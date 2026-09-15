@@ -193,6 +193,12 @@ object LicenseManager {
         val action = if (current != null && current.code != code) "renew" else "activate"
         val resp = callEndpoint(action, code, deviceId(), current?.code)
             ?: return ActivateResult.Error("网络不可用，请稍后重试")
+        /* 响应不是 JSON（网关拦截页 / 5xx / 空响应）：ret 是真实 HTTP 状态，不能按业务码解读，
+           否则「403 拦截页」会被显示成「该卡密已被封禁」。 */
+        if (resp.msg?.startsWith("bad_json") == true) {
+            OtvLog.w("license 激活异常响应：${resp.msg}")
+            return ActivateResult.Error("服务器无响应（HTTP ${resp.ret}），请检查网络后重试")
+        }
         return when (resp.ret) {
             0 -> if (applySuccess(resp)) ActivateResult.Ok else ActivateResult.Error("服务端票据校验失败（E2）")
             400 -> ActivateResult.Error("卡密格式或请求不正确")
@@ -345,20 +351,29 @@ object LicenseManager {
         deviceId: String,
         currentCode: String?,
     ): EndpointResp? = withContext(Dispatchers.IO) {
-        runCatching {
-            val json = JSONObject()
-                .put("protocol", 2)
-                .put("action", action)
-                .put("code", code)
-                .put("deviceId", deviceId)
-            if (action == "renew") json.put("currentCode", currentCode)
+        val payload = JSONObject()
+            .put("protocol", 2)
+            .put("action", action)
+            .put("code", code)
+            .put("deviceId", deviceId)
+        if (action == "renew") payload.put("currentCode", currentCode)
+
+        fun once(): EndpointResp? = runCatching {
             val request = Request.Builder()
                 .url(BuildConfig.LICENSE_ENDPOINT)
-                .post(json.toString().toRequestBody("application/json".toMediaType()))
+                .header("User-Agent", "MyTV/${BuildConfig.VERSION_NAME} (Android)")
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
                 .build()
             http.newCall(request).execute().use { response ->
-                val jo = runCatching { JSONObject(response.body?.string().orEmpty()) }.getOrNull()
-                    ?: return@use EndpointResp(502, null, "bad_json", null, null, null, null)
+                val raw = response.body?.string().orEmpty()
+                val jo = runCatching { JSONObject(raw) }.getOrNull()
+                    /* 响应不是 JSON（网关 5xx / 拦截页 / 空响应）：保留真实 HTTP 状态和一小段
+                       响应体，否则底层统一成 502 会把「403 拦截页」误读成「该卡密已被封禁」。 */
+                    ?: return@use EndpointResp(
+                        ret = response.code.takeIf { it >= 400 } ?: 502, ticket = null,
+                        msg = "bad_json:${response.code}:" + raw.take(80).replace('\n', ' '),
+                        licenseCode = null, activatedAt = null, expireAt = null, serverNow = null,
+                    )
                 EndpointResp(
                     ret = jo.optInt("ret", if (response.isSuccessful) 500 else response.code),
                     ticket = jo.optJSONObject("ticket")?.let(::parseTicket),
@@ -370,6 +385,16 @@ object LicenseManager {
                 )
             }
         }.onFailure { OtvLog.w("license endpoint unavailable: ${it.message}") }.getOrNull()
+
+        /* 网关偶发 5xx / 拦截页 / 连接抖动：原地重试一次。激活本身幂等——同一设备重复激活
+           只会回同一张票、不新增设备位，所以重试是安全的。 */
+        val first = once()
+        val retryable = first == null || first.ret >= 500 || first.msg?.startsWith("bad_json") == true
+        if (retryable) {
+            OtvLog.i("license endpoint 首次失败（${first?.ret ?: "网络异常"}），原地重试一次")
+            return@withContext (once() ?: first)
+        }
+        first
     }
 
     private fun parseTimestamp(value: Any?): Long? = when (value) {
