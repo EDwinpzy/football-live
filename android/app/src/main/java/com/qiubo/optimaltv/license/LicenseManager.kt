@@ -131,6 +131,12 @@ object LicenseManager {
                 OtvLog.w("license load failed: ${it.message}")
                 _state.value = LicenseState.NotActivated
             }
+            /* 重装自愈（2026-09-16）：卡密只存在本 App 私有数据里，卸载/重装会被系统清空；
+               而设备指纹（sha256(ANDROID_ID|包名|机型)）在同一台机器上重装后不变，所以向
+               服务端认领回「已绑定的那张卡」。成功后用户无需再输卡密；失败按未激活处理。 */
+            if (_state.value is LicenseState.NotActivated) {
+                runCatching { tryRestore() }.onFailure { OtvLog.w("license restore error: ${it.message}") }
+            }
             silentReverify()
             while (inited) {
                 delay(REVERIFY_INTERVAL_MS)
@@ -217,6 +223,23 @@ object LicenseManager {
             compact.length == 10 -> "OTV-${compact.substring(0, 5)}-${compact.substring(5)}"
             else -> ""
         }
+    }
+
+    /**
+     * 设备维度恢复（2026-09-16）：只带设备指纹，请服务端找回「这台设备已经绑定过的那张卡」。
+     * 服务端只回已绑定的授权，不新增设备位、不延长有效期；认领不到就返回 false（当作未激活，
+     * 正常走激活页）。这样同一台机器重装后用户不必再输一遍卡密。
+     */
+    private suspend fun tryRestore(): Boolean {
+        if (!BuildConfig.LICENSE_ENABLED) return false
+        val resp = callEndpoint("restore", "", deviceId(), null) ?: return false
+        if (resp.ret != 0) {
+            OtvLog.i("license restore: ret=${resp.ret}（未认领到，按未激活处理）")
+            return false
+        }
+        val ok = applySuccess(resp)
+        if (ok) OtvLog.i("license restore ok: plan=${resp.ticket?.plan}")
+        return ok
     }
 
     private suspend fun applySuccess(resp: EndpointResp): Boolean {
