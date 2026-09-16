@@ -115,6 +115,10 @@ object StreamDecryptServer {
         }
     }
 
+    /** 长时体检用（2026-09-16）：解密池已建实例数。0 = 换源/解析必失败（池被回收或
+     *  渲染进程死亡），是「切信号源没反应」的现场指标。仅主线程读。 */
+    fun readySlots(): Int = runCatching { pool.count { it != null } }.getOrDefault(-1)
+
     /** Rebuild every WebView slot while keeping the local bridge available. */
     fun reset() {
         Log.w(TAG, "decrypt bridge reset")

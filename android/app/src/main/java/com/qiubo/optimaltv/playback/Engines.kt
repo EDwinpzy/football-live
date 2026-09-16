@@ -71,10 +71,29 @@ interface MediaEngine {
     /** v1.17 IPTV 大缓冲档（用户需求：美国/英国等远端源卡顿）——加大 min/max 缓冲
      *  平滑抖动；默认关闭（足球直播走本地中继无需）。须在首次 prepare 前设置。 */
     fun setLargeBufferPreferred(on: Boolean) {}
+    /**
+     * 直播窗口提示（2026-09-16 长跑卡顿根治）：上层在起播前探测媒体清单的可播放窗口
+     * 长度（毫秒）后传入，0 = 未知（沿用旧行为）。须在 prepare 前调用。
+     *
+     * 背景：v1.23 把直播目标延迟统一设成「落后 15s」——对窗口 30s+ 的公网源是稳的，
+     * 但足球直播走本地中继时上游清单只有 3×2s＝6s 窗口，15s 目标根本不可达：
+     * ExoPlayer 的速度控制会一直按 0.97x 追赶一个够不到的偏移，播着播着就被滑动窗口
+     * 甩到最老分片之外（实测 2–5 分钟一次可感知卡顿，最后整段冻住）。
+     * 引擎据此选目标偏移与缓冲档：窗口小 → 目标 ≈ 窗口的 40%，把「延迟几秒」变成
+     * 真正可用的缓冲垫。
+     */
+    fun setLiveWindowHintMs(windowMs: Long) {}
     /** 当前音频轨道编解码（如 "mp4a.40.2"/"ac-3"）；未选中/未知返回 null。
      *  电视#8 无声源治理：Media3 软解不含 AC-3/EAC-3 时轨道静默失败不报错，
      *  由上层轮询本接口发现后切 libVLC（自带 ffmpeg 软解）。 */
     fun audioCodecs(): String? = null
+    /**
+     * 解码/渲染计数快照（2026-09-16 长时体检）：`rendered` = 真正送画面的帧数，
+     * 是「位置照常前进但画面冻住」（既有看门狗抓不到的形态）的唯一硬信号。
+     * 必须【在应用线程（主线程）调用】——ExoPlayer 的取数接口会校验应用线程。
+     * 引擎不支持时返回 null（libVLC），调用方只记日志、不做冻结判定。
+     */
+    fun decoderStats(): DecoderStats? = null
     fun play()
     fun pause()
     fun seekTo(ms: Long)
@@ -113,6 +132,11 @@ object EngineRegistry {
  */
 class Media3Engine(context: Context) : MediaEngine {
 
+    private companion object {
+        /** 「小窗口直播」阈值：窗口 ≤ 该值时不按 15s 目标延迟播（见 setLiveWindowHintMs） */
+        const val SMALL_WINDOW_MAX_MS = 12_000L
+    }
+
     override val engineId = "media3"
     override val displayName = "Media3 / ExoPlayer"
 
@@ -132,12 +156,64 @@ class Media3Engine(context: Context) : MediaEngine {
     @Volatile private var softwarePreferred = false
     /** v1.17 IPTV 大缓冲档：ensurePlayer 按 this 标记选 LoadControl 参数 */
     @Volatile private var largeBuffer = false
+    /** 直播窗口长度提示（0 = 未知）：见 MediaEngine.setLiveWindowHintMs */
+    @Volatile private var liveWindowHintMs = 0L
 
     override fun setLargeBufferPreferred(on: Boolean) {
         largeBuffer = on
     }
 
+    /** 小窗口直播（足球直播中继：3×2s＝6s）：必须换掉固定的 15s 目标延迟与 6s 恢复水位 */
+    private fun smallWindowLive(): Boolean = liveWindowHintMs in 1..SMALL_WINDOW_MAX_MS
+
+    override fun setLiveWindowHintMs(windowMs: Long) {
+        val v = if (windowMs > 0) windowMs else 0L
+        if (v == liveWindowHintMs) return
+        val profileChanged = smallWindowLive() != (v in 1..SMALL_WINDOW_MAX_MS)
+        com.qiubo.optimaltv.OtvLog.i(
+            "engine 直播窗口提示 ${liveWindowHintMs}ms → ${v}ms" +
+                if (profileChanged) "（重建播放器换缓冲档）" else "",
+        )
+        liveWindowHintMs = v
+        // 缓冲档（LoadControl）只能在建播放器时给——档位变化时释放，下次 prepare 以新档重建
+        if (profileChanged) releasePlayerForRebuild()
+    }
+
+    /** 释放当前播放器实例（渲染面/监听器复用），下次 ensurePlayer 以新参数重建 */
+    private fun releasePlayerForRebuild() {
+        player?.let {
+            runCatching {
+                it.removeListener(listener)
+                it.removeAnalyticsListener(analyticsListener)
+                it.release()
+            }
+        }
+        player = null
+        renderViewAsPlayer().player = null
+    }
+
     override fun audioCodecs(): String? = runCatching { player?.audioFormat?.codecs }.getOrNull()
+
+    /**
+     * 长时体检（2026-09-16）：ExoPlayer 视频渲染器计数。
+     *
+     * `renderedOutputBufferCount` 是真正送进渲染面的帧数——位置前进而它不增即解码/渲染
+     * 管线停摆（线上「20 分钟后画面冻住、退出重进才好」的候选形态）。
+     * getVideoDecoderCounters() 内部 verifyApplicationThread()，本方法只能在主线程调用
+     * （体检任务跑在 viewModelScope 默认的 Main 调度器上）。
+     */
+    override fun decoderStats(): DecoderStats? = runCatching {
+        player?.videoDecoderCounters?.let { c ->
+            DecoderStats(
+                rendered = c.renderedOutputBufferCount,
+                skipped = c.skippedOutputBufferCount,
+                dropped = c.droppedBufferCount,
+                droppedInput = c.droppedInputBufferCount,
+                decoderInits = c.decoderInitCount,
+                consecutiveDropped = c.maxConsecutiveDroppedBufferCount,
+            )
+        }
+    }.getOrNull()
 
     override val renderView: View by lazy {
         val inflationParent = android.widget.FrameLayout(appCtx)
@@ -273,8 +349,13 @@ class Media3Engine(context: Context) : MediaEngine {
         // 播放器在缓冲余量内自愈；点播同享（恢复多等 2s，换感知不到的抖动）。
         // 点播与足球直播（本地中继）维持 30s/120s。
         val (minBuf, maxBuf, startBuf, reBuf) =
-            if (largeBuffer) intArrayOf(45_000, 150_000, 1_000, 6_000).toList()
-            else intArrayOf(30_000, 120_000, 1_000, 6_000).toList()
+            when {
+                // 小窗口直播（中继足球源 6s）：恢复水位必须小于窗口，否则一次抖动就要
+                // 等满整个窗口才出画（实测「转圈 8s 后触发整会话重解析」的大卡顿）
+                smallWindowLive() -> intArrayOf(8_000, 16_000, 600, 1_500).toList()
+                largeBuffer -> intArrayOf(45_000, 150_000, 1_000, 6_000).toList()
+                else -> intArrayOf(30_000, 120_000, 1_000, 6_000).toList()
+            }
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(minBuf, maxBuf, startBuf, reBuf)
             .setPrioritizeTimeOverSizeThresholds(true)
@@ -355,15 +436,30 @@ class Media3Engine(context: Context) : MediaEngine {
         val b = MediaItem.Builder().setUri(url)
         if (url.contains("m3u8", ignoreCase = true)) {
             b.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
-            b.setLiveConfiguration(
-                MediaItem.LiveConfiguration.Builder()
-                    .setTargetOffsetMs(15_000)
-                    .setMinOffsetMs(8_000)
-                    .setMaxOffsetMs(30_000)
-                    .build(),
-            )
+            b.setLiveConfiguration(liveConfigurationFor())
         }
         return b.build()
+    }
+
+    /**
+     * 直播目标偏移（2026-09-16 长跑卡顿根治）：
+     * - 窗口未知 / 大窗口（公网 IPTV 等，窗口通常 30s+）：沿用 v1.23 的「落后 15s」，
+     *   抖动时自动退离边缘吸收，稳定时追近；
+     * - 小窗口（中继足球源实测 6s）：目标偏移取窗口的 40%（6s → 2.4s）。这个值必须
+     *   **可达**——不可达时 ExoPlayer 的速度控制会长期按 0.97x 追赶，最后被滑动窗口
+     *   甩出最老分片，表现为「看十几分钟后卡死，退出重进才好」。
+     */
+    private fun liveConfigurationFor(): MediaItem.LiveConfiguration {
+        val w = liveWindowHintMs
+        val cfg = MediaItem.LiveConfiguration.Builder()
+        return if (smallWindowLive()) {
+            cfg.setTargetOffsetMs((w * 2 / 5).coerceIn(1_200, 4_000))
+                .setMinOffsetMs((w / 8).coerceIn(300, 1_000))
+                .setMaxOffsetMs((w * 2 / 3).coerceIn(2_500, 8_000))
+                .build()
+        } else {
+            cfg.setTargetOffsetMs(15_000).setMinOffsetMs(8_000).setMaxOffsetMs(30_000).build()
+        }
     }
 
     override fun prepare(request: PrepareRequest) {
@@ -405,15 +501,7 @@ class Media3Engine(context: Context) : MediaEngine {
         softwarePreferred = on
         com.qiubo.optimaltv.OtvLog.w("engine 解码器策略切换：软解优先=$on（重建播放器）")
         // 立即重建：释放当前实例，下次 prepare 以新选择器构建（渲染面/监听器复用）
-        player?.let {
-            runCatching {
-                it.removeListener(listener)
-                it.removeAnalyticsListener(analyticsListener)
-                it.release()
-            }
-        }
-        player = null
-        renderViewAsPlayer().player = null
+        releasePlayerForRebuild()
     }
 
     override fun play() {

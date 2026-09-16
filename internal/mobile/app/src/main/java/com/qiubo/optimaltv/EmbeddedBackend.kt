@@ -31,6 +31,10 @@ object EmbeddedBackend {
     /** 解压后的后端根目录（app 私有可写） */
     fun backendDir(ctx: Context): File = File(ctx.filesDir, "embedded_backend")
 
+    /** 长时体检用（2026-09-16）：内嵌后端端口。注意后端跑在 :backend 独立进程，
+     *  主进程读不到它的 started 标志（会得到假阴性），探活一律走本端口。 */
+    fun port(): Int = PORT
+
     private var started = false
 
     private class Extracted(val dir: File, val src: String, val code: Int)

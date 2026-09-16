@@ -16,15 +16,19 @@ import com.qiubo.optimaltv.playback.EngineRegistry
 import com.qiubo.optimaltv.playback.MediaEngine
 import com.qiubo.optimaltv.playback.PrepareRequest
 import com.qiubo.optimaltv.playback.PlaybackKind
+import com.qiubo.optimaltv.playback.PlaybackHealthLog
+import com.qiubo.optimaltv.playback.PlaybackHealthSnapshot
 import com.qiubo.optimaltv.playback.PlaybackRecoveryPolicy
 import com.qiubo.optimaltv.playback.RecoveryAction
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class Panel { NONE, MORE }
 
@@ -97,6 +101,16 @@ class PlayerViewModel(
         const val START_WATCHDOG_MS = 20_000L      // 方案 §3.2-1 jellyplay BUFFERING_TIMEOUT_MS
         const val STALL_TICKS_LIMIT = 8            // 8s 位置无推进判定卡顿中断
         const val PROGRESS_INTERVAL_MS = 5_000L
+        /** 长时体检采样节拍（2026-09-16 用户需求①）：10s 一次，冻结按连续窗口累计。 */
+        const val HEALTH_TICK_MS = 10_000L
+        /** 体检行节拍：每 5 分钟一行（按墙上时间算——跨会话重启不断档）。 */
+        const val HEALTH_LOG_INTERVAL_MS = 300_000L
+        /** 连续 3 个采样（~30s）位置在前进、渲染帧数不增 → 画面冻结（既有两道看门狗不响的形态）。 */
+        const val HEALTH_FREEZE_TICKS = 3
+        /** 冻结判定所需的最小位置推进量：过滤「真的卡在缓冲」（那种形态交给既有看门狗）。 */
+        const val HEALTH_FREEZE_MIN_ADVANCE_MS = 3_000L
+        /** 连续 6 个采样（60s）稳定出画才算「这条线真的活了」——见 onSessionStarted 说明。 */
+        const val HEALTH_HEALTHY_TICKS = 6
         val SPEED_STEPS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f)
     }
 
@@ -117,6 +131,19 @@ class PlayerViewModel(
     private var triedLines = mutableSetOf<Int>()
     private var watchdogJob: Job? = null
     private var stallJob: Job? = null
+    /** 长时体检/冻结取证任务（2026-09-16 需求①）：见 PlaybackHealthLog 头注释 */
+    private var healthJob: Job? = null
+    /** 内嵌后端探活最近结果（体检 10s 刷新一次；起播快照沿用缓存值） */
+    private var backendAlive = false
+    /** 直播窗口探测用短超时客户端（本地中继；超时即返回未知，不干预播放） */
+    private val windowProbeClient by lazy {
+        okhttp3.OkHttpClient.Builder()
+            .connectTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+    }
+    /** 上一次 5 分钟体检的墙上时间（跨会话重启保持节拍，长跑日志不会因换源而断档） */
+    private var lastHealthLogAt = 0L
     private var progressJob: Job? = null
     /** 直播静默续签循环（90s 重新解析当前源 → 签名变化即热切换） */
     private var renewJob: Job? = null
@@ -723,6 +750,14 @@ class PlayerViewModel(
         }
         sessionViaRelay = playUrl.contains("/api/relay")
         if (_ui.value.isLive) livePlayingUrl = playUrl
+        // 直播窗口探测（2026-09-16 长跑卡顿根治）：起播前量一次清单的可播放窗口，
+        // 交引擎选目标延迟/缓冲档——中继足球源窗口只有 ~6s，固定「落后 15s」不可达，
+        // 速度控制会长期偏离实时并最终掉出滑动窗口（「十几分钟后卡死」的根因）。
+        if (_ui.value.isLive && playUrl.contains("m3u8", ignoreCase = true)) {
+            val winMs = probeLiveWindowMs(playUrl)
+            OtvLog.i("直播窗口探测：${winMs}ms（0=未知，按大窗口档播）url=${playUrl.take(80)}")
+            engine.setLiveWindowHintMs(winMs)
+        }
         // VLC 兜底引擎（v1.8）：与 Media3 同走 /api/relay HLS 中继——真实故障流
         // （aarray High 压段）实测该路径 9 分 10 秒零卡顿；后端另有 /api/relayts
         // 连续 TS 端点（实验设施，VLC ts demux 对拼接段时间戳重置容忍差，弃用）
@@ -732,6 +767,7 @@ class PlayerViewModel(
         armWatchdog()
         armFirstFrameWatchdog()
         startStallMonitor()
+        startHealthMonitor()
         prefetchLines()
     }
 
@@ -811,6 +847,149 @@ class PlayerViewModel(
         }
     }
 
+    /**
+     * 长时体检 + 冻结取证（2026-09-16 用户需求①）。
+     *
+     * 每 10s 采样一次，跑在 viewModelScope 默认的 Main 调度器上——ExoPlayer 的
+     * getVideoDecoderCounters() 会校验应用线程，必须主线程取数。
+     *
+     * 两条产出：
+     * - 每 5 分钟一行 [HEALTH]（引擎/位置/缓冲/渲染帧数/丢帧/中继/后端/解密池/内存/网络）：
+     *   卡死前那几分钟的走向一眼可见，重启 app 后仍能从 files/logs/otv.log 回看；
+     * - 「位置在前进、渲染帧数不增」连续 30s = 画面冻住（既有看门狗只认 BUFFERING 超时与
+     *   位置不前进，对这种形态不响）→ 先打 [STALL-DUMP] 留现场，再交给既有恢复阶梯
+     *   （刷新→换源→重建引擎→重置运行时，有限次；不含整机自重启）。
+     */
+    private fun startHealthMonitor() {
+        healthJob?.cancel()
+        healthJob = viewModelScope.launch {
+            var lastRendered = -1
+            var lastPos = -1L
+            var frozenTicks = 0
+            var healthyTicks = 0
+            while (isActive) {
+                delay(HEALTH_TICK_MS)
+                val s = _ui.value
+                if (!hasEngine() || s.fatalMsg != null) {
+                    frozenTicks = 0; lastRendered = -1; lastPos = -1L
+                    continue
+                }
+                val es = engine.uiState.value
+                val dec = runCatching { engine.decoderStats() }.getOrNull()
+                backendAlive = probeBackendAlive()
+                val playing = es.state == EnginePlayState.READY && es.isPlaying && !userPaused
+                if (playing && dec != null && lastRendered >= 0) {
+                    val advanced = es.positionMs - lastPos
+                    if (dec.rendered > lastRendered) frozenTicks = 0
+                    else if (advanced >= HEALTH_FREEZE_MIN_ADVANCE_MS) frozenTicks++ else frozenTicks = 0
+                } else {
+                    frozenTicks = 0
+                }
+                lastRendered = dec?.rendered ?: -1
+                lastPos = es.positionMs
+                // 僵尸源修复（见 onSessionStarted）：稳定出画满 60s 才恢复同线重试配额
+                if (playing) {
+                    healthyTicks++
+                    if (healthyTicks >= HEALTH_HEALTHY_TICKS) {
+                        healthyTicks = 0
+                        if (sameLineRetries != 0) {
+                            sameLineRetries = 0
+                            OtvLog.i("本线稳定播放 60s → 同线重试配额恢复")
+                        }
+                    }
+                } else {
+                    healthyTicks = 0
+                }
+                if (frozenTicks >= HEALTH_FREEZE_TICKS) {
+                    frozenTicks = 0
+                    val secs = HEALTH_FREEZE_TICKS * HEALTH_TICK_MS / 1000
+                    OtvLog.e("画面冻结：位置前进但渲染帧数 ${secs}s 不增 → 交给既有恢复阶梯")
+                    PlaybackHealthLog.freeze(healthSnapshot("画面冻结 ${secs}s（时钟前进、无新帧）"))
+                    recoverPlaybackStall("画面冻结 ${secs}s（时钟前进、无新帧）")
+                } else if (android.os.SystemClock.elapsedRealtime() - lastHealthLogAt >= HEALTH_LOG_INTERVAL_MS) {
+                    lastHealthLogAt = android.os.SystemClock.elapsedRealtime()
+                    PlaybackHealthLog.tick(healthSnapshot("5 分钟体检"))
+                }
+            }
+        }
+    }
+
+    /** 体检快照取数（主线程；全部 runCatching，取不到就记 -1）。 */
+    private fun healthSnapshot(note: String): PlaybackHealthSnapshot {
+        val s = _ui.value
+        val es = if (hasEngine()) engine.uiState.value else com.qiubo.optimaltv.playback.EngineUiState()
+        val line = s.lines.getOrNull(s.activeLine)
+        return PlaybackHealthSnapshot(
+            kind = if (s.isLive) "live" else "vod",
+            content = if (s.isLive) s.title else "${s.title} ep${s.epIndex + 1}/${s.epCount}",
+            lineIndex = s.activeLine + 1,
+            lineLabel = line?.label.orEmpty().ifBlank { "-" },
+            lineCount = s.lines.size,
+            url = (if (s.isLive) livePlayingUrl else line?.url).orEmpty(),
+            engineId = if (hasEngine()) engine.engineId else "-",
+            engineName = if (hasEngine()) engine.displayName else "-",
+            engineEpoch = s.engineEpoch,
+            state = es.state.name,
+            isPlaying = es.isPlaying,
+            positionMs = es.positionMs,
+            durationMs = es.durationMs,
+            bufferedAheadMs = es.bufferedAheadMs,
+            firstFrame = es.firstFrameRendered,
+            decoder = if (hasEngine()) runCatching { engine.decoderStats() }.getOrNull() else null,
+            viaRelay = sessionViaRelay,
+            relayBroken = relayBroken.size,
+            backendStarted = backendAlive,
+            decryptSlots = runCatching { com.qiubo.optimaltv.playback.StreamDecryptServer.readySlots() }.getOrDefault(-1),
+            recoveryStep = recoveryAttempt,
+            stallRecoveries = stallRecoveries,
+            note = note,
+        )
+    }
+
+    /**
+     * 内嵌后端探活（长时体检用）：后端跑在 `:backend` 独立进程，主进程读不到它的
+     * started 标志，因此按「能不能连上本地端口」判断——这也正是播放链路真实依赖的形态。
+     * 走 IO 调度器 + 300ms 超时，不阻塞主线程，也不会因为后端线程僵住而卡住体检本身。
+     */
+    private suspend fun probeBackendAlive(): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            java.net.Socket().use {
+                it.connect(java.net.InetSocketAddress("127.0.0.1", com.qiubo.optimaltv.EmbeddedBackend.port()), 300)
+            }
+        }.isSuccess
+    }
+
+    /**
+     * 直播窗口探测（2026-09-16 长跑卡顿根治）：把媒体清单里所有 `#EXTINF` 时长相加，
+     * 得到「可播放窗口」长度（毫秒）。起播前调用一次（走本地中继，约 0.2–0.6s）。
+     *
+     * 拿不到（主清单 #EXT-X-STREAM-INF / 请求失败 / 超时）返回 0 = 未知，引擎沿用旧档，
+     * 行为与修复前一致——探测失败不会让直播更糟。
+     */
+    private suspend fun probeLiveWindowMs(url: String): Long = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = okhttp3.Request.Builder().url(url).build()
+            windowProbeClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use 0L
+                readWindowMs(resp.body?.string().orEmpty())
+            }
+        }.getOrDefault(0L)
+    }
+
+    /** 纯函数：清单文本 → 窗口毫秒（无 EXTINF 视为未知 0）。 */
+    private fun readWindowMs(body: String): Long {
+        var sum = 0.0
+        var n = 0
+        for (line in body.lineSequence()) {
+            val t = line.trim()
+            if (!t.startsWith("#EXTINF", ignoreCase = true)) continue
+            val v = t.substringAfter(":", "").substringBefore(",").trim().toDoubleOrNull() ?: continue
+            sum += v
+            n++
+        }
+        return if (n > 0) (sum * 1000).toLong() else 0L
+    }
+
     /** Bounded live/VOD recovery ladder shared with the mobile client. */
     private fun recoverPlaybackStall(reason: String) {
         if (!hasEngine() || _ui.value.fatalMsg != null) return
@@ -820,6 +999,8 @@ class PlayerViewModel(
         val action = PlaybackRecoveryPolicy.action(kind, attempt)
         val resume = PlaybackRecoveryPolicy.resumePosition(s.positionMs)
         val current = s.activeLine
+        // 长时体检：交给恢复阶梯前先留现场（排查方案 §22 字段清单）
+        runCatching { com.qiubo.optimaltv.playback.PlaybackHealthLog.stall(healthSnapshot(reason)) }
         OtvLog.w("recovery kind=$kind step=$attempt action=$action reason=$reason pos=${s.positionMs}")
         when (action) {
             RecoveryAction.RELOAD_CURRENT -> {
@@ -870,9 +1051,15 @@ class PlayerViewModel(
         watchdogJob?.cancel()
         liveAutoRetries = 0   // 成功起播：自动重试计数归零（下次故障重新计 5 次）
         liveAutoRetryJob?.cancel()
-        sameLineRetries = 0   // 起播成功：同线重解析配额恢复
+        /* 2026-09-16 僵尸源修复：起播成功【不】立刻恢复同线重试配额。
+           线上实测：某备用信号源「能出画面、几秒后必断」，每次短暂 READY 都把配额清零，
+           于是 3 次重试永远用不完 → App 死守这条死源无限循环（日志里 rbuf 计数一路涨到
+           400+，观感=一直卡），永远不会换到能用的源。配额改由「稳定播放满 60s」恢复
+           （见 startHealthMonitor），僵尸源撑不到 60s，第 4 次就会换线。 */
         Log.i(TAG, "READY line=${_ui.value.activeLine} @$posMs ms")
         OtvLog.i("READY line=${_ui.value.activeLine} @$posMs ms（出画面）")
+        // 长时体检基线：起播现场（30s 验收与长跑对比都以这条为参考）
+        runCatching { PlaybackHealthLog.start(healthSnapshot("起播")) }
         if (_ui.value.isLive) armIptvAudioCodecCheck()   // 电视#8：无声编解码检查
         // 线路记忆（仅点播；直播始终默认 bb＝原版足球直播2，需求 足球#14）
         if (!_ui.value.isLive) {
