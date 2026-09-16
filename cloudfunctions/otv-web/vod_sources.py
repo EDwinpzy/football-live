@@ -21,6 +21,21 @@ RUNTIME_PATH = Path(__file__).with_name("vod_sources.runtime.json")
 AUTO_MATCH_THRESHOLD = 80
 TITLE_SEPARATORS = re.compile(r"[^\w\u4e00-\u9fff]+", re.UNICODE)
 PRIVATE_HOSTS = {"localhost", "localhost.localdomain"}
+"""代理 fake-IP 承载段：Clash / Surge / sing-box 默认把域名映射到 198.18.0.0/15，
+真实连接由本机代理完成。国内用户装这类代理是常态，若把这段当「内网」拦掉，
+除直连 IP 外的影视源会全灭（表现为只剩「好好看」一个源）。字面量 IP 落在这段仍拦。"""
+PROXY_FAKE_IP_RANGES = (ipaddress.ip_network("198.18.0.0/15"),)
+"""源匹配重试：9 个源同时失联（弱网/代理抖动/出口 DNS 抽风）不是「没有这部片」，
+但旧实现直接回空列表，用户看到的是「没有信号源 / 无法播放」。出现异常时重试一次。"""
+RESOLVE_ATTEMPTS = 2
+RESOLVE_RETRY_DELAY = 0.6
+RESOLVE_MAX_WORKERS = 12
+"""探测预算：9 个源全通时线路能到 40+ 条，逐条探测会把详情拖到 15~40 秒（实测），
+而播放器只展示综合排名前 5。这里按源轮转取前 N 条探测，其余保留「未探测」状态
+（alive=None，排序垫后但不判死），既保住排序质量又压住耗时。"""
+PROBE_MAX_LINES = 18
+PROBE_MAX_WORKERS = 18
+PROBE_TIMEOUT_SECONDS = 4
 
 
 class UnsafeSourceUrl(ValueError):
@@ -81,25 +96,37 @@ class SourceRegistry:
         return {"schema": 1, "version": self.version, "sources": [asdict(source) for source in self.sources]}
 
     def resolve_subject(self, subject):
-        """Search enabled adapters and return only confident, normalized lines."""
+        """Search enabled adapters and return only confident, normalized lines.
+
+        重试契约：只有当**确有源抛异常**（弱网/代理抖动导致整批失联）时才补一次，
+        避免用户看到「没有信号源 / 无法播放」；源都正常应答、只是标题匹配不上时
+        立刻返回空，不做无谓的二次等待。
+        """
         enabled = [source for source in self.sources if source.enabled]
-
-        def resolve_one(source):
-            try:
-                adapter = HhkanAdapter(source) if source.adapter_type == "hhkan" else MacCmsAdapter(source)
-                candidates = adapter.search(subject)
-                best = max(candidates, key=lambda item: match_score(subject, item), default=None)
-                if not best or match_score(subject, best) < AUTO_MATCH_THRESHOLD:
-                    return []
-                return adapter.detail(best)
-            except Exception:
-                return []
-
         if not enabled:
             return []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(enabled))) as pool:
-            groups = list(pool.map(resolve_one, enabled))
-        lines = [line for group in groups for line in group]
+        workers = min(RESOLVE_MAX_WORKERS, len(enabled))
+        for attempt in range(max(1, RESOLVE_ATTEMPTS)):
+            failures = []
+
+            def resolve_one(source):
+                try:
+                    adapter = HhkanAdapter(source) if source.adapter_type == "hhkan" else MacCmsAdapter(source)
+                    candidates = adapter.search(subject)
+                    best = max(candidates, key=lambda item: match_score(subject, item), default=None)
+                    if not best or match_score(subject, best) < AUTO_MATCH_THRESHOLD:
+                        return []
+                    return adapter.detail(best)
+                except Exception as exc:  # noqa: BLE001 - 单源失败不拖累整批，但要记下来
+                    failures.append(str(exc)[:120])
+                    return []
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                groups = list(pool.map(resolve_one, enabled))
+            lines = [line for group in groups for line in group]
+            if lines or not failures or attempt + 1 >= max(1, RESOLVE_ATTEMPTS):
+                break
+            time.sleep(RESOLVE_RETRY_DELAY)
 
         def inspect(line):
             try:
@@ -111,8 +138,11 @@ class SourceRegistry:
                 line.update({"alive": False, "latency_ms": None, "height": 0})
             return line
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, max(1, len(lines)))) as pool:
-            lines = list(pool.map(inspect, lines))
+        picked = _pick_probe_lines(lines, PROBE_MAX_LINES)
+        if picked:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(PROBE_MAX_WORKERS, len(picked))) as pool:
+                list(pool.map(inspect, picked))
         history = ({line["id"]: self.history.success_rate(line["id"]) for line in lines}
                    if self.history else None)
         return rank_lines(lines, history)
@@ -215,6 +245,37 @@ class LineHistory:
         os.replace(tmp, self.path)
 
 
+def _pick_probe_lines(lines, limit):
+    """按源轮转挑选要探测的线路：每台源先拿一条代表线，再补第二条……
+    否则线路最多的那台（好好看常 30+ 条）会把探测预算占满，别的源永远排不上。
+    未被挑中的线路保持未探测（alive=None）：排序垫后但不算判死。"""
+    limit = int(limit or 0)
+    if limit <= 0 or len(lines) <= limit:
+        return list(lines)
+    buckets = {}
+    for line in lines:
+        buckets.setdefault(str(line.get("source_id") or ""), []).append(line)
+    picked = []
+    while len(picked) < limit:
+        progressed = False
+        for key in list(buckets):
+            bucket = buckets[key]
+            if bucket and len(picked) < limit:
+                picked.append(bucket.pop(0))
+                progressed = True
+        if not progressed:
+            break
+    return picked
+
+
+def _is_proxy_fake_ip(address):
+    try:
+        ip = ipaddress.ip_address(str(address))
+    except ValueError:
+        return False
+    return any(ip in network for network in PROXY_FAKE_IP_RANGES)
+
+
 def _validate_public_url(url, resolve_dns=False):
     parsed = urllib.parse.urlsplit(str(url or ""))
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
@@ -230,7 +291,13 @@ def _validate_public_url(url, resolve_dns=False):
                 addresses = {row[4][0] for row in socket.getaddrinfo(hostname, parsed.port or 443)}
             except socket.gaierror as exc:
                 raise UnsafeSourceUrl("影视源域名无法解析") from exc
-            if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+            if not addresses:
+                raise UnsafeSourceUrl("影视源域名无法解析")
+            # 域名全部落在代理 fake-IP 段 = 本机 DNS 被透明代理接管，连出去的是真实站点，
+            # 不是内网服务。全部命中才放行；混入其他非公网地址仍按内网拦截。
+            if all(_is_proxy_fake_ip(address) for address in addresses):
+                return url
+            if any(not ipaddress.ip_address(address).is_global for address in addresses):
                 raise UnsafeSourceUrl("影视源域名解析到非公网地址")
     else:
         if not ip.is_global:
@@ -251,7 +318,7 @@ def _probe_fetch(url):
     _validate_public_url(url, resolve_dns=True)
     started = time.monotonic()
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/vnd.apple.mpegurl,*/*"})
-    with urllib.request.urlopen(request, timeout=8) as response:
+    with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT_SECONDS) as response:
         _validate_public_url(response.geturl(), resolve_dns=True)
         body = response.read(256 * 1024).decode("utf-8", "replace")
     return {"elapsed_ms": int((time.monotonic() - started) * 1000), "body": body}
