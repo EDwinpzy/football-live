@@ -20,24 +20,19 @@ import com.qiubo.optimaltv.ui.theme.sx
 import com.qiubo.optimaltv.ui.theme.sxs
 
 /**
- * 双击返回才彻底退出应用（需求⑥）：首次按返回轻提示「再按一次退出」，
- * 2.5s 内再按一次执行明确退出；超时重新计数。
- * 用于足球/影视/我的三个主 tab 屏的「已到顶」返回分支（替代旧 moveTaskToBack）。
+ * 主 tab 已到顶时按返回 = 彻底退出应用（用户 2026-09-16 明确要求）。
+ *
+ * 旧实现是「2.5s 内连按两次才退出」，第一次只弹提示——实测用户按一次返回后
+ * 进程与内嵌后端都还活着（只是回了桌面），再次进入直接复用那个已经卡死的会话，
+ * 于是「退出重进还是卡」。现在一次返回就执行 ExitCoordinator 的完整退出：
+ * 释放播放器/解码器 → 关解密桥 → 停内嵌后端 → 结束 Activity → 杀主进程。
  */
 @Composable
 fun rememberDoubleBackExit(onHint: (String) -> Unit): () -> Unit {
     val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
-    var lastBackAt by remember { mutableLongStateOf(0L) }
     return {
-        // v1.19：交互计时改 uptimeMillis——墙钟受 NTP 校时跳变影响会出现
-        // 「连按两次退不出去/误退出」（与 v1.18 跨时钟域 bug 同源）
-        val now = android.os.SystemClock.uptimeMillis()
-        if (now - lastBackAt < 2500) {
-            activity?.let { com.qiubo.optimaltv.lifecycle.ExitCoordinator.exit(it) }
-        } else {
-            lastBackAt = now
-            onHint("再按一次返回键退出应用")
-        }
+        onHint("已退出应用")
+        activity?.let { com.qiubo.optimaltv.lifecycle.ExitCoordinator.exit(it) }
     }
 }
 
