@@ -1263,19 +1263,22 @@ def h_vod_source_publish(_d: dict) -> dict:
 
 def h_health(_d: dict) -> dict:
     """激活端点连通探测：用非法格式码打公网端点，网关/云函数活着即返回 ret=400
-    （参数层拒绝，不入库不留审计痕迹；signin/RPC 链路由业务请求自然验证）。"""
+    （参数层拒绝，不入库不留审计痕迹；signin/RPC 链路由业务请求自然验证）。
+    带 protocol=2 并以 400 为主判据；426（协议升级提示）同样说明链路活着，
+    否则 v1.26+ 分协议校验上线后探针会恒定误报「异常」。"""
     url = "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/activate"
     u = urllib.parse.urlsplit(url)
     if u.scheme != "https" or u.hostname != "appletv-d5ge1bth794873f76.service.tcloudbase.com" or u.port is not None:
         return {"ok": False, "detail": "目标 URL 不在白名单"}
-    body = json.dumps({"code": "OTV-0000-0000", "deviceId": "healthcheck0000"}).encode("utf-8")
+    body = json.dumps({"code": "OTV-0000-0000", "deviceId": "healthcheck0000",
+                       "protocol": 2}).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
     t0 = time.time()
     try:
         with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=8) as r:
             out = json.loads(r.read().decode("utf-8"))
-        return {"ok": out.get("ret") == 400, "ret": out.get("ret"),
+        return {"ok": out.get("ret") in (400, 426), "ret": out.get("ret"),
                 "latency_ms": int((time.time() - t0) * 1000)}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "latency_ms": int((time.time() - t0) * 1000), "detail": str(e)[:120]}
