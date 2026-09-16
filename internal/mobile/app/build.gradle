@@ -23,18 +23,20 @@ android {
         // v1.27（2026-09-15）：与 TV 版同步的修复批（影视三栏 / 豆瓣海报 / 今日比赛 / 详情页超时）
         // v1.28（2026-09-16）：与 TV 版同步（重装免重激活 + 激活失败诊断与重试）
         // v1.29（2026-09-16）：与 TV 版同步（源匹配重试 / 代理 fake-IP 放行 / 探测预算 / 海报兜底）
-    versionCode 33
-    versionName "1.31"
+        // v1.32（2026-09-16）：云端接口从 Sites 切回腾讯云 CloudBase（国内可直连）。
+        // ⚠ 本轮为【测试版】：LICENSE_ENABLED=false —— 默认视为已激活，测完必须改回 true 再发正式包。
+    versionCode 34
+    versionName "1.32"
         // 与 TV 版一致的三 ABI（Chaquopy/libVLC so 需要）；移动版无 cpp 拼音解码器
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
 
         // v1.19 版本重规划：内测/公测双 flavor 退役——只保留原公测移动一条线（命名「移动版」）。
         // 卡密门控为正式线标配；热更新与 TV 版共用同一通道（同一后端 zip）
         resValue 'string', 'app_name', 'My TV 移动版'
-        buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'
-        buildConfigField 'String', 'LICENSE_ENDPOINT', '"https://mytv-cloud.pengzhiyuan0724.chatgpt.site/activate"'
+        buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'   // ⚠ 测试版：默认已激活
+        buildConfigField 'String', 'LICENSE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/activate"'
         buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'true'
-        buildConfigField 'String', 'HOTUPDATE_ENDPOINT', '"https://mytv-cloud.pengzhiyuan0724.chatgpt.site/hotupdate"'
+        buildConfigField 'String', 'HOTUPDATE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/hotupdate"'
         // 启动门闸预算（App.kt 共享读取）：移动端 30s——2026-09-03 事故：首装冷缓存下
         // 90s 兜底全跑满（hhkan 冷抓+327 封面预载），用户感知「卡启动屏打不开」；
         // TV 遥控场景可等 90s，移动端 30s 必进主界面，剩余预载转后台继续

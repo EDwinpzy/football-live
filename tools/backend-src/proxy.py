@@ -3028,10 +3028,10 @@ class Handler(SimpleHTTPRequestHandler):
     # ---- 卡密激活同源转发（v1.25 需求②：网页版会员系统） ----
     # 直连云端 activate 会踩网关 CORS 头合并（函数回 * + 网关回显 Origin → "origin,*"
     # 非法头被浏览器拒收）；网页前端一律走同源 /api/activate，由服务端 urllib 转发。
-    # 2026-09-15：默认指向自建 Sites 后端（原腾讯云 CloudBase 地址已退役）。
+    # 2026-09-16：后台迁回腾讯云 CloudBase（国内可直连），Sites 后端退役。
     _ACTIVATE_ENDPOINT = os.environ.get(
         "OTV_LICENSE_ENDPOINT",
-        "https://mytv-cloud.pengzhiyuan0724.chatgpt.site/activate",
+        "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/activate",
     )
 
     def _license_relay(self):
@@ -4006,7 +4006,7 @@ class Handler(SimpleHTTPRequestHandler):
 # 与 app IptvRepository.SOURCES 同源：后台托管 latest（自建站点对象存储）优先，
 # 上游每日校验列表殿后。服务端出站无跨源限制，客户端拿到即可播（线路经 /api/relay）。
 IPTV_SOURCES = [
-    "https://mytv-cloud.pengzhiyuan0724.chatgpt.site/iptv/latest",
+    "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/iptv/latest",
     "https://gh-proxy.com/raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
     "https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",
 ]

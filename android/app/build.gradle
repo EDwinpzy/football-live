@@ -21,8 +21,10 @@ android {
     // v1.28（2026-09-16）：重装免重激活（设备维度恢复）+ 激活失败保留真实 HTTP 状态并重试一次
     // v1.29（2026-09-16）：影视源全通修复批——源匹配失败重试 / 代理 fake-IP 放行 /
     //                      探测预算收敛 / 豆瓣海报 Referer 与占位图兜底（热更 v21 同源）
-    versionCode 33
-    versionName "1.31"
+    // v1.32（2026-09-16）：云端接口从 Sites 切回腾讯云 CloudBase（国内可直连）。
+    // ⚠ 本轮为【测试版】：LICENSE_ENABLED=false —— 默认视为已激活，测完必须改回 true 再发正式包。
+    versionCode 34
+    versionName "1.32"
         // 方案 §5：双 ABI split 思路——真机 arm64/v7a + 模拟器 x86_64（开发验证用）
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
         // AOSP 谷歌拼音解码器（搜索页拼音候选，2026-08-29）；默认 c++_static（new/delete 需要 libc++）
@@ -30,10 +32,10 @@ android {
         // 卡密门控/热更新为正式线标配（LICENSE_*/HOTUPDATE_* 常量原公测口径）。
         // v1.18 热更新：云端下发内嵌后端 zip，启动时静默检查+预下载，下次冷启动生效
         resValue 'string', 'app_name', 'My TV'
-        buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'
-        buildConfigField 'String', 'LICENSE_ENDPOINT', '"https://mytv-cloud.pengzhiyuan0724.chatgpt.site/activate"'
+        buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'   // ⚠ 测试版：默认已激活
+        buildConfigField 'String', 'LICENSE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/activate"'
         buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'true'
-        buildConfigField 'String', 'HOTUPDATE_ENDPOINT', '"https://mytv-cloud.pengzhiyuan0724.chatgpt.site/hotupdate"'
+        buildConfigField 'String', 'HOTUPDATE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/hotupdate"'
         // 启动门闸预算：TV 90s（用户要求全加载完再进，遥控场景可等）；App.kt 共享读取。
         // 2026-09-03 事故教训见 mobile 的 30000 注释
         buildConfigField 'long', 'STARTUP_GATE_MS', '90000'

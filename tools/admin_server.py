@@ -217,6 +217,8 @@ HU_REQUIRED_ENTRIES = (
     "vod_sources.py", "vod_sources.default.json",
 )
 HU_MAX_BYTES = 220 * 1024 * 1024
+# 显式指定热更版本号的上限（防手滑输入天文数字把设备端比较逻辑顶掉）
+HU_MAX_VERSION = 10_000_000
 
 
 def obj_url(key: str) -> str:
@@ -436,6 +438,8 @@ def h_hu_upload(qs: dict, raw: bytes) -> dict:
         version = int((qs.get("version") or ["0"])[0] or 0)
     except ValueError:
         return {"error": "版本号必须是数字"}
+    if version and not 1 <= version <= HU_MAX_VERSION:
+        return {"error": "版本号超出范围"}
     try:
         version = version if version >= 1 else _hu_alloc_version()
         meta = _hu_parse_meta(qs)
@@ -487,18 +491,23 @@ def _hu_obj_delete(key: str) -> None:
 def h_hu_upload_commit(qs: dict) -> dict:
     """分片上传收尾：按序读回全部分片 → 重组校验（尺寸/zip 结构）→ 发布 → 清理暂存。
 
-    版本号在 commit 时才分配（与直传同语义：max+1）。expected size 由客户端上报，
-    重组后必须精确相等，防止分片缺失/错序拼出坏包。"""
+    版本号在 commit 时才分配（缺省 max+1，可带 version= 显式指定）。expected size 由
+    客户端上报，重组后必须精确相等，防止分片缺失/错序拼出坏包。"""
     uid = (qs.get("uid") or [""])[0]
     try:
         total = int((qs.get("total") or ["0"])[0])
         size = int((qs.get("size") or ["0"])[0])
+        # 显式版本号（切换云端基座时的版本连续性：库里最高 v17、设备已到 v21，
+        # 自动 max+1 只会拿到 v18 被设备忽略）；缺省仍走 max+1 自动分配。
+        explicit = int((qs.get("version") or ["0"])[0] or 0)
     except ValueError:
         return {"error": "bad_total_or_size"}
     if not HU_UPLOAD_UID_RE.match(uid):
         return {"error": "bad_uid"}
     if not 1 <= total <= 2048 or not 1 <= size <= HU_MAX_BYTES:
         return {"error": "bad_total_or_size"}
+    if explicit and not 1 <= explicit <= HU_MAX_VERSION:
+        return {"error": "bad_version"}
     keys = [f"hu-uploads/{uid}/part-{i:04d}" for i in range(total)]
     buf = bytearray()
     missing = []
@@ -515,7 +524,7 @@ def h_hu_upload_commit(qs: dict) -> dict:
             _hu_obj_delete(k)
         return {"error": f"重组尺寸不符（期望 {size}，实得 {len(buf)}）——请重新上传"}
     try:
-        version = _hu_alloc_version()
+        version = explicit if explicit >= 1 else _hu_alloc_version()
         meta = _hu_parse_meta(qs)
     except ValueError as e:
         for k in keys:
