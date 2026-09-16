@@ -42,12 +42,14 @@ class IptvRepository(context: Context) {
         /** 上游补源地址按序回退（2026-09-03 实测选型）：
          *  ① 站点每日校验推送产物（/iptv/refresh 定时拉上游→逐线测活剔死→按测速排序
          *     写入对象存储，匿名 GET 直拉——电视#9「每天自动推送可用源、删除不可用源」；
-         *     对象与热更包同桶不同前缀 iptv/）；
+         *     对象与热更包同桶不同前缀 iptv/）。2026-09-16：后台虽已迁回腾讯云 CloudBase，
+         *     但**电视源按用户要求仍取自建站点那份**（两个地址下发的是同一份文件，
+         *     SHA-256 逐字节一致；切换只影响「从哪取」，不影响频道表内容）；
          *  ②③ Guovin/iptv-api 每日自动优化列表（gh-proxy / jsdelivr 双镜像，1619 线路，
          *     上游每日 EPG 校验，gh-proxy ~4s / jsdelivr ~1.6s）；
          *  ④⑤ vbskycn/iptv 聚合（原源，gh-proxy 实测 2.7s；raw 直连国内超时仅作兜底）。 */
         val SOURCES = listOf(
-            "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/iptv/latest",
+            "https://mytv-cloud.pengzhiyuan0724.chatgpt.site/iptv/latest",
             "https://gh-proxy.com/raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
             "https://cdn.jsdelivr.net/gh/Guovin/iptv-api@gd/output/result.m3u",
             "https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",

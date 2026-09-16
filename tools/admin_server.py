@@ -10,10 +10,12 @@
                   OTV_AUTH_USER / OTV_AUTH_PASS     svc_import 服务账号（云端必设）
                   OTV_PRIV_KEY                      卡密签发私钥 PEM（云端可选：
                                                     不设则「补货」禁用，仍可本地补货）
+                  OTV_ADMIN_SECRET                  会话签名密钥（云端建议设；不设则
+                                                    由 ADMIN_USER/ADMIN_PASS 派生固定值）
 
 登录门禁（v1.20 需求：移到腾讯云 + 外网访问 + 登录门禁）：
   - GET / 页面内置登录浮层；POST /api/login 校验账号密码 → 下发 HMAC 签名的
-    HttpOnly 会话 Cookie（12h 有效，进程重启失效）
+    HttpOnly 会话 Cookie（12h 有效；密钥固定，多实例/重启后仍有效）
   - 除 /api/login、静态资源外全部接口须带有效 Cookie；登录失败限速（5 次/60s 锁定）
 
 功能（v1.17 → v1.20）:
@@ -98,7 +100,11 @@ def _resolve_admin_pass() -> str:
 
 
 ADMIN_PASS = _resolve_admin_pass()
-SESSION_SECRET = os.environ.get("OTV_ADMIN_SECRET") or secrets.token_urlsafe(24)
+# 会话签名密钥：优先 env；缺省时由登录凭据派生**固定**值。
+# 不能退回随机值——云函数多实例/冷启动各自随机会让 Cookie 时验时不验
+# （2026-09-16 线上实测：登录成功后再连发 8 次带 Cookie 请求，7 次 401）。
+SESSION_SECRET = os.environ.get("OTV_ADMIN_SECRET") or hashlib.sha256(
+    f"otv-admin-session:{ADMIN_USER}:{ADMIN_PASS}".encode("utf-8")).hexdigest()
 SESSION_TTL = 12 * 3600
 COOKIE = "otv_admin_sess"
 

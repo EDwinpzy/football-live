@@ -8,6 +8,8 @@
 
 云端环境变量（函数配置注入，不进代码包）：
   OTV_ADMIN_USER / OTV_ADMIN_PASS  登录门禁（必填）
+  OTV_ADMIN_SECRET                 会话签名密钥（可选：不设则由登录凭据派生固定值，
+                                   多实例/冷启动间一致；随机兜底会致登录后立刻掉线）
   OTV_AUTH_USER  / OTV_AUTH_PASS   svc_import（必填，db_import 环境变量分支）
   OTV_PRIV_KEY                     可选：卡密签发私钥（不设则云端补货禁用，本地补货不受影响）
 """
