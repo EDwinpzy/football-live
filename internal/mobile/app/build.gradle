@@ -22,8 +22,9 @@ android {
         // v1.25（2026-09-13）：授权协议 v2，统一到期时间与 24 小时网络宽限
         // v1.27（2026-09-15）：与 TV 版同步的修复批（影视三栏 / 豆瓣海报 / 今日比赛 / 详情页超时）
         // v1.28（2026-09-16）：与 TV 版同步（重装免重激活 + 激活失败诊断与重试）
-        versionCode 30
-        versionName "1.28"
+        // v1.29（2026-09-16）：与 TV 版同步（源匹配重试 / 代理 fake-IP 放行 / 探测预算 / 海报兜底）
+        versionCode 31
+        versionName "1.29"
         // 与 TV 版一致的三 ABI（Chaquopy/libVLC so 需要）；移动版无 cpp 拼音解码器
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
 
