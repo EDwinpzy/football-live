@@ -21,8 +21,8 @@ android {
     // v1.28（2026-09-16）：重装免重激活（设备维度恢复）+ 激活失败保留真实 HTTP 状态并重试一次
     // v1.29（2026-09-16）：影视源全通修复批——源匹配失败重试 / 代理 fake-IP 放行 /
     //                      探测预算收敛 / 豆瓣海报 Referer 与占位图兜底（热更 v21 同源）
-    versionCode 32
-    versionName "1.30"
+    versionCode 33
+    versionName "1.31"
         // 方案 §5：双 ABI split 思路——真机 arm64/v7a + 模拟器 x86_64（开发验证用）
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
         // AOSP 谷歌拼音解码器（搜索页拼音候选，2026-08-29）；默认 c++_static（new/delete 需要 libc++）

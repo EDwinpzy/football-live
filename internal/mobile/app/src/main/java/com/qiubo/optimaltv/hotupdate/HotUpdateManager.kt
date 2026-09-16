@@ -445,7 +445,10 @@ object HotUpdateManager {
         onProgress: (Long, Long) -> Unit = { _, _ -> },
     ): String? = withContext(Dispatchers.IO) {
         runCatching {
-            val req = Request.Builder().url(url).build()
+            // 自有站点接口统一浏览器 UA：见 data/net/HttpUa（非浏览器 UA 会被边缘拦成 403）
+            val req = Request.Builder().url(url)
+                .header("User-Agent", com.qiubo.optimaltv.data.net.HttpUa.BROWSER)
+                .build()
             http.newCall(req).execute().use { r ->
                 if (!r.isSuccessful) return@runCatching null
                 val total = r.body?.contentLength() ?: -1L
@@ -486,6 +489,8 @@ object HotUpdateManager {
     private suspend fun postJson(url: String, body: JSONObject): JSONObject? = withContext(Dispatchers.IO) {
         runCatching {
             val req = Request.Builder().url(url)
+                .header("User-Agent", com.qiubo.optimaltv.data.net.HttpUa.BROWSER)
+                .header("Accept", com.qiubo.optimaltv.data.net.HttpUa.ACCEPT)
                 .post(body.toString().toRequestBody("application/json".toMediaType()))
                 .build()
             http.newCall(req).execute().use { r ->

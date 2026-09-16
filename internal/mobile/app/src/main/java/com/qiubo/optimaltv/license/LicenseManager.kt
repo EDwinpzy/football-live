@@ -84,6 +84,24 @@ object LicenseManager {
     private const val RENEW_BADGE_MS = 7 * DAY_MS
     private const val REVERIFY_INTERVAL_MS = 6 * 3600_000L
 
+    /**
+     * 激活请求的 UA（2026-09-16 线上 403 根因修复）。
+     *
+     * 实测：投影仪直连激活返回「HTTP 403 + Cloudflare 拦截页」，而同一台机器拉比赛列表、
+     * 电视源、热更检查（GET）全部正常——差别就在 UA：数据层各接口一律用浏览器 UA
+     * （`Mozilla/5.0 … OptimalTV/1.0`），只有激活请求用了 `MyTV/x.y (Android)` 这种
+     * 明显的非浏览器标识。Cloudflare 的机器人规则按「出口 IP 信誉 + UA」判定：本机经
+     * 代理的好 IP 能过，投影仪的住宅 IP 就被拦成 403 拦截页（请求根本没到我们的服务端，
+     * 后台激活日志里一条记录都没有）。
+     *
+     * 因此激活与数据层统一用浏览器 UA；重试时再换一个更「大众脸」的 Chrome UA，
+     * 覆盖边缘规则按具体 UA 判定的情况。
+     */
+    private const val UA_BROWSER = com.qiubo.optimaltv.data.net.HttpUa.BROWSER
+    private const val UA_CHROME =
+        "Mozilla/5.0 (Linux; Android 11; SM-G9810) AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/120.0.0.0 Mobile Safari/537.36"
+
     private val _state = MutableStateFlow<LicenseState?>(null)
     val state: StateFlow<LicenseState?> = _state.asStateFlow()
 
@@ -97,6 +115,16 @@ object LicenseManager {
     private val http = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        .build()
+
+    /**
+     * 兜底客户端：只走 HTTP/1.1。部分边缘节点的机器人规则按 HTTP/2 指纹判定，
+     * 换协议常常就能过（与换 UA 同一类规避，属激活链路的最后一档）。
+     */
+    private val http11 = OkHttpClient.Builder()
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
         .build()
 
     private val pubKey: PublicKey by lazy {
@@ -197,6 +225,14 @@ object LicenseManager {
            否则「403 拦截页」会被显示成「该卡密已被封禁」。 */
         if (resp.msg?.startsWith("bad_json") == true) {
             OtvLog.w("license 激活异常响应：${resp.msg}")
+            /* 边缘拦截页（Cloudflare / 运营商劫持）与「网关 5xx」要给用户不同的下一步：
+               前者换网络就能过，后者只需重试。截断的响应体里能认出 Cloudflare 特征。 */
+            val blocked = resp.msg.contains("Attention Required", true) ||
+                resp.msg.contains("Cloudflare", true) ||
+                resp.msg.contains("cf-error", true)
+            if (blocked) {
+                return ActivateResult.Error("激活被网络中间层拦截（HTTP ${resp.ret}），请换网络后重试")
+            }
             return ActivateResult.Error("服务器无响应（HTTP ${resp.ret}），请检查网络后重试")
         }
         return when (resp.ret) {
@@ -358,13 +394,16 @@ object LicenseManager {
             .put("deviceId", deviceId)
         if (action == "renew") payload.put("currentCode", currentCode)
 
-        fun once(): EndpointResp? = runCatching {
+        fun once(client: okhttp3.OkHttpClient, ua: String): EndpointResp? = runCatching {
             val request = Request.Builder()
                 .url(BuildConfig.LICENSE_ENDPOINT)
-                .header("User-Agent", "MyTV/${BuildConfig.VERSION_NAME} (Android)")
+                // 浏览器 UA + 常规请求头：见 UA_BROWSER 注释（非浏览器 UA 会被边缘拦成 403）
+                .header("User-Agent", ua)
+                .header("Accept", com.qiubo.optimaltv.data.net.HttpUa.ACCEPT)
+                .header("Accept-Language", com.qiubo.optimaltv.data.net.HttpUa.ACCEPT_LANGUAGE)
                 .post(payload.toString().toRequestBody("application/json".toMediaType()))
                 .build()
-            http.newCall(request).execute().use { response ->
+            client.newCall(request).execute().use { response ->
                 val raw = response.body?.string().orEmpty()
                 val jo = runCatching { JSONObject(raw) }.getOrNull()
                     /* 响应不是 JSON（网关 5xx / 拦截页 / 空响应）：保留真实 HTTP 状态和一小段
@@ -388,13 +427,28 @@ object LicenseManager {
 
         /* 网关偶发 5xx / 拦截页 / 连接抖动：原地重试一次。激活本身幂等——同一设备重复激活
            只会回同一张票、不新增设备位，所以重试是安全的。 */
-        val first = once()
-        val retryable = first == null || first.ret >= 500 || first.msg?.startsWith("bad_json") == true
-        if (retryable) {
-            OtvLog.i("license endpoint 首次失败（${first?.ret ?: "网络异常"}），原地重试一次")
-            return@withContext (once() ?: first)
+        /* 三档尝试（激活幂等：同设备重复激活只回同一张票、不占设备位）：
+           ① 数据层同款浏览器 UA；② 大众脸 Chrome UA；③ 再叠一层「只走 HTTP/1.1」。
+           只有「无响应 / 5xx / 非 JSON 拦截页」才继续下一档——业务码（卡密不存在、设备数满等）
+           是真实结论，不重试。 */
+        val attempts = listOf(
+            Triple(http, UA_BROWSER, "浏览器UA"),
+            Triple(http, UA_CHROME, "ChromeUA"),
+            Triple(http11, UA_CHROME, "ChromeUA+HTTP/1.1"),
+        )
+        var last: EndpointResp? = null
+        for ((client, ua, label) in attempts) {
+            val resp = once(client, ua)
+            if (resp == null) {
+                OtvLog.i("license endpoint 无响应（$label）→ 尝试下一档")
+                continue
+            }
+            last = resp
+            val retryable = resp.ret >= 500 || resp.msg?.startsWith("bad_json") == true
+            if (!retryable) return@withContext resp
+            OtvLog.i("license endpoint 异常（$label ret=${resp.ret} ${resp.msg?.take(40)}）→ 尝试下一档")
         }
-        first
+        last
     }
 
     private fun parseTimestamp(value: Any?): Long? = when (value) {

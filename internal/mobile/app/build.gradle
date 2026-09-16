@@ -23,8 +23,8 @@ android {
         // v1.27（2026-09-15）：与 TV 版同步的修复批（影视三栏 / 豆瓣海报 / 今日比赛 / 详情页超时）
         // v1.28（2026-09-16）：与 TV 版同步（重装免重激活 + 激活失败诊断与重试）
         // v1.29（2026-09-16）：与 TV 版同步（源匹配重试 / 代理 fake-IP 放行 / 探测预算 / 海报兜底）
-    versionCode 32
-    versionName "1.30"
+    versionCode 33
+    versionName "1.31"
         // 与 TV 版一致的三 ABI（Chaquopy/libVLC so 需要）；移动版无 cpp 拼音解码器
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
 

@@ -157,6 +157,9 @@ object AnnouncementManager {
         runCatching {
             val req = Request.Builder()
                 .url(BuildConfig.HOTUPDATE_ENDPOINT.trimEnd('/') + "/announce")
+                // 自有站点接口统一浏览器 UA：见 data/net/HttpUa（非浏览器 UA 会被边缘拦成 403）
+                .header("User-Agent", com.qiubo.optimaltv.data.net.HttpUa.BROWSER)
+                .header("Accept", com.qiubo.optimaltv.data.net.HttpUa.ACCEPT)
                 .get()
                 .build()
             withTimeoutOrNull(10_000) {
