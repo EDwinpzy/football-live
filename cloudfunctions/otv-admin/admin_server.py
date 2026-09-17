@@ -109,6 +109,9 @@ SESSION_SECRET = os.environ.get("OTV_ADMIN_SECRET") or hashlib.sha256(
     f"otv-admin-session:{ADMIN_USER}:{ADMIN_PASS}".encode("utf-8")).hexdigest()
 SESSION_TTL = 12 * 3600
 COOKIE = "otv_admin_sess"
+# 免登录开关（用户可要求；默认关）：OTV_ADMIN_NOAUTH=1 时网关匿名直达后台，
+# 谁拿到 /admin/ 地址都能改卡密、推热更、发公告。改 env 即时生效，不用重新部署代码。
+NOAUTH = os.environ.get("OTV_ADMIN_NOAUTH") == "1"
 
 
 def _sign(expires: int) -> str:
@@ -1402,7 +1405,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, b"logo missing", "text/plain; charset=utf-8")
             return
         if self.path == "/api/whoami":
-            if self._session_ok():
+            if NOAUTH or self._session_ok():
                 self._send(200, b'{"ok":true}', "application/json; charset=utf-8")
             else:
                 self._send(401, b'{"ok":false}', "application/json; charset=utf-8")
@@ -1448,7 +1451,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # 会话门禁：其余 /api/* 一律须带有效 Cookie
-        if not self._session_ok():
+        if not (NOAUTH or self._session_ok()):
             self._send(401, '{"error": "未登录或会话已过期"}'.encode("utf-8"),
                        "application/json; charset=utf-8")
             return
