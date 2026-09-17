@@ -27,6 +27,23 @@ def search_payload(rows):
     return {"data": rows}
 
 
+def explore_row(sid, title, rate="8.0"):
+    return {"id": str(sid), "title": title, "rate": rate, "cover": "https://img.example/%s.jpg" % sid}
+
+
+def home_fetch(rows_by_sort, details):
+    """假豆瓣：Explore 列表按 `sort` 分页返回，`/subject/<id>` 返回详情。"""
+    def fetch(url):
+        if "/subject/" in url:
+            sid = url.rstrip("/").rsplit("/", 1)[-1]
+            return details.get(sid, {})
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        rows = rows_by_sort.get((query.get("sort") or ["U"])[0]) or []
+        start = int((query.get("start") or ["0"])[0])
+        return search_payload(rows[start:start + douban_catalog.EXPLORE_PAGE_SIZE])
+    return fetch
+
+
 class DoubanCatalogTest(unittest.TestCase):
     def setUp(self):
         # 限流退避会让用例白等几秒；用例只关心调用次数与回落结果。
@@ -203,6 +220,73 @@ class DoubanCatalogTest(unittest.TestCase):
         result = catalog.show("variety", genre="真人秀")
         self.assertEqual(result["items"], [])
         self.assertEqual(result["source"], "douban")
+
+    def test_movie_rule_drops_concerts_and_stage_but_keeps_musical_films(self):
+        """电影栏不许出现演唱会/舞台实录：豆瓣把这些也标成 movie，只能靠标题/又名认。"""
+        rows = [explore_row(111, "陈奕迅DUO演唱会"), explore_row(222, "汉密尔顿"),
+                explore_row(333, "悲惨世界"), explore_row(444, "肖申克的救赎")]
+        details = {
+            "111": {"title": "陈奕迅DUO演唱会", "genres": ["音乐", "歌舞"], "aka": ["DUO:陈奕迅2010演唱会"]},
+            "222": {"title": "汉密尔顿", "aka": ["汉密尔顿音乐剧"]},
+            # 又名里带「音乐剧」但是电影版：必须留下
+            "333": {"title": "悲惨世界", "aka": ["音乐剧《悲惨世界》电影版"], "genres": ["剧情", "爱情", "歌舞"]},
+            "444": {"title": "肖申克的救赎", "genres": ["剧情", "犯罪"], "durations": ["142分钟"]},
+        }
+        catalog = douban_catalog.DoubanCatalog(fetch=home_fetch({"U": rows, "R": rows, "S": rows}, details))
+        result = catalog.home("movie")
+        titles = [[item["title"] for item in section["items"]] for section in result["sections"]]
+        self.assertEqual(titles, [["悲惨世界", "肖申克的救赎"]] * 3)
+
+    def test_movie_home_backfills_next_page_when_a_section_is_mostly_stage(self):
+        """高分栏里演唱会占了大半时，要继续翻页补足，而不是只留几部片子。"""
+        concerts = [explore_row(1000 + i, "某演唱会 %d" % i) for i in range(20)]
+        rows = concerts + [explore_row(444, "肖申克的救赎")]
+        details = {str(1000 + i): {"title": "某演唱会 %d" % i, "aka": ["%d 巡回演唱会" % i]} for i in range(20)}
+        details["444"] = {"title": "肖申克的救赎", "genres": ["剧情", "犯罪"]}
+        catalog = douban_catalog.DoubanCatalog(fetch=home_fetch({"U": rows, "R": rows, "S": rows}, details))
+        section = catalog.home("movie")["sections"][0]
+        self.assertEqual([item["title"] for item in section["items"]], ["肖申克的救赎"])
+
+    def test_tv_rule_drops_short_dramas_but_keeps_normal_series(self):
+        """电视剧栏不许出现短剧：短片类型、单集 ≤5 分钟、无剧集元数据三种都要剔掉。"""
+        rows = [explore_row(1, "婚后引力"), explore_row(2, "糯糯下山"),
+                explore_row(3, "妾本草芥"), explore_row(4, "早春晴朗")]
+        details = {
+            "1": {"title": "婚后引力", "genres": ["剧情", "爱情", "短片"]},
+            "2": {"title": "糯糯下山", "genres": ["剧情"], "durations": ["2分钟"], "episodes_count": 152},
+            "3": {"title": "妾本草芥", "genres": ["古装"]},
+            "4": {"title": "早春晴朗", "genres": ["剧情", "爱情"], "durations": ["45分钟"], "episodes_count": 24},
+        }
+        catalog = douban_catalog.DoubanCatalog(fetch=home_fetch({"U": rows, "R": rows, "S": rows}, details))
+        titles = [[item["title"] for item in section["items"]]
+                  for section in catalog.home("tv")["sections"]]
+        self.assertEqual(titles, [["早春晴朗"]] * 3)
+
+    def test_unknown_details_never_drop_items(self):
+        """详情拿不到时必须原样保留：判据缺失 ≠ 命中规则。"""
+        rows = [explore_row(1, "婚后引力"), explore_row(2, "早春晴朗")]
+        catalog = douban_catalog.DoubanCatalog(fetch=home_fetch({"U": rows, "R": rows, "S": rows}, {}))
+        for category in ("movie", "tv"):
+            titles = [[item["title"] for item in section["items"]]
+                      for section in catalog.home(category)["sections"]]
+            self.assertEqual(titles, [["婚后引力", "早春晴朗"]] * 3)
+
+    def test_snapshot_fallback_sections_are_filtered_too(self):
+        """云端/离线只能走快照：快照条目带类型时同样要应用分组规则。"""
+        snapshot = {"home": {"tv": {"sections": [
+            {"title": "最近热门", "items": [
+                {"douban_id": "1", "title": "婚后引力", "genres": ["剧情", "短片"]},
+                {"douban_id": "2", "title": "早春晴朗", "genres": ["剧情"], "durations": ["45分钟"]}]},
+            {"title": "最新上映", "items": [
+                {"douban_id": "3", "title": "妾本草芥", "genres": ["古装"]}]},
+            {"title": "豆瓣高分", "items": [
+                {"douban_id": "4", "title": "繁花", "genres": ["剧情"], "durations": ["45分钟"]}]}]}}}
+        catalog = douban_catalog.DoubanCatalog(
+            fetch=lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")), snapshot=snapshot)
+        result = catalog.home("tv")
+        self.assertEqual(result["source"], "douban-snapshot")
+        self.assertEqual([[item["title"] for item in section["items"]] for section in result["sections"]],
+                         [["早春晴朗"], ["妾本草芥"], ["繁花"]])
 
 
 if __name__ == "__main__":

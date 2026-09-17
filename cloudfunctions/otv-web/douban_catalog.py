@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -26,6 +27,22 @@ SORT_CODES = {"hot": "U", "new": "R", "rating": "S"}  # U 热门 / R 最新 / S 
 # 首页三栏是「不带筛选、按排序取前 20」，空列表只可能是限流；旧实现把它当成功结果
 # 写进 6 小时缓存，用户看到「最近热门有内容、另外两栏空」且在过期前不再恢复。
 EXPLORE_RETRY_DELAYS = (0.4, 1.2)
+
+# ---- 分组内容规则（2026-09-17 用户要求）----------------------------------------
+# 豆瓣把演唱会场次、音乐剧/话剧现场实录挂在「电影」下，把竖屏短剧挂在「电视剧」下，
+# 列表接口又不给类型字段，所以这两条规则要补详情后再判：范围见 SECTION_POLICIES。
+STAGE_PERFORMANCE_TOKENS = (
+    "演唱会", "音乐会", "音乐剧", "音乐节", "舞台剧", "话剧", "相声", "脱口秀",
+    "纪念演出", "巡演", "巡回演出", "现场演出", "剧院现场", "国家剧院", "不插电", "歌友会",
+)
+# 「音乐剧的电影版」仍是电影（例：《悲惨世界》2012 又名「音乐剧《悲惨世界》电影版」）
+FILM_VERSION_TOKENS = ("电影版", "剧场版")
+SHORT_FORM_GENRES = ("短片", "短剧", "微短剧", "竖屏剧", "迷你剧")
+SHORT_EPISODE_MINUTES = 5    # 单集 ≤ 5 分钟 → 竖屏短剧（例：152 集 × 2 分钟）
+DETAIL_MERGE_FIELDS = ("genres", "regions", "year", "aliases", "tags", "durations", "episodes_count")
+ENRICH_WORKERS = 8           # 补详情的并发数
+ENRICH_MAX_EXTRA_PAGES = 2   # 剔除后不足一栏时，最多再翻 2 页补足
+SECTION_POLICIES = {"movie": "stage", "tv": "short"}
 SUBJECT_FIELDS = (
     "id", "douban_id", "title", "original_title", "aliases", "year",
     "category", "genres", "regions", "season", "rating", "rating_count",
@@ -86,6 +103,90 @@ def _category(item, requested="movie"):
     return requested if requested in ("movie", "tv") else "movie"
 
 
+def _minute_length(value):
+    """时长串（`2分钟` / `45分钟` / `1小时20分钟`）→ 分钟数；解析不出返回 0。"""
+    text = _text(value)
+    hours = re.search(r"(\d+)\s*小时", text)
+    minutes = re.search(r"(\d+)\s*分钟", text)
+    total = int(hours.group(1)) * 60 if hours else 0
+    return total + (int(minutes.group(1)) if minutes else 0)
+
+
+def is_stage_performance(item):
+    """演唱会 / 舞台实录（含音乐剧现场、国家剧院现场）。
+
+    豆瓣把这些条目也归在「电影」类型下，列表接口只给标题，类型字段要补详情才有，
+    因此这里按标题 + 原名 + 又名 + 豆瓣标签判定；`电影版/剧场版` 命中则仍算电影。
+    """
+    parts = [item.get("title"), item.get("original_title")]
+    parts.extend(_list(item.get("aliases")))
+    parts.extend(_list(item.get("tags")))
+    text = " ".join(_text(part) for part in parts if part)
+    if not text:
+        return False
+    if any(token in text for token in FILM_VERSION_TOKENS):
+        return False
+    return any(token in text for token in STAGE_PERFORMANCE_TOKENS)
+
+
+def looks_like_short_drama(item):
+    """竖屏短剧：豆瓣把短剧也标成 type=tv，靠这几条判据从「电视剧」里剔出去。
+
+    1. 类型/标签含 短片/短剧/微短剧…；
+    2. 单集时长 ≤ 5 分钟（例：152 集 × 2 分钟）；
+    3. 补过详情后仍没有任何剧集信息（短剧常态；正常剧集都有集数）。
+       只有确实拿到详情（`detail_meta`）才用第 3 条，避免把「还没补到详情」当短剧误杀。
+    """
+    if is_short_drama(item):
+        return True
+    genres = " ".join(_list(item.get("genres")))
+    if any(token in genres for token in SHORT_FORM_GENRES):
+        return True
+    lengths = [length for length in (_minute_length(value) for value in _list(item.get("durations"))) if length]
+    if lengths and min(lengths) <= SHORT_EPISODE_MINUTES:
+        return True
+    if item.get("detail_meta") and not lengths and not _integer(item.get("episodes_count"), 0):
+        return True
+    return False
+
+
+def section_excluded(category, item):
+    """栏目内容规则：电影栏不出现演唱会/舞台实录，电视剧栏不出现短剧。"""
+    policy = SECTION_POLICIES.get(category)
+    if policy == "stage":
+        return is_stage_performance(item)
+    if policy == "short":
+        return looks_like_short_drama(item)
+    return False
+
+
+def _merge_detail(item, detail):
+    """把详情里的分组判据并入列表条目（列表接口本身没有类型/又名/集数）。"""
+    merged = dict(item)
+    for key in DETAIL_MERGE_FIELDS:
+        value = detail.get(key)
+        if value and not merged.get(key):
+            merged[key] = value
+    merged["detail_meta"] = True
+    return merged
+
+
+def _apply_section_policy(category, value):
+    """对（缓存或快照）首页结果再套一次规则：写缓存前已过滤，这里只兜兜底。"""
+    if category not in SECTION_POLICIES or not isinstance(value, dict):
+        return value
+    result = dict(value)
+    sections = []
+    for section in value.get("sections") or []:
+        if isinstance(section, dict):
+            section = dict(section)
+            section["items"] = [item for item in (section.get("items") or [])
+                                if isinstance(item, dict) and not section_excluded(category, item)]
+        sections.append(section)
+    result["sections"] = sections
+    return result
+
+
 _CARD_YEAR = re.compile(r"^\d{4}$")
 
 
@@ -136,6 +237,9 @@ def normalize_subject(raw, requested_category="movie"):
         "category": _category(raw, requested_category),
         "genres": _list(raw.get("genres") or raw.get("genre")),
         "regions": _list(raw.get("regions") or raw.get("countries")),
+        "tags": _list(raw.get("tags")),
+        "durations": _list(raw.get("durations")),
+        "episodes_count": _integer(raw.get("episodes_count"), 0),
         "season": _integer(raw.get("season"), 0),
         "rating": _number(rating),
         "rating_count": _integer(rating),
@@ -433,6 +537,53 @@ class DoubanCatalog:
                 time.sleep(EXPLORE_RETRY_DELAYS[attempt])
         raise DoubanThrottled("empty Douban explore data for %s" % category)
 
+    def _enrich(self, items):
+        """并发补详情，把分组判据并进列表条目；详情走 7 天磁盘缓存，失败就跳过。"""
+        pending = [item for item in items if item.get("douban_id") and not item.get("detail_meta")]
+        if not pending:
+            return [dict(item) for item in items]
+        with ThreadPoolExecutor(max_workers=min(ENRICH_WORKERS, len(pending))) as pool:
+            details = list(pool.map(self._detail_meta, [item["douban_id"] for item in pending]))
+        by_id = {item["douban_id"]: detail for item, detail in zip(pending, details) if detail}
+        return [_merge_detail(item, by_id[item["douban_id"]]) if by_id.get(item.get("douban_id"))
+                else dict(item) for item in items]
+
+    def _detail_meta(self, douban_id):
+        """单条详情；拿不到有效详情返回空字典（叫它别把「未知」当判据）。"""
+        try:
+            detail = self.detail(douban_id)
+        except Exception:
+            return {}
+        return detail if isinstance(detail, dict) and detail.get("title") else {}
+
+    def _section_items(self, category, sort):
+        """首页一栏的条目：拉列表 → 补详情 → 按分类规则剔除 → 不够就翻页补足。
+
+        不带规则的分类维持原样（一次请求、原样返回）；带规则的分类在剔除后
+        继续翻页，避免电影高分栏被演唱会占掉大半后只剩几部片子。
+        """
+        if category not in SECTION_POLICIES:
+            return self._explore(category, sort, strict=True)
+        accepted, seen = [], set()
+        for page in range(1, 2 + ENRICH_MAX_EXTRA_PAGES):
+            # 第一页沿用严格模式（空 data = 限流，要回落）；翻页时空 data 是正常的列表末尾。
+            if page == 1:
+                rows = self._explore(category, sort, strict=True)
+            else:
+                rows = self._explore(category, sort, page=page)
+            if not rows:
+                break
+            for item in self._enrich(rows):
+                key = str(item.get("douban_id") or item.get("id") or "")
+                if key and key in seen:
+                    continue
+                seen.add(key)
+                if not section_excluded(category, item):
+                    accepted.append(item)
+            if len(accepted) >= EXPLORE_PAGE_SIZE:
+                break
+        return accepted[:EXPLORE_PAGE_SIZE]
+
     def home(self, category):
         if category not in CATEGORY_VALUES:
             raise ValueError("unsupported category")
@@ -449,7 +600,7 @@ class DoubanCatalog:
             sections, degraded = [], 0
             for title, sort in zip(HOME_SECTION_NAMES, ("U", "R", "S")):
                 try:
-                    items = self._explore(category, sort, strict=True)
+                    items = self._section_items(category, sort)
                 except DoubanThrottled:
                     items = []
                 if not items:
@@ -465,6 +616,8 @@ class DoubanCatalog:
             return result
 
         result = self._coalesced(key, "home", produce, snapshot_value)
+        # 快照/缓存兜底路径没有经过 [_section_items]，这里再套一次规则。
+        result = _apply_section_policy(category, result)
         self._ingest([item for section in (result.get("sections") or []) for item in (section.get("items") or [])])
         return result
 
