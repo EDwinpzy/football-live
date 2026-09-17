@@ -103,6 +103,7 @@ table.grid th{font-size:11px;letter-spacing:.05em;color:var(--dim);font-weight:5
   padding:7px 12px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.02)}
 table.grid th.s{cursor:pointer}
 table.grid th.s:hover{color:var(--txt)}
+#tab-hu.hu-dragging{outline:2px dashed var(--accent);outline-offset:8px;border-radius:6px}
 table.grid td{padding:7px 12px;border-bottom:1px solid var(--line2);font-size:12.5px;vertical-align:middle}
 table.grid tr:hover td{background:rgba(255,255,255,.03)}
 tr.grp td{background:var(--bg3);color:var(--dim);font-size:11.5px;letter-spacing:.04em;padding:5px 12px}
@@ -379,6 +380,7 @@ table.pool tr:not(.miss):hover td{background:rgba(255,255,255,.05)}
     <button class="ghost mini" id="btn-hu-dir" style="display:none">更换目录</button>
     <span class="hint" id="hu-dir-hint">…</span>
   </div>
+  <div class="hint" id="hu-drop-hint" style="margin-top:6px">也可以把 python-backend.zip（或 backend 文件夹）直接拖到本页任意位置上传——不弹任何选择框。</div>
   <div class="errbox" id="hu-err"></div>
   <div class="okbox" id="hu-ok"></div>
 
@@ -556,7 +558,7 @@ table.pool tr:not(.miss):hover td{background:rgba(255,255,255,.05)}
     </div>
   </div>
   <div class="panel">
-    <div class="secthead"><h2>源列表</h2><span class="sub">当前项目源按配置顺序显示</span><span class="spring"></span><button class="ghost mini" onclick="loadVodSources()">刷新</button></div>
+<div class="secthead"><h2>源列表</h2><span class="sub" id="vod-source-list-sub">当前项目源按配置顺序显示</span><span class="spring"></span><button class="ghost mini" id="btn-vod-speed" onclick="vodSourceSpeedAll()">全部测速</button><button class="ghost mini" onclick="loadVodSources()">刷新</button></div>
     <div class="gridwrap" id="vod-source-table"></div>
   </div>
 </section>
@@ -1005,7 +1007,12 @@ async function gen() {
     count: +document.getElementById("g-count").value, note: document.getElementById("g-note").value.trim()});
   btn.disabled = false; btn.textContent = "生成并入库";
   if (d.error) { err.textContent = d.error; err.style.display = "block"; toast("补货失败：" + d.error.slice(0, 60), true); return; }
-  ok.innerHTML = `批次 <b>${esc(d.batch)}</b> 已生成并入库（${d.imported} 个）<br>发卡平台导入文件：<code>${esc(d.csv)}</code>`;
+  /* 云端形态没有本机文件系统：服务端直接回传 cards.csv 文本，这里给下载入口 */
+  const csvHref = d.csv_text
+    ? `data:text/csv;charset=utf-8,${encodeURIComponent(d.csv_text)}`
+    : "";
+  ok.innerHTML = `批次 <b>${esc(d.batch)}</b> 已生成并入库（${d.imported} 个）<br>发卡平台导入文件：<code>${esc(d.csv)}</code>`
+    + (csvHref ? ` <a class="ghost mini" download="${esc(d.batch)}-cards.csv" href="${csvHref}">下载 cards.csv</a>` : "");
   ok.style.display = "block";
   toast(`批次 ${d.batch} 已入库（${d.imported} 个卡密）`);
   loadStats();
@@ -1184,38 +1191,99 @@ async function huDirLoad() {
   } catch (e) { return null; }
 }
 async function huDirSave(h) {
-  try { (await huIdbOpen()).transaction("kv", "readwrite").objectStore("kv").put(h, "huDir"); } catch (e) {}
+  try {
+    const db = await huIdbOpen();
+    await new Promise((res, rej) => {
+      const tx = db.transaction("kv", "readwrite");
+      tx.oncomplete = () => res(true);
+      tx.onerror = () => rej(tx.error || new Error("indexeddb 写入失败"));
+      tx.onabort = () => rej(tx.error || new Error("indexeddb 写入被中断"));
+      tx.objectStore("kv").put(h, "huDir");
+    });
+    huLsSet(HU_DIR_NAME_KEY, h.name);
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
-function huDirHint(h) {
-  document.getElementById("hu-dir-hint").textContent = h
-    ? "最新 zip 目录：" + h.name
-    : "首次使用「上传最新版本」需选择本地 zip 输出目录（build_backend_zip.py 产物处）";
+/* 目录句柄能不能跨会话保留，取决于浏览器有没有清站点数据（无痕 / 关闭时清除 → 每次都问）。
+   这里额外记一个"上次用的目录名"做线索：句柄没了但名字还在，就能明确告诉用户是浏览器没保留，
+   而不是含糊地再弹一次选择框。 */
+const HU_DIR_NAME_KEY = "otv_hu_dir_name", HU_LAST_UP_KEY = "otv_hu_last_upload";
+const huLsGet = (k) => { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } };
+const huLsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+function huDirHint(h, saveOk) {
+  const remembered = huLsGet(HU_DIR_NAME_KEY);
+  const lastUp = huLsGet(HU_LAST_UP_KEY);
+  const tail = lastUp ? "　·　上次上传：" + lastUp : "";
+  const el = document.getElementById("hu-dir-hint");
   document.getElementById("btn-hu-dir").style.display = h ? "" : "none";
+  if (h && saveOk !== false) {
+    el.textContent = `最新 zip 目录：${h.name}（已记住，以后一键直传；跨会话首次会再确认一次权限，不用重挑目录）${tail}`;
+  } else if (h) {
+    el.textContent = `最新 zip 目录：${h.name}（本次可用），但此浏览器不允许记住目录，下次还要重选。想彻底免选：本机跑 node scripts/ops/hu-upload.mjs${tail}`;
+  } else if (remembered) {
+    el.textContent = `上次用的目录「${remembered}」没被浏览器保留（无痕模式或"关闭时清除站点数据"会这样），需要重选一次。想彻底免选：本机跑 node scripts/ops/hu-upload.mjs${tail}`;
+  } else {
+    el.textContent = "「上传最新版本」弹的是「选文件夹」的框（不是选文件；里面空的是正常的，它只列子文件夹）：停在 backend 这一层，点右下角「选择文件夹」即可，页面会自己取里面最新的 zip。";
+  }
+}
+/* 目录选择框弹出时页面会失焦。若页面一直没失焦、又迟迟没有结果，
+   说明当前环境没法把选择框显示出来（内嵌浏览器、后台窗口常见），不能一直干等。 */
+function huPickDir() {
+  // id 让浏览器记住上次选的位置：万一句柄没保留，重新打开也直接落在同一个目录
+  const p = window.showDirectoryPicker({mode: "read", id: "otv-hu-zip"});
+  /* 看门狗只负责"催一句"，绝不丢弃用户真正选中的结果——
+     之前用 Promise.race 把结果 race 掉了：在选择框里停留超过 12s，用户后面选中的目录会被丢掉，
+     于是下次点按钮又弹一次（就是"每次都要重选"的根因）。 */
+  p.then((h) => { huDirSave(h).then((ok) => huDirHint(h, ok)); }, () => {});
+  const guard = new Promise((_, rej) => {
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if (document.hasFocus() && Date.now() - t0 > 20000) {
+        clearInterval(iv);
+        rej(Object.assign(new Error("目录选择框没有弹出来"), {name: "PickerNotShownError"}));
+      }
+    }, 400);
+    p.then(() => clearInterval(iv), () => clearInterval(iv));
+  });
+  return Promise.race([p, guard]);
+}
+function huDirErr(e) {
+  const err = document.getElementById("hu-err");
+  if (e && e.name === "AbortError") return; // 自己点了取消，不用报错
+  err.textContent = (e && e.name === "PickerNotShownError")
+    ? "目录选择框没有弹出来——当前浏览器不能直读本地目录（Codex 内嵌浏览器、后台标签页常见）。请用 Chrome / Edge 桌面窗口打开本页，或改用「上传所选文件」；也可以在本机跑 node scripts/ops/hu-upload.mjs（默认路径已写好，不用选目录）。"
+    : "目录选择失败：" + ((e && e.message) || "未知原因") + "——可改用「上传所选文件」，用 Chrome / Edge 桌面窗口重试，或在本机跑 node scripts/ops/hu-upload.mjs。";
+  err.style.display = "block";
 }
 async function huLatestFile() {
   let dh = await huDirLoad();
   if (!dh) {
-    dh = await window.showDirectoryPicker({mode: "read"});
-    await huDirSave(dh); huDirHint(dh);
+    dh = await huPickDir(); // 句柄已在 huPickDir 内保存并更新提示
+  } else if (await dh.queryPermission({mode: "read"}) !== "granted") {
+    // 句柄在、权限过期：这里弹的是权限确认，不是重新挑目录
+    let perm = "denied";
+    try { perm = await dh.requestPermission({mode: "read"}); } catch (e) { perm = "denied"; }
+    if (perm !== "granted") {
+      huDirHint(dh);
+      return {error: "浏览器没有给目录读取权限（可能上次点了「拒绝」）。点「更换目录」重选一次即可，或在本机跑 node scripts/ops/hu-upload.mjs。"};
+    }
   }
-  if (await dh.queryPermission({mode: "read"}) !== "granted"
-      && await dh.requestPermission({mode: "read"}) !== "granted")
-    return {error: "没有目录读取权限"};
   let best = null;
   for await (const ent of dh.values()) {
     if (ent.kind === "file" && ent.name.toLowerCase().endsWith(".zip")) {
       const f = await ent.getFile();
-      if (!best || f.lastModified > best.f.lastModified) best = {name: ent.name, f};
+      if (!best || f.lastModified > best.f.lastModified) best = {name: ent.name, f, dh};
     }
   }
   return best || {error: "所选目录里没有 zip——请指向 build_backend_zip.py 输出目录（含 python-backend.zip）"};
 }
 document.getElementById("btn-hu-dir").onclick = async () => {
   try {
-    const dh = await window.showDirectoryPicker({mode: "read"});
-    await huDirSave(dh); huDirHint(dh);
+    const dh = await huPickDir(); // 句柄已在 huPickDir 内保存并更新提示
     toast("已更换最新 zip 目录：" + dh.name);
-  } catch (e) {}
+  } catch (e) { huDirErr(e); }
 };
 document.getElementById("btn-hu-latest").onclick = async function () {
   const err = document.getElementById("hu-err");
@@ -1223,14 +1291,64 @@ document.getElementById("btn-hu-latest").onclick = async function () {
   if (!window.showDirectoryPicker) {
     err.textContent = "当前浏览器不支持一键上传（需 Chrome/Edge 桌面版），请用「上传所选文件」"; err.style.display = "block"; return;
   }
+  if (!huLsGet(HU_DIR_NAME_KEY)) {
+    document.getElementById("hu-dir-hint").textContent = "正在打开目录选择框……选好后这里会变成「已记住的目录」";
+  }
   let pick;
   try { pick = await huLatestFile(); }
-  catch (e) { return; }  // 用户取消了目录选择
+  catch (e) { huDirErr(e); return; }
   if (pick.error) { err.textContent = pick.error; err.style.display = "block"; return; }
   document.getElementById("hu-fileinfo").textContent =
     `${pick.name} · ${huMb(pick.f.size)} · ${new Date(pick.f.lastModified).toLocaleString()}`;
   await huDoUpload(pick.f, this);
+  if (document.getElementById("hu-ok").style.display === "block") {
+    huLsSet(HU_LAST_UP_KEY, `${pick.name} · ${huMb(pick.f.size)} · ${new Date().toLocaleString()}`);
+    huDirHint(pick.dh, true);
+  }
 };
+
+/* ---- 拖拽上传：把 zip（或它所在的文件夹）拖到「热更新」页任意位置，零对话框、零权限 ---- */
+async function huZipFromDrop(dt) {
+  for (const it of Array.from(dt.items || [])) {
+    if (it.kind !== "file" || typeof it.getAsFileSystemHandle !== "function") continue;
+    let handle = null;
+    try { handle = await it.getAsFileSystemHandle(); } catch (e) { continue; }
+    if (!handle || handle.kind !== "directory") continue;
+    let best = null;
+    for await (const ent of handle.values()) {
+      if (ent.kind === "file" && ent.name.toLowerCase().endsWith(".zip")) {
+        const f = await ent.getFile();
+        if (!best || f.lastModified > best.f.lastModified) best = {name: ent.name, f, dh: null};
+      }
+    }
+    return best || {error: "拖进来的文件夹里没有 zip——请拖 backend 目录（含 python-backend.zip）。"};
+  }
+  const files = Array.from(dt.files || []).filter((f) => f.name.toLowerCase().endsWith(".zip"));
+  if (!files.length) return {error: "没看到 zip：把 python-backend.zip 拖进来，或直接拖它所在的 backend 文件夹。"};
+  files.sort((a, b) => b.lastModified - a.lastModified);
+  return {name: files[0].name, f: files[0], dh: null};
+}
+(() => {
+  const panel = document.getElementById("tab-hu");
+  panel.addEventListener("dragover", (e) => { e.preventDefault(); panel.classList.add("hu-dragging"); });
+  panel.addEventListener("dragleave", (e) => { if (!panel.contains(e.relatedTarget)) panel.classList.remove("hu-dragging"); });
+  panel.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    panel.classList.remove("hu-dragging");
+    const err = document.getElementById("hu-err");
+    err.style.display = "none";
+    let pick;
+    try { pick = await huZipFromDrop(e.dataTransfer); }
+    catch (ex) { pick = {error: "读取拖入的文件失败：" + (ex.message || ex)}; }
+    if (pick.error) { err.textContent = pick.error; err.style.display = "block"; return; }
+    document.getElementById("hu-fileinfo").textContent =
+      `${pick.name} · ${huMb(pick.f.size)} · ${new Date(pick.f.lastModified).toLocaleString()}`;
+    await huDoUpload(pick.f, document.getElementById("btn-hu-latest"));
+    if (document.getElementById("hu-ok").style.display === "block") {
+      huLsSet(HU_LAST_UP_KEY, `${pick.name} · ${huMb(pick.f.size)} · ${new Date().toLocaleString()}`);
+    }
+  });
+})();
 (async () => { huDirHint(await huDirLoad()); })();
 document.getElementById("hu-status").onchange = e => {
   document.getElementById("hu-publish-at-row").style.display = e.target.value === "scheduled" ? "" : "none";
@@ -1432,7 +1550,38 @@ function iptvPlay(id) {
   ipVeil().style.display = "";
   iptvPlayLoad();
 }
-function iptvPlayLoad() {
+/* hls.js 按需加载：以前在 <head>/<body> 里直接 <script src=cdn.jsdelivr…> 拉，
+   国内网络经常连不上，浏览器标签会一直转圈（看起来像"打不开"）。改成点播放时才加载，
+   并且三个 CDN 轮流试；都失败就退回 video 原生 HLS（Safari 可播）。 */
+const HLS_CDNS = [
+  "https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js",
+  "https://unpkg.com/hls.js@1.5.13/dist/hls.min.js",
+  "https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js",
+];
+let hlsLoading = null;
+function ensureHls() {
+  if (window.Hls) return Promise.resolve(true);
+  if (hlsLoading) return hlsLoading;
+  hlsLoading = (async () => {
+    for (const url of HLS_CDNS) {
+      try {
+        await new Promise((res, rej) => {
+          const s = document.createElement("script");
+          const timer = setTimeout(() => rej(new Error("timeout")), 8000);
+          s.src = url;
+          s.onload = () => { clearTimeout(timer); res(); };
+          s.onerror = () => { clearTimeout(timer); rej(new Error("error")); };
+          document.head.appendChild(s);
+        });
+        if (window.Hls) return true;
+      } catch (e) { /* 换下一个 CDN */ }
+    }
+    return false;
+  })();
+  return hlsLoading;
+}
+async function iptvPlayLoad() {
+  await ensureHls();
   const r = ipChan; if (!r) return;
   const err = document.getElementById("ip-err");
   err.style.display = "none";
@@ -1773,6 +1922,33 @@ async function iptvAutoRun() {
 
 /* ---- 影视源草稿、发布与指定影片测试 ---- */
 let vodSourceRows = [], vodSourceEditId = null, vodSourceTestRow = null, vodSourceHls = null;
+let vodLatency = {}, vodLatSortDir = null; // null=配置顺序，asc=由快到慢，desc=由慢到快
+const VOD_LAT_KEY = "otv_vod_latency_v1";
+function vodLatLoad() {
+  try { vodLatency = JSON.parse(localStorage.getItem(VOD_LAT_KEY) || "{}") || {}; } catch (e) { vodLatency = {}; }
+}
+function vodLatKey(s) { return String((s && (s.id || s.name)) || ""); }
+function vodLatSet(s, ok, ms) {
+  const key = vodLatKey(s);
+  if (!key) return;
+  vodLatency[key] = { ok: !!ok, ms: Math.max(0, Math.round(ms || 0)), at: Date.now() };
+  try { localStorage.setItem(VOD_LAT_KEY, JSON.stringify(vodLatency)); } catch (e) {}
+}
+function vodLatCell(s) {
+  const e = vodLatency[vodLatKey(s)];
+  if (!e) return '<span class="dim">—</span>';
+  return e.ok ? `<b>${e.ms}ms</b>` : '<span class="st bad">失败</span>';
+}
+function vodSyncSortUi() {
+  const sub = document.getElementById("vod-source-list-sub");
+  if (sub) sub.textContent = vodLatSortDir === "asc" ? "按测速延时从快到慢显示"
+    : vodLatSortDir === "desc" ? "按测速延时从慢到快显示" : "当前项目源按配置顺序显示";
+}
+/* 点「延时」表头循环切换：配置顺序 → 由快到慢 → 由慢到快 → 配置顺序 */
+function vodFlipLatSort() {
+  vodLatSortDir = vodLatSortDir === null ? "asc" : vodLatSortDir === "asc" ? "desc" : null;
+  vodRenderRows();
+}
 function vodRows(payload) {
   if (Array.isArray(payload)) return payload;
   if (Array.isArray(payload.drafts)) return payload.drafts;
@@ -1791,14 +1967,70 @@ async function loadVodSources() {
   vodSourceRows = vodRows(d);
   document.getElementById("vod-source-version").textContent = `草稿 ${vodSourceRows.length} 个源 · 已发布 v${d.published_version || d.publishedVersion || d.version || 0}`;
   document.getElementById("vod-source-draft-state").style.display = d.dirty === false ? "none" : "inline-block";
+  vodRenderRows();
+}
+function vodRenderRows() {
+  const table = document.getElementById("vod-source-table");
+  vodSyncSortUi();
   if (!vodSourceRows.length) { table.innerHTML = '<div class="empty">暂无影视源，可从网站识别或手动新增。</div>'; return; }
-  table.innerHTML = `<table class="grid"><tr><th>顺序</th><th>名称</th><th>网站 / 接口</th><th>适配器</th><th>状态</th><th>操作</th></tr>` +
-    vodSourceRows.map((s, i) => `<tr>
+  const order = vodSourceRows.map((s, i) => i);
+  if (vodLatSortDir) {
+    // 分组固定：测速成功 → 失败 → 未测速；同档保持配置顺序，成功组内按毫秒排（升降随 vodLatSortDir）
+    const rank = (i) => {
+      const e = vodLatency[vodLatKey(vodSourceRows[i])];
+      if (!e) return [2, 0];
+      return e.ok ? [0, e.ms] : [1, 0];
+    };
+    order.sort((a, b) => {
+      const ra = rank(a), rb = rank(b);
+      if (ra[0] !== rb[0]) return ra[0] - rb[0];
+      if (ra[1] !== rb[1]) return vodLatSortDir === "desc" ? rb[1] - ra[1] : ra[1] - rb[1];
+      return a - b;
+    });
+  }
+  const arrow = vodLatSortDir === "asc" ? " ▲" : vodLatSortDir === "desc" ? " ▼" : "";
+  table.innerHTML = `<table class="grid"><tr><th>顺序</th><th>名称</th><th>网站 / 接口</th><th>适配器</th><th>状态</th><th class="s" title="点击按延时排序" onclick="vodFlipLatSort()">延时${arrow}</th><th>操作</th></tr>` +
+    order.map((i) => {
+      const s = vodSourceRows[i];
+      return `<tr>
       <td class="dim">${s.sort_order ?? i}</td><td><b>${esc(s.name)}</b></td>
       <td class="mono" style="font-size:11px;max-width:380px;word-break:break-all">${esc(s.site_url || "—")}<br><span class="dim">${esc(s.api_url || "—")}</span></td>
       <td><span class="tag">${esc(s.adapter_type)}</span></td><td>${s.enabled ? '<span class="st ok">启用</span>' : '<span class="dim">停用</span>'}</td>
-      <td><button class="ghost mini" onclick="vodSourceTest(${i})">测试</button> <button class="ghost mini" onclick="vodSourceEdit(${i})">编辑</button> <button class="ghost mini" style="color:var(--bad)" onclick="vodSourceDelete(${i})">删除</button></td>
-    </tr>`).join("") + "</table>";
+      <td id="vod-lat-${i}">${vodLatCell(s)}</td>
+      <td><button class="ghost mini" onclick="vodSourceSpeedOne(${i})">测速</button> <button class="ghost mini" onclick="vodSourceTest(${i})">测试</button> <button class="ghost mini" onclick="vodSourceEdit(${i})">编辑</button> <button class="ghost mini" style="color:var(--bad)" onclick="vodSourceDelete(${i})">删除</button></td>
+    </tr>`;
+    }).join("") + "</table>";
+}
+async function vodSourceSpeedOne(index, quiet) {
+  const s = vodSourceRows[index];
+  if (!s) return null;
+  const cell = document.getElementById("vod-lat-" + index);
+  if (cell) cell.innerHTML = '<span class="dim">测速中…</span>';
+  const d = await api("vod_source_speed", {source: s});
+  vodLatSet(s, !d.error && d.ok !== false, d.latency_ms);
+  if (quiet) { if (cell) cell.innerHTML = vodLatCell(s); }
+  else vodRenderRows();
+  return d;
+}
+async function vodSourceSpeedAll() {
+  if (!vodSourceRows.length) { toast("没有可测速的源", true); return; }
+  const btn = document.getElementById("btn-vod-speed");
+  const total = vodSourceRows.length;
+  let done = 0;
+  btn.disabled = true; btn.textContent = `测速中… 0/${total}`;
+  const queue = vodSourceRows.map((s, i) => i);
+  const run = async () => {
+    while (queue.length) {
+      await vodSourceSpeedOne(queue.shift(), true);
+      done += 1;
+      btn.textContent = `测速中… ${done}/${total}`;
+    }
+  };
+  await Promise.all([run(), run(), run()]);
+  btn.disabled = false; btn.textContent = "全部测速";
+  vodLatSortDir = "asc";
+  vodRenderRows();
+  toast(`已测速 ${total} 个源，按延时从快到慢排序`);
 }
 function vodSourceEdit(index) {
   const row = index == null ? {} : vodSourceRows[index];
@@ -1860,7 +2092,8 @@ function vodSourceTestClose() {
   video.pause(); video.removeAttribute("src"); video.load(); video.style.display = "none";
   document.getElementById("vod-source-test-veil").style.display = "none";
 }
-function vodSourcePreview(url) {
+async function vodSourcePreview(url) {
+  await ensureHls();
   const video = document.getElementById("vod-source-preview");
   video.style.display = "block";
   if (vodSourceHls) vodSourceHls.destroy();
@@ -1879,6 +2112,8 @@ async function vodSourceTestRun() {
   const klass = d.grade === "优秀" || d.grade === "良好" ? "ok" : d.grade === "一般" ? "warn" : "bad";
   result.innerHTML = `<b class="st ${klass}" style="font-size:18px">${esc(d.grade)}</b> · 综合 ${d.score ?? 0} 分<br><span class="dim">${esc(d.summary || "")}</span>` + (d.preview_url ? '<br><button class="act" style="margin-top:10px" id="btn-vod-preview">试看</button>' : "");
   if (d.preview_url) document.getElementById("btn-vod-preview").onclick = () => vodSourcePreview(d.preview_url);
+  /* 指定影片测试的耗时同样计入延时列，便于「全部测速」后排序 */
+  if (vodSourceTestRow && d.grade && d.grade !== "不可用") { vodLatSet(vodSourceTestRow, true, d.latency_ms); vodRenderRows(); }
 }
 
 /* ---- tab 切换 ---- */
@@ -1906,12 +2141,12 @@ document.getElementById("btn-rehealth").onclick = loadHealth;
 loadStats();
 loadHealth();
 loadOvLedger();
+vodLatLoad();
 /* hash 深链：#licenses 直开对应标签页 */
 const h = location.hash.slice(1);
 if (["overview","licenses","logs","gen","hu","ann","iptv","vod-sources"].includes(h) && h !== "overview")
   document.querySelector(`nav.verbs button[data-tab="${h}"]`).click();
 </script>
-<!-- v1.22 试播浮层用：与网页版同版本 hls.js；加载失败时退回 video 原生 HLS（Safari） -->
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js" defer></script>
+<!-- v1.22 试播浮层用的 hls.js 改成"点播放时才按需加载"（见 ensureHls），不再随页面启动去连外部 CDN -->
 </body>
 </html>

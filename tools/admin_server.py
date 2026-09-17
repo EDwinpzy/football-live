@@ -590,8 +590,14 @@ def h_gen(d: dict) -> dict:
     if imp.returncode != 0:
         return {"error": f"批次 {batch} 已签发但入库失败（可手动重跑 db_import.py）:\n"
                          + (imp.stderr or imp.stdout)[-400:]}
+    csv_path = ROOT / "out" / batch / "cards.csv"
+    try:
+        csv_text = csv_path.read_text(encoding="utf-8")
+    except OSError:
+        csv_text = ""
+    # 云端形态没有本机文件系统：连文本一起回传，前端给「下载 cards.csv」入口
     return {"batch": batch, "imported": count,
-            "csv": str(ROOT / "out" / batch / "cards.csv")}
+            "csv": str(csv_path), "csv_text": csv_text}
 
 
 # ---------------- v1.20 运营公告管理（后台发布 → app 顶部悬浮窗） ----------------
@@ -1261,6 +1267,36 @@ def h_vod_source_publish(_d: dict) -> dict:
     return rpc("vod_source_admin_publish", {})
 
 
+def h_vod_source_speed(d: dict) -> dict:
+    """单源测速：只打一次该源最轻的请求，返回毫秒延时，供后台「全部测速」后按延时排序。
+    macms 取 `?ac=list`（接口探活）；其余适配器打站内搜索页（无 API，只能测页面）。"""
+    raw = d.get("source") if isinstance(d.get("source"), dict) else d
+    adapter = str(raw.get("adapter_type") or "")
+    if adapter.startswith("macms"):
+        base = str(raw.get("api_url") or "").rstrip("/")
+        url = base + "?ac=list" if base else ""
+    else:
+        site = str(raw.get("site_url") or "").rstrip("/")
+        url = site + "/search?k=" + urllib.parse.quote("测试") + "&p=1" if site else ""
+    if not url:
+        return {"ok": False, "latency_ms": 0, "error": "该源未配置可用地址"}
+    started = time.monotonic()
+    try:
+        vod_sources._validate_public_url(url, resolve_dns=True)
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 OptimalTV-admin"})
+        with urllib.request.urlopen(request, timeout=8) as response:
+            vod_sources._validate_public_url(response.geturl(), resolve_dns=True)
+            body = response.read(256 * 1024)
+            status = response.status
+        return {"ok": status == 200 and len(body) > 0,
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "status": status, "bytes": len(body)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "latency_ms": int((time.monotonic() - started) * 1000),
+                "error": str(exc)[:120]}
+
+
 def h_health(_d: dict) -> dict:
     """激活端点连通探测：用非法格式码打公网端点，网关/云函数活着即返回 ret=400
     （参数层拒绝，不入库不留审计痕迹；signin/RPC 链路由业务请求自然验证）。
@@ -1306,6 +1342,7 @@ ROUTES = {
     "/api/vod_source_delete": h_vod_source_delete,
     "/api/vod_source_discover": h_vod_source_discover,
     "/api/vod_source_test": h_vod_source_test,
+    "/api/vod_source_speed": h_vod_source_speed,
     "/api/vod_source_publish": h_vod_source_publish,
     # v1.20 电视源管理
     "/api/iptv_list": h_iptv_list,
