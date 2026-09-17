@@ -34,19 +34,32 @@ EXPLORE_RETRY_DELAYS = (0.4, 1.2)
 STAGE_PERFORMANCE_TOKENS = (
     "演唱会", "音乐会", "音乐剧", "音乐节", "舞台剧", "话剧", "相声", "脱口秀",
     "纪念演出", "巡演", "巡回演出", "现场演出", "剧院现场", "国家剧院", "不插电", "歌友会",
+    "开幕式",
+    # 英文原名的现场演出品牌（例：雷曼兄弟三部曲 original_title = "National Theatre Live: …"）
+    "national theatre live", "national theatre", "nt live",
+)
+# 单独出现在「类型」里的演出标记：脱口秀/相声专场等的类型就是它，而电影的类型里没有这些词。
+# 「音乐剧」不在此列——歌舞片（《爱乐之城》《悲惨世界》电影版）的类型也可能沾边，风险留给标题/又名。
+STAGE_GENRE_TOKENS = (
+    "演唱会", "音乐会", "音乐节", "舞台剧", "话剧", "相声", "脱口秀", "开幕式", "不插电", "歌友会", "巡演",
 )
 # 「音乐剧的电影版」仍是电影（例：《悲惨世界》2012 又名「音乐剧《悲惨世界》电影版」）
 FILM_VERSION_TOKENS = ("电影版", "剧场版")
 SHORT_FORM_GENRES = ("短片", "短剧", "微短剧", "竖屏剧", "迷你剧")
 SHORT_EPISODE_MINUTES = 5    # 单集 ≤ 5 分钟 → 竖屏短剧（例：152 集 × 2 分钟）
-DETAIL_MERGE_FIELDS = ("genres", "regions", "year", "aliases", "tags", "durations", "episodes_count")
+# original_title 也要并进来：现场演出品牌常常只出现在原名里（例：National Theatre Live: …）
+DETAIL_MERGE_FIELDS = ("genres", "regions", "year", "aliases", "tags", "durations", "episodes_count",
+                       "original_title")
 ENRICH_WORKERS = 8           # 补详情的并发数
 ENRICH_MAX_EXTRA_PAGES = 2   # 剔除后不足一栏时，最多再翻 2 页补足
 SECTION_POLICIES = {"movie": "stage", "tv": "short"}
+# 三栏并行后详情会同时从三个方向打过来（3 栏 × 8 池），上游却是同一个豆瓣；
+# 用一个全局闸把「在飞的详情请求」压回 ENRICH_WORKERS，避免把自己打成限流。
+_DETAIL_GATE = threading.Semaphore(ENRICH_WORKERS)
 SUBJECT_FIELDS = (
     "id", "douban_id", "title", "original_title", "aliases", "year",
     "category", "genres", "regions", "season", "rating", "rating_count",
-    "summary", "directors", "actors", "poster_url", "backdrop_url", "release_date",
+    "summary", "directors", "actors", "poster_url", "hero_url", "backdrop_url", "release_date",
 )
 TTL = {"home": 21600, "filters": 86400, "detail": 604800, "search": 1800, "show": 21600}
 CACHE_SCHEMA = 1
@@ -117,16 +130,18 @@ def is_stage_performance(item):
 
     豆瓣把这些条目也归在「电影」类型下，列表接口只给标题，类型字段要补详情才有，
     因此这里按标题 + 原名 + 又名 + 豆瓣标签判定；`电影版/剧场版` 命中则仍算电影。
+    另外补一层「类型」判定，兜住脱口秀/相声专场、大型开幕式这类标题看不出来的现场演出。
     """
     parts = [item.get("title"), item.get("original_title")]
     parts.extend(_list(item.get("aliases")))
     parts.extend(_list(item.get("tags")))
-    text = " ".join(_text(part) for part in parts if part)
-    if not text:
-        return False
+    text = " ".join(_text(part) for part in parts if part).lower()
     if any(token in text for token in FILM_VERSION_TOKENS):
         return False
-    return any(token in text for token in STAGE_PERFORMANCE_TOKENS)
+    if any(token in text for token in STAGE_PERFORMANCE_TOKENS):
+        return True
+    genres = " ".join(_list(item.get("genres")))
+    return any(token in genres for token in STAGE_GENRE_TOKENS)
 
 
 def looks_like_short_drama(item):
@@ -220,6 +235,21 @@ def _merge_card_subtitle(raw):
     return merged
 
 
+# 豆瓣同一张剧照有多个尺寸前缀，列表接口只给最小号：
+#   s_ratio_poster ≈ 240×360（卡片够用）… l/public = 1142×1600（同一张，实测 261KB）
+# 影视页顶部 hero 是全宽铺图，240 宽拉到 1920 会糊成一片，所以额外给一条 hero_url。
+_DOUBAN_PHOTO_RE = re.compile(
+    r"^(https?://[^/]*doubanio\.com)/view/photo/[^/]+/(?:public/)?(p\d+\.[A-Za-z]+)$")
+
+
+def hero_poster_url(url):
+    """同一张豆瓣剧照换最大尺寸（`/view/photo/l/public/`）；非豆瓣图返回空串。"""
+    match = _DOUBAN_PHOTO_RE.match(_text(url))
+    if not match:
+        return ""
+    return "%s/view/photo/l/public/%s" % (match.group(1), match.group(2))
+
+
 def normalize_subject(raw, requested_category="movie"):
     raw = _merge_card_subtitle(raw if isinstance(raw, dict) else {})
     subject_id = _text(raw.get("douban_id") or raw.get("id")).removeprefix("douban:")
@@ -247,6 +277,7 @@ def normalize_subject(raw, requested_category="movie"):
         "directors": _list(raw.get("directors") or raw.get("director")),
         "actors": _list(raw.get("actors") or raw.get("actor")),
         "poster_url": _text(poster),
+        "hero_url": hero_poster_url(poster) or _text(raw.get("backdrop_url")) or _text(poster),
         "backdrop_url": _text(raw.get("backdrop_url")),
         "release_date": _text((raw.get("release_date") or raw.get("pubdate") or raw.get("datePublished") or [""])[0]
                               if isinstance(raw.get("release_date") or raw.get("pubdate"), list)
@@ -476,11 +507,45 @@ class DoubanCatalog:
             content_type = response.headers.get("Content-Type", "").lower()
             return json.loads(body) if "json" in content_type or body.lstrip().startswith(("{", "[")) else body
 
+    def _refresh_async(self, key, producer):
+        """后台刷新（stale-while-revalidate）：同一 key 已有刷新在跑就跳过。"""
+        with self._condition_lock:
+            condition = self._conditions.setdefault(key, threading.Condition())
+        with condition:
+            if getattr(condition, "_running", False):
+                return
+            condition._running = True
+
+        def run():
+            try:
+                value = producer()
+                if value and self.cache:
+                    self.cache.put(key, value)
+            except Exception:
+                # 后台刷新失败不打扰用户：旧值继续用，下次请求再试。
+                pass
+            finally:
+                with condition:
+                    condition._running = False
+                    condition.notify_all()
+
+        threading.Thread(target=run, name="douban-swr", daemon=True).start()
+
     def _coalesced(self, key, kind, producer, snapshot_value=None):
         if self.cache:
             fresh = self.cache.get(key, TTL[kind])
             if fresh is not None:
                 return fresh
+            # 过期值先上屏、后台刷新：首页 6h TTL 一过（冷实例换了缓存目录更常见）旧实现
+            # 要用户原地等三栏抓完（本机冷态实测 2.3s，弱网更久）。带 stale 标记返回，
+            # 上层回落链与客户端仍按「旧数据」处理。
+            stale = self.cache.get_stale(key)
+            if isinstance(stale, dict):
+                self._refresh_async(key, producer)
+                fallback = copy.deepcopy(stale)
+                fallback["stale"] = True
+                fallback["source"] = "douban-cache"
+                return fallback
         with self._condition_lock:
             condition = self._conditions.setdefault(key, threading.Condition())
         with condition:
@@ -550,11 +615,19 @@ class DoubanCatalog:
 
     def _detail_meta(self, douban_id):
         """单条详情；拿不到有效详情返回空字典（叫它别把「未知」当判据）。"""
-        try:
-            detail = self.detail(douban_id)
-        except Exception:
-            return {}
+        with _DETAIL_GATE:
+            try:
+                detail = self.detail(douban_id)
+            except Exception:
+                return {}
         return detail if isinstance(detail, dict) and detail.get("title") else {}
+
+    def _section_or_empty(self, category, sort):
+        """一栏的抓取结果；限流返回空列表，由上层用同栏旧值/随包快照补位。"""
+        try:
+            return self._section_items(category, sort)
+        except DoubanThrottled:
+            return []
 
     def _section_items(self, category, sort):
         """首页一栏的条目：拉列表 → 补详情 → 按分类规则剔除 → 不够就翻页补足。
@@ -595,14 +668,16 @@ class DoubanCatalog:
 
             三栏全被限流才整体抛错，交给 [_coalesced] 回落——这样用户看到的
             三栏不会出现「一栏新鲜、两栏空」的错位，也不会把空栏写进 6 小时缓存。
+            三栏并行抓（每栏 ≈0.6s 上游）：串行曾让单次 /vod/home 至少 1.8s，
+            本机实测并行后 1.80s → 0.63s。
             """
             previous = self.cache.get_stale(key) if self.cache else None
+            with ThreadPoolExecutor(max_workers=len(HOME_SECTION_NAMES)) as pool:
+                fetched = list(pool.map(
+                    lambda pair: self._section_or_empty(category, pair[1]),
+                    list(zip(HOME_SECTION_NAMES, ("U", "R", "S")))))
             sections, degraded = [], 0
-            for title, sort in zip(HOME_SECTION_NAMES, ("U", "R", "S")):
-                try:
-                    items = self._section_items(category, sort)
-                except DoubanThrottled:
-                    items = []
+            for title, items in zip(HOME_SECTION_NAMES, fetched):
                 if not items:
                     items = _section_items(previous, title) or _section_items(snapshot_value, title)
                     degraded += 1

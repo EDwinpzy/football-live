@@ -2,6 +2,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.parse
@@ -224,10 +225,18 @@ class DoubanCatalogTest(unittest.TestCase):
     def test_movie_rule_drops_concerts_and_stage_but_keeps_musical_films(self):
         """电影栏不许出现演唱会/舞台实录：豆瓣把这些也标成 movie，只能靠标题/又名认。"""
         rows = [explore_row(111, "陈奕迅DUO演唱会"), explore_row(222, "汉密尔顿"),
-                explore_row(333, "悲惨世界"), explore_row(444, "肖申克的救赎")]
+                explore_row(333, "悲惨世界"), explore_row(444, "肖申克的救赎"),
+                explore_row(555, "秋前算账"), explore_row(666, "2008年第29届北京奥运会开幕式"),
+                explore_row(777, "雷曼兄弟三部曲")]
         details = {
             "111": {"title": "陈奕迅DUO演唱会", "genres": ["音乐", "歌舞"], "aka": ["DUO:陈奕迅2010演唱会"]},
             "222": {"title": "汉密尔顿", "aka": ["汉密尔顿音乐剧"]},
+            # 现场演出品牌只在原名里：判定必须用到详情补进来的 original_title
+            "777": {"title": "雷曼兄弟三部曲", "original_title": "National Theatre Live: The Lehman Trilogy",
+                    "genres": ["剧情"]},
+            # 标题看不出是现场演出，靠「类型」判定（脱口秀专场 / 大型开幕式）
+            "555": {"title": "秋前算账", "genres": ["脱口秀"]},
+            "666": {"title": "2008年第29届北京奥运会开幕式", "genres": ["运动"]},
             # 又名里带「音乐剧」但是电影版：必须留下
             "333": {"title": "悲惨世界", "aka": ["音乐剧《悲惨世界》电影版"], "genres": ["剧情", "爱情", "歌舞"]},
             "444": {"title": "肖申克的救赎", "genres": ["剧情", "犯罪"], "durations": ["142分钟"]},
@@ -287,6 +296,73 @@ class DoubanCatalogTest(unittest.TestCase):
         self.assertEqual(result["source"], "douban-snapshot")
         self.assertEqual([[item["title"] for item in section["items"]] for section in result["sections"]],
                          [["早春晴朗"], ["妾本草芥"], ["繁花"]])
+
+    def test_home_fetches_the_three_sections_in_parallel(self):
+        """三栏并行：串行时单次 /vod/home 至少 1.8s 上游耗时（实测 1.80s → 0.63s）。
+
+        用 Barrier 而不是计时断言——串行执行会让第 1 栏等到超时，测试确定性失败。
+        """
+        barrier = threading.Barrier(3, timeout=5)
+
+        def fetch(url):
+            if "/subject/" in url:
+                return {}
+            barrier.wait()
+            return search_payload([{"id": "1", "title": "节目", "rate": "8.0"}])
+
+        result = douban_catalog.DoubanCatalog(fetch=fetch).home("variety")
+        self.assertEqual([len(section["items"]) for section in result["sections"]], [1, 1, 1])
+
+    def test_expired_cache_is_served_at_once_and_refreshed_in_background(self):
+        """TTL 过期不能把用户扣在请求上：旧值先上屏，抓取转后台，下一次读到新值。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = douban_catalog.JsonDiskCache(tmp)
+            cache.put("home:variety", {
+                "category": "variety", "stale": False, "source": "douban",
+                "sections": [{"title": title, "items": [{"douban_id": "1", "title": "上一版"}]}
+                             for title in douban_catalog.HOME_SECTION_NAMES],
+            }, fetched_at=time.time() - 86400)
+            catalog = douban_catalog.DoubanCatalog(
+                fetch=lambda _url: search_payload([{"id": "2", "title": "新一版", "rate": "8.0"}]),
+                cache=cache)
+
+            result = catalog.home("variety")
+            self.assertTrue(result["stale"])
+            self.assertEqual(result["sections"][0]["items"][0]["title"], "上一版")
+
+            # 后台刷新不受 time.sleep 补丁影响：借 Event.wait 当真实等待。
+            tick = threading.Event()
+            for _ in range(250):
+                refreshed = cache.get_stale("home:variety")
+                if refreshed["sections"][0]["items"][0]["title"] == "新一版":
+                    break
+                tick.wait(0.02)
+            self.assertEqual(cache.get_stale("home:variety")["sections"][0]["items"][0]["title"], "新一版")
+
+    def test_hero_poster_url_upgrades_to_the_largest_douban_size(self):
+        """影视页顶部 hero 全宽铺图：列表给的最小号会把 1920 宽拉糊，统一换最大尺寸前缀。"""
+        self.assertEqual(
+            douban_catalog.hero_poster_url(
+                "https://img3.doubanio.com/view/photo/s_ratio_poster/public/p2935109312.jpg"),
+            "https://img3.doubanio.com/view/photo/l/public/p2935109312.jpg")
+        self.assertEqual(
+            douban_catalog.hero_poster_url(
+                "https://img9.doubanio.com/view/photo/m_ratio_poster/public/p457760035.jpg"),
+            "https://img9.doubanio.com/view/photo/l/public/p457760035.jpg")
+        # 非豆瓣图床原样不认（返回空串，由调用方回落到原字段）
+        self.assertEqual(douban_catalog.hero_poster_url("https://img.example/1292052.webp"), "")
+        self.assertEqual(douban_catalog.hero_poster_url(""), "")
+
+    def test_normalized_subject_carries_hero_url(self):
+        item = douban_catalog.normalize_subject({
+            "id": "1292052", "title": "肖申克的救赎",
+            "pic": {"large": "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p480747492.jpg"},
+        })
+        self.assertEqual(item["hero_url"],
+                         "https://img3.doubanio.com/view/photo/l/public/p480747492.jpg")
+        # 拿不到大图时退回原海报，hero 不能因此变空
+        plain = douban_catalog.normalize_subject({"id": "1", "title": "片", "poster_url": "https://img.example/a.jpg"})
+        self.assertEqual(plain["hero_url"], "https://img.example/a.jpg")
 
 
 if __name__ == "__main__":
