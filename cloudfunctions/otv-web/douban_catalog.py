@@ -55,7 +55,9 @@ ENRICH_MAX_EXTRA_PAGES = 2   # 剔除后不足一栏时，最多再翻 2 页补�
 SECTION_POLICIES = {"movie": "stage", "tv": "short"}
 # 三栏并行后详情会同时从三个方向打过来（3 栏 × 8 池），上游却是同一个豆瓣；
 # 用一个全局闸把「在飞的详情请求」压回 ENRICH_WORKERS，避免把自己打成限流。
-_DETAIL_GATE = threading.Semaphore(ENRICH_WORKERS)
+# 2026-09-17 实测（冷缓存 home(movie)）：闸=8 → 6.95s，闸=16 → 4.99s，
+# 闸=24 触发豆瓣限流回落快照（source=douban-snapshot）。取 16 为上限。
+_DETAIL_GATE = threading.Semaphore(ENRICH_WORKERS * 2)
 SUBJECT_FIELDS = (
     "id", "douban_id", "title", "original_title", "aliases", "year",
     "category", "genres", "regions", "season", "rating", "rating_count",

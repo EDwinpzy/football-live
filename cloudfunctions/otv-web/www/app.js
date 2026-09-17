@@ -16,6 +16,7 @@ const VOD_SORTS = [["hot", "热门"], ["new", "最新上映"], ["rating", "豆�
 
 function normalizeDoubanItem(it, category) {
   return { ...it, id: String(it.id || ""), title: it.title || "", cover: it.poster_url || it.cover || "",
+    hero: heroImg(it.hero_url || it.poster_url || it.cover || ""),
     score: +it.rating || +it.score || 0, categoryId: "douban:" + category,
     area: (it.regions || []).join(" / "), tags: it.genres || it.tags || [], remark: it.remark || "" };
 }
@@ -66,6 +67,16 @@ function img(u) {
 }
 function relay(u, ref) {
   return BASE + "/api/relay?u=" + encodeURIComponent(u) + (ref === "none" ? "&ref=none" : "");
+}
+
+/* 影视页顶部 hero 是全宽铺图：豆瓣列表接口只给 ~240 宽的 s_ratio_poster，拉到 1920
+   糊成一片。同一张图有 /view/photo/l/public/（1142×1600）这个最大尺寸，这里统一升级。
+   后端 /vod/home 已下发 hero_url 时优先用它，取不到再就地换算。 */
+const DOUBAN_PHOTO_RE = /^(https?:\/\/[^/]*doubanio\.com)\/view\/photo\/[^/]+\/(?:public\/)?(p\d+\.[A-Za-z]+)$/;
+function heroImg(u) {
+  const s = String(u || "").trim();
+  const m = s.match(DOUBAN_PHOTO_RE);
+  return m ? m[1] + "/view/photo/l/public/" + m[2] : s;
 }
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({
@@ -790,7 +801,7 @@ function playLiveMatch(m) {
 /* ================================================================
  * 影视首页（VodScreen 复刻）
  * ================================================================ */
-const vod = { loaded: false, car: [], cat: null, catSel: 0, sections: [], libLoading: false };
+const vod = { loaded: false, car: [], cat: null, catSel: 0, sections: [], libLoading: false, libLoadedFor: null };
 
 /* v1.22 网页版加载提速：目录类 JSON 60s 客户端缓存——buildCatalog 与 fetchLibBlocks
    会对同一 /hhkan/channel/{cid} 各发一次（切分类时又发），缓存后 tab 内往返不重拉 */
@@ -828,7 +839,9 @@ function normalizeVodHome(home) {
 }
 function fetchVodHome(category = "movie") {
   if (_vodHomeInflight) return _vodHomeInflight;
-  const request = fetchJSON(BASE + "/vod/home?category=" + encodeURIComponent(category), { timeout: 90000 })
+  /* 走同一份客户端缓存 + in-flight 表：旧实现是裸 fetchJSON，进影视页时
+     buildCatalogProgressive / fetchLibBlocks / 预热三处会把 movie 分类同时打 3 次。 */
+  const request = fetchJSONCached(BASE + "/vod/home?category=" + encodeURIComponent(category), 60000, 90000)
     .then(home => normalizeVodHome({ ...home, sections: (home.sections || []).map(s => ({ ...s, items: (s.items || []).map(it => normalizeDoubanItem(it, category)) })) }))
     .finally(() => {
       if (_vodHomeInflight === request) _vodHomeInflight = null;
@@ -925,16 +938,16 @@ function buildHeroes(home, cat) {
     return home.carousel.map(c => {
       const id = c.vid != null ? c.vid : c.id;
       return { id: String(id || "").startsWith("hhkan:") ? String(id) : "hhkan:" + id,
-        title: c.title, bg: c.backdrop || c.cover, tag: (c.tags || [])[0] || "" };
+        title: c.title, bg: heroImg(c.backdrop || c.cover), tag: (c.tags || [])[0] || "" };
     }).filter(c => c.id !== "hhkan:");
   const hot = home && home.sections
     ? home.sections.filter(s => HOT_KEYS.some(k => s.name.includes(k)))
-      .flatMap(s => (s.items || []).map(it => ({ id: it.id, title: it.title, bg: it.cover, tag: s.name })))
+      .flatMap(s => (s.items || []).map(it => ({ id: it.id, title: it.title, bg: it.hero || it.cover, tag: s.name })))
       .filter((v, i, a) => a.findIndex(x => x.id === v.id) === i)
     : [];
   if (hot.length) return hot.slice(0, 8);
   return (cat ? cat.dedupedItems.filter(it => it.cover).slice(0, 6) : [])
-    .map(it => ({ id: it.id, title: it.title, bg: it.cover, tag: "" }));
+    .map(it => ({ id: it.id, title: it.title, bg: it.hero || it.cover, tag: "" }));
 }
 
 /* 分类页以好好看频道三栏目为主。旧版先拼首页/全站最新，分类会混入别类内容，
@@ -1050,23 +1063,105 @@ async function fetchLibBlocksSWR(cid, homeSections, cb) {
 
 /* App vodBrief：hero 详情补全 meta/desc/评分（缓存） */
 const briefCache = {};
+/* 同一 id 的详情并发去重：hero 轮播/重绘会在首个请求回来前重复调用，
+   实测同一部片会同时打 5 次 /vod/detail（briefCache 只在成功后才写入）。 */
+const briefInflight = {};
 async function vodBrief(id) {
   if (briefCache[id] !== undefined) return briefCache[id];
-  try {
-    /* hero id 在三端统一为 hhkan:{vid}，后端 detail 路由只接受数字 vid。
-       旧网页直接拼接前缀会请求失败，因此只剩「正片 / My TV 精选内容」占位文案。 */
-    const ref = String(id || "").replace(/^douban:/, "");
-    const d = await fetchJSON(BASE + "/vod/detail/" + ref + "?defer_sources=1", { timeout: 60000 });
-    if (!d.title) { briefCache[id] = null; return null; }
-    const v = { meta: d.meta || "", desc: d.desc || "", rating: +d.score || 0 };
-    briefCache[id] = v;
-    return v;
-  } catch (e) { return null; }
+  if (briefInflight[id]) return briefInflight[id];
+  const request = (async () => {
+    try {
+      /* hero id 在三端统一为 hhkan:{vid}，后端 detail 路由只接受数字 vid。
+         旧网页直接拼接前缀会请求失败，因此只剩「正片 / My TV 精选内容」占位文案。 */
+      const ref = String(id || "").replace(/^douban:/, "");
+      const d = await fetchJSON(BASE + "/vod/detail/" + ref + "?defer_sources=1", { timeout: 60000 });
+      if (!d.title) { briefCache[id] = null; return null; }
+      const v = { meta: d.meta || "", desc: d.desc || "", rating: +d.score || 0 };
+      briefCache[id] = v;
+      return v;
+    } catch (e) { return null; }
+  })().finally(() => { delete briefInflight[id]; });
+  briefInflight[id] = request;
+  return request;
+}
+
+/* ---------------- 影视页门闸（2026-09-17 用户要求） ----------------
+ * 「要影视界面加载完成、有图片和信息后才能进入，否则就在加载页面等待」。
+ * 判定链：目录/首页数据到位 → 当前分类三块回执到位（空栏也算到位）→ 首屏封面预载完；
+ * 数据 12s / 图片 10s 硬上限，图挂了或超时一律放行，绝不把用户永久扣在加载页。 */
+const VOD_GATE_DATA_TIMEOUT = 12000;
+const VOD_GATE_IMAGE_TIMEOUT = 10000;
+let vodGateAttempt = 0;
+
+function vodGateReady() {
+  if (!vod.cat && !(vod.homeSections || []).length) return false;
+  const sel = vodCategories()[vod.catSel] || { id: "" };
+  /* 「全部 ›」网格只依赖目录条目；分类页要等当前分类三块回执（空栏也认） */
+  if (sel.id === "" || !vod.cat) return true;
+  return vod.libLoadedFor === sel.id;
+}
+
+/* 首屏要预载的图：hero 大图 + 当前分类三块各前 12 张（或「全部」网格前 18 张） */
+function vodFirstScreenImages() {
+  const urls = [];
+  const push = u => { const v = img(u); if (v && urls.indexOf(v) < 0) urls.push(v); };
+  const hero = (vod.heroes || [])[vod.heroIdx || 0];
+  if (hero && hero.bg) push(hero.bg);
+  const sel = vodCategories()[vod.catSel] || { id: "" };
+  if (sel.id === "" || !vod.cat) {
+    ((vod.cat && vod.cat.dedupedItems) || []).slice(0, 18).forEach(it => push(it.cover));
+  } else {
+    (vod.sections || []).forEach(sec => (sec.items || []).slice(0, 12).forEach(it => push(it.cover)));
+  }
+  return urls.slice(0, 40);
+}
+
+function preloadImg(url) {
+  return new Promise(resolve => {
+    if (!url) { resolve(false); return; }
+    const im = new Image();
+    const done = ok => { im.onload = im.onerror = null; resolve(ok); };
+    im.onload = () => done(true);
+    im.onerror = () => done(false);
+    im.src = url;
+    if (im.complete && im.naturalWidth > 0) done(true);
+  });
+}
+
+function revealVod() {
+  $("#pVod").classList.remove("gated");
+  $("#vodLoading").hidden = true;
+}
+
+/* 失败放行：撤掉遮罩但保留错误文案（见 initVod 的失败分支） */
+function failVodGate() {
+  vodGateAttempt++;   /* 让还在等数据的门闸循环失效，别再回头撤掉错误文案 */
+  $("#pVod").classList.remove("gated");
+}
+
+async function runVodGate() {
+  const attempt = ++vodGateAttempt;
+  const deadline = Date.now() + VOD_GATE_DATA_TIMEOUT;
+  while (Date.now() < deadline) {
+    if (vodGateReady()) break;
+    await new Promise(r => setTimeout(r, 120));
+  }
+  if (attempt !== vodGateAttempt) return;          /* 期间又重新进过页 */
+  await Promise.race([
+    Promise.all(vodFirstScreenImages().map(preloadImg)),
+    new Promise(r => setTimeout(r, VOD_GATE_IMAGE_TIMEOUT)),
+  ]);
+  if (attempt !== vodGateAttempt) return;
+  revealVod();
 }
 
 async function initVod() {
   if (vod.loaded) return;
   vod.loaded = true;
+  /* 2026-09-17 用户要求：影视页要「数据 + 图片都就绪」才上屏，否则留在加载页等。
+     gated 期间整页内容 display:none，只剩 #vodLoading，避免先出空壳再一张张补海报。 */
+  $("#pVod").classList.add("gated");
+  runVodGate();
   /* 需求①（v1.25 加载提速）：目录/首页数据 SWR 持久缓存——localStorage 旧值先上屏
      （二次进站秒开），后台拉新后重渲染（≤5min 视为新鲜直接用） */
   const catC = store.get("otvw:cat", null), homeC = store.get("otvw:home", null);
@@ -1079,7 +1174,6 @@ async function initVod() {
       vod.car = (home.carousel || []).slice(0, 8);
       vod.homeSections = home.sections || [];
     }
-    $("#vodLoading").hidden = true;
     renderVodHero(); renderHistRow(); renderCatChips(); renderVodLib();
   };
   if (catC || homeC) applyVod(catC, homeC);
@@ -1103,6 +1197,7 @@ async function initVod() {
   const homeFresh = homeC && Date.now() - (homeC._ts || 0) < 300000;
   if (!cat && !home && !catC && !homeC) {
     $("#vodLoading").textContent = "片库加载失败，请稍后重试";
+    failVodGate();
     vod.loaded = false;
     setTimeout(() => { vod.loaded = false; }, 4000);
     return;
@@ -1110,6 +1205,7 @@ async function initVod() {
   /* 失败时保留已先行绘制的缓存/部分结果；只有真正没有任何可用数据才进入失败态。 */
   if (!arrived && !homeFresh) {
     $("#vodLoading").textContent = "片库加载失败，请稍后重试";
+    failVodGate();
     vod.loaded = false;
     setTimeout(() => { vod.loaded = false; }, 4000);
   }
@@ -1158,6 +1254,8 @@ function renderVodLib() {
   const paint = sections => {
     if (vod.catSel !== mySel) return;   /* 快速切分类防旧响应覆盖 */
     vod.sections = sections;
+    /* 影视页门闸回执：当前分类三块已到（空栏也算「到」，否则会一直等到超时） */
+    vod.libLoadedFor = sel.id;
     if (!sections.length) { host.innerHTML = `<div class="page-loading">— 加载中 …</div>`; return; }
     let html = "";
     sections.forEach((s, si) => {

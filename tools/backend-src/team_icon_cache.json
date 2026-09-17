@@ -37,7 +37,7 @@
   "利勒斯特罗姆": {
     "url": null,
     "id": null,
-    "ts": 1788579924
+    "ts": 1789657874
   },
   "布兰": {
     "url": "https://r2.thesportsdb.com/images/media/team/badge/ovuad71690695412.png",
@@ -932,7 +932,7 @@
   "波兹南莱赫": {
     "url": null,
     "id": null,
-    "ts": 1788579953
+    "ts": 1789657875
   },
   "琴斯托霍瓦": {
     "url": null,
@@ -1553,5 +1553,25 @@
     "url": "https://assets.football-logos.cc/logos/portugal/64x64/estoril.3788c948.png",
     "id": null,
     "ts": 1789347421
+  },
+  "杜连斯": {
+    "url": null,
+    "id": null,
+    "ts": 1789657874
+  },
+  "OFI克里特": {
+    "url": "https://assets.football-logos.cc/logos/greece/64x64/ofi.73ae167c.png",
+    "id": null,
+    "ts": 1789654065
+  },
+  "马拉加": {
+    "url": "https://r2.thesportsdb.com/images/media/team/badge/upqyvr1473502952.png",
+    "id": "535",
+    "ts": 1789654066
+  },
+  "比尔森胜利": {
+    "url": null,
+    "id": null,
+    "ts": 1789657875
   }
 }

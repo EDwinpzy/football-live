@@ -53,11 +53,12 @@ fun heroRefs(catalog: Aggregated?, home: VodRepository.HomeState): List<HeroRef>
     val hotKeys = listOf("近期热门", "最近更新", "近期热播", "热播", "近期热门电影", "近期热门剧集")
     val hot = home.sections
         .filter { sec -> hotKeys.any { sec.name.contains(it) } }
-        .flatMap { sec -> sec.items.map { HeroRef(it.id, it.title, it.posterUrl, sec.name) } }
+        // hero 用大图：列表接口给的最小号铺满整屏会糊（见 VodItem.heroUrl）
+        .flatMap { sec -> sec.items.map { HeroRef(it.id, it.title, it.heroUrl.ifBlank { it.posterUrl }, sec.name) } }
         .distinctBy { it.id }
     if (hot.isNotEmpty()) return hot.take(8)
     return catalog?.dedupedItems?.filter { it.posterUrl.isNotBlank() }?.take(6)
-        ?.map { HeroRef(it.id, it.title, it.posterUrl, "") }.orEmpty()
+        ?.map { HeroRef(it.id, it.title, it.heroUrl.ifBlank { it.posterUrl }, "") }.orEmpty()
 }
 
 /** 豆瓣刮削结果（预探测替换：字段空则不替换） */

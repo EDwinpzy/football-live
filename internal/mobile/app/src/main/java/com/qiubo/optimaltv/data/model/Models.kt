@@ -40,6 +40,9 @@ data class VodItem(
     val rating: Double = 0.0,
     val desc: String = "",
     val posterUrl: String = "",
+    /** 影视页顶部 hero 用的大图：豆瓣列表只给 ~240 宽的 s_ratio_poster，铺满屏会糊，
+     *  后端 hero_url 给的是同一张图的 /view/photo/l/public/（1142×1600）。空则回落到 posterUrl。 */
+    val heroUrl: String = "",
     val tags: List<String> = emptyList(),
     val episodes: List<Episode> = emptyList(),
     val detailRef: String = "",

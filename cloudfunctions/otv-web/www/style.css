@@ -47,6 +47,12 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
 .page{display:none;flex-direction:column;min-height:var(--vh,100vh)}
 .page:not([hidden]){display:flex}
 .page-loading{color:rgba(255,255,255,.5);font-size:26px;padding:60px 86px;white-space:pre-line;text-align:center}
+/* ===== 影视页门闸（app.js runVodGate）：数据 + 首屏封面就绪前只显示加载态 ===== */
+#pVod.gated{justify-content:center}
+#pVod.gated > .vod-hero,
+#pVod.gated > #histRow,
+#pVod.gated > #catChips,
+#pVod.gated > #vodSections{display:none}
 .hscroll{display:flex;overflow-x:auto;overflow-y:hidden}
 .hscroll::-webkit-scrollbar{display:none}
 

@@ -75,18 +75,33 @@ class VodApiSource(
             else base.trimEnd('/') + "/hhkan/proxy?u=" + URLEncoder.encode(u, "UTF-8")
         }
 
+        /** 豆瓣同一张剧照有多个尺寸前缀，列表接口只给最小号（s_ratio_poster ≈ 240×360）。
+         *  影视页 hero 是全宽铺图，240 宽拉到 1920 会糊；后端 `/vod/home` 已下发 hero_url
+         *  （/view/photo/l/public/，1142×1600），拿不到就在这里就地换算。 */
+        private val DOUBAN_PHOTO_RE =
+            Regex("""^(https?://[^/]*doubanio\.com)/view/photo/[^/]+/(?:public/)?(p\d+\.[A-Za-z]+)$""")
+
+        fun heroPoster(raw: String): String {
+            val u = raw.trim()
+            val m = DOUBAN_PHOTO_RE.find(u) ?: return u
+            return "${m.groupValues[1]}/view/photo/l/public/${m.groupValues[2]}"
+        }
+
         fun parseItems(array: JSONArray?, category: String, base: String = ""): List<VodItem> =
             (0 until (array?.length() ?: 0)).mapNotNull { index ->
                 val item = array?.optJSONObject(index) ?: return@mapNotNull null
                 val rawId = item.optString("id").removePrefix("douban:")
                 val title = item.optString("title").trim()
                 if (rawId.isBlank() || title.isBlank()) return@mapNotNull null
+                val rawPoster = item.optString("poster_url")
                 VodItem(
                     id = "douban:$rawId", sourceId = "douban", title = title,
                     categoryId = "douban:$category", year = item.optString("year"),
                     area = strings(item.optJSONArray("regions")).joinToString(" / "),
                     rating = item.optDouble("rating", 0.0), desc = item.optString("summary"),
-                    posterUrl = relayPoster(base, item.optString("poster_url")), tags = strings(item.optJSONArray("genres")),
+                    posterUrl = relayPoster(base, rawPoster),
+                    heroUrl = relayPoster(base, heroPoster(item.optString("hero_url").ifBlank { rawPoster })),
+                    tags = strings(item.optJSONArray("genres")),
                     detailRef = rawId,
                 )
             }

@@ -120,6 +120,9 @@ object AppStartup {
     /** 全量门闸预算（用户要求等所有界面信息就绪）：TV 90s / 移动 30s，见 app/build.gradle */
     private val FULL_GATE_MS = com.qiubo.optimaltv.BuildConfig.STARTUP_GATE_MS
 
+    /** 封面等待预算：门闸要「有图才放行」，但弱网不能让启动屏无限等；超时剩余转后台。 */
+    private const val COVER_WAIT_MS = 20_000L
+
     fun begin() {
         val scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val t0 = System.currentTimeMillis()
@@ -265,16 +268,28 @@ object AppStartup {
         if (urls.isEmpty()) return 0
         val loader = coil.Coil.imageLoader(Graph.appContext)
         val cappedUrls = urls.take(96)
-        cappedUrls.forEachIndexed { idx, u ->
-            val req = coil.request.ImageRequest.Builder(Graph.appContext)
-                .data(u)
-                // hero 大图（carousel backdrop）保持默认整屏尺寸；其余卡片按 2x
-                .apply { if (idx >= heroCount) size(464, 704) }
-                .build()
-            loader.enqueue(req)
-        }
         if (cappedUrls.size < urls.size) {
             OtvLog.i("封面预载收敛：${cappedUrls.size}/${urls.size} 张（其余进页按需加载）")
+        }
+        /* 2026-09-17 用户要求「影视界面要加载完成、有图片和信息后才能进入」：旧实现只把请求
+           enqueue 出去就返回，门闸其实没等图，进页仍会一张张补。改成真正加载并等待完成。
+           仍然限时：预算是 COVER_WAIT_MS，超时的图留在独立 scope 里跑完（不随门闸协程取消）。 */
+        val pending = java.util.concurrent.atomic.AtomicInteger(cappedUrls.size)
+        val allDone = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val coverScope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        cappedUrls.forEachIndexed { idx, u ->
+            coverScope.launch {
+                val req = coil.request.ImageRequest.Builder(Graph.appContext)
+                    .data(u)
+                    // hero 大图（carousel backdrop）保持默认整屏尺寸；其余卡片按 2x
+                    .apply { if (idx >= heroCount) size(464, 704) }
+                    .build()
+                runCatching { loader.execute(req) }
+                if (pending.decrementAndGet() <= 0) allDone.complete(Unit)
+            }
+        }
+        if (kotlinx.coroutines.withTimeoutOrNull(COVER_WAIT_MS) { allDone.await() } == null) {
+            OtvLog.i("封面预载到预算上限（${COVER_WAIT_MS}ms）：剩 ${pending.get()} 张转后台继续")
         }
         return cappedUrls.size
     }

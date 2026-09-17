@@ -224,6 +224,7 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
         if (ui.fatalMsg == null) {
             // 滑动快进/亮度音量 手势反馈浮层数据
             var seekPreviewMs by remember { mutableStateOf<Long?>(null) }
+            var seekDir by remember { mutableStateOf(1) }                // +1 快进 / -1 快退（决定箭头朝向）
             var vbKind by remember { mutableStateOf<String?>(null) }     // "brightness"/"volume"
             var vbValue by remember { mutableStateOf(0f) }
             val dragCtx = LocalContext.current
@@ -257,6 +258,7 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                             onDragStart = { seekPreviewMs = ui.positionMs },
                             onHorizontalDrag = { change, dragAmount ->
                                 change.consume()
+                                if (dragAmount != 0f) seekDir = if (dragAmount > 0f) 1 else -1
                                 val cur = seekPreviewMs ?: ui.positionMs
                                 val deltaMs = (dragAmount / size.width.toFloat()) * 120_000f
                                 seekPreviewMs = (cur + deltaMs.toLong())
@@ -324,6 +326,7 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
             // 手势反馈浮层：滑动快进预览 / 亮度 / 音量
             GestureIndicator(
                 seekPreviewMs = seekPreviewMs,
+                seekDir = seekDir,
                 vbKind = vbKind,
                 vbValue = vbValue,
             )
@@ -455,24 +458,41 @@ private fun PortraitPlayerPanel(ui: PlayerUiState, vm: PlayerViewModel) {
 /**
  * 手势反馈浮层（影视#1 v1.19）：滑动快进时中央显示目标时间；竖滑调节时
  * 中央显示亮度/音量标签与进度条。手势结束自动消失。
+ *
+ * 2026-09-17 用户要求：快进/快退那个图标改 Apple 极简风、去掉深色底——现在是
+ * SF Symbols `goforward`/`gobackward` 同款白描边圆箭头，只有一层柔和文字投影。
  */
 @Composable
 private fun GestureIndicator(
     seekPreviewMs: Long?,
+    seekDir: Int,
     vbKind: String?,
     vbValue: Float,
 ) {
     if (seekPreviewMs == null && vbKind == null) return
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier
-                .background(Color(0xB3000000), RoundedCornerShape(18.dp))
-                .padding(horizontal = 28.dp, vertical = 20.dp),
-        ) {
-            if (seekPreviewMs != null) {
-                Text("⏩ " + formatTime(seekPreviewMs), color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
-            } else if (vbKind != null) {
+        if (seekPreviewMs != null) {
+            /* 无底色：只用白色描边图标 + 时间，靠投影保证在浅色画面上也能看清 */
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                SeekDirectionGlyph(forward = seekDir >= 0, size = 88.dp)
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    formatTime(seekPreviewMs),
+                    color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.SemiBold,
+                    style = with(LocalDensity.current) {
+                        LocalTextStyle.current.copy(
+                            shadow = Shadow(color = Color(0x99000000), blurRadius = 20f, offset = Offset(0f, 3f)),
+                        )
+                    },
+                )
+            }
+        } else if (vbKind != null) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .background(Color(0xB3000000), RoundedCornerShape(18.dp))
+                    .padding(horizontal = 28.dp, vertical = 20.dp),
+            ) {
                 Text(
                     if (vbKind == "brightness") "亮度" else "音量",
                     color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium,
@@ -493,6 +513,54 @@ private fun GestureIndicator(
                 }
             }
         }
+    }
+}
+
+/**
+ * Apple 风格「快进 / 快退」圆箭头（SF Symbols `goforward` / `gobackward` 同款）：
+ * 白描边圆环缺口开在正上方，收口处一个实心箭头沿圆周切向指向前进方向，完全无底色。
+ *
+ * 屏幕坐标角度：0°=右、90°=下、270°=上。forward 走顺时针（330°→260°），
+ * backward 水平镜像（210°→280°），两者箭头都落在正上方、分别朝右 / 朝左。
+ */
+@Composable
+private fun SeekDirectionGlyph(forward: Boolean, size: Dp) {
+    Canvas(Modifier.size(size)) {
+        val s = this.size.minDimension
+        val stroke = s * 0.075f
+        val radius = s / 2f - stroke / 2f - s * 0.05f
+        val center = Offset(this.size.width / 2f, this.size.height / 2f)
+
+        fun at(deg: Float, r: Float = radius): Offset {
+            val rad = Math.toRadians(deg.toDouble())
+            return Offset(center.x + r * kotlin.math.cos(rad).toFloat(),
+                          center.y + r * kotlin.math.sin(rad).toFloat())
+        }
+
+        val dir = if (forward) 1f else -1f
+        drawArc(
+            color = Color.White,
+            startAngle = if (forward) 330f else 210f,
+            sweepAngle = 290f * dir,
+            useCenter = false,
+            topLeft = Offset(center.x - radius, center.y - radius),
+            size = androidx.compose.ui.geometry.Size(radius * 2f, radius * 2f),
+            style = Stroke(width = stroke, cap = StrokeCap.Round),
+        )
+        // 箭头：底边钉在圆弧收口处（270° - 10°·dir），尖端再往前 24° 沿切向
+        val arcEnd = 270f - 10f * dir
+        val tip = at(arcEnd + 24f * dir)
+        val baseA = at(arcEnd, radius + stroke * 1.7f)
+        val baseB = at(arcEnd, radius - stroke * 1.7f)
+        drawPath(
+            Path().apply {
+                moveTo(tip.x, tip.y)
+                lineTo(baseA.x, baseA.y)
+                lineTo(baseB.x, baseB.y)
+                close()
+            },
+            Color.White,
+        )
     }
 }
 
@@ -561,14 +629,12 @@ private fun VodPlayerOverlay(
     onTick: () -> Unit,
 ) {
     val ps = rememberUiScale()
-    // v1.21 投屏：进度镜像改渲染器上报值；投屏钮/设备浮层/投屏中横幅
+    // v1.21 投屏：进度镜像改渲染器上报值；投屏中横幅。
+    // 2026-09-17 用户要求：投屏入口从画面左上角挪到「更多」面板里（放在「画幅」下面），
+    // 可用设备直接列在入口下方，不再弹独立底部 sheet。
     val castOn = ui.castDevice != null
     val posMs = if (castOn) ui.castPositionMs else ui.positionMs
     val durMs = if (castOn) (ui.castDurationMs.takeIf { it > 0 } ?: ui.durationMs) else ui.durationMs
-    var castSheet by remember { mutableStateOf(false) }
-    if (castSheet) {
-        CastDeviceSheet(ui = ui, vm = vm, onDismiss = { castSheet = false })
-    }
     Box(Modifier.fillMaxSize()) {
         if (castOn) {
             // 投屏中横幅（2026-09-05 视觉稿定稿：蓝调胶囊——绿点 + 投屏中 + 设备名；点击断开回本地续播）
@@ -590,23 +656,6 @@ private fun VodPlayerOverlay(
                 Text(ui.castDevice?.name ?: "", color = OtvColors.White70, fontSize = 24f.sxs(ps), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.width(14f.sx(ps)))
                 Text("点按断开", color = OtvColors.White50, fontSize = 22f.sxs(ps), maxLines = 1)
-            }
-        } else if (ui.controlsVisible && ui.fatalMsg == null) {
-            // 投屏入口（左上角，与右上「更多」对称）：玻璃胶囊 + 标准投屏图标
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(start = 80f.sx(ps), top = 90f.sx(ps))
-                    .clip(RoundedCornerShape(50))
-                    .background(Color(0xC714141A))
-                    .border(1.dp, Color(0x29FFFFFF), RoundedCornerShape(50))
-                    .clickable { castSheet = true; vm.scanCastDevices(); onTick() }
-                    .padding(horizontal = 26f.sx(ps), vertical = 13f.sx(ps)),
-            ) {
-                CastGlyph(30f.sx(ps), Color.White)
-                Spacer(Modifier.width(12f.sx(ps)))
-                Text("投屏", color = Color.White, fontSize = 26f.sxs(ps), fontWeight = FontWeight.Medium)
             }
         }
     Box(Modifier.fillMaxSize()) {
@@ -746,6 +795,8 @@ private fun MorePanel(
     onDismiss: () -> Unit,
     onPickEpisode: (Int) -> Unit,
 ) {
+    // 打开面板即扫一次局域网，设备自动列在「投屏」下方（用户要求：不用再点一次才出列表）
+    LaunchedEffect(Unit) { vm.scanCastDevices() }
     Box(Modifier.fillMaxSize()) {
         // 全屏暗区：视觉压暗视频；点暗区关闭浮窗（对应 TV 版 BACK 关闭）
         Box(
@@ -934,6 +985,76 @@ private fun MorePanel(
                     }
                 }
             }
+            Spacer(Modifier.height(18.dp))
+            // 投屏（2026-09-17 用户要求）：入口挪到「画幅」下面，可投屏设备自动列在下方，
+            // 不再需要先点一次按钮才出列表、也不弹独立底部 sheet。
+            SectionLabel("投屏")
+            val otherCastDevices = ui.castDevices.filter { it.uuid != ui.castDevice?.uuid }
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // 投屏中设备：置顶显示断开
+                ui.castDevice?.let { dev ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0x240A84FF))
+                            .clickable { vm.stopCast(resumeLocal = true) }
+                            .padding(horizontal = 18.dp, vertical = 14.dp),
+                    ) {
+                        CastGlyph(24.dp, AccentBlue)
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            "正在投屏 · ${dev.name}", color = AccentBlue, modifier = Modifier.weight(1f),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                        Text("断开", color = TextPrimary.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+                otherCastDevices.forEach { dev ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0x24FFFFFF))
+                            .clickable { vm.startCast(dev) }
+                            .padding(horizontal = 18.dp, vertical = 14.dp),
+                    ) {
+                        CastGlyph(24.dp, TextPrimary.copy(alpha = 0.7f))
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            dev.name, color = TextPrimary, modifier = Modifier.weight(1f),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                        Text("投屏", color = Color.White, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+                if (otherCastDevices.isEmpty() && ui.castDevice == null) {
+                    val castHint = ui.castError
+                    Text(
+                        when {
+                            ui.castScanning -> "正在扫描局域网…"
+                            castHint != null -> castHint
+                            else -> "未发现设备（电视需与本机同一 Wi-Fi）"
+                        },
+                        color = if (castHint != null && !ui.castScanning) Color(0xFFFFB84D)
+                                else TextPrimary.copy(alpha = 0.55f),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Row(
+                    horizontalArrangement = Arrangement.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .border(0.5.dp, Color(0x33FFFFFF), RoundedCornerShape(12.dp))
+                        .clickable { vm.scanCastDevices() }
+                        .padding(horizontal = 18.dp, vertical = 12.dp),
+                ) {
+                    Text("重新扫描", color = TextPrimary.copy(alpha = 0.8f), style = MaterialTheme.typography.labelMedium)
+                }
+            }
             Spacer(Modifier.height(28.dp))
         }
     }
@@ -1088,93 +1209,6 @@ private fun ErrorWidget(
 }
 
 /** 进度条拖动/点按位置 → 播放进度比例（0..1） */
-/** v1.21 投屏设备浮层（底部 sheet）：扫描状态 + 设备列表 + 投屏中设备断开入口 */
-@Composable
-private fun CastDeviceSheet(
-    ui: PlayerUiState,
-    vm: PlayerViewModel,
-    onDismiss: () -> Unit,
-) {
-    BackHandler { onDismiss() }
-    val noRipple = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Color(0x88000000))
-            .clickable(interactionSource = noRipple, indication = null) { onDismiss() },
-    ) {
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
-                .background(Color(0xE9121216))
-                .clickable(interactionSource = noRipple, indication = null) {}   // 吃掉点按防穿透
-                .padding(horizontal = 34.dp, vertical = 26.dp),
-        ) {
-            Text("投屏到设备", color = TextPrimary, style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                when {
-                    ui.castScanning -> "正在扫描局域网…"
-                    ui.castDevices.isEmpty() -> "未发现设备（电视需与本机同一 Wi-Fi）"
-                    else -> "发现 ${ui.castDevices.size} 台设备"
-                },
-                color = TextPrimary.copy(alpha = 0.55f), style = MaterialTheme.typography.bodySmall,
-            )
-            ui.castError?.let { castError ->
-                Spacer(Modifier.height(8.dp))
-                Text(castError, color = Color(0xFFFFB84D), style = MaterialTheme.typography.bodySmall)
-            }
-            Spacer(Modifier.height(14.dp))
-            // 投屏中设备：置顶显示断开
-            ui.castDevice?.let { dev ->
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0x240A84FF))
-                        .clickable { vm.stopCast(resumeLocal = true); onDismiss() }
-                        .padding(horizontal = 18.dp, vertical = 14.dp),
-                ) {
-                    Text("正在投屏 · ${dev.name}", color = AccentBlue, modifier = Modifier.weight(1f))
-                    Text("断开", color = TextPrimary.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium)
-                }
-                Spacer(Modifier.height(10.dp))
-            }
-            ui.castDevices.filter { it.uuid != ui.castDevice?.uuid }.forEach { dev ->
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0x24FFFFFF))
-                        .clickable { vm.startCast(dev); onDismiss() }
-                        .padding(horizontal = 18.dp, vertical = 14.dp),
-                ) {
-                    Text(dev.name, color = TextPrimary, modifier = Modifier.weight(1f))
-                    Text("投屏", color = Color.White, style = MaterialTheme.typography.labelMedium)
-                }
-                Spacer(Modifier.height(10.dp))
-            }
-            // 重新扫描
-            Row(
-                horizontalArrangement = Arrangement.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .border(0.5.dp, Color(0x33FFFFFF), RoundedCornerShape(12.dp))
-                    .clickable { vm.scanCastDevices() }
-                    .padding(horizontal = 18.dp, vertical = 14.dp),
-            ) {
-                Text("重新扫描", color = TextPrimary.copy(alpha = 0.8f))
-            }
-            Spacer(Modifier.height(18.dp))
-        }
-    }
-}
-
 private fun dragFracOf(x: Float, widthPx: Int): Float =
     if (widthPx <= 0) 0f else (x / widthPx.toFloat()).coerceIn(0f, 1f)
 
