@@ -100,6 +100,8 @@ def _resolve_admin_pass() -> str:
 
 
 ADMIN_PASS = _resolve_admin_pass()
+# 补货产物目录：云端 /var/user 只读，用 OTV_OUT_DIR 指到 /tmp（与 license_gen.py 同一开关）
+OUT_ROOT = Path(os.environ.get("OTV_OUT_DIR") or (ROOT / "out"))
 # 会话签名密钥：优先 env；缺省时由登录凭据派生**固定**值。
 # 不能退回随机值——云函数多实例/冷启动各自随机会让 Cookie 时验时不验
 # （2026-09-16 线上实测：登录成功后再连发 8 次带 Cookie 请求，7 次 401）。
@@ -585,12 +587,12 @@ def h_gen(d: dict) -> dict:
         return {"error": "无法解析批次目录:\n" + gen.stdout[-300:]}
     batch = m.group(1)
     imp = subprocess.run(
-        [sys.executable, str(ROOT / "db_import.py"), str(ROOT / "out" / batch)],
+        [sys.executable, str(ROOT / "db_import.py"), str(OUT_ROOT / batch)],
         capture_output=True, text=True, cwd=ROOT)
     if imp.returncode != 0:
         return {"error": f"批次 {batch} 已签发但入库失败（可手动重跑 db_import.py）:\n"
                          + (imp.stderr or imp.stdout)[-400:]}
-    csv_path = ROOT / "out" / batch / "cards.csv"
+    csv_path = OUT_ROOT / batch / "cards.csv"
     try:
         csv_text = csv_path.read_text(encoding="utf-8")
     except OSError:

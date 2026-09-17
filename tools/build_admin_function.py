@@ -14,21 +14,30 @@
   OTV_PRIV_KEY                     可选：卡密签发私钥（不设则云端补货禁用，本地补货不受影响）
 """
 import shutil
+import zipfile
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
 PROJ = TOOLS.parent
 FUNC = PROJ / "cloudfunctions" / "otv-admin"
 
-FILES = ("admin_server.py", "scf_main.py", "admin.html", "db_import.py", "license_gen.py")
+FILES = ("admin_server.py", "scf_main.py", "admin.html", "db_import.py", "license_gen.py",
+         "requirements.txt")
 # 影视源后台接口运行时依赖。admin_server.py 在云函数包根目录加载这些模块。
 BACKEND_FILES = ("vod_sources.py", "vod_sources.default.json", "hhkan.py")
 
 BOOTSTRAP = """#!/bin/bash
 cd /var/user
 export PORT=${PORT:-9000}
+# 云端补货（ECDSA 签发）依赖 cryptography：wheel 解包到 vendor/（与 otv-web 的 quickjs 同款做法）
+export PYTHONPATH=/var/user/vendor:${PYTHONPATH}
+# /var/user 只读：补货产物（cards.csv / import.sql）写到 /tmp
+export OTV_OUT_DIR=/tmp/otv-out
 exec python3 scf_main.py
 """
+
+# 云端补货签名依赖（tools/vendor/*.whl，本地预下载；缺失则该功能在云端不可用）
+VENDOR_WHEELS = ("cryptography-*", "cffi-*", "pycparser-*")
 
 PKG = """{
   "name": "otv-admin",
@@ -56,6 +65,19 @@ def main() -> None:
         PROJ / "android" / "app" / "src" / "main" / "res" / "drawable" / "my_tv_logo.png",
         FUNC / "my_tv_logo.png")
     print("cloudfunctions/otv-admin/ my_tv_logo.png")
+    vendor = FUNC / "vendor"
+    found = []
+    for pattern in VENDOR_WHEELS:
+        for wheel in sorted((TOOLS / "vendor").glob(pattern + ".whl")):
+            vendor.mkdir(exist_ok=True)
+            with zipfile.ZipFile(wheel) as zf:
+                zf.extractall(vendor)
+            found.append(wheel.name)
+    if found:
+        print("cloudfunctions/otv-admin/ vendor/ (%d wheel): %s" % (len(found), ", ".join(found)))
+    else:
+        print("⚠ tools/vendor 下没找到签名依赖 wheel（云端补货会在运行时缺 cryptography）——"
+              "按《开发与发布手册》§5.1 的 pip download 命令补上再汇组")
     (FUNC / "scf_bootstrap").write_text(BOOTSTRAP, encoding="utf-8", newline="\n")
     (FUNC / "package.json").write_text(PKG, encoding="utf-8", newline="\n")
     print("cloudfunctions/otv-admin/ scf_bootstrap + package.json")

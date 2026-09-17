@@ -26,6 +26,8 @@ img_cache/
 .worktrees/
 tools/keys/
 *.whl
+# otv-admin 的签名依赖 vendor/（由 tools/vendor/*.whl 解包生成，11MB 二进制，不入库）
+cloudfunctions/otv-admin/vendor/
 
 # VOD 影视索引/抓取运行期缓存（本地代理自动生成，不入库）
 tools/backend-src/.cache/

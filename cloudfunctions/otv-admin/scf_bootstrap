@@ -1,4 +1,8 @@
 #!/bin/bash
 cd /var/user
 export PORT=${PORT:-9000}
+# 云端补货（ECDSA 签发）依赖 cryptography：wheel 解包到 vendor/（与 otv-web 的 quickjs 同款做法）
+export PYTHONPATH=/var/user/vendor:${PYTHONPATH}
+# /var/user 只读：补货产物（cards.csv / import.sql）写到 /tmp
+export OTV_OUT_DIR=/tmp/otv-out
 exec python3 scf_main.py

@@ -12,15 +12,17 @@
   tickets.jsonl   票据原文（含签名），供 verify 与入库核对
   import.sql      PG licenses 表导入脚本（INSERT ... ON CONFLICT DO NOTHING）
 
-私钥 tools/keys/private_key.pem 是整个体系的命根子：
-不进仓库、不上云、不贴进任何会话；请离线备份一份。
+私钥 tools/keys/private_key.pem 是整个体系的命根子：不进仓库、不贴进任何会话，请离线备份一份。
+两种来源（load_priv 自动选）：环境变量 OTV_PRIV_KEY（云端后台补货用；云函数 /var/user 只读，
+落不了文件，所以直接读环境变量）优先，其次本机 tools/keys/private_key.pem。
 """
 import argparse
 import base64
 import json
+import os
 import secrets
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -31,7 +33,8 @@ ROOT = Path(__file__).resolve().parent
 KEY_DIR = ROOT / "keys"
 PRIV_PATH = KEY_DIR / "private_key.pem"
 PUB_PATH = KEY_DIR / "public_key.pem"
-OUT_DIR = ROOT / "out"
+# 输出目录：云端 /var/user 只读，云函数里用 OTV_OUT_DIR 指到 /tmp（见 build_admin_function.py）
+OUT_DIR = Path(os.environ.get("OTV_OUT_DIR") or (ROOT / "out"))
 LEDGER_PATH = OUT_DIR / "used_codes.txt"
 
 # 32 字符表：剔除 0/O/1/I，遥控器输入与人工辨认均无歧义
@@ -53,12 +56,20 @@ def canonical(code: str, plan: str, days: int, issued: str, nonce: str) -> str:
 
 
 def load_priv():
+    env = os.environ.get("OTV_PRIV_KEY")
+    if env:
+        return serialization.load_pem_private_key(
+            env.replace("\\n", "\n").encode("utf-8"), password=None)
     if not PRIV_PATH.exists():
         sys.exit("私钥不存在，先执行: python license_gen.py init")
     return serialization.load_pem_private_key(PRIV_PATH.read_bytes(), password=None)
 
 
 def load_pub():
+    env = os.environ.get("OTV_PRIV_KEY")
+    if env:
+        # 云端没有公钥文件：从私钥推导（同一把钥匙，结果与本机 keys/public_key.pem 一致）
+        return load_priv().public_key()
     if not PUB_PATH.exists():
         sys.exit("公钥不存在，先执行: python license_gen.py init")
     return serialization.load_pem_public_key(PUB_PATH.read_bytes())
@@ -117,6 +128,11 @@ def cmd_gen(args):
 
     batch = f"{issued.replace('-', '')}-{args.plan}-{args.count}"
     batch_dir = OUT_DIR / batch
+    if batch_dir.exists():
+        # 同名批次（同日 + 同套餐 + 同数量）不覆盖前一批的导入文件：
+        # 云端 artifacts 落在 /tmp，同实例复用目录，直接覆盖会丢掉上一批的 cards.csv
+        batch = f"{batch}-{datetime.now().strftime('%H%M%S')}"
+        batch_dir = OUT_DIR / batch
     batch_dir.mkdir(parents=True, exist_ok=True)
 
     with (batch_dir / "cards.csv").open("w", encoding="utf-8-sig", newline="") as f:
