@@ -36,12 +36,14 @@ tvOS 深色风格；Python 后端内嵌进 app（Chaquopy），设备端自给�
 | 用网页版 | 手机浏览器打开 https://appletv-d5ge1bth794873f76.service.tcloudbase.com/web/ （首次「风险提醒」点确定即过；国内可直连） |
 | 进后台管理 | https://appletv-d5ge1bth794873f76.service.tcloudbase.com/admin/ · 账号 `admin`，密码 = 函数环境变量 `OTV_ADMIN_PASS` |
 | 本地构建后端与网页 | `python tools/release_all.py`（默认只在本机生成部署包和 App 热更新包，不触碰公网） |
-| 部署/推送 | 用户明确确认范围后，运行 `python tools/release_all.py --deploy` 部署网页版，再到后台「热更新」页上传/发布；APK 分发另行确认 |
+| 部署/推送 | `python tools/release_all.py --deploy` 部署网页版 → 重打两个 APK → `node 后台管理系统/scripts/ops/hu-upload.mjs` 上传并发布热更 → `git push origin main` |
 | 发新 APK | `android/` 或 `internal/mobile/` 下 `./gradlew assembleRelease`（v1.19 起双 flavor 退役，单线发布），产物自动归档到 `apk/` |
 | 签发卡密 | `python tools/license_gen.py gen --plan <套餐> --count <数量>` → `python tools/db_import.py out/<批次>`；协议迁移/存量重置见 `tools/license_v2_*.sql` 与 `tools/license_v2_reset.py` |
 | 验证改动 | MuMu 模拟器实测（截图 + logcat tag `OTV`），记录进 `docs/04-records/测试记录.md`；网页版改动**必须浏览器实测** |
 
-发布边界：所有任务先在本机完成构建、验证并报告产物；部署云函数、上传/发布热更新、分发 APK、远程 Git push 等外部动作，必须单独经过用户明确确认（G3）后执行。
+发布边界：**2026-09-17 起用户长期授权全流程自动执行**——改动验证通过后自动构建 APK、自动部署网页版、自动上传发布热更、
+自动更新记录文档、自动 `git push`，不再逐项征求确认（原「G3 明确确认」门禁已取消）。仍要先问的只有不可恢复的破坏性操作，
+以及需要用户做产品取舍的改动。同一份约定见仓库根 `AGENTS.md` 与 `docs/02-guides/开发与发布手册.md`。
 
 ## 目录结构
 
