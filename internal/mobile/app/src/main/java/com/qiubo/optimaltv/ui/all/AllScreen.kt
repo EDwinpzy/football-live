@@ -48,7 +48,6 @@ import com.qiubo.optimaltv.ui.components.PosterPlaceholder
 import com.qiubo.optimaltv.ui.components.tapCard
 import com.qiubo.optimaltv.ui.components.MobileBackButton
 import com.qiubo.optimaltv.ui.components.MobileVodCard
-import com.qiubo.optimaltv.ui.components.VodCardMetaStyle
 import com.qiubo.optimaltv.ui.components.VodFilterRow
 import com.qiubo.optimaltv.ui.theme.OtvColors
 import com.qiubo.optimaltv.ui.theme.rememberUiScale
@@ -259,7 +258,6 @@ private fun VcardCard(
         item = item,
         s = s,
         compact = compact,
-        metaStyle = VodCardMetaStyle.Rating,
         onClick = { nav.navigate("detail/" + URLEncoder.encode(item.id, "UTF-8")) },
     )
 }

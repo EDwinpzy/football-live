@@ -54,7 +54,6 @@ import com.qiubo.optimaltv.ui.components.MainTabBar
 import com.qiubo.optimaltv.ui.components.MobileVodCard
 import com.qiubo.optimaltv.ui.components.OtvHint
 import com.qiubo.optimaltv.ui.components.PosterPlaceholder
-import com.qiubo.optimaltv.ui.components.VodCardMetaStyle
 import com.qiubo.optimaltv.ui.components.VodCategorySelector
 import com.qiubo.optimaltv.ui.components.chromeHidePx
 import com.qiubo.optimaltv.ui.components.navigateToTab
@@ -489,7 +488,6 @@ private fun androidx.compose.foundation.layout.RowScope.LibCard(
         s = s,
         compact = compact,
         modifier = Modifier.weight(1f),
-        metaStyle = VodCardMetaStyle.YearAndRating,
         onClick = { nav.navigate("detail/" + URLEncoder.encode(item.id, "UTF-8")) },
     )
 }

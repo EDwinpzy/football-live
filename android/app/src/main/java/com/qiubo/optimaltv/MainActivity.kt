@@ -52,6 +52,7 @@ object DebugNavBus {
 /** v1.17 品牌启动屏（用户需求：内容加载好后再进入 app）：黑底 + My TV 字标 + 细转圈 */
 @Composable
 private fun StartupSplash() {
+    val status by AppStartup.status.collectAsStateWithLifecycle()
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Image(
@@ -61,6 +62,9 @@ private fun StartupSplash() {
             )
             Spacer(Modifier.height(48.dp))
             com.qiubo.optimaltv.ui.components.AppleLoading()
+            // 全量预热可能十几秒到数十秒：给一行进度文案，避免看起来像卡死
+            Spacer(Modifier.height(24.dp))
+            Text(status, color = Color(0xFF9A9AA2), fontSize = 14.sp)
         }
     }
 }

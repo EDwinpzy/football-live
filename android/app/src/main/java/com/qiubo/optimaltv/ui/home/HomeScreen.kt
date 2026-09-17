@@ -445,19 +445,11 @@ fun VodScreen(nav: NavController) {
 private data class HeroEntry(val id: String, val title: String, val bg: String, val tag: String)
 
 /** 原版 refreshVod hero 降级链：carousel≥3 → 首页热门板块合并(hotHeroItems) → 目录前 6 */
-private fun buildHeroes(cat0: com.qiubo.optimaltv.data.repo.Aggregated?, home: com.qiubo.optimaltv.data.repo.VodRepository.HomeState): List<HeroEntry> {
-    if (home.carousel.size >= 3) {
-        return home.carousel.map { HeroEntry("hhkan:" + it.vid, it.title, it.backdrop, it.tags.firstOrNull().orEmpty()) }
-    }
-    val hotKeys = listOf("近期热门", "最近更新", "近期热播", "热播", "近期热门电影", "近期热门剧集")
-    val hot = home.sections
-        .filter { sec -> hotKeys.any { sec.name.contains(it) } }
-        .flatMap { sec -> sec.items.map { HeroEntry(it.id, it.title, it.posterUrl, sec.name) } }
-        .distinctBy { it.id }
-    if (hot.isNotEmpty()) return hot.take(8)
-    return cat0?.dedupedItems?.filter { it.posterUrl.isNotBlank() }?.take(6)
-        ?.map { HeroEntry(it.id, it.title, it.posterUrl, "") }.orEmpty()
-}
+// 降级链口径已上提到 VodRepository.heroRefs：UI 与启动门闸 hero 简介预载必须同一套，
+// 否则预载取的 id 与页面真正渲染的 hero 对不上（豆瓣源下 carousel 恒空时预载全落空）。
+private fun buildHeroes(cat0: com.qiubo.optimaltv.data.repo.Aggregated?, home: com.qiubo.optimaltv.data.repo.VodRepository.HomeState): List<HeroEntry> =
+    com.qiubo.optimaltv.data.repo.heroRefs(cat0, home)
+        .map { HeroEntry(it.id, it.title, it.bg, it.tag) }
 
 /**
  * 固定 hero 海报带（需求 #1/#8/#15/#16）：
@@ -665,7 +657,7 @@ private fun VodHeroBand(
     }
 }
 
-/** 片库竖卡（原版 libCardHtml/.vcard：poster 232×352 r12 + remark 右下 + vname 24 白 + vmeta 20 .5白）
+/** 片库竖卡（poster 232×352 r12 + remark 右下 + vname 24 白；副行已按用户要求去掉）
  *  需求 影视#3：选中环紧贴卡片边缘。需求 影视#11：remark 徽章高度降为 2/3。 */
 @Composable
 private fun LibCard(nav: NavController, item: VodItem, s: Float, cardReg: FocusRegistry? = null) {
@@ -707,13 +699,7 @@ private fun LibCard(nav: NavController, item: VodItem, s: Float, cardReg: FocusR
         }
         Spacer(Modifier.height(12f.sx(s)))
         Text(item.title, color = OtvColors.White, fontSize = 24f.sxs(s), fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        if (item.rating > 0) {
-            Spacer(Modifier.height(4f.sx(s)))
-            Text(
-                (item.year.takeIf { it.isNotBlank() }?.plus("  ") ?: "") + "★ " + "%.1f".format(item.rating),
-                color = OtvColors.White50, fontSize = 20f.sxs(s),
-            )
-        }
+        // 2026-09-17 用户要求：卡片下方不再显示豆瓣评分与年份，只留片名
     }
 }
 

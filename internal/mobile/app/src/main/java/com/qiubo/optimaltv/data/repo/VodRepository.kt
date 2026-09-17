@@ -36,6 +36,30 @@ data class CatalogState(
     val sourceStates: List<SourceState> = emptyList(),
 )
 
+/** hero 条目（三来源归一：carousel 横版大图 / 首页热门板块竖版封面 / 目录竖版封面） */
+data class HeroRef(val id: String, val title: String, val bg: String, val tag: String)
+
+/**
+ * 原版 refreshVod hero 降级链：carousel>=3 → 首页热门板块合并(hotHeroItems) → 目录前 6。
+ *
+ * 2026-09-17：口径从 HomeScreen.kt 提到这里，供 UI 渲染与启动门闸 hero 简介预载共用。
+ * 旧实现两边各写一套（预载按 carousel 取 id、UI 实际按热门板块取），豆瓣源下
+ * carousel 恒空 → 预载全是空转，hero 简介仍要等进页才发请求（用户反馈加载慢的成因）。
+ */
+fun heroRefs(catalog: Aggregated?, home: VodRepository.HomeState): List<HeroRef> {
+    if (home.carousel.size >= 3) {
+        return home.carousel.map { HeroRef("hhkan:" + it.vid, it.title, it.backdrop, it.tags.firstOrNull().orEmpty()) }
+    }
+    val hotKeys = listOf("近期热门", "最近更新", "近期热播", "热播", "近期热门电影", "近期热门剧集")
+    val hot = home.sections
+        .filter { sec -> hotKeys.any { sec.name.contains(it) } }
+        .flatMap { sec -> sec.items.map { HeroRef(it.id, it.title, it.posterUrl, sec.name) } }
+        .distinctBy { it.id }
+    if (hot.isNotEmpty()) return hot.take(8)
+    return catalog?.dedupedItems?.filter { it.posterUrl.isNotBlank() }?.take(6)
+        ?.map { HeroRef(it.id, it.title, it.posterUrl, "") }.orEmpty()
+}
+
 /** 豆瓣刮削结果（预探测替换：字段空则不替换） */
 data class DoubanInfo(val found: Boolean, val rating: String, val desc: String, val poster: String)
 

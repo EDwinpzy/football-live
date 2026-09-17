@@ -414,9 +414,6 @@ private fun VcardCard(
         }
         Spacer(Modifier.height(10f.sx(s)))
         Text(item.title, color = OtvColors.White, fontSize = 24f.sxs(s), maxLines = 1, overflow = TextOverflow.Ellipsis)
-        if (item.rating > 0) {
-            Spacer(Modifier.height(2f.sx(s)))
-            Text("★ " + "%.1f".format(item.rating), color = OtvColors.White50, fontSize = 19f.sxs(s))
-        }
+        // 2026-09-17 用户要求：卡片下方不再显示豆瓣评分（与影视页片库卡保持一致）
     }
 }

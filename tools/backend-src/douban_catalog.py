@@ -22,6 +22,10 @@ EXPLORE_API = "https://movie.douban.com/j/new_search_subjects"
 EXPLORE_PAGE_SIZE = 20
 EXPLORE_TAGS = {"movie": "电影", "tv": "电视剧", "anime": "动漫", "variety": "综艺", "short": "短剧"}
 SORT_CODES = {"hot": "U", "new": "R", "rating": "S"}  # U 热门 / R 最新 / S 高分
+# 豆瓣限流时会回 HTTP 200 + 空 data（tools/build_douban_snapshot.py 已按此处理）。
+# 首页三栏是「不带筛选、按排序取前 20」，空列表只可能是限流；旧实现把它当成功结果
+# 写进 6 小时缓存，用户看到「最近热门有内容、另外两栏空」且在过期前不再恢复。
+EXPLORE_RETRY_DELAYS = (0.4, 1.2)
 SUBJECT_FIELDS = (
     "id", "douban_id", "title", "original_title", "aliases", "year",
     "category", "genres", "regions", "season", "rating", "rating_count",
@@ -248,6 +252,20 @@ class JsonDiskCache:
         return copy.deepcopy(envelope["value"]) if envelope else None
 
 
+class DoubanThrottled(ValueError):
+    """豆瓣 Explore 限流（HTTP 200 + 空 data）：按失败处理，走缓存/快照回落。"""
+
+
+def _section_items(value, title):
+    """取（缓存或快照）分类首页里同名栏目的条目；没有则返回空列表。"""
+    if not isinstance(value, dict):
+        return []
+    for section in value.get("sections") or []:
+        if isinstance(section, dict) and section.get("title") == title:
+            return [item for item in (section.get("items") or []) if isinstance(item, dict)]
+    return []
+
+
 class DoubanCatalog:
     def __init__(self, fetch=None, cache=None, snapshot=None, media_index=None):
         self.fetch = fetch or self._fetch
@@ -387,8 +405,13 @@ class DoubanCatalog:
                 condition._running = False
                 condition.notify_all()
 
-    def _explore(self, category, sort, page=1, genre="", region="", year="", rating=""):
-        """豆瓣 Explore 列表：排序与类型/地区/年份/评分筛选都在服务端完成。"""
+    def _explore(self, category, sort, page=1, genre="", region="", year="", rating="", strict=False):
+        """豆瓣 Explore 列表：排序与类型/地区/年份/评分筛选都在服务端完成。
+
+        `strict=True`（首页三栏）：空 data 视为限流，退避重试后仍为空则抛
+        [DoubanThrottled]，由上层回落最近一次缓存或随包快照——绝不把空栏当成功
+        结果缓存。带筛选的「全部」页保持宽松：空结果是合法结果。
+        """
         tags = [EXPLORE_TAGS[category]]
         if region and region != "全部":
             tags.append(region)
@@ -398,23 +421,50 @@ class DoubanCatalog:
                  "start": max(0, int(page) - 1) * EXPLORE_PAGE_SIZE}
         if genre and genre != "全部":
             query["genres"] = genre
-        payload = self.fetch(EXPLORE_API + "?" + urllib.parse.urlencode(query))
-        rows = payload.get("data") if isinstance(payload, dict) else None
-        return [normalize_explore_row(row, category) for row in (rows or []) if isinstance(row, dict)]
+        url = EXPLORE_API + "?" + urllib.parse.urlencode(query)
+        for attempt in range(len(EXPLORE_RETRY_DELAYS) + 1):
+            payload = self.fetch(url)
+            rows = payload.get("data") if isinstance(payload, dict) else None
+            if rows:
+                return [normalize_explore_row(row, category) for row in rows if isinstance(row, dict)]
+            if not strict:
+                return []
+            if attempt < len(EXPLORE_RETRY_DELAYS):
+                time.sleep(EXPLORE_RETRY_DELAYS[attempt])
+        raise DoubanThrottled("empty Douban explore data for %s" % category)
 
     def home(self, category):
         if category not in CATEGORY_VALUES:
             raise ValueError("unsupported category")
+        key = "home:" + category
         snapshot_value = ((self.snapshot.get("home") or {}).get(category))
 
         def produce():
-            return {"category": category, "sections": [
-                {"title": HOME_SECTION_NAMES[0], "items": self._explore(category, "U")},
-                {"title": HOME_SECTION_NAMES[1], "items": self._explore(category, "R")},
-                {"title": HOME_SECTION_NAMES[2], "items": self._explore(category, "S")},
-            ], "stale": False, "source": "douban"}
+            """三栏分别抓取：某栏被限流就用该分类上一版缓存/随包快照的同一栏补位。
 
-        result = self._coalesced("home:" + category, "home", produce, snapshot_value)
+            三栏全被限流才整体抛错，交给 [_coalesced] 回落——这样用户看到的
+            三栏不会出现「一栏新鲜、两栏空」的错位，也不会把空栏写进 6 小时缓存。
+            """
+            previous = self.cache.get_stale(key) if self.cache else None
+            sections, degraded = [], 0
+            for title, sort in zip(HOME_SECTION_NAMES, ("U", "R", "S")):
+                try:
+                    items = self._explore(category, sort, strict=True)
+                except DoubanThrottled:
+                    items = []
+                if not items:
+                    items = _section_items(previous, title) or _section_items(snapshot_value, title)
+                    degraded += 1
+                sections.append({"title": title, "items": items})
+            if degraded >= len(HOME_SECTION_NAMES):
+                raise DoubanThrottled("all Douban home sections throttled")
+            result = {"category": category, "sections": sections, "stale": False, "source": "douban"}
+            if degraded:
+                result["stale"] = True
+                result["source"] = "douban-partial"
+            return result
+
+        result = self._coalesced(key, "home", produce, snapshot_value)
         self._ingest([item for section in (result.get("sections") or []) for item in (section.get("items") or [])])
         return result
 

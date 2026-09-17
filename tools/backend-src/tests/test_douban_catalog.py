@@ -2,6 +2,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import time
 import unittest
 import urllib.parse
 
@@ -27,6 +28,12 @@ def search_payload(rows):
 
 
 class DoubanCatalogTest(unittest.TestCase):
+    def setUp(self):
+        # 限流退避会让用例白等几秒；用例只关心调用次数与回落结果。
+        original = douban_catalog.time.sleep
+        douban_catalog.time.sleep = lambda _seconds: None
+        self.addCleanup(setattr, douban_catalog.time, "sleep", original)
+
     def test_movie_explore_maps_to_stable_subject(self):
         item = douban_catalog.parse_explore(fixture_json("explore_movie.json"))[0]
         self.assertEqual(item["id"], "douban:1292052")
@@ -126,6 +133,76 @@ class DoubanCatalogTest(unittest.TestCase):
         catalog.home("movie")
         catalog.show("movie")
         self.assertIn("1292052", index.ids)
+
+    def test_throttled_home_keeps_previous_cache_instead_of_empty_sections(self):
+        """豆瓣限流会回 200 + 空 data：空栏必须当失败，不能当成功结果缓存。
+
+        旧实现把「最近热门有内容、其余两栏空」的结果写进 6 小时缓存，
+        用户看到的分组就一直错到缓存过期。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = douban_catalog.JsonDiskCache(tmp)
+            cache.put("home:variety", {
+                "category": "variety", "stale": False, "source": "douban",
+                "sections": [
+                    {"title": "最近热门", "items": [{"douban_id": "1", "title": "上一版热门"}]},
+                    {"title": "最新上映", "items": [{"douban_id": "2", "title": "上一版最新"}]},
+                    {"title": "豆瓣高分", "items": [{"douban_id": "3", "title": "上一版高分"}]},
+                ]}, fetched_at=time.time() - 86400)
+            catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: {"data": []}, cache=cache)
+            result = catalog.home("variety")
+            self.assertTrue(result["stale"])
+            self.assertEqual([len(section["items"]) for section in result["sections"]], [1, 1, 1])
+            cached = cache.get_stale("home:variety")
+            self.assertEqual([len(section["items"]) for section in cached["sections"]], [1, 1, 1])
+
+    def test_throttled_home_without_cache_falls_back_to_snapshot(self):
+        snapshot = {"home": {"variety": {"category": "variety", "sections": [
+            {"title": "最近热门", "items": [{"douban_id": "1", "title": "快照热门"}]},
+            {"title": "最新上映", "items": [{"douban_id": "2", "title": "快照最新"}]},
+            {"title": "豆瓣高分", "items": [{"douban_id": "3", "title": "快照高分"}]}]}}}
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: {"data": []}, snapshot=snapshot)
+        result = catalog.home("variety")
+        self.assertEqual(result["source"], "douban-snapshot")
+        self.assertEqual([section["items"][0]["title"] for section in result["sections"]],
+                         ["快照热门", "快照最新", "快照高分"])
+
+    def test_partial_throttle_only_backfills_the_missing_section(self):
+        snapshot = {"home": {"movie": {"sections": [
+            {"title": "最近热门", "items": [{"douban_id": "1", "title": "快照热门"}]},
+            {"title": "最新上映", "items": [{"douban_id": "2", "title": "快照最新"}]},
+            {"title": "豆瓣高分", "items": [{"douban_id": "3", "title": "快照高分"}]}]}}}
+
+        def fetch(url):
+            if "sort=U" in url:
+                return search_payload([{"id": "9", "title": "新鲜热门", "rate": "9.0"}])
+            return {"data": []}
+
+        catalog = douban_catalog.DoubanCatalog(fetch=fetch, snapshot=snapshot)
+        result = catalog.home("movie")
+        self.assertEqual(result["source"], "douban-partial")
+        self.assertTrue(result["stale"])
+        self.assertEqual([section["items"][0]["title"] for section in result["sections"]],
+                         ["新鲜热门", "快照最新", "快照高分"])
+
+    def test_throttled_home_sections_are_retried_before_giving_up(self):
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            return {"data": []}
+
+        douban_catalog.DoubanCatalog(fetch=fetch, snapshot={}).home("movie")
+        self.assertEqual(len(calls), 3 * (1 + len(douban_catalog.EXPLORE_RETRY_DELAYS)))
+
+    def test_filtered_show_empty_result_is_not_treated_as_throttling(self):
+        """「全部」页的筛选空结果是合法结果：既不回落快照，也不抛限流错误。"""
+        snapshot = {"home": {"variety": {"sections": [
+            {"title": "最近热门", "items": [{"douban_id": "1", "title": "快照综艺"}]}]}}}
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: {"data": []}, snapshot=snapshot)
+        result = catalog.show("variety", genre="真人秀")
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["source"], "douban")
 
 
 if __name__ == "__main__":

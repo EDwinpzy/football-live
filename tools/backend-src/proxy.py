@@ -4003,8 +4003,9 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 # ---------------- 网页版电视频道表（/api/iptv，2026-09-04 v1.21） ----------------
-# 与 app IptvRepository.SOURCES 同源：后台托管 latest（自建站点对象存储）优先，
-# 上游每日校验列表殿后。服务端出站无跨源限制，客户端拿到即可播（线路经 /api/relay）。
+# 与 app IptvRepository.SOURCES 同源：线上主后端托管 latest（2026-09-17 起为 CloudBase
+# appletv-d5ge1bth794873f76，自建站点对象存储已退役）优先，上游每日校验列表殿后。
+# 服务端出站无跨源限制，客户端拿到即可播（线路经 /api/relay）。
 IPTV_SOURCES = [
     "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/iptv/latest",
     "https://gh-proxy.com/raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",

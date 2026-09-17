@@ -1174,22 +1174,15 @@ function renderVodLib() {
 }
 
 /* 海报竖卡（232×352 r12 + remark 角标）。
- * sub="year" 影视首页 LibCard（year  ★x.x 20px）/ sub="star" 全部页 VcardCard（★x.x 19px）/ sub="" 搜索/我的（无副行） */
-function posterCard(it, titleSize, sub) {
-  let subHtml = "";
-  if (sub === "year" && +it.score > 0) {
-    const yr = os(it.year);
-    subHtml = `<div class="pc-sub">${esc(yr ? yr + "  " : "")}★ ${Number(it.score).toFixed(1)}</div>`;
-  } else if (sub === "star" && +it.score > 0) {
-    subHtml = `<div class="pc-sub" style="font-size:19px;margin-top:2px">★ ${Number(it.score).toFixed(1)}</div>`;
-  }
+ * 2026-09-17 用户要求：卡片下方不再有副行（年份/豆瓣评分），只留海报 + 片名；
+ * 全部页 VcardCard 的评分由 allCard 单独渲染，不走这里。 */
+function posterCard(it, titleSize) {
   return `<div class="pcard" data-vid="${esc(it.id)}">
     <div class="pc-img"><img loading="lazy" decoding="async" src="${esc(img(it.cover))}" alt="">${it.remark ? `<span class="pc-tag">${esc(it.remark)}</span>` : ""}</div>
     <div class="pc-title" style="font-size:${titleSize || 24}px">${esc(it.title)}</div>
-    ${subHtml}
   </div>`;
 }
-function libCard(it, titleSize) { return posterCard(it, titleSize, "year"); }
+function libCard(it, titleSize) { return posterCard(it, titleSize); }
 function bindCards(sel) {
   $$(sel + " .pcard").forEach(c => c.addEventListener("click", () => {
     const t = c.querySelector(".pc-title");
@@ -1685,7 +1678,7 @@ function renderSearch() {
       rs.length === 0 && search.loading ? "搜索中…" : rs.length === 0 ? "没有匹配的影片" : "该分类暂无结果";
     return;
   }
-  $("#searchGrid").innerHTML = shown.map(it => posterCard(it, 24, "")).join("");
+  $("#searchGrid").innerHTML = shown.map(it => posterCard(it, 24)).join("");
   bindCards("#searchGrid"); registerGrid("#searchGrid", state.portrait ? 205 : 232, 20, state.portrait ? 40 : 70);
 }
 /* App 结果分类：目录内按 categoryId；目录外前 24 条拉详情归类（并发 6） */
@@ -1806,7 +1799,7 @@ function renderFav() {
   $("#favEmpty").hidden = favs.length > 0;
   $("#favHistSec").hidden = hist.length === 0;   /* App：历史记录标题仅历史非空时渲染 */
   $("#favHistEmpty").hidden = hist.length > 0;
-  $("#favRow").innerHTML = favs.map(it => posterCard(it, 21, "")).join("");
+  $("#favRow").innerHTML = favs.map(it => posterCard(it, 21)).join("");
   bindCards("#favRow");
   $("#histRowFav").innerHTML = hist.map(h => histCard(h, "fav")).join("");
   $$("#histRowFav .pcard").forEach(c => c.addEventListener("click", () => {

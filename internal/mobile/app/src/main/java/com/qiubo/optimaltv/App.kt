@@ -10,9 +10,12 @@ import com.qiubo.optimaltv.data.prefs.SettingsStore
 import com.qiubo.optimaltv.data.repo.IptvRepository
 import com.qiubo.optimaltv.data.repo.LiveRepository
 import com.qiubo.optimaltv.data.repo.VodRepository
+import com.qiubo.optimaltv.data.repo.heroRefs
 import com.qiubo.optimaltv.data.source.RemoteApiSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
@@ -88,27 +91,43 @@ object Graph {
 }
 
 /**
- * v1.20 启动门闸重设计（用户需求「首次进入 app 压缩在 5s 内」）：
- * 门闸只等「本地秒出」的资源——授权状态（DataStore）、IPTV 快照（磁盘 m3u）、
- * 目录（磁盘 JSON 快照 / assets 种子）——就绪或 5s 硬预算耗尽即放行进主界面；
- * 网络类预热（足球赛程冷抓 20s+、目录刷新、各分类 tab 页数据、封面 Coil 预载）
- * 全部转后台继续，进页后数据到货渐进上屏（各页自带 loading 态，不闪空白）。
- * 旧版（v1.17~1.19）门闸等全部网络预热完成（TV 90s / 移动 30s）才放行——弱网/
- * 冷缓存下进 app 动辄半分钟起步，是「进入 app 很卡很慢」的主根因。
+ * 启动门闸（v1.32 起按用户要求回到「全量预热后再放行」）：
+ *
+ * - 旧版（v1.17~1.19）：等全部网络预热完成（TV 90s / 移动 30s）→ 进 app 动辄半分钟，
+ *   是「进入 app 很卡很慢」的主根因，故 v1.20 改成只等本地秒出资源（5s 硬预算）。
+ * - v1.32（2026-09-16 用户需求）：「要等所有界面的信息加载好之后再进入 APP，否则就在
+ *   加载界面那里等待」——进主界面后各页数据迟迟不上屏（影视页 hero 简介 15s+、
+ *   片库三栏更晚）比多等几秒启动屏更难忍，于是把足球赛程 / 电视源拉新 / 目录刷新 /
+ *   影视各分类三栏 + hero 简介 + 封面预热全部纳入门闸等待，预算上限取
+ *   [BuildConfig.STARTUP_GATE_MS]（TV 90s / 移动 30s）；到上限仍放行，剩余转后台继续，
+ *   避免弱网/断网时把用户永久扣在启动屏。
  */
 object AppStartup {
     private val _ready = kotlinx.coroutines.flow.MutableStateFlow(false)
     val ready: kotlinx.coroutines.flow.StateFlow<Boolean> = _ready.asStateFlow()
 
-    /** 快速门闸总预算：本地资源秒出，5s 是弱机/首装硬上限 */
+    private val _status = kotlinx.coroutines.flow.MutableStateFlow("正在准备…")
+
+    /**
+     * 启动屏文案（2026-09-17 用户需求：全量预热期间人会盯着启动屏看，需要知道不是在卡死）。
+     * 只作提示，不参与门控判定。
+     */
+    val status: kotlinx.coroutines.flow.StateFlow<String> = _status.asStateFlow()
+
+    /** 本地三件套（授权/IPTV 快照/目录快照）预算：本地资源秒出，5s 是弱机/首装硬上限 */
     private const val FAST_GATE_MS = 5_000L
+
+    /** 全量门闸预算（用户要求等所有界面信息就绪）：TV 90s / 移动 30s，见 app/build.gradle */
+    private val FULL_GATE_MS = com.qiubo.optimaltv.BuildConfig.STARTUP_GATE_MS
 
     fun begin() {
         val scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val t0 = System.currentTimeMillis()
+        _status.value = "正在准备…"
         scope.launch {
             try {
-                kotlinx.coroutines.withTimeoutOrNull(FAST_GATE_MS) {
+                val settled = kotlinx.coroutines.withTimeoutOrNull(FULL_GATE_MS) {
+                    _status.value = "正在连接服务器…"
                     // 授权状态（门控判定依赖；DataStore 本地读，亚秒级）
                     val lic = if (com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED) {
                         launch {
@@ -128,7 +147,30 @@ object AppStartup {
                             Graph.repo.awaitCatalogAvailable()
                         }
                     }
-                    listOfNotNull(lic, iptv, cat).joinAll()
+                    // 全量预热（用户要求：所有界面信息加载完再进主界面）——失败不阻塞放行
+                    val matches = launch {
+                        runCatching { Graph.live.matches() }
+                            .onFailure { OtvLog.w("启动预热：比赛列表失败（后台重试）: ${it.message}") }
+                    }
+                    val iptvRefresh = launch {
+                        runCatching { Graph.iptv.refreshIfStale() }
+                            .onFailure { OtvLog.w("启动预热：电视源拉新失败（后台重试）: ${it.message}") }
+                    }
+                    val catalogRefresh = launch {
+                        runCatching { Graph.repo.refresh() }
+                            .onFailure { OtvLog.w("启动预热：目录刷新失败（后台重试）: ${it.message}") }
+                    }
+                    val vodPreload = launch {
+                        runCatching { preloadVodTabPages() }
+                            .onFailure { OtvLog.w("影视 tab 页预载失败（后台继续）: ${it.message}") }
+                    }
+                    _status.value = "正在加载影视片库…"
+                    listOfNotNull(lic, iptv, cat, matches, iptvRefresh, catalogRefresh, vodPreload).joinAll()
+                    _status.value = "即将进入…"
+                    true
+                }
+                if (settled == null) {
+                    OtvLog.w("startup gate 到预算上限（${FULL_GATE_MS}ms）仍未全部就绪 → 放行，剩余转后台")
                 }
             } catch (e: Exception) {
                 OtvLog.e("startup gate 异常（兜底放行）: ${e.message}")
@@ -138,24 +180,16 @@ object AppStartup {
                 _ready.value = true
             }
         }
-        // 后台预热（不阻塞放行）：足球赛程 / IPTV 拉新 / 目录刷新 / 分类 tab 页深预载
-        scope.launch { runCatching { Graph.live.matches() } }
-        scope.launch { runCatching { Graph.iptv.refreshIfStale() } }
-        scope.launch { runCatching { Graph.repo.refresh() } }
-        scope.launch {
-            runCatching { preloadVodTabPages() }
-                .onFailure { OtvLog.w("影视 tab 页预载失败（后台继续）: ${it.message}") }
-        }
         // v1.19 硬保险：主线程 Handler 看门狗——门闸协程级超时（withTimeout）依赖
         // IO 线程池可调度；若任何同步阻塞把 IO 池占满（实测：Semaphore.acquire 死锁
         // 曾让兜底失效、启动屏永久冻结），协程超时永远恢复不了。本看门狗跑在
-        // 主线程 Looper 上，不受影响：任何情况下启动屏最多 7s 必放行。
+        // 主线程 Looper 上，不受影响：任何情况下启动屏最多「预算上限 + 2s」必放行。
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
             if (!_ready.value) {
-                OtvLog.e("startup gate 看门狗触发：7s 仍未放行 → 强制放行（协程链疑似饿死）")
+                OtvLog.e("startup gate 看门狗触发：${FULL_GATE_MS + 2_000}ms 仍未放行 → 强制放行（协程链疑似饿死）")
                 _ready.value = true
             }
-        }, FAST_GATE_MS + 2_000)
+        }, FULL_GATE_MS + 2_000)
     }
 
     /**
@@ -174,7 +208,22 @@ object AppStartup {
         Graph.repo.awaitCatalogAvailable()
         val cats = Graph.repo.state.value.catalog?.categories ?: return
         cats.forEach { Graph.repo.libBlocks(it.id) }       // 全部分类三块并行拉取（幂等）
-        cats.forEach { Graph.repo.awaitLibBlocks(it.id) }  // 等全部拉完再收封面
+        // 两件事并行：等各分类三块拉完（下面还要收封面 URL）+ 预取 hero 简介。
+        // hero 简介（豆瓣详情）以前要等页面组合时才发请求，实测进页后 15s+ 才到货
+        // （用户反馈「影视信息加载太慢」）；这里按 UI 同一套 hero 口径（heroRefs）
+        // 预取前 6 条，结果落 VodRepository.briefCache，进页同步命中直接出简介。
+        kotlinx.coroutines.coroutineScope {
+            launch {
+                runCatching {
+                    Graph.repo.awaitHome()
+                    heroRefs(Graph.repo.state.value.catalog, Graph.repo.homeFlow.value)
+                        .map { it.id }.distinct().take(6)
+                        .map { id -> launch { runCatching { Graph.repo.vodBrief(id) } } }
+                        .joinAll()
+                }.onFailure { OtvLog.w("hero 简介预载失败（进页后按需拉取）: ${it.message}") }
+            }
+            cats.map { async { Graph.repo.awaitLibBlocks(it.id) } }.awaitAll()
+        }
         val blocks = Graph.repo.libBlocksFlow.value
         val home = Graph.repo.homeFlow.value
         // URL 收集优先用刷新完成后的最新目录（refresh 与预载并行，通常此时已完成）

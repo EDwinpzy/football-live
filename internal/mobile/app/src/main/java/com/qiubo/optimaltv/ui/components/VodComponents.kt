@@ -98,11 +98,9 @@ fun RowScope.DetailActionButton(
     }
 }
 
-/** 横屏卡片元信息样式；竖屏 compact=true 时统一不显示评分。 */
-enum class VodCardMetaStyle { None, Rating, YearAndRating }
-
 /**
  * 影视海报卡的单一生产实现：首页、全部、搜索共用，避免三个页面样式/评分规则漂移。
+ * 2026-09-17 用户要求：卡片下方不再显示豆瓣评分与年份（竖屏/横屏一致），只留片名。
  */
 @Composable
 fun MobileVodCard(
@@ -110,7 +108,6 @@ fun MobileVodCard(
     s: Float,
     compact: Boolean,
     modifier: Modifier = Modifier,
-    metaStyle: VodCardMetaStyle = VodCardMetaStyle.None,
     onClick: () -> Unit,
 ) {
     Column(modifier.fillMaxWidth().testTag(MobileUiTags.card(item.id))) {
@@ -146,7 +143,7 @@ fun MobileVodCard(
                 )
             }
         }
-        Spacer(Modifier.height((if (metaStyle == VodCardMetaStyle.YearAndRating) 12f else 10f).sx(s)))
+        Spacer(Modifier.height(10f.sx(s)))
         Text(
             item.title,
             color = OtvColors.White,
@@ -155,15 +152,6 @@ fun MobileVodCard(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        if (!compact && item.rating > 0.0 && metaStyle != VodCardMetaStyle.None) {
-            Spacer(Modifier.height((if (metaStyle == VodCardMetaStyle.YearAndRating) 4f else 2f).sx(s)))
-            val prefix = if (metaStyle == VodCardMetaStyle.YearAndRating && item.year.isNotBlank()) "${item.year}  " else ""
-            Text(
-                prefix + "★ " + "%.1f".format(item.rating),
-                color = OtvColors.White50,
-                fontSize = (if (metaStyle == VodCardMetaStyle.YearAndRating) 20f else 19f).sxs(s),
-            )
-        }
     }
 }
 
