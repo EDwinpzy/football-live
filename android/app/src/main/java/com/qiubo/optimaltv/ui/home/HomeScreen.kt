@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
@@ -85,6 +86,22 @@ import java.net.URLEncoder
  * hero 左右键手动切换（播放钮上），不自动轮播（需求 #15）。
  */
 private const val VOD_BAND = 700f
+
+/**
+ * hero 各文字块的高度上限（设计值 + 4px 余量）：title 64 / meta 54 / desc 74。
+ * 2026-09-19 修复（用户报障「奥德赛」立刻播放钮整颗消失）：截图实测设备上 title/meta
+ * 的文字框比设计高约 90px（字体行高差异），三行累计把尾部按钮顶出海报带、meta 与简介
+ * 也整体下移。逐块封顶后，异常设备的行高被夹回设计值——位置与正常设备逐像素一致。
+ */
+private const val VOD_HERO_TITLE_MAX = 68f
+private const val VOD_HERO_META_MAX = 58f
+private const val VOD_HERO_DESC_MAX = 78f
+
+/** hero 文字列总上限（= 68 + 8 + 58 + 10 + 78 = 222），总闸，兜住任何单块漏网 */
+private const val VOD_HERO_TEXT_MAX = 222f
+
+/** hero 播放钮距海报带底部（设计钮框 y 576..640，带高 700 → 底部留 60） */
+private const val VOD_HERO_BTN_BOTTOM = 60f
 
 @Composable
 fun VodScreen(nav: NavController) {
@@ -528,17 +545,21 @@ private fun VodHeroBand(
                 .height(160f.sx(s))
                 .background(Brush.verticalGradient(0f to Color.Transparent, 1f to OtvColors.Bg)),
         )
-        // vcontent（top 340：title 44 / cat 27 / desc 两行 / btn 白50% h64）
+        // vcontent（top 340：title 44 / cat 27 / desc 两行；播放钮已移出本列，见下方注释）
         hero?.let { h ->
             Column(
                 Modifier
                     .align(Alignment.TopStart)
                     .padding(start = 91f.sx(s), top = 340f.sx(s))
-                    .width(760f.sx(s)),
+                    .width(760f.sx(s))
+                    // 2026-09-19：文字列总闸（设计内容高 210）——单块见各自 heightIn
+                    .heightIn(max = VOD_HERO_TEXT_MAX.sx(s)),
             ) {
                 Text(
                     h.title, color = OtvColors.White, fontSize = 44f.sxs(s), fontWeight = FontWeight.Bold,
                     lineHeight = 46f.sxs(s), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    // 行高/字体内边距随设备字体变的夹子（设计框高 64）
+                    modifier = Modifier.heightIn(max = VOD_HERO_TITLE_MAX.sx(s)),
                     style = androidx.compose.ui.text.TextStyle(
                         shadow = androidx.compose.ui.graphics.Shadow(
                             Color(0x99000000),
@@ -564,10 +585,15 @@ private fun VodHeroBand(
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(14f.sx(s)),
+                        // 夹回设计框高 54（设备字体行高异常时 meta 不再把简介/按钮往下推）
+                        modifier = Modifier.heightIn(max = VOD_HERO_META_MAX.sx(s)),
                     ) {
                         if (metaLine.isNotEmpty()) {
                             Text(
-                                metaLine.joinToString(" / "),
+                                // 2026-09-19：段数上限 6——豆瓣 regions+genres 最多可到 10 段
+                                //（奥德赛：2026/美国/加拿大/冰岛/新西兰/摩洛哥/英国/动作/历史/奇幻），
+                                // 760 宽单行放不下会被省略号截断且把评分挤出列外；截到 6 段与其它影片观感一致
+                                metaLine.take(6).joinToString(" / "),
                                 color = OtvColors.White.copy(alpha = 0.8f), fontSize = 27f.sxs(s), fontWeight = FontWeight.Medium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
@@ -582,63 +608,70 @@ private fun VodHeroBand(
                     Text(
                         desc, color = OtvColors.White55, fontSize = 27f.sxs(s), fontWeight = FontWeight.Medium,
                         lineHeight = 35f.sxs(s), maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        // 夹回设计框高 74（两行）；超出只收敛行数，不再挤压按钮
+                        modifier = Modifier.heightIn(max = VOD_HERO_DESC_MAX.sx(s)),
                     )
                 }
-                // vod-actions（mt26）：btn-vod 白50%底黑字 h64 px40 r32 字26 Bold；聚焦纯白（focusedBg）+scale1.02
-                Spacer(Modifier.height(26f.sx(s)))
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .focusRequester(playFocus)
-                        .dpadFocusable(
-                            scaleFocused = 1.02f, focusedBg = OtvColors.White, focusedBgRadius = 32f.sx(s),
-                            // 需求 #4：焦点在 hero 播放钮上时左右键翻页切换影片，海报跟随切换；
-                            // UP 由引擎 topFocus 逃逸回当前页 tab（无需显式声明）
-                            navOverride = { dir ->
-                                when (dir) {
-                                    NAV_LEFT -> if (heroes.size > 1) { onPrev(); true } else false
-                                    NAV_RIGHT -> if (heroes.size > 1) { onNext(); true } else false
-                                    // v1.17：DOWN 定向到「当前选中分类」chip——几何搜索会落在
-                                    // 第一个 chip（电影）上，hover-select 立即切回电影并覆盖上次
-                                    // 分类记忆（实测根因）；定向到选中项后 hover-select 无害。
-                                    // 光标导航#3（2026-09-03）：有最近观看时 DOWN 先落最近观看
-                                    // 首卡（用户报障：hero 跳过最近观看直达 chips）；无历史再落 chip。
-                                    // 目标行未组合（requestFocus 必败）：滚一步露出再试（对齐引擎
-                                    // scroll-reveal 手感）
-                                    NAV_DOWN -> {
-                                        val downTarget = if (hasHistory) firstHistoryFocus else selectedCatChipFocus
-                                        heroScope.launch {
-                                            repeat(8) {
-                                                if (runCatching { downTarget.requestFocus() }.isSuccess) return@launch
-                                                runCatching { listState.scrollBy(300f) }
-                                                delay(60)
-                                            }
+            }
+            // vod-actions：btn-vod 白50%底黑字 h64 px40 r32 字26 Bold；聚焦纯白（focusedBg）+scale1.02
+            // 2026-09-19 修复：钮从文字列尾部移到海报带底固定位（设计钮框 y576..640，距带底 60）。
+            // 起因：用户报障「奥德赛」——meta 10 段 + 简介更长时文字列被撑高，钮被顶出海报带、
+            // 整颗不可见（截图实测钮落在带外）。现在钮不参与文字流测量，简介再长也只让 desc
+            // 收敛行数（VOD_HERO_TEXT_MAX 封顶），钮位置与设计稿逐像素一致。
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 91f.sx(s), bottom = VOD_HERO_BTN_BOTTOM.sx(s))
+                    .focusRequester(playFocus)
+                    .dpadFocusable(
+                        scaleFocused = 1.02f, focusedBg = OtvColors.White, focusedBgRadius = 32f.sx(s),
+                        // 需求 #4：焦点在 hero 播放钮上时左右键翻页切换影片，海报跟随切换；
+                        // UP 由引擎 topFocus 逃逸回当前页 tab（无需显式声明）
+                        navOverride = { dir ->
+                            when (dir) {
+                                NAV_LEFT -> if (heroes.size > 1) { onPrev(); true } else false
+                                NAV_RIGHT -> if (heroes.size > 1) { onNext(); true } else false
+                                // v1.17：DOWN 定向到「当前选中分类」chip——几何搜索会落在
+                                // 第一个 chip（电影）上，hover-select 立即切回电影并覆盖上次
+                                // 分类记忆（实测根因）；定向到选中项后 hover-select 无害。
+                                // 光标导航#3（2026-09-03）：有最近观看时 DOWN 先落最近观看
+                                // 首卡（用户报障：hero 跳过最近观看直达 chips）；无历史再落 chip。
+                                // 目标行未组合（requestFocus 必败）：滚一步露出再试（对齐引擎
+                                // scroll-reveal 手感）
+                                NAV_DOWN -> {
+                                    val downTarget = if (hasHistory) firstHistoryFocus else selectedCatChipFocus
+                                    heroScope.launch {
+                                        repeat(8) {
+                                            if (runCatching { downTarget.requestFocus() }.isSuccess) return@launch
+                                            runCatching { listState.scrollBy(300f) }
+                                            delay(60)
                                         }
-                                        true
                                     }
-                                    else -> false
+                                    true
                                 }
-                            },
-                            // 需求 影视#1：光标移到「立即播放」时页面滚动回最上方
-                            onFocusedChange = {
-                                if (it) {
-                                    ReturnFocus.mark("vod", "hero")
-                                    heroScope.launch { listState.animateScrollToItem(0) }
-                                }
-                            },
-                        ) {
-                            nav.navigate("detail/" + URLEncoder.encode(h.id, "UTF-8"))
-                        }
-                        .background(OtvColors.White.copy(alpha = 0.5f), RoundedCornerShape(32f.sx(s)))
-                        .height(64f.sx(s))
-                        .padding(horizontal = 40f.sx(s)),
-                ) {
-                    /* 看过的影片换成「继续播放」（用户 2026-09-17 要求） */
-                    Text(
-                        if (h.id in watchedIds) "继续播放" else "立即播放",
-                        color = OtvColors.Bg, fontSize = 26f.sxs(s), fontWeight = FontWeight.Bold,
-                    )
-                }
+                                else -> false
+                            }
+                        },
+                        // 需求 影视#1：光标移到「立即播放」时页面滚动回最上方
+                        onFocusedChange = {
+                            if (it) {
+                                ReturnFocus.mark("vod", "hero")
+                                heroScope.launch { listState.animateScrollToItem(0) }
+                            }
+                        },
+                    ) {
+                        nav.navigate("detail/" + URLEncoder.encode(h.id, "UTF-8"))
+                    }
+                    .background(OtvColors.White.copy(alpha = 0.5f), RoundedCornerShape(32f.sx(s)))
+                    .height(64f.sx(s))
+                    .padding(horizontal = 40f.sx(s)),
+            ) {
+                /* 看过的影片换成「继续播放」（用户 2026-09-17 要求） */
+                Text(
+                    if (h.id in watchedIds) "继续播放" else "立即播放",
+                    color = OtvColors.Bg, fontSize = 26f.sxs(s), fontWeight = FontWeight.Bold,
+                )
             }
         }
         // carousel-dots（带内底部居中：黑50%胶囊，当前页白点）

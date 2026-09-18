@@ -127,7 +127,10 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
 .lib-empty{color:rgba(255,255,255,.5);font-size:26px;padding:0 86px;min-height:40px}
 
 /* ===== 影视 hero ===== */
-.vod-hero-content{position:absolute;left:91px;top:340px;width:760px}
+/* 2026-09-19：内容列封顶（设计内容高 210）——与 App 同口径（VOD_HERO_TEXT_MAX）。
+   起因：用户报障「奥德赛」简介/meta 更长时把「立即播放」顶出海报带（钮整颗不可见）。 */
+.vod-hero-content{position:absolute;left:91px;top:340px;width:760px;max-height:210px;overflow:hidden;
+  -webkit-text-size-adjust:100%;text-size-adjust:100%}
 .hero-title{font-size:44px;font-weight:700;line-height:46px;color:#fff;max-width:100%;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   text-shadow:0 2px 20px rgba(0,0,0,.6)}
@@ -136,7 +139,10 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
 .hero-meta-row .hm-score{font-size:15px;font-weight:700;color:rgba(255,255,255,.5);flex-shrink:0}
 .hero-desc{font-size:27px;font-weight:500;line-height:35px;color:rgba(255,255,255,.55);
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.btn-play-hero{height:64px;padding:0 40px;border-radius:32px;background:rgba(255,255,255,.5);
+/* 钮固定到带底设计位（App：钮框 y576..640，距带底 60）——不再随文字列排布，
+   文字再长也不会把它挤出去；正常内容下位置与设计稿一致（left 91 + 内缩 40 = 文字 131） */
+.btn-play-hero{position:absolute;left:91px;bottom:60px;height:64px;padding:0 40px;border-radius:32px;
+  background:rgba(255,255,255,.5);
   font-size:26px;font-weight:700;color:#0E0E0F;flex-shrink:0}
 .vod-dots{left:50%;transform:translateX(-50%);bottom:30px}
 
@@ -504,6 +510,8 @@ body.portrait .src-picker .sp-chips{flex-wrap:wrap;justify-content:center}
    ============================================================ */
 body.portrait .vod-hero{height:520px}
 body.portrait .vod-hero-content{left:40px;top:170px;width:640px}
+/* 竖屏播放钮同样固定到带底（与 App 移动版竖屏分支一致：钮框 y406..470，带 520 → 距底 50） */
+body.portrait .btn-play-hero{left:40px;bottom:50px}
 /* 需求①（2026-09-12）：足球 hero 竖屏自适应缩小（对齐影视 hero 520 做法）——
    带高 700→520；内容列 top 170→120（让出标签栏胶囊后仍容两队比分+状态行）；
    CTA 绝对定位 top 500→390（520 带内，不再压比分区/溢出带外） */

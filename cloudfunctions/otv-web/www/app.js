@@ -1360,7 +1360,11 @@ function renderVodHero() {
   vodBrief(c.id).then(b => {
     if (!b) { $("#vodHeroDesc").textContent = c.title + " · My TV 精选内容，一键播放。"; return; }
     if (vod.heroes[vod.heroIdx || 0] && vod.heroes[vod.heroIdx || 0].id !== c.id) return;
-    const meta = b.meta ? b.meta.split("/").map(x => x.trim()).filter(Boolean).join(" / ") : (c.tag || "");
+    /* 2026-09-19：段数上限 6——豆瓣 regions+genres 最多可到 10 段
+       （奥德赛：2026/美国/加拿大/冰岛/新西兰/摩洛哥/英国/动作/历史/奇幻），
+       760 宽单行放不下会被省略号截断、并把评分挤出列外；与 App 同口径（take(6)） */
+    const metaParts = b.meta ? b.meta.split("/").map(x => x.trim()).filter(Boolean) : [];
+    const meta = metaParts.length ? metaParts.slice(0, 6).join(" / ") : (c.tag || "");
     $("#vodHeroMeta").innerHTML = `${esc(meta)}${b.rating > 0 ? `<span class="hm-score">★ ${b.rating.toFixed(1)}</span>` : ""}`;
     $("#vodHeroDesc").textContent = b.desc || c.title + " · My TV 精选内容，一键播放。";
   });

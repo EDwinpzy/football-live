@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -77,6 +78,23 @@ import java.net.URLEncoder
  */
 private const val VOD_BAND = 700f
 private const val VOD_BAND_PORTRAIT = 520f
+
+/**
+ * hero 各文字块的高度上限（设计值 + 4px 余量）：title 64 / meta 54 / desc 74。
+ * 2026-09-19 修复（用户报障「奥德赛」立刻播放钮整颗消失）：截图实测设备上 title/meta
+ * 的文字框比设计高约 90px（字体行高差异），三行累计把尾部按钮顶出海报带、meta 与简介
+ * 也整体下移。逐块封顶后，异常设备的行高被夹回设计值；与 TV 版同口径。
+ */
+private const val VOD_HERO_TITLE_MAX = 68f
+private const val VOD_HERO_META_MAX = 58f
+private const val VOD_HERO_DESC_MAX = 78f
+
+/** hero 文字列总上限（= 68 + 8 + 58 + 10 + 78 = 222），总闸，兜住任何单块漏网 */
+private const val VOD_HERO_TEXT_MAX = 222f
+
+/** hero 播放钮距海报带底部（设计钮框：横屏 y576..640/带 700 → 60；竖屏 y406..470/带 520 → 50） */
+private const val VOD_HERO_BTN_BOTTOM_LAND = 60f
+private const val VOD_HERO_BTN_BOTTOM_PORT = 50f
 
 @Composable
 fun VodScreen(nav: NavController) {
@@ -382,19 +400,26 @@ private fun VodHeroBand(
                             .height(160f.sx(s))
                             .background(Brush.verticalGradient(0f to Color.Transparent, 1f to OtvColors.Bg)),
                     )
-                    // vcontent（2026-09-19 用户需求：文字/按钮整体上移，横屏 top 340→250 / 竖屏 170→120）
+                    // vcontent（横屏 top 340 / 竖屏 top 170；竖屏宽 640 防溢出窄屏）
+                    // 2026-09-19 回滚「整体上移 340→250 / 170→120」：那次上移是对
+                    // 「简介把播放钮顶出海报带」的位移规避，现已按根因修（文字列封顶 + 钮固定到
+                    // 带底设计位），位置恢复设计稿，与 TV 版重新 1:1 对齐。
                     Column(
                         Modifier
                             .align(Alignment.TopStart)
                             .padding(
                                 start = if (portrait) 40f.sx(s) else 91f.sx(s),
-                                top = (if (portrait) 120f else 250f).sx(s),
+                                top = (if (portrait) 170f else 340f).sx(s),
                             )
-                            .width((if (portrait) 640f else 760f).sx(s)),
+                            .width((if (portrait) 640f else 760f).sx(s))
+                            // 文字列总闸（设计内容高 210）：单块见各自 heightIn
+                            .heightIn(max = VOD_HERO_TEXT_MAX.sx(s)),
                     ) {
                         Text(
                             h.title, color = OtvColors.White, fontSize = 44f.sxs(s), fontWeight = FontWeight.Bold,
                             lineHeight = 46f.sxs(s), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            // 行高/字体内边距随设备字体变的夹子（设计框高 64）
+                            modifier = Modifier.heightIn(max = VOD_HERO_TITLE_MAX.sx(s)),
                             style = androidx.compose.ui.text.TextStyle(
                                 shadow = androidx.compose.ui.graphics.Shadow(
                                     Color(0x99000000),
@@ -420,10 +445,15 @@ private fun VodHeroBand(
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(14f.sx(s)),
+                                // 夹回设计框高 54（设备字体行高异常时 meta 不再把简介/按钮往下推）
+                                modifier = Modifier.heightIn(max = VOD_HERO_META_MAX.sx(s)),
                             ) {
                                 if (metaLine.isNotEmpty()) {
                                     Text(
-                                        metaLine.joinToString(" / "),
+                                        // 2026-09-19：段数上限 6——豆瓣 regions+genres 最多 10 段
+                                        //（奥德赛：2026/美国/加拿大/冰岛/新西兰/摩洛哥/英国/动作/历史/奇幻），
+                                        // 760 宽单行放不下会被省略号截断且把评分挤出列外
+                                        metaLine.take(6).joinToString(" / "),
                                         color = OtvColors.White.copy(alpha = 0.8f), fontSize = 27f.sxs(s), fontWeight = FontWeight.Medium,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     )
@@ -438,24 +468,33 @@ private fun VodHeroBand(
                             Text(
                                 desc, color = OtvColors.White55, fontSize = 27f.sxs(s), fontWeight = FontWeight.Medium,
                                 lineHeight = 35f.sxs(s), maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                // 夹回设计框高 74（两行）；超出只收敛行数，不再挤压按钮
+                                modifier = Modifier.heightIn(max = VOD_HERO_DESC_MAX.sx(s)),
                             )
                         }
-                        // vod-actions（mt26）：btn-vod 白50%底黑字 h64 px40 r32 字26 Bold
-                        Spacer(Modifier.height(26f.sx(s)))
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(32f.sx(s)))
-                                .tapCard { nav.navigate("detail/" + URLEncoder.encode(h.id, "UTF-8")) }
-                                .background(OtvColors.White.copy(alpha = 0.5f), RoundedCornerShape(32f.sx(s)))
-                                .height(64f.sx(s))
-                                .padding(horizontal = 40f.sx(s)),
-                        ) {
-                            Text(
-                                if (h.id in watchedIds) "继续播放" else "立即播放",
-                                color = OtvColors.Bg, fontSize = 26f.sxs(s), fontWeight = FontWeight.Bold,
+                    }
+                    // vod-actions：btn-vod 白50%底黑字 h64 px40 r32 字26 Bold
+                    // 2026-09-19 修复：钮从文字列尾部移到海报带底固定位（设计位），
+                    // 与 TV 版同一口径；文字列再长也只会让 desc 收敛行数（各块 heightIn 封顶），
+                    // 钮不再被顶出带外（用户报障：奥德赛钮整颗消失）。
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(
+                                start = if (portrait) 40f.sx(s) else 91f.sx(s),
+                                bottom = (if (portrait) VOD_HERO_BTN_BOTTOM_PORT else VOD_HERO_BTN_BOTTOM_LAND).sx(s),
                             )
-                        }
+                            .clip(RoundedCornerShape(32f.sx(s)))
+                            .tapCard { nav.navigate("detail/" + URLEncoder.encode(h.id, "UTF-8")) }
+                            .background(OtvColors.White.copy(alpha = 0.5f), RoundedCornerShape(32f.sx(s)))
+                            .height(64f.sx(s))
+                            .padding(horizontal = 40f.sx(s)),
+                    ) {
+                        Text(
+                            if (h.id in watchedIds) "继续播放" else "立即播放",
+                            color = OtvColors.Bg, fontSize = 26f.sxs(s), fontWeight = FontWeight.Bold,
+                        )
                     }
                 }
             }
