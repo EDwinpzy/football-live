@@ -73,16 +73,18 @@ CACHE_SCHEMA = 1
 CACHE_ENVELOPE_KEYS = {"schema", "fetched_at", "value"}
 SNAPSHOT_PATH = Path(__file__).with_name("douban_snapshot.json")
 FILTER_MATRIX_PATH = Path(__file__).with_name("douban_filter_matrix.json")
-FILTER_DIMENSIONS = ("genre", "region", "year", "rating")
+FILTER_DIMENSIONS = ("genre", "region", "year")
+# 本地判定某个维度时，条目上必须拿到的字段（评分不在其中：列表行的 `rate` 一定给得到）。
+LOCAL_FIELDS = {"genre": "genres", "region": "regions", "year": "year"}
 # 无实测数据时的保守缺省：只有电影类型有直接证据（线上 `genre=` 能返回正常结果，
 # 2026-09-18 `show(tv, genre=古装)` 也返回过结果），其余维度一律本地判定 —— 宁可少给，
 # 不给错。探测脚本（tools/probe_douban_filter_matrix.py）会用实测覆盖这份缺省。
 DEFAULT_FILTER_MATRIX = {
-    "movie": {"genre": True, "region": True, "year": True, "rating": True},
-    "tv": {"genre": False, "region": False, "year": False, "rating": True},
-    "anime": {"genre": False, "region": False, "year": False, "rating": True},
-    "variety": {"genre": False, "region": False, "year": False, "rating": True},
-    "short": {"genre": False, "region": False, "year": False, "rating": True},
+    "movie": {"genre": True, "region": True, "year": True},
+    "tv": {"genre": False, "region": False, "year": False},
+    "anime": {"genre": False, "region": False, "year": False},
+    "variety": {"genre": False, "region": False, "year": False},
+    "short": {"genre": False, "region": False, "year": False},
 }
 
 
@@ -714,12 +716,16 @@ class DoubanCatalog:
                 condition._running = False
                 condition.notify_all()
 
-    def _explore(self, category, sort, page=1, genre="", region="", year="", rating="", strict=False):
+    def _explore(self, category, sort, page=1, genre="", region="", year="", rating="",
+                 strict=False, send=FILTER_DIMENSIONS):
         """豆瓣 Explore 列表：排序与类型/地区/年份/评分筛选都在服务端完成。
 
         `strict=True`（首页三栏）：空 data 视为限流，退避重试后仍为空则抛
         [DoubanThrottled]，由上层回落最近一次缓存或随包快照——绝不把空栏当成功
         结果缓存。带筛选的「全部」页保持宽松：空结果是合法结果。
+
+        `send` 决定哪些筛选维度交给上游：矩阵判定「上游不可信」的维度必须排除掉 ——
+        某些分类收到 `genres=` 会直接回空页，那会让用户看到一片空白。
         """
         # `tags=` 只放大类。地区/年份/类型各有专用参数：旧实现把它们拼进 tags=，豆瓣
         # 服务端其实没按这些条件筛（`tags=电影,日本` 只按「电影」筛），于是「选了地区
@@ -727,11 +733,11 @@ class DoubanCatalog:
         query = {"sort": sort, "range": rating_range(rating),
                  "tags": ",".join([EXPLORE_TAGS[category]]),
                  "start": max(0, int(page) - 1) * EXPLORE_PAGE_SIZE}
-        if genre and genre != "全部":
+        if genre and genre != "全部" and "genre" in send:
             query["genres"] = genre
-        if region and region != "全部":
+        if region and region != "全部" and "region" in send:
             query["countries"] = region
-        span = year_range_value(year)
+        span = year_range_value(year) if "year" in send else ""
         if span:
             query["year_range"] = span
         url = EXPLORE_API + "?" + urllib.parse.urlencode(query)
@@ -745,9 +751,17 @@ class DoubanCatalog:
                 time.sleep(EXPLORE_RETRY_DELAYS[attempt])
         raise DoubanThrottled("empty Douban explore data for %s" % category)
 
-    def _enrich(self, items):
-        """并发补详情，把分组判据并进列表条目；详情走 7 天磁盘缓存，失败就跳过。"""
-        pending = [item for item in items if item.get("douban_id") and not item.get("detail_meta")]
+    def _enrich(self, items, needs=()):
+        """并发补详情，把分组判据并进列表条目；详情走 7 天磁盘缓存，失败就跳过。
+
+        `needs` 是调用方真正缺的字段（见 [LOCAL_FIELDS]）。旧实现「带筛选就把整页逐条
+        补详情」，一次浏览最多约 60 次上游请求；现在只有缺判据的行才补 —— 列表行自带的
+        `card_subtitle` 解析结果（年份/地区/类型）已经覆盖大多数行。
+        """
+        fields = tuple(needs)
+        pending = [item for item in items
+                   if item.get("douban_id") and not item.get("detail_meta")
+                   and (not fields or any(not item.get(field) for field in fields))]
         if not pending:
             return [dict(item) for item in items]
         with ThreadPoolExecutor(max_workers=min(ENRICH_WORKERS, len(pending))) as pool:
@@ -877,20 +891,26 @@ class DoubanCatalog:
 
     @staticmethod
     def _matches(item, genre="", region="", year="", rating=""):
-        """快照兜底的筛选：条目缺某个字段时放行。
+        """本地三态判定：只有明确匹配才通过，判据未知一律剔除。
 
-        列表接口本身不含地区/类型/年份，快照里只有补过详情的条目才有；把「未知」
-        当作「不匹配」会让云端「全部」页在筛选后直接空掉。
+        这个方法只在「上游不可信该维度」时被调用（见 [_filter_matrix]）：上游已经筛过的
+        维度不会走到这里，所以不存在「该有却被本地砍掉」的情况。
+
+        旧实现是「条目缺某个字段就放行」—— 综艺/短剧的条目录从未补过类型/地区，于是
+        筛选等于没筛（实测返回 20 条、真实匹配 0 条）。准确度优先：宁可少给，不给错。
         """
-        if genre and genre != "全部" and item.get("genres") and genre not in item["genres"]:
+        if genre and genre != "全部" and genre not in (item.get("genres") or []):
             return False
-        if region and region != "全部" and item.get("regions") and region not in item["regions"]:
+        if region and region != "全部" and region not in (item.get("regions") or []):
             return False
-        if year and year != "全部" and item.get("year"):
+        if year and year != "全部":
+            value = str(item.get("year") or "")[:4]
+            if not value.isdigit():
+                return False
             if year == "更早":
-                if int(str(item["year"])[:4] or 0) >= time.localtime().tm_year - 11:
+                if int(value) > early_year_cutoff():
                     return False
-            elif str(item["year"]) != year:
+            elif value != str(year):
                 return False
         if rating and rating != "全部":
             score = float(item.get("rating") or 0)
@@ -898,8 +918,8 @@ class DoubanCatalog:
                 if score > 0:
                     return False
             else:
-                threshold_match = re.search(r"\d+", rating)
-                if threshold_match and score > 0 and score < int(threshold_match.group(0)):
+                threshold = re.search(r"\d+", rating)
+                if threshold and score > 0 and score < int(threshold.group(0)):
                     return False
         return True
 
@@ -909,16 +929,25 @@ class DoubanCatalog:
         sort_code = SORT_CODES.get(sort, "U")
         key = "show:%s:%s:%s:%s:%s:%s:%s" % (category, genre, region, year, rating, sort_code, page)
         filtered = any(v and v != "全部" for v in (genre, region, year, rating))
+        # 矩阵决定每个维度由谁负责：可信的交给上游（本地不再判，避免误杀），不可信的
+        # 一律本地判，且**不发该参数给上游** —— 某些分类收到 `genres=` 会直接回空页。
+        # 评分永远本地判：列表行的 `rate` 一定拿得到，不涉及「未知剔除」。
+        matrix = self._filter_matrix().get(category) or {}
+        active = {name: value for name, value in
+                  (("genre", genre), ("region", region), ("year", year), ("rating", rating))
+                  if value and value != "全部"}
+        local = tuple(name for name in active if name == "rating" or not matrix.get(name))
+        send = tuple(name for name in active if name not in local)
+        needs = tuple(LOCAL_FIELDS[name] for name in local if name in LOCAL_FIELDS)
 
         def produce():
-            # 豆瓣 Explore 对筛选参数的支持按分类而异（见 `_filter_matrix`），所以带筛选时
-            # 先照常请求，再对「上游不可信」的维度做本地兜底过滤，并多抓两页把一页补足。
+            # 上游回来的一页可能被本地筛掉一些，多抓两页把一页补足。
             pages = [int(page)]
             if filtered:
                 pages += [int(page) + i for i in range(1, SHOW_FILTER_EXTRA_PAGES + 1)]
             collected, seen, rows = [], set(), []
             for p in pages:
-                rows = self._explore(category, sort_code, p, genre, region, year, rating)
+                rows = self._explore(category, sort_code, p, genre, region, year, rating, send=send)
                 if not rows:
                     break
                 fresh = []
@@ -929,12 +958,13 @@ class DoubanCatalog:
                     if key_id:
                         seen.add(key_id)
                     fresh.append(item)
-                # 豆瓣 Explore 的列表行不带类型/地区（线上实测 genres/regions 恒为空），
-                # 所以带筛选时必须补一次详情（[detail] 走 7 天磁盘缓存 + 并发闸）再判断，
-                # 否则"选了地区/类型"看起来永远不生效。无筛选时完全不补详情，保持原有速度。
-                candidates = self._enrich(fresh) if filtered else fresh
+                candidates = self._enrich(fresh, needs) if needs else fresh
                 for item in candidates:
-                    if self._matches(item, genre, region, year, rating):
+                    if self._matches(item,
+                                     genre if "genre" in local else "",
+                                     region if "region" in local else "",
+                                     year if "year" in local else "",
+                                     rating if "rating" in local else ""):
                         collected.append(item)
                 if not filtered or len(collected) >= EXPLORE_PAGE_SIZE:
                     break

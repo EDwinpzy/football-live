@@ -253,13 +253,15 @@ class DoubanCatalogTest(unittest.TestCase):
         self.assertEqual(result["items"][0]["genres"], ["剧情", "犯罪"])
 
     def test_type_filter_drops_non_matching_rows_locally(self):
-        """类型筛选：命中行保留、非命中行剔除（上游对 genres= 支持因分类而异）。"""
+        """上游不可信该维度时（此处电视剧的类型，见 `_filter_matrix`）：命中行保留、
+        非命中行剔除。电影类型交给上游、本地不再判，另由
+        `test_upstream_filtered_dimension_is_not_judged_again_locally` 覆盖。"""
         rows = [
             {"id": "1", "title": "悬疑片", "rate": "8.0", "card_subtitle": "2024 / 中国大陆 / 悬疑"},
             {"id": "2", "title": "喜剧片", "rate": "8.0", "card_subtitle": "2024 / 中国大陆 / 喜剧"},
         ]
         catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: search_payload(rows))
-        result = catalog.show("movie", genre="悬疑", page=1)
+        result = catalog.show("tv", genre="悬疑", page=1)
         self.assertEqual([item["title"] for item in result["items"]], ["悬疑片"])
 
     def test_filtered_show_enriches_rows_when_list_has_no_regions(self):
@@ -400,6 +402,53 @@ class DoubanCatalogTest(unittest.TestCase):
         query = urllib.parse.parse_qs(urllib.parse.urlparse(calls[0]).query)
         self.assertEqual(query["year_range"], ["1,%d" % (current - 12)])
         self.assertNotIn("更早", query["tags"][0])
+
+    def test_unknown_metadata_is_dropped_instead_of_passed_through(self):
+        """旧实现「字段未知就放行」：综艺/短剧的条目录从未补过类型/地区，于是筛选等于
+        没筛（实测 `show(variety, 任意筛选)` 返回 20 条、真实匹配 0 条）。"""
+        rows = [
+            {"id": "1", "title": "无元数据", "rate": "8.0"},
+            {"id": "2", "title": "真日本片", "rate": "8.0", "card_subtitle": "2024 / 日本 / 剧情"},
+        ]
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: search_payload(rows), snapshot={})
+        result = catalog.show("variety", region="日本", page=1)
+        self.assertEqual([item["title"] for item in result["items"]], ["真日本片"])
+
+    def test_upstream_filtered_dimension_is_not_judged_again_locally(self):
+        """电影类型由豆瓣服务端筛（`genre=` 实测有效）。本地不得再判一次，否则列表行
+        没带 genres 的条目会被误杀。"""
+        rows = [{"id": "1", "title": "科幻片", "rate": "8.0"}]
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: search_payload(rows), snapshot={})
+        self.assertEqual([item["title"] for item in catalog.show("movie", genre="科幻")["items"]],
+                         ["科幻片"])
+
+    def test_untrusted_genre_is_not_sent_upstream(self):
+        """矩阵说不信任类型时，连 `genres=` 都不发 —— 上游对某些分类传该参数会直接回空页，
+        那样用户会看到「一片空白」而不是「筛出的少数准确结果」。"""
+        calls = []
+        catalog = douban_catalog.DoubanCatalog(
+            fetch=lambda url: calls.append(url) or search_payload([]), snapshot={})
+        catalog.show("variety", genre="真人秀", page=1)
+        self.assertNotIn("genres", urllib.parse.parse_qs(urllib.parse.urlparse(calls[0]).query))
+
+    def test_detail_is_fetched_only_for_rows_missing_the_needed_field(self):
+        """带筛选不再逐条补详情：只有缺判据字段的行才补（这就是性能热点）。"""
+        fetched = []
+
+        def fetch(url):
+            if "/subject/" in url:
+                fetched.append(url.rsplit("/", 1)[-1])
+                return {"title": "补详情", "countries": ["日本"], "genres": ["剧情"]}
+            return search_payload([
+                {"id": "1", "title": "有元数据", "rate": "8.0", "card_subtitle": "2024 / 日本 / 剧情"},
+                {"id": "2", "title": "缺元数据", "rate": "8.0"},
+            ])
+
+        catalog = douban_catalog.DoubanCatalog(fetch=fetch, snapshot={})
+        result = catalog.show("variety", region="日本", page=1)
+        self.assertEqual([item["title"] for item in result["items"]], ["有元数据", "缺元数据"])
+        self.assertEqual([item["regions"] for item in result["items"]], [["日本"], ["日本"]])
+        self.assertEqual(fetched, ["2"])
 
     def test_movie_rule_drops_concerts_and_stage_but_keeps_musical_films(self):
         """电影栏不许出现演唱会/舞台实录：豆瓣把这些也标成 movie，只能靠标题/又名认。"""
