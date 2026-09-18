@@ -140,6 +140,8 @@ fun AllScreen(nav: NavController) {
     var page by remember { mutableIntStateOf(1) }
     var hasMore by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(false) }
+    // 上游降级标记（豆瓣被拦/超时）：结果来自缓存或快照时不能显示成「没有符合条件的内容」
+    var upstreamAvailable by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
     var reqSeq by remember { mutableIntStateOf(0) }
 
@@ -154,6 +156,7 @@ fun AllScreen(nav: NavController) {
         if (seq != reqSeq) return@LaunchedEffect
         items = r?.items.orEmpty().distinctBy { it.id }
         hasMore = r?.hasMore ?: false
+        upstreamAvailable = r?.upstreamAvailable ?: true
         page = 1
         loading = false
     }
@@ -171,6 +174,7 @@ fun AllScreen(nav: NavController) {
             if (seq == reqSeq && r != null) {
                 items = (items + r.items).distinctBy { it.id }
                 hasMore = r.hasMore
+                upstreamAvailable = r.upstreamAvailable
                 page = next
                 // v1.19 竞态修复：loading 只随本请求代数解锁——旧版无条件清 loading，
                 // 筛选切换后旧响应回来会提前解锁，新筛选首屏还在路上就允许触底加载交错上屏
@@ -269,6 +273,18 @@ fun AllScreen(nav: NavController) {
                         onSelect = { by = it })
                 }
         }
+            // 上游降级：有内容时说「可能不是最新」，没内容时说「暂时获取不到」——
+            // 绝不把上游故障显示成「没有符合条件的内容」。
+            if (!upstreamAvailable) {
+                item(span = { GridItemSpan(maxLineSpan) }, key = "upstream") {
+                    Text(
+                        if (items.isEmpty()) "暂时获取不到片库，请稍后重试"
+                        else "数据可能不是最新，正在重试…",
+                        color = OtvColors.White50, fontSize = 22f.sxs(s),
+                        modifier = Modifier.padding(top = 4f.sx(s)),
+                    )
+                }
+            }
             items(items, key = { it.id }) { item ->
                 VcardCard(nav, item, s, cardReg)
             }

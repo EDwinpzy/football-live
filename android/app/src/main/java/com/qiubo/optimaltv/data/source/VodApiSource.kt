@@ -130,7 +130,11 @@ class VodApiSource(
             val query = listOf("genre" to type, "region" to area, "year" to year, "rating" to rating, "sort" to sort, "page" to page.toString())
                 .joinToString("&") { (key, value) -> "$key=${URLEncoder.encode(value, "UTF-8")}" }
             val json = fetchJson(base, "/vod/show/$category?$query", client)
-            return HhkanSource.ShowPage(parseItems(json.optJSONArray("items"), category, base), json.optBoolean("has_more"))
+            return HhkanSource.ShowPage(
+                items = parseItems(json.optJSONArray("items"), category, base),
+                hasMore = json.optBoolean("has_more"),
+                upstreamAvailable = json.optBoolean("upstream_available", true),
+            )
         }
 
         fun fetchDetail(base: String, client: OkHttpClient, id: String): HhkanSource.Companion.DetailInfo {

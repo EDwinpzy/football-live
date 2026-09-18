@@ -71,7 +71,9 @@ class HhkanSource(
     )
 
     /** GET /hhkan/show/{cid}?page&by&type&area&lang&year → 筛选分页列表 + 是否还有下一页 */
-    data class ShowPage(val items: List<VodItem>, val hasMore: Boolean)
+    /** `upstreamAvailable=false` = 豆瓣暂时不可用（被拦/超时），结果来自缓存或快照：
+     *  界面必须说「数据可能不是最新」或「暂时获取不到」，不能显示成「没有符合条件的内容」。 */
+    data class ShowPage(val items: List<VodItem>, val hasMore: Boolean, val upstreamAvailable: Boolean = true)
 
     companion object { // MARK-240826
         /** 与原版 proxy.py _HHKAN_CHANNELS 保持一致 */
