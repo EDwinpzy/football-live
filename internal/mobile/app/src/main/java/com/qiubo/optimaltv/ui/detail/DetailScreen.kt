@@ -209,15 +209,7 @@ fun DetailScreen(nav: NavController, vodIdArg: String) {
                                 s = s,
                                 testTag = MobileUiTags.DetailFavorite,
                             ) { vm.toggleFavorite() }
-                            if (ui.resumeEpIndex >= 0) {
-                                DetailActionButton(
-                                    text = "从头看",
-                                    primary = false,
-                                    fill = portrait,
-                                    s = s,
-                                    testTag = MobileUiTags.DetailRestart,
-                                ) { vm.clearProgress() }
-                            }
+                            // 2026-09-19 用户需求：去掉「从头看」按钮（清除进度改由播放器长按/面板承担，逻辑保留）
                         }
 
                         // 选集区（需求⑧：紧贴按钮行下方；电影单集不渲染；
