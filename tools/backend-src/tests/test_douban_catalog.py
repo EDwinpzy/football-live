@@ -222,6 +222,72 @@ class DoubanCatalogTest(unittest.TestCase):
         self.assertEqual(result["items"], [])
         self.assertEqual(result["source"], "douban")
 
+    def test_explore_rows_keep_card_subtitle_so_area_filter_works(self):
+        """2026-09-18 用户报障「片库筛选不生效（例如地区）」：上游 series/variety 分类不认
+        genres=，所以列表行必须带 card_subtitle 解析出的 regions/genres，本地兜底过滤才有效。"""
+        rows = [
+            {"id": "1", "title": "美剧甲", "rate": "8.0", "card_subtitle": "2024 / 美国 / 剧情 犯罪"},
+            {"id": "2", "title": "国产剧乙", "rate": "8.0", "card_subtitle": "2024 / 中国大陆 / 剧情"},
+        ]
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: search_payload(rows))
+        result = catalog.show("tv", region="美国", page=1)
+        self.assertEqual([item["title"] for item in result["items"]], ["美剧甲"])
+        self.assertEqual(result["items"][0]["regions"], ["美国"])
+        self.assertEqual(result["items"][0]["genres"], ["剧情", "犯罪"])
+
+    def test_type_filter_drops_non_matching_rows_locally(self):
+        """类型筛选：命中行保留、非命中行剔除（上游对 genres= 支持因分类而异）。"""
+        rows = [
+            {"id": "1", "title": "悬疑片", "rate": "8.0", "card_subtitle": "2024 / 中国大陆 / 悬疑"},
+            {"id": "2", "title": "喜剧片", "rate": "8.0", "card_subtitle": "2024 / 中国大陆 / 喜剧"},
+        ]
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: search_payload(rows))
+        result = catalog.show("movie", genre="悬疑", page=1)
+        self.assertEqual([item["title"] for item in result["items"]], ["悬疑片"])
+
+    def test_filtered_show_enriches_rows_when_list_has_no_regions(self):
+        """线上实测：Explore 列表行不含地区/类型（genres/regions 全空），带筛选时要补详情
+        再判断，否则「选了地区」等于没筛（用户 2026-09-18 报障）。"""
+        def fetch(url):
+            if "/subject/1" in url:
+                return {"title": "美剧甲", "year": "2024", "countries": ["美国"],
+                        "genres": ["剧情"], "rating": {"value": 8.0}}
+            if "/subject/2" in url:
+                return {"title": "国产剧乙", "year": "2024", "countries": ["中国大陆"],
+                        "genres": ["剧情"], "rating": {"value": 8.0}}
+            return search_payload([
+                {"id": "1", "title": "美剧甲", "rate": "8.5", "cover": "https://img.example/1.jpg"},
+                {"id": "2", "title": "国产剧乙", "rate": "8.5", "cover": "https://img.example/2.jpg"},
+            ])
+
+        catalog = douban_catalog.DoubanCatalog(fetch=fetch)
+        result = catalog.show("tv", region="美国", page=1)
+        self.assertEqual([item["title"] for item in result["items"]], ["美剧甲"])
+        self.assertEqual(result["items"][0]["regions"], ["美国"])
+
+    def test_filters_offer_the_full_douban_type_vocabulary(self):
+        """用户报障「类型条件太少了」：类型表要覆盖豆瓣真实类型，而不是 10 个以内。"""
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: {})
+        movie_types = catalog.filters("movie")["types"]
+        self.assertGreaterEqual(len(movie_types) - 1, 20)
+        for name in ("惊悚", "恐怖", "纪录片", "歌舞", "传记"):
+            self.assertIn(name, movie_types)
+        for name in ("古装", "短片", "惊悚"):
+            self.assertIn(name, catalog.filters("tv")["types"])
+        self.assertIn("中国台湾", catalog.filters("tv")["areas"])
+
+    def test_disk_cache_filenames_never_collide_on_chinese_filters(self):
+        """2026-09-18「片库筛选不生效」根因回归：缓存文件名旧实现把非 ASCII 字符整段换成
+        下划线，导致 `show:movie:::美国::U:1` 与 `show:movie:::::U:1` 撞成同一个文件，
+        带中文的地区/类型筛选就命中了未筛选的缓存结果。"""
+        cache = douban_catalog.JsonDiskCache(tempfile.mkdtemp())
+        plain = cache._path("show:movie:::::U:1")
+        us = cache._path("show:movie:::美国::U:1")
+        jp = cache._path("show:movie:::日本::U:1")
+        self.assertNotEqual(plain, us)
+        self.assertNotEqual(us, jp)
+        self.assertEqual(len({plain.name, us.name, jp.name}), 3)
+
     def test_movie_rule_drops_concerts_and_stage_but_keeps_musical_films(self):
         """电影栏不许出现演唱会/舞台实录：豆瓣把这些也标成 movie，只能靠标题/又名认。"""
         rows = [explore_row(111, "陈奕迅DUO演唱会"), explore_row(222, "汉密尔顿"),

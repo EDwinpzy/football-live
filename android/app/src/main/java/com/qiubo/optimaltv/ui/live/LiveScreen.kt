@@ -745,13 +745,18 @@ private fun ScoreRow(team: String, pts: String, s: Float) {
             Modifier.size(84f.sx(s)),
             contentAlignment = Alignment.Center,
         ) {
-            Text(team.take(1), color = OtvColors.White, fontSize = 40f.sxs(s), fontWeight = FontWeight.Bold)
-            // v1.19 流畅度：SubcomposeAsyncImage 每图一次子组合（可见区 ~40+ 次），
-            // loading/error 本为空分支无存在必要——换普通 AsyncImage（底层首字 Text 兜底不变）
+            // 2026-09-18 队标重叠修复：首字兜底只在图标未就绪时绘制。透明底队徽（尤文图斯
+            // 等 SVG）会把压在下面的白字切成碎片，看上去就是"队标重叠"。
+            var iconReady by remember(team) { mutableStateOf(false) }
+            if (!iconReady) {
+                Text(team.take(1), color = OtvColors.White, fontSize = 40f.sxs(s), fontWeight = FontWeight.Bold)
+            }
             coil.compose.AsyncImage(
                 model = Graph.live.teamIconUrl(team),
                 contentDescription = team,
                 contentScale = ContentScale.Fit,
+                onSuccess = { iconReady = true },
+                onError = { iconReady = false },
                 modifier = Modifier.fillMaxSize().padding(6f.sx(s)),
             )
         }
@@ -916,13 +921,17 @@ private fun TeamBlock(team: String, s: Float) {
             Modifier.size(72f.sx(s)),
             contentAlignment = Alignment.Center,
         ) {
-            Text(team.take(1), color = OtvColors.White, fontSize = 34f.sxs(s), fontWeight = FontWeight.Bold)
-            // v1.19 流畅度：SubcomposeAsyncImage 每图一次子组合（可见区 ~40+ 次），
-            // loading/error 本为空分支无存在必要——换普通 AsyncImage（底层首字 Text 兜底不变）
+            // 2026-09-18 队标重叠修复：同 TeamIcon 行，兜底首字只在未加载出队徽时显示
+            var iconReady by remember(team) { mutableStateOf(false) }
+            if (!iconReady) {
+                Text(team.take(1), color = OtvColors.White, fontSize = 34f.sxs(s), fontWeight = FontWeight.Bold)
+            }
             coil.compose.AsyncImage(
                 model = Graph.live.teamIconUrl(team),
                 contentDescription = team,
                 contentScale = ContentScale.Fit,
+                onSuccess = { iconReady = true },
+                onError = { iconReady = false },
                 modifier = Modifier.fillMaxSize().padding(6f.sx(s)),
             )
         }

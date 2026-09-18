@@ -150,12 +150,11 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
   padding:1px 7px;font-size:20px;line-height:20px;color:#fff}
 .pcard .pc-prog{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,.18)}
 .pcard .pc-prog i{display:block;height:100%;background:rgba(255,255,255,.92)}
-/* 「上次看到」角标：首页 17px 灰紫底 / 我的页 15px 黑70 底（App HistoryCard vs HistoryVodCard） */
+/* 「上次看到」角标：首页与「我的」页历史卡片统一同一套（2026-09-18 用户要求：
+   历史记录卡片右下角「上次看到XXXX」的底色/高度/透明度要对齐影视页「最近观看」卡片） */
 .pcard .pc-hist-tag{position:absolute;left:6px;right:6px;bottom:10px;background:rgba(102,102,104,.6);border-radius:5px;
   padding:3px 8px;font-size:17px;line-height:20px;color:#fff;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pcard .pc-hist-tag.fav{left:8px;right:8px;bottom:10px;background:rgba(0,0,0,.7);border-radius:6px;
-  font-size:15px}
 .pcard .pc-title{font-size:24px;font-weight:500;color:#fff;margin-top:12px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pcard .pc-sub{font-size:20px;color:rgba(255,255,255,.5);margin-top:4px;

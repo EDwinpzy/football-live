@@ -150,13 +150,13 @@ fun PaywallOffers(nav: NavController, s: Float, showActivate: Boolean = true, mo
                         )
                     }
                 }
-                // 选中套餐 → 右侧二维码购买面板（方案 §4.4）
+                // 选中套餐 → 右侧「续费」按钮（2026-09-18 用户要求：二维码改为按钮续费）
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 64f.sx(s))) {
-                    QrPanel(p, s)
+                    RenewPanel(p, s)
                 }
             }
         } else {
-            // 竖屏：2×2 套餐卡换行 + 二维码居中在下
+            // 竖屏：2×2 套餐卡换行 + 续费按钮居中在下（原二维码位置）
             @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
             androidx.compose.foundation.layout.FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(28f.sx(s)),
@@ -171,7 +171,7 @@ fun PaywallOffers(nav: NavController, s: Float, showActivate: Boolean = true, mo
                 }
             }
             Spacer(Modifier.height(30f.sx(s)))
-            QrPanel(p, s)
+            RenewPanel(p, s)
         }
 
         if (showActivate) {
@@ -227,20 +227,36 @@ private fun PlanCard(
     }
 }
 
-/** 右侧购买面板：白底二维码（扫码对比度最佳）+ 套餐说明 */
+/**
+ * 续费面板（2026-09-18 起替代扫码二维码）：点击按钮发起续费。
+ * 续费接口尚未接通时 [RenewalGateway.request] 返回 false，页面给出卡密兜底提示。
+ */
 @Composable
-private fun QrPanel(p: PlanUi, s: Float) {
+private fun RenewPanel(p: PlanUi, s: Float) {
+    var pending by remember(p.plan) { mutableStateOf(false) }
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        QrCode(
-            content = PurchaseLinks.forPlan(p.plan),
-            size = 330f.sx(s),
+        Box(
+            contentAlignment = Alignment.Center,
             modifier = Modifier
-                .background(Color.White, RoundedCornerShape(18f.sx(s)))
-                .padding(22f.sx(s)),
-        )
+                .clip(RoundedCornerShape(60f.sx(s)))
+                .tapCard {
+                    RenewalGateway.request(p.plan)
+                    pending = true
+                }
+                .background(OtvColors.White, RoundedCornerShape(60f.sx(s)))
+                .padding(horizontal = 76f.sx(s), vertical = 32f.sx(s)),
+        ) {
+            Text(
+                "续费 ${p.name}",
+                color = OtvColors.Bg, fontSize = 34f.sxs(s), fontWeight = FontWeight.SemiBold,
+            )
+        }
         Spacer(Modifier.height(20f.sx(s)))
         Text("${p.name} · ${p.price}", color = OtvColors.White, fontSize = 30f.sxs(s), fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(8f.sx(s)))
-        Text("手机扫码购买 · 自动发货", color = OtvColors.White50, fontSize = 24f.sxs(s))
+        Text(
+            if (pending) "续费通道准备中，可先用下方「输入卡密激活」" else "点击按钮续费 · 自动发货",
+            color = OtvColors.White50, fontSize = 24f.sxs(s),
+        )
     }
 }

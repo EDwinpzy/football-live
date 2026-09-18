@@ -249,16 +249,18 @@ private fun HistoryVodCard(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
-            // 需求 我的#1：文字右下角 + 半透明深色背景胶囊
+            // 需求 我的#1 + 2026-09-18 用户要求：与影视页「最近观看」卡片右下角角标完全一致
+            //（底色 0x99666668 / 圆角 5 / 17px / 贴边 6dp，对齐 HomeScreen 同款角标）
             Text(
                 "上次看到 第${h.epIndex + 1}集 ${formatTime(h.positionMs)}",
                 color = OtvColors.White,
-                fontSize = (if (compact) 12f else 15f).sxs(s), maxLines = 1,
+                fontSize = (if (compact) 13f else 17f).sxs(s),
+                lineHeight = (if (compact) 16f else 20f).sxs(s), maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(start = 8f.sx(s), end = 8f.sx(s), bottom = 10f.sx(s))
-                    .background(Color(0xB3000000), RoundedCornerShape(6f.sx(s)))
+                    .padding(6f.sx(s))
+                    .background(Color(0x99666668), RoundedCornerShape(5f.sx(s)))
                     .padding(horizontal = 8f.sx(s), vertical = 3f.sx(s)),
             )
             // hprogress：底部 4px 进度条（观看进度）

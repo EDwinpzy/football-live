@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import html
 import json
 import os
@@ -23,6 +24,10 @@ EXPLORE_API = "https://movie.douban.com/j/new_search_subjects"
 EXPLORE_PAGE_SIZE = 20
 EXPLORE_TAGS = {"movie": "电影", "tv": "电视剧", "anime": "动漫", "variety": "综艺", "short": "短剧"}
 SORT_CODES = {"hot": "U", "new": "R", "rating": "S"}  # U 热门 / R 最新 / S 高分
+# 带筛选时本地补抓的页数（2026-09-18）：豆瓣 Explore 对筛选参数的支持按分类而异——
+# 电影认 `genres=`，电视剧/综艺/短剧传 `genres=` 会直接返回空页。所以筛选在拿到行之后
+# 再用行内 genres/regions 兜底过滤一遍，并多抓两页把一页 20 条补足。
+SHOW_FILTER_EXTRA_PAGES = 2
 # 豆瓣限流时会回 HTTP 200 + 空 data（tools/build_douban_snapshot.py 已按此处理）。
 # 首页三栏是「不带筛选、按排序取前 20」，空列表只可能是限流；旧实现把它当成功结果
 # 写进 6 小时缓存，用户看到「最近热门有内容、另外两栏空」且在过期前不再恢复。
@@ -316,6 +321,10 @@ def normalize_explore_row(raw, category="movie"):
         "actors": raw.get("casts"),
         "rating": {"value": raw.get("rate"), "count": 0},
         "url": raw.get("url"),
+        # 2026-09-18：列表行的 card_subtitle（`年份 / 地区 / 类型 / 导演 / 主演`）必须透传，
+        # 否则行内没有 regions/genres，筛选只能靠上游参数——而电视剧/综艺/短剧等分类上游
+        # 不认 genres=，用户就会看到"选了地区/类型等于没筛"。
+        "card_subtitle": raw.get("card_subtitle"),
     }, category)
 
 
@@ -355,8 +364,14 @@ class JsonDiskCache:
         self.directory.mkdir(parents=True, exist_ok=True)
 
     def _path(self, key):
-        safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", key)
-        return self.directory / (safe + ".json")
+        # 2026-09-18 修「片库筛选不生效」根因：旧实现把 key 里的非 ASCII 字符整段替换成
+        # 下划线，于是 `show:movie:::美国::U:1` 与 `show:movie:::::U:1` 会落成同一个文件名
+        # ——带中文的地区/类型筛选直接命中「未筛选」的缓存结果（year/rating 因为带数字，
+        # 文件名仍不同，所以当时看着是好的）。现在保留可读前缀 + 末尾拼 key 的短哈希，
+        # 任何 key 都不再撞车。
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+        safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", key)[:80]
+        return self.directory / ("%s-%s.json" % (safe, digest))
 
     def put(self, key, value, fetched_at=None):
         envelope = {"schema": CACHE_SCHEMA, "fetched_at": fetched_at or time.time(), "value": value}
@@ -702,14 +717,23 @@ class DoubanCatalog:
         if category not in CATEGORY_VALUES:
             raise ValueError("unsupported category")
         current_year = time.localtime().tm_year
+        # 2026-09-18 用户报障「类型条件太少了，豆瓣上肯定不止这些」：类型表按随包快照里
+        # 真实出现过的 genres 汇总（外加豆瓣 Explore 实测可用的几个电影类型），保证每个
+        # 选项筛出来都有内容，不再只给 6~10 个。
         genres = {
-            "movie": ["全部", "剧情", "喜剧", "动作", "爱情", "科幻", "动画", "悬疑", "犯罪", "纪录片"],
-            "tv": ["全部", "剧情", "喜剧", "爱情", "悬疑", "犯罪", "科幻"],
-            "anime": ["全部", "动画", "奇幻", "冒险", "科幻", "喜剧"],
-            "variety": ["全部", "真人秀", "音乐", "脱口秀", "歌舞"],
-            "short": ["全部", "剧情", "喜剧", "爱情", "悬疑", "古装"],
+            "movie": ["全部", "剧情", "喜剧", "动作", "爱情", "科幻", "动画", "悬疑", "惊悚", "恐怖",
+                      "犯罪", "纪录片", "战争", "奇幻", "冒险", "灾难", "历史", "传记", "音乐",
+                      "歌舞", "家庭", "运动", "同性", "武侠", "古装"],
+            "tv": ["全部", "剧情", "爱情", "喜剧", "犯罪", "古装", "短片", "悬疑", "惊悚", "动作",
+                   "奇幻", "冒险", "传记", "同性", "历史"],
+            "anime": ["全部", "动画", "短片", "喜剧", "奇幻", "动作", "科幻", "冒险", "剧情", "音乐",
+                      "爱情", "惊悚", "悬疑", "家庭", "古装"],
+            "variety": ["全部", "真人秀", "音乐", "歌舞", "脱口秀", "喜剧"],
+            "short": ["全部", "剧情", "喜剧", "爱情", "悬疑", "古装", "奇幻", "动作", "家庭"],
         }[category]
-        regions = ["全部", "中国大陆", "中国香港", "中国台湾", "美国", "英国", "日本", "韩国", "法国", "德国"]
+        regions = ["全部", "中国大陆", "中国香港", "中国台湾", "美国", "英国", "加拿大", "法国",
+                   "德国", "意大利", "西班牙", "日本", "韩国", "印度", "泰国", "澳大利亚",
+                   "新西兰", "俄罗斯"]
         years = ["全部"] + [str(year) for year in range(current_year, current_year - 12, -1)] + ["更早"]
         ratings = ["全部", "9分以上", "8分以上", "7分以上", "暂无评分"]
         return {"category": category, "types": genres, "areas": regions, "years": years, "ratings": ratings, "rows": [
@@ -756,9 +780,38 @@ class DoubanCatalog:
         key = "show:%s:%s:%s:%s:%s:%s:%s" % (category, genre, region, year, rating, sort_code, page)
 
         def produce():
-            items = self._explore(category, sort_code, page, genre, region, year, rating)
+            # 豆瓣 Explore 对筛选参数的支持按分类而异（电视剧/综艺/短剧传 genres 返回空页），
+            # 所以带筛选时先照常请求，再用行内 genres/regions/year 兜底过滤，并多抓两页补足。
+            filtered = any(v and v != "全部" for v in (genre, region, year, rating))
+            pages = [int(page)]
+            if filtered:
+                pages += [int(page) + i for i in range(1, SHOW_FILTER_EXTRA_PAGES + 1)]
+            collected, seen, rows = [], set(), []
+            for p in pages:
+                rows = self._explore(category, sort_code, p, genre, region, year, rating)
+                if not rows:
+                    break
+                fresh = []
+                for item in rows:
+                    key_id = str(item.get("douban_id") or item.get("id") or "")
+                    if key_id and key_id in seen:
+                        continue
+                    if key_id:
+                        seen.add(key_id)
+                    fresh.append(item)
+                # 豆瓣 Explore 的列表行不带类型/地区（线上实测 genres/regions 恒为空），
+                # 所以带筛选时必须补一次详情（[detail] 走 7 天磁盘缓存 + 并发闸）再判断，
+                # 否则"选了地区/类型"看起来永远不生效。无筛选时完全不补详情，保持原有速度。
+                candidates = self._enrich(fresh) if filtered else fresh
+                for item in candidates:
+                    if self._matches(item, genre, region, year, rating):
+                        collected.append(item)
+                if not filtered or len(collected) >= EXPLORE_PAGE_SIZE:
+                    break
+            items = collected[:EXPLORE_PAGE_SIZE]
+            has_more = bool(rows) if filtered else (len(items) >= EXPLORE_PAGE_SIZE)
             return {"category": category, "page": int(page), "items": items,
-                    "has_more": len(items) >= EXPLORE_PAGE_SIZE, "source": "douban", "stale": False}
+                    "has_more": has_more, "source": "douban", "stale": False}
 
         # 快照兜底也遵守筛选与分页契约：否则云端「全部」页会忽略用户筛选、
         # 并在一次响应里吐出整份快照。

@@ -52,6 +52,19 @@ object PurchaseLinks {
     fun forPlan(@Suppress("UNUSED_PARAMETER") plan: String): String = SHOP_HOME
 }
 
+/**
+ * 续费接口预留（2026-09-18 用户需求：移动端会员页去掉二维码，改为点击按钮续费）。
+ *
+ * 扫码通道下线后，会员页的续费按钮统一走这里发起。后台续费下单/支付接口接通后，只需在
+ * App 启动时注入 [handler]（或直接替换 [request] 实现），会员页无需再改。
+ * 返回 false = 通道尚未接通，页面据此给出「暂用卡密激活」的兜底提示。
+ */
+object RenewalGateway {
+    var handler: ((plan: String) -> Boolean)? = null
+
+    fun request(plan: String): Boolean = handler?.invoke(plan) ?: false
+}
+
 /** ZXing 生成 + Canvas 绘制二维码（无嵌入 View，纯 Compose；TV 大屏/移动小屏同款）。
  *  v1.20 性能修复：旧版按 512×512 请求矩阵并在 Canvas 每次重绘遍历全部 26 万像素
  *  （drawRect × 262144），聚焦切换/页面重组即掉帧卡顿（用户报障「会员界面很卡」
