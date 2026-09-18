@@ -47,6 +47,16 @@ class DetailViewModel(private val vodId: String) : ViewModel() {
                     ) else return@collect
                 if (_ui.value.item == item) return@collect
                 val lines = st.catalog!!.groups[item.normTitle].orEmpty()
+                /* 2026-09-17 详情提速：目录条目自带标题/海报/评分/简介，先把这一版上屏
+                   （主按钮落「正在查找片源」），再等下面的 resolveDetail 完成多源匹配。
+                   旧版要等整段匹配跑完才第一次赋值 → 详情页只有一个「加载中…」，
+                   冷路径实测 12-30s（多源搜索 + 18 条线路测速）。 */
+                _ui.value = DetailUiState(
+                    item = item,
+                    lines = lines,
+                    activeLineId = lines.firstOrNull()?.id ?: vodId,
+                    sourceAvailability = SourceAvailability.MATCHING,
+                )
                 // 懒解析源（hhkan）：补全选集/简介后重算跨源线路
                 val full = if (item.detailRef.isNotBlank()) Graph.repo.resolveDetail(vodId) ?: item else item
                 val fullLines = if (full != item) {
@@ -60,7 +70,11 @@ class DetailViewModel(private val vodId: String) : ViewModel() {
                 var resumeEp = -1
                 var resumePos = 0L
                 var resumeAt = 0L
-                for (line in (fullLines + lines).distinctBy { it.id }) {
+                /* 目录条目本身不带选集（豆瓣源 parseItems 不填 episodes），旧版只遍历
+                   fullLines+lines → 每轮都 `line.episodes.isEmpty() → continue`，
+                   续播判定永远落空、主按钮永远「立即播放」（2026-09-17 用户报障）。
+                   把 resolveDetail 回来的 full（带选集）放进同一批扫描即可。 */
+                for (line in (listOf(full) + fullLines + lines).distinctBy { it.id }) {
                     if (line.episodes.isEmpty()) continue
                     Graph.db.vodDao().progressOfVod(line.id).forEach { p ->
                         if (p.positionMs > 1000 && p.updatedAt > resumeAt && p.epIndex in line.episodes.indices) {

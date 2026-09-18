@@ -222,6 +222,7 @@ fun VodScreen(nav: NavController) {
                             selectedCatChipFocus = selectedCatChipFocus,
                             firstHistoryFocus = firstHistoryFocus,
                             hasHistory = history.isNotEmpty(),
+                            watchedIds = history.map { it.vodId }.toSet(),
                             listState = vodListState,
                             onPrev = { heroIdxTop = (heroIdxTop - 1 + heroesTop.size.coerceAtLeast(1)) % heroesTop.size.coerceAtLeast(1) },
                             onNext = { heroIdxTop = (heroIdxTop + 1) % heroesTop.size.coerceAtLeast(1) },
@@ -467,6 +468,8 @@ private fun VodHeroBand(
     selectedCatChipFocus: FocusRequester,
     firstHistoryFocus: FocusRequester,
     hasHistory: Boolean,
+    /** 有观看记录的影片 id：hero 主按钮据此显示「继续播放」（用户 2026-09-17 要求） */
+    watchedIds: Set<String>,
     listState: androidx.compose.foundation.lazy.LazyListState,
     onPrev: () -> Unit,
     onNext: () -> Unit,
@@ -628,7 +631,11 @@ private fun VodHeroBand(
                         .height(64f.sx(s))
                         .padding(horizontal = 40f.sx(s)),
                 ) {
-                    Text("立即播放", color = OtvColors.Bg, fontSize = 26f.sxs(s), fontWeight = FontWeight.Bold)
+                    /* 看过的影片换成「继续播放」（用户 2026-09-17 要求） */
+                    Text(
+                        if (h.id in watchedIds) "继续播放" else "立即播放",
+                        color = OtvColors.Bg, fontSize = 26f.sxs(s), fontWeight = FontWeight.Bold,
+                    )
                 }
             }
         }

@@ -169,7 +169,7 @@ fun VodScreen(nav: NavController) {
                         .background(OtvColors.Bg),
                 ) {
                     item(key = "hero") {
-                        VodHeroBand(nav, heroesTop, s, portrait)
+                        VodHeroBand(nav, heroesTop, s, portrait, history.map { it.vodId }.toSet())
                     }
                     // 最近观看（需求 影视#7：竖版卡=片库同款 232×352，片名在卡下；需求 影视#10 点卡直进播放）
                     item(key = "history") {
@@ -322,7 +322,14 @@ private fun buildHeroes(cat0: com.qiubo.optimaltv.data.repo.Aggregated?, home: c
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun VodHeroBand(nav: NavController, heroes: List<HeroEntry>, s: Float, portrait: Boolean) {
+private fun VodHeroBand(
+    nav: NavController,
+    heroes: List<HeroEntry>,
+    s: Float,
+    portrait: Boolean,
+    /** 有观看记录的影片 id：hero 主按钮据此显示「继续播放」（用户 2026-09-17 要求） */
+    watchedIds: Set<String>,
+) {
     val heroCtx = LocalContext.current
     val heroScope = androidx.compose.runtime.rememberCoroutineScope()
     val pagerState = rememberPagerState(initialPage = 0) { heroes.size.coerceAtLeast(1) }
@@ -439,7 +446,10 @@ private fun VodHeroBand(nav: NavController, heroes: List<HeroEntry>, s: Float, p
                                 .height(64f.sx(s))
                                 .padding(horizontal = 40f.sx(s)),
                         ) {
-                            Text("立即播放", color = OtvColors.Bg, fontSize = 26f.sxs(s), fontWeight = FontWeight.Bold)
+                            Text(
+                                if (h.id in watchedIds) "继续播放" else "立即播放",
+                                color = OtvColors.Bg, fontSize = 26f.sxs(s), fontWeight = FontWeight.Bold,
+                            )
                         }
                     }
                 }

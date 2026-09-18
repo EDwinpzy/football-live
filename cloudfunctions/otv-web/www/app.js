@@ -231,7 +231,10 @@ function uiBack() {
   let sx = 0, sy = 0, live = false;
   addEventListener("touchstart", e => {
     const t = e.touches[0];
-    live = t.clientX < 36 && !e.target.closest("#video, #tvVideo, #cTrack, .ctl-track, input, textarea");
+    /* #video（影视播放器）不参与左缘返回：它与横滑快进/竖滑亮度手势同区，容易误触退播；
+       电视播放器 #tvVideo 上没有滑动手势，左缘右滑必须可用——横屏时视频铺满整屏，
+       否则电视播放态在横屏没有可见退出入口（FAB/侧栏都不常驻）。 */
+    live = t.clientX < 36 && !e.target.closest("#video, #cTrack, .ctl-track, input, textarea");
     sx = t.clientX; sy = t.clientY;
   }, { passive: true });
   addEventListener("touchend", e => {
@@ -1339,6 +1342,9 @@ function renderVodHero() {
   $$("#vodDots i").forEach((d, i) => d.addEventListener("click", () => { vod.heroIdx = i; renderVodHero(); }));
   /* App 立即播放 → 详情页（不自动起播） */
   $("#vodHeroPlay").onclick = () => openDetail(c.id);
+  /* 看过就换文案（用户 2026-09-17 要求）：有进度或历史记录 → 「继续播放」 */
+  const seen = !!getProgress("vod:" + c.id) || getHistory().some(h => h.id === c.id);
+  $("#vodHeroPlay").textContent = seen ? "继续播放" : "立即播放";
 }
 
 /* 历史卡直进播放（App 路由 player/{vodId}/{epIndex}：默认线路 0 + 该集续播） */
@@ -1574,7 +1580,9 @@ async function openDetail(vid, cardHint, autoplay) {
     if (cardHint.cover) $("#dPoster").src = img(cardHint.cover);
   }
   const dkey = "otvw:dt:" + vid;
-  const applyDetail = d => {
+  /* partial=true：只有元数据（第一段），线路还在匹配——此时不能拿「没有 sources」
+     当成「选集越界」把续播状态清掉，也不能预解析起播集（无线路可解析）。 */
+  const applyDetail = (d, partial) => {
     if (!current()) return;
     detail = d; detail.vid = vid; dLineIdx = 0; dEpIdx = 0; dEpPage = 0;
     /* App DetailViewModel：跨线路最近观看（updatedAt 最新）；pos>1s */
@@ -1582,9 +1590,11 @@ async function openDetail(vid, cardHint, autoplay) {
     const prog = getProgress("vod:" + vid);
     const epSaved = store.get("otvw:ep:" + vid, -1);
     if (prog && epSaved >= 0 && resumable(prog)) { dResumeEp = epSaved; dResumePos = prog.pos; }
-    if (dResumeEp >= (detail.sources[dLineIdx] ? detail.sources[dLineIdx].episodes.length : 0)) dResumeEp = -1;
+    const epCount = detail.sources[dLineIdx] ? detail.sources[dLineIdx].episodes.length : 0;
+    if (epCount && dResumeEp >= epCount) dResumeEp = -1;
     dEpPage = dResumeEp >= 0 ? Math.floor(dResumeEp / 20) : 0;
     renderDetail();
+    if (partial) return;
     /* v1.32 起播提速：详情上屏即后台预解析「将播放的那一集」（续播集或第 1 集，
      * 排名第 1 线路）——点播放时解析已在途/已完成，起播只剩中继握手 */
     try {
@@ -1606,20 +1616,40 @@ async function openDetail(vid, cardHint, autoplay) {
     return;
   }
   if (cached) applyDetail(cached._d);
+  /* 2026-09-17 详情提速：详情页原先要等「多源匹配 + 线路测速」整段跑完才上屏
+     （冷路径实测 12-30s，整页只有一个「加载中…」）。现在拆两段：
+     ① `defer_sources=1` 只取豆瓣元数据（多数已随首页补详情落在服务端 7 天缓存里）
+        → 海报/标题/meta/评分/演员/简介立刻上屏，主按钮显示「正在查找片源」；
+     ② 再取完整详情（含 sources）→ 只补选集区与主按钮，不动已经上屏的信息。 */
+  const ref = String(vid).replace(/^douban:/, "");
+  const normalizeDetail = raw => ({ ...raw, cover: raw.poster_url || "", score: +raw.rating || 0,
+    area: (raw.regions || []).join(" / "), tags: raw.genres || [], desc: raw.summary || "",
+    meta: [raw.year, ...(raw.regions || []), ...(raw.genres || [])].filter(Boolean).join(" / "),
+    actors: (raw.actors || []).join(" / "),
+    sources: (raw.sources || []).map(line => ({ ...line, episodes: (line.episodes || []).map((ep, index) => ({ ep: ep.name || `第${index + 1}集`, pid: line.id, vid: index })) })) });
+  let painted = false;
   try {
-    const rawDetail = await fetchJSON(BASE + "/vod/detail/" + String(vid).replace(/^douban:/, ""), { timeout: 60000, signal: controller.signal });
-    const d = { ...rawDetail, cover: rawDetail.poster_url || "", score: +rawDetail.rating || 0,
-      area: (rawDetail.regions || []).join(" / "), tags: rawDetail.genres || [], desc: rawDetail.summary || "",
-      meta: [rawDetail.year, ...(rawDetail.regions || []), ...(rawDetail.genres || [])].filter(Boolean).join(" / "),
-      actors: (rawDetail.actors || []).join(" / "),
-      sources: (rawDetail.sources || []).map(line => ({ ...line, episodes: (line.episodes || []).map((ep, index) => ({ ep: ep.name || `第${index + 1}集`, pid: line.id, vid: index })) })) };
+    const fast = await fetchJSON(BASE + "/vod/detail/" + ref + "?defer_sources=1", { timeout: 60000, signal: controller.signal });
     if (!current()) return;
+    if (!fast.title) throw new Error(fast.error || "未找到该影片");
+    applyDetail(normalizeDetail(fast), true);
+    painted = true;
+    const rawDetail = await fetchJSON(BASE + "/vod/detail/" + ref, { timeout: 90000, signal: controller.signal });
+    if (!current()) return;
+    const d = normalizeDetail(rawDetail);
     if (!d.title) throw new Error(d.error || "未找到该影片");
     try { store.set(dkey, { _ts: Date.now(), _d: d }); } catch (e) {}
     applyDetail(d);
     if (autoplay && current()) startPlayButton();
   } catch (e) {
-    if (current() && !cached) { $("#dTitle").textContent = "加载失败"; hint(e.message); }
+    if (!current()) return;
+    if (painted) {
+      /* 第二段失败：保留已上屏的信息，只把主按钮从「正在查找片源」落到「暂无片源」 */
+      if (detail) { detail.source_state = "unavailable"; renderDetail(); }
+      hint("线路匹配失败：" + e.message);
+    } else if (!cached) {
+      $("#dTitle").textContent = "加载失败"; hint(e.message);
+    }
   } finally {
     if (detailRequest === controller) detailRequest = null;
   }
@@ -2305,6 +2335,7 @@ function renderSrcPicker() {
     } catch (e) { if (gen === pv.recoveryGen) recoverPlayback("手动切源失败", gen); }
   }));
   $("#srcPickerWrap").hidden = !pv.picker;
+  syncPlayerBackBtn();
 }
 
 async function resolveFreshLiveSource(index) {
@@ -2457,11 +2488,17 @@ function setPlayIcon(playing) {
   $("#cPlayIco").innerHTML = playing ? `<path d="M6 5h4v14H6zm8 0h4v14h-4z"/>` : `<path d="M8 5v14l11-7z"/>`;
 }
 /* 5s 无操作自动隐藏（App tick 5000ms）；竖屏常驻控制条只收浮层（需求12⑥） */
+/* 返回钮与「控制条/信号源条」同现同隐（index.html 注释：返回钮在控制条或信号源条可见时出现在左上角）。
+   横屏直播播放态视频铺满整屏，信号源条上的返回钮是唯一可见的退出入口。 */
+function syncPlayerBackBtn() {
+  if (!pv.ctx) return;
+  $("#ctlBack").hidden = !(pv.picker || pv.controls);
+}
 function armHide() {
   clearTimeout(pv.hideTimer);
   pv.hideTimer = setTimeout(() => {
     if (pv.video && pv.video.paused) return;
-    if (pv.picker) { pv.picker = false; $("#srcPickerWrap").hidden = true; }
+    if (pv.picker) { pv.picker = false; $("#srcPickerWrap").hidden = true; syncPlayerBackBtn(); }
     else if (pv.controls && !state.portrait) hideControls();
   }, 5000);
 }
@@ -2560,13 +2597,31 @@ document.addEventListener("fullscreenchange", () => {
 });
 
 /* 更多面板（MorePanel：右侧 560dp 悬浮栏 / 竖屏 92vw；选集 4 列 20/页；全屏暗区点按关闭） */
+/* 面板换集/换线统一切换点：只改 dEpIdx 而不改 pv.ctx 时，startPlayFromCtx() 会用 openPlayer
+   复用旧的 epIdx/playRef → 表现为「点了选集/信号源但没有真的切换」。
+   这里把 pv.ctx 的集号与解析引用（pid/vid）一并指到目标集，再交给 startPlayFromCtx 重开。 */
+function mpApplyEpisode(idx) {
+  const s = detail && detail.sources[dLineIdx];
+  const eps = (s && s.episodes) || [];
+  if (!pv.ctx || typeof idx !== "number" || idx < 0 || idx >= eps.length) return false;
+  const ep = eps[idx];
+  dEpIdx = idx; dEpPage = Math.floor(idx / 10);
+  pv.ctx.epIdx = idx;
+  pv.ctx.epName = ep.ep || `第${idx + 1}集`;
+  pv.ctx.playRef = { pid: ep.pid, vid: ep.vid };
+  return true;
+}
+
 function renderMorePanel() {
   const c = pv.ctx; if (!c) return;
   $("#mpPoster").src = img(c.cover || "");
   $("#mpTitle").textContent = c.title || "影片";
   $("#mpMeta").textContent = c.kind === "vod" ? (detail ? detail.meta || "" : "") : "足球直播";
   const engineName = (window.Hls && Hls.isSupported()) ? "hls.js" : "原生 HLS";
-  $("#mpLine").textContent = `线路${pv.srcIdx + 1}/${pv.sources.length} · ${engineName}`;
+  /* 影视：线路号取「更多」面板里高亮的线路（dLineIdx）；直播：取当前信号源序号 */
+  $("#mpLine").textContent = (c.kind === "vod" && detail && detail.sources.length)
+    ? `线路${dLineIdx + 1}/${detail.sources.length} · ${engineName}`
+    : `线路${pv.srcIdx + 1}/${pv.sources.length} · ${engineName}`;
   $("#mpDesc").textContent = c.kind === "vod" && detail ? detail.desc || "" : "";
   /* 选集（电影不显示） */
   const isMovie = c.epCount <= 1;
@@ -2580,7 +2635,7 @@ function renderMorePanel() {
     $("#mpEpPages").innerHTML = eps.length >= 20 ? Array.from({ length: pageCount }, (_, p) =>
       `<button class="epp ${p === page ? "on" : ""}" data-p="${p}">第${p * pageSize + 1}-${Math.min((p + 1) * pageSize, eps.length)}集</button>`).join("") : "";
     $$("#mpEpPages .epp").forEach(b => b.addEventListener("click", () => {
-      dEpPage = +b.dataset.p; dEpIdx = dEpPage * pageSize; renderDetailEps(); startPlayFromCtx();
+      mpApplyEpisode(+b.dataset.p * pageSize); renderDetailEps(); startPlayFromCtx();
     }));
     const pageEps = eps.slice(page * pageSize, (page + 1) * pageSize);
     $("#mpEpGrid").innerHTML = pageEps.map((e, i) => {
@@ -2588,8 +2643,7 @@ function renderMorePanel() {
       return `<button class="epc ${idx === c.epIdx ? "on" : ""}" data-i="${idx}">${idx + 1}</button>`;
     }).join("");
     $$("#mpEpGrid .epc").forEach(b => b.addEventListener("click", () => {
-      dEpIdx = +b.dataset.i; dEpPage = Math.floor(dEpIdx / pageSize);
-      renderDetailEps(); startPlayFromCtx();
+      mpApplyEpisode(+b.dataset.i); renderDetailEps(); startPlayFromCtx();
     }));
   }
   /* 换源线路（仅多线路；v1.31 后端统一清晰度排名，面板只展示前 5） */
@@ -2598,7 +2652,9 @@ function renderMorePanel() {
     $("#mpLines").innerHTML = detail.sources.slice(0, 5).map((s, i) =>
       `<button class="lchip ${i === dLineIdx ? "on" : ""}" data-i="${i}">${esc("信号源" + (i + 1))}</button>`).join("");
     $$("#mpLines .lchip").forEach(ch => ch.addEventListener("click", () => {
-      dLineIdx = +ch.dataset.i; dEpIdx = 0; renderDetailEps(); startPlayFromCtx(true);
+      dLineIdx = +ch.dataset.i;
+      mpApplyEpisode(0);          /* 换线回到该线路第 1 集，同时把 pv.ctx.playRef 指向新线路 */
+      renderDetailEps(); startPlayFromCtx(true);
     }));
   } else { $("#mpLinesSec").hidden = true; $("#mpLines").innerHTML = ""; }
   /* 倍速 */
