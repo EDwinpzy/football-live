@@ -273,6 +273,39 @@ class HhkanCatalogContractTest(unittest.TestCase):
         self.assertIn('if (/^https:\\/\\//i.test(u)) return u;', helper)
         self.assertNotIn("IMG_CDN_RE.test", helper)
 
+    def test_hero_brief_only_fetches_douban_metadata(self):
+        """hero 简介只取豆瓣元数据（defer_sources=1），不等全量片源解析。
+
+        全量 /vod/detail 要等后端把 22 个站点的搜索+探测跑完（本机实测 7.5s，电视弱网
+        远超客户端 45s 读超时）——简介会长时间停在「加载简介…」，超时后退化成通用占位文案。
+        """
+        sources = [
+            ROOT / "android/app/src/main/java/com/qiubo/optimaltv/data/source/VodApiSource.kt",
+            ROOT / "internal/mobile/app/src/main/java/com/qiubo/optimaltv/data/source/VodApiSource.kt",
+        ]
+        for path in sources:
+            src = path.read_text(encoding="utf-8")
+            self.assertIn('if (deferSources) "?defer_sources=1"', src, path)
+
+        repos = [
+            ROOT / "android/app/src/main/java/com/qiubo/optimaltv/data/repo/VodRepository.kt",
+            ROOT / "internal/mobile/app/src/main/java/com/qiubo/optimaltv/data/repo/VodRepository.kt",
+        ]
+        for path in repos:
+            repo = path.read_text(encoding="utf-8")
+            brief = repo[repo.index("hero 简介补全"):repo.index("companion object {")]
+            self.assertIn("deferSources = true", brief, path)
+            self.assertIn("readTimeout(20", brief, path)
+            # defer_sources 的响应 sources 恒为空：写进共用缓存会让详情页显示「暂无片源」
+            self.assertNotIn("fetchDetailCached(", brief, path)
+            self.assertIn("briefDetailCache", brief, path)
+
+        web = (BACKEND / "www/app.js").read_text(encoding="utf-8")
+        brief_js = web[web.index("async function vodBrief(id)"):web.index("async function initVod()")]
+        self.assertIn("defer_sources=1", brief_js)
+        self.assertIn("d.summary", brief_js)
+        self.assertIn("d.rating", brief_js)
+
     def test_player_requests_ranked_vod_pool_before_start(self):
         backend = (BACKEND / "proxy.py").read_text(encoding="utf-8")
         route = backend[backend.index('if p.startswith("/hhkan/detail/"):'):

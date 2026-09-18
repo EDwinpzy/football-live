@@ -1091,7 +1091,15 @@ async function vodBrief(id) {
       const ref = String(id || "").replace(/^douban:/, "");
       const d = await fetchJSON(BASE + "/vod/detail/" + ref + "?defer_sources=1", { timeout: 60000 });
       if (!d.title) { briefCache[id] = null; return null; }
-      const v = { meta: d.meta || "", desc: d.desc || "", rating: +d.score || 0 };
+      /* 2026-09-18：详情接口已是豆瓣 subject 形态（summary/rating/year/regions/genres）。
+         旧代码读好好看口径的 meta/desc/score——三个字段都取不到，简介恒为空、评分恒 0，
+         hero 只剩「XXX · My TV 精选内容，一键播放。」占位。meta 拼法与 App 端保持一致。 */
+      const v = {
+        meta: [d.year, (d.regions || []).join(" / "), (d.genres || []).join(" / ")]
+          .filter(Boolean).join(" / "),
+        desc: d.summary || "",
+        rating: +d.rating || 0,
+      };
       briefCache[id] = v;
       return v;
     } catch (e) { return null; }
