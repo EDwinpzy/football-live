@@ -32,6 +32,7 @@ import java.security.PublicKey
 import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
 import java.time.Instant
+import java.time.OffsetDateTime
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -451,9 +452,15 @@ object LicenseManager {
         last
     }
 
+    /* 2026-09-19 修复 E2（激活成功但客户端拒票）：PG 返回的 activatedAt/serverNow 是
+       带本地时区偏移的 ISO 串（如 2026-09-19T00:21:34.253846+08:00），Instant.parse 只认
+       UTC（Z 结尾），偏移时间戳直接抛异常 → 字段变 null → applySuccess 误报
+       「服务端票据校验失败（E2）」。补 OffsetDateTime 兜底解析带偏移的形态。 */
     private fun parseTimestamp(value: Any?): Long? = when (value) {
         is Number -> value.toLong()
-        is String -> value.toLongOrNull() ?: runCatching { Instant.parse(value).toEpochMilli() }.getOrNull()
+        is String -> value.toLongOrNull()
+            ?: runCatching { Instant.parse(value).toEpochMilli() }.getOrNull()
+            ?: runCatching { OffsetDateTime.parse(value).toInstant().toEpochMilli() }.getOrNull()
         else -> null
     }
 }
