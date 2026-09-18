@@ -512,7 +512,7 @@
   "格罗宁根": {
     "url": null,
     "id": null,
-    "ts": 1788619852
+    "ts": 1789717912
   },
   "横滨水手": {
     "url": null,
@@ -677,7 +677,7 @@
   "坎布尔": {
     "url": null,
     "id": null,
-    "ts": 1788619853
+    "ts": 1789717913
   },
   "捷克": {
     "url": null,
@@ -912,7 +912,7 @@
   "海牙": {
     "url": null,
     "id": null,
-    "ts": 1788619855
+    "ts": 1789717913
   },
   "阿雷佐": {
     "url": null,
@@ -1217,7 +1217,7 @@
   "不莱梅": {
     "url": null,
     "id": null,
-    "ts": 1788619848
+    "ts": 1789717913
   },
   "RB莱比锡": {
     "url": null,
@@ -1573,5 +1573,65 @@
     "url": null,
     "id": null,
     "ts": 1789664510
+  },
+  "西班牙人": {
+    "url": "https://assets.football-logos.cc/logos/spain/64x64/espanyol.3c923236.png",
+    "id": null,
+    "ts": 1789717912
+  },
+  "埃尔切": {
+    "url": "https://assets.football-logos.cc/logos/spain/64x64/elche.30c2c806.png",
+    "id": null,
+    "ts": 1789717912
+  },
+  "奥克兰FC": {
+    "url": "https://assets.football-logos.cc/logos/belgium/64x64/fcv-dender-eh.6b61ba86.png",
+    "id": null,
+    "ts": 1789717912
+  },
+  "卡利亚里": {
+    "url": "https://assets.football-logos.cc/logos/italy/64x64/cagliari.f51a6d39.png",
+    "id": null,
+    "ts": 1789717912
+  },
+  "科隆": {
+    "url": "https://assets.football-logos.cc/logos/germany/64x64/koln.203b0d57.png",
+    "id": null,
+    "ts": 1789717912
+  },
+  "兹沃勒": {
+    "url": "https://assets.football-logos.cc/logos/netherlands/64x64/pec-zwolle.a9204f0f.png",
+    "id": null,
+    "ts": 1789717913
+  },
+  "萨索洛": {
+    "url": "https://assets.football-logos.cc/logos/italy/64x64/sassuolo.78a3e8a3.png",
+    "id": null,
+    "ts": 1789717913
+  },
+  "西悉尼流浪者": {
+    "url": null,
+    "id": null,
+    "ts": 1789717913
+  },
+  "吉维森特": {
+    "url": "https://assets.football-logos.cc/logos/portugal/64x64/gil-vicente.0d34f9a4.png",
+    "id": null,
+    "ts": 1789717913
+  },
+  "巴黎FC": {
+    "url": "https://assets.football-logos.cc/logos/belgium/64x64/fcv-dender-eh.6b61ba86.png",
+    "id": null,
+    "ts": 1789717913
+  },
+  "马梅洛迪日落": {
+    "url": null,
+    "id": null,
+    "ts": 1789717913
+  },
+  "阿拉维斯": {
+    "url": "https://r2.thesportsdb.com/images/media/team/badge/0aaifo1734673843.png",
+    "id": "17168",
+    "ts": 1789717913
   }
 }
