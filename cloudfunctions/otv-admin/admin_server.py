@@ -257,6 +257,272 @@ def pg_get_public(key: str, max_bytes: int = 32 * 1024 * 1024):
         return r.read(max_bytes)
 
 
+# ---------------- 还原（按页面清库；破坏性操作，双闸 + 强制备份） ----------------
+#
+# 前端每个页面一个「还原」按钮：把该页维护的版本 / 记录清回初始状态。
+# 三条硬约束（写在代码里，任何调用方都绕不过）：
+#   1) 必须显式提供后台密码 + 逐页确认短语——后台当前可能是免登录形态
+#      （OTV_ADMIN_NOAUTH=1），只有会话不足以授权销毁数据；
+#   2) 删除前把将删的行**完整导出**并随响应返回，前端自动落本地 JSON 备份；
+#   3) 电视源 / 影视源只清历史，保留当前生效的那一版：客户端配置与正在分发的
+#      m3u 都来自它（vod_source_public_check 读 vod_source_versions 最新一行），
+#      删掉等于线上断源。
+
+RESET_SCOPES = {
+    "overview": {
+        "label": "总览",
+        "confirm": "还原总览",
+        "desc": "清空卡密、激活流水、热更包（含桶对象与设备上报日志）、公告；电视源 / 影视源不动",
+        "tables": (("activate_log", "激活流水"), ("licenses", "卡密"),
+                   ("hotupdate_log", "热更设备日志"), ("hotupdate_pkg", "热更包记录"),
+                   ("announcements", "公告")),
+        "hu_objects": True,
+    },
+    "licenses": {
+        "label": "卡密",
+        "confirm": "还原卡密",
+        "desc": "清空卡密表（激活流水保留，可在「激活流水」页单独还原）",
+        "tables": (("licenses", "卡密"),),
+    },
+    "logs": {
+        "label": "激活流水",
+        "confirm": "还原激活流水",
+        "desc": "清空激活日志",
+        "tables": (("activate_log", "激活流水"),),
+    },
+    "hu": {
+        "label": "热更新",
+        "confirm": "还原热更新",
+        "desc": "删除全部热更包（含桶内 zip）+ 设备上报日志；下次发布即 v1",
+        "tables": (("hotupdate_log", "热更设备日志"), ("hotupdate_pkg", "热更包记录")),
+        "hu_objects": True,
+    },
+    "ann": {
+        "label": "运营公告",
+        "confirm": "还原公告",
+        "desc": "清空公告（客户端回到无公告状态）",
+        "tables": (("announcements", "公告"),),
+    },
+    "iptv": {
+        "label": "电视源",
+        "confirm": "还原电视源",
+        "desc": "清空版本历史与管理日志，**保留当前生效的那一版**（频道表与正在分发的 m3u 不动）",
+        "tables": (("iptv_admin_log", "电视源管理日志"),),
+        "keep_latest": (("iptv_version", "电视源版本历史", "version"),),
+    },
+    "vod": {
+        "label": "影视源",
+        "confirm": "",
+        "desc": "影视源的版本表只开放给专用数据库函数",
+        "tables": (),
+        # 2026-09-18 实测：vod_source_versions / vod_source_drafts 对服务账号是 403
+        # （permission denied，只有 SECURITY DEFINER 函数能碰）。REST 通道删不了，
+        # 又不想为此加一条新的破坏性 SQL 函数，所以这一页如实说明、不给可点的按钮。
+        "unsupported": "影视源的两张表（vod_source_versions / vod_source_drafts）只对数据库内部函数开放，"
+                       "后台服务账号无权读写，因此无法从后台清空这一页的版本记录。"
+                       "要清空请在 CloudBase 控制台用 SQL 处理（例如 truncate vod_source_versions）。",
+    },
+}
+
+RESET_BACKUP_MAX_BYTES = 10 * 1024 * 1024
+RESET_BACKUP_PAGE = 1000
+
+
+def _rest(table: str, query: str = "", method: str = "GET", body: bytes | None = None,
+          headers: dict | None = None, timeout: int = 120):
+    """PostgREST 直连（表级）。返回 (status, bytes, headers)。"""
+    url = db_import.BASE + "/v1/rdb/rest/" + table + (("?" + query) if query else "")
+    db_import.check_url(url)
+    h = {"Accept": "application/json", "Authorization": "Bearer " + cloud_token()}
+    if body is not None:
+        h["Content-Type"] = "application/json"
+    h.update(headers or {})
+    req = urllib.request.Request(url, data=body, method=method, headers=h)
+    try:
+        with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=timeout) as r:
+            return r.status, r.read(RESET_BACKUP_MAX_BYTES + 1), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(2048), dict(e.headers or {})
+
+
+def _hdr(headers: dict, name: str, default: str = "") -> str:
+    """取值不区分大小写：CloudBase 网关走 HTTP/2，响应头名会被统一小写。"""
+    want = name.lower()
+    for k, v in (headers or {}).items():
+        if str(k).lower() == want:
+            return str(v)
+    return default
+
+
+def _rest_count(table: str) -> int:
+    st, body, hdr = _rest(table, "select=*&limit=1", headers={"Prefer": "count=exact"})
+    if st >= 300:
+        raise RuntimeError(f"{table} 计数失败 HTTP {st}: {body[:200].decode('utf-8', 'replace')}")
+    cr = _hdr(hdr, "Content-Range")
+    total = cr.rsplit("/", 1)[-1]
+    if not total.isdigit():
+        raise RuntimeError(f"{table} 计数响应缺少 Content-Range: {cr or hdr}")
+    return int(total)
+
+
+def _rest_newest(table: str, column: str) -> int:
+    st, body, _h = _rest(table, f"select={column}&order={column}.desc&limit=1")
+    if st >= 300:
+        raise RuntimeError(f"{table} 读最新版本失败 HTTP {st}: {body[:200].decode('utf-8', 'replace')}")
+    rows = json.loads(body or b"[]")
+    return int(rows[0][column]) if rows else 0
+
+
+def _rest_dump(table: str) -> list:
+    """整表导出（备份用）：分页拉全量行。"""
+    rows, offset = [], 0
+    while True:
+        st, body, _h = _rest(table, f"select=*&limit={RESET_BACKUP_PAGE}&offset={offset}")
+        if st >= 300:
+            raise RuntimeError(f"{table} 导出失败 HTTP {st}: {body[:200].decode('utf-8', 'replace')}")
+        page = json.loads(body or b"[]")
+        rows.extend(page)
+        if len(page) < RESET_BACKUP_PAGE:
+            return rows
+        offset += len(page)
+        if offset > 500_000:
+            raise RuntimeError(f"{table} 行数超过 50 万，请分批还原")
+
+
+def _rest_delete(table: str, query: str = "") -> int:
+    st, body, _h = _rest(table, query, method="DELETE")
+    if st >= 300:
+        raise RuntimeError(f"{table} 删除失败 HTTP {st}: {body[:200].decode('utf-8', 'replace')}")
+    return st
+
+
+def _reset_scope(scope: str) -> dict:
+    spec = RESET_SCOPES.get(scope)
+    if not spec:
+        raise ValueError("未知还原范围: " + str(scope))
+    return spec
+
+
+def reset_preview(scope: str) -> dict:
+    """干跑：返回该页将被清空的内容与条数（不写任何数据）。"""
+    try:
+        spec = _reset_scope(scope)
+    except ValueError as e:  # noqa: BLE001
+        return {"error": str(e)}
+    if spec.get("unsupported"):
+        return {"scope": scope, "label": spec["label"], "desc": spec["desc"],
+                "unsupported": True, "reason": spec["unsupported"], "items": [], "total": 0}
+    items = []
+    try:
+        for table, label in spec["tables"]:
+            items.append({"table": table, "label": label, "count": _rest_count(table), "kept": False})
+        for table, label, col in spec.get("keep_latest", ()):
+            total = _rest_count(table)
+            newest = _rest_newest(table, col)
+            kept = 1 if newest > 0 else 0
+            items.append({"table": table, "label": label, "count": max(total - kept, 0),
+                          "kept": True, "keepNote": f"保留当前生效 v{newest}" if kept else "无版本"})
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"统计失败: {e}"}
+    return {"scope": scope, "label": spec["label"], "desc": spec["desc"],
+            "confirm": spec["confirm"], "items": items,
+            "total": sum(i["count"] for i in items)}
+
+
+def reset_apply(scope: str, password: str, confirm: str) -> dict:
+    """执行还原：密码 + 确认短语双闸 → 全量备份 → 删除 → 复核。"""
+    try:
+        spec = _reset_scope(scope)
+    except ValueError as e:  # noqa: BLE001
+        return {"error": str(e)}
+    if spec.get("unsupported"):
+        return {"error": spec["unsupported"]}
+    if not password or not hmac.compare_digest(str(password).encode("utf-8"), ADMIN_PASS.encode("utf-8")):
+        return {"error": "后台密码不正确，已拒绝还原"}
+    if (confirm or "").strip() != spec["confirm"]:
+        return {"error": f"确认短语不匹配，请输入「{spec['confirm']}」"}
+
+    preview = reset_preview(scope)
+    if preview.get("error"):
+        return preview
+
+    # 1) 先备份（导出要删的全部行；导出与删除之间的新增行由复核兜底）
+    backup_rows, backup_meta = {}, []
+    for table, label in spec["tables"]:
+        rows = _rest_dump(table)
+        backup_rows[table] = rows
+        backup_meta.append({"table": table, "label": label, "rows": len(rows)})
+    kept_notes = []
+    for table, label, col in spec.get("keep_latest", ()):
+        newest = _rest_newest(table, col)
+        rows = [r for r in _rest_dump(table) if int(r.get(col) or 0) != newest]
+        backup_rows[table] = rows
+        backup_meta.append({"table": table, "label": label, "rows": len(rows)})
+        kept_notes.append({"table": table, "label": label, "keptVersion": newest})
+    backup = {
+        "schema": 1, "scope": scope, "label": spec["label"],
+        "capturedAt": datetime.now(timezone.utc).isoformat(),
+        "environment": "appletv-d5ge1bth794873f76",
+        "rows": backup_rows,
+    }
+    raw = json.dumps(backup, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    if len(raw) > RESET_BACKUP_MAX_BYTES:
+        return {"error": f"备份体积 {len(raw) // 1024}KB 超过上限，请分批还原（先清流水再清卡密）"}
+
+    # 2) 删除（先子表后主表；保留最新版的表用过滤器排除当前生效那一行）
+    deleted = []
+    try:
+        for table, label in spec["tables"]:
+            _rest_delete(table)
+            deleted.append({"table": table, "label": label, "deleted": len(backup_rows.get(table, []))})
+        for table, label, col in spec.get("keep_latest", ()):
+            newest = _rest_newest(table, col)
+            if newest > 0:
+                _rest_delete(table, f"{col}=lt.{newest}")
+            deleted.append({"table": table, "label": label, "deleted": len(backup_rows.get(table, [])),
+                            "kept": (f"v{newest}" if newest > 0 else "")})
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"删除中断: {e}。已导出备份见响应 backup，可直接用于恢复", "backup": backup}
+
+    # 3) 热更包：顺手清桶内对象（失败不影响结果，孤立对象无害）
+    if spec.get("hu_objects"):
+        for row in backup_rows.get("hotupdate_pkg", []):
+            key = str(row.get("object_key") or "").strip()
+            if not key:
+                code = row.get("hot_version_code")
+                key = f"backend-hu{code}.zip" if code else ""
+            if key:
+                _hu_obj_delete(key)
+
+    # 4) 复核：删后条数必须归零（保留版的按预期剩 1）
+    verify = []
+    for table, label in spec["tables"]:
+        left = _rest_count(table)
+        verify.append({"table": table, "label": label, "left": left})
+    for table, label, col in spec.get("keep_latest", ()):
+        left = _rest_count(table)
+        verify.append({"table": table, "label": label, "left": left, "kept": "当前生效版本"})
+    bad = [v for v in verify if v["left"] > (1 if v.get("kept") else 0)]
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return {
+        "ok": True, "scope": scope, "label": spec["label"],
+        "deleted": deleted, "kept": kept_notes, "verify": verify, "residual": bad,
+        "backup": {"name": f"admin-reset-{stamp}-{scope}.json", "bytes": len(raw),
+                   "sha256": hashlib.sha256(raw).hexdigest(), "rows": backup_meta},
+        "backupData": backup,
+    }
+
+
+def h_reset_preview(d: dict) -> dict:
+    return reset_preview(str(d.get("scope") or "").strip())
+
+
+def h_reset(d: dict) -> dict:
+    return reset_apply(str(d.get("scope") or "").strip(),
+                       str(d.get("password") or ""), str(d.get("confirm") or ""))
+
+
 def h_stats(_d: dict) -> dict:
     return rpc("admin_stats", {})
 
@@ -1341,6 +1607,9 @@ ROUTES = {
     "/api/hu_health": h_hu_health,
     "/api/ann_get": h_ann_get,
     "/api/ann_publish": h_ann_publish,
+    # 还原（按页面清库）：密码 + 逐页确认短语双重闸，且强制先导出备份
+    "/api/reset_preview": h_reset_preview,
+    "/api/reset": h_reset,
     # 影视源草稿、测试与显式发布（均位于统一会话门禁之后）
     "/api/vod_source_list": h_vod_source_list,
     "/api/vod_source_save": h_vod_source_save,
