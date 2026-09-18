@@ -41,6 +41,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -85,6 +86,7 @@ import com.qiubo.optimaltv.ui.components.AppleLoading
 import com.qiubo.optimaltv.ui.components.OtvHint
 import com.qiubo.optimaltv.ui.components.tapCard
 import com.qiubo.optimaltv.ui.components.MobileBackButton
+import com.qiubo.optimaltv.ui.components.chromeHidePx
 import com.qiubo.optimaltv.ui.components.navigateToTab
 import com.qiubo.optimaltv.ui.detail.simpleFactory
 import com.qiubo.optimaltv.ui.player.PlayerViewModel
@@ -799,8 +801,18 @@ private fun TvBrowseScreen(
         }
 
         // 顶栏 tab（浏览态恢复，与其他主页面一致）
+        // 2026-09-19：补「下移即隐藏」——频道网格滚离顶部时顶栏淡出上移、回顶淡入
+        //（此前影视/足球/我的都接了下潜，电视页漏掉，用户报「下移时顶部标签栏不隐藏」）
+        val chromeCtx = androidx.compose.ui.platform.LocalContext.current
+        val chromeHide = remember { chromeHidePx(chromeCtx.resources.displayMetrics.widthPixels) }
+        val chromeGone by remember(gridState, chromeHide) {
+            derivedStateOf {
+                gridState.firstVisibleItemIndex > 0 || gridState.firstVisibleItemScrollOffset > chromeHide
+            }
+        }
         com.qiubo.optimaltv.ui.components.MainTabBar(
             "tv", { key -> navigateToTab(nav, key) }, { nav.navigate("search") },
+            hidden = chromeGone,
         )
 
         OtvHint(hint)

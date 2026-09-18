@@ -96,11 +96,15 @@ fun MainTabBar(
 ) {
     val s = rememberUiScale()
     // 进入页面挂阈值、离开时清除（OtvNav 全局单值；各带栏页面均传 autoHide=true）。
-    // 阈值为物理 px（OtvNav 节点 bounds 为窗口物理坐标）：300 设计px ≈ 屏宽物理px × 300/1920
+    // 阈值为物理 px（OtvNav 节点 bounds 为窗口物理坐标）。
+    // 2026-09-19：300 → 200 设计px。原值是从「滚动驱动」的移动端口径直接搬来的，
+    // 在 TV 版（焦点驱动）上等于要求「光标下移到 y>300」才收起——电视页的频道网格
+    // 第一行顶边只有 ~240（chips 行 150），于是下移进网格时顶栏纹丝不动（用户报障）。
+    // 200 设计px 落在 chips 行下方、网格首行上方：光标进内容区即隐藏、回到 chips/tab 恢复。
     val tabCtx = androidx.compose.ui.platform.LocalContext.current
     if (autoHide) {
         androidx.compose.runtime.DisposableEffect(tabCtx) {
-            OtvNav.chromeHideThresholdPx = 300f * tabCtx.resources.displayMetrics.widthPixels / 1920f
+            OtvNav.chromeHideThresholdPx = 200f * tabCtx.resources.displayMetrics.widthPixels / 1920f
             onDispose { OtvNav.clearChrome() }
         }
     }

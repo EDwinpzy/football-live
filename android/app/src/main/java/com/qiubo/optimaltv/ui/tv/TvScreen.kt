@@ -825,10 +825,13 @@ private fun TvBrowseScreen(
         }
 
         // 顶栏 tab（浏览态恢复，与其他主页面一致；DOWN 定向进内容首焦点=首个分组 chip）
+        // 2026-09-19：补 autoHide——光标下移进频道网格时顶栏隐藏、回顶部显示
+        //（此前只有影视/足球/我的/搜索开了，电视页漏掉，用户报「下移时顶栏不隐藏」）
         com.qiubo.optimaltv.ui.components.MainTabBar(
             "tv", { key -> navigateToTab(nav, key) }, { nav.navigate("search") }, tabFocus,
             contentDownFocus = firstChipFocus,
             contentDownScrollTop = { },
+            autoHide = true,   // 光标下移进内容区隐藏顶栏，回顶部显示
         )
 
         OtvHint(hint)
