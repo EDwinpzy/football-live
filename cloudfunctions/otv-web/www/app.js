@@ -187,6 +187,11 @@ function heroSwap(band, url) {
   band.dataset.swapping = url;
   const nx = document.createElement("img");
   nx.className = "hero-img"; nx.alt = ""; nx.decoding = "async"; nx.fetchPriority = "high";
+  /* 2026-09-18：新图必须继承 id（首屏静态 HTML 的 #vodHeroImg / #liveHeroImg）。
+     旧实现换图后 id 丢失，之后任何一次「heroes 为空」的重绘都会在
+     $("#vodHeroImg").removeAttribute("src") 上抛 TypeError，把 renderVodHero 之后的
+     renderHistRow/renderCatChips/renderVodLib 全部带走——影视页只剩一条空底板。 */
+  if (cur.id) nx.id = cur.id;
   nx.dataset.url = url; nx.src = url;
   nx.style.opacity = "0";
   cur.after(nx);   /* 新图在上层淡入，盖住旧图后移除 */
@@ -934,8 +939,12 @@ function scheduleVodWarmup() {
   else setTimeout(warm, 1800);
 }
 
-/* App refreshHome hero 降级链：carousel≥3 → 首页热门板块合并 take8 → 目录前 6 */
-const HOT_KEYS = ["近期热门", "最近更新", "近期热播", "热播", "近期热门电影", "近期热门剧集"];
+/* App refreshHome hero 降级链：carousel≥3 → 首页热门板块合并 take8 → 目录前 6。
+   2026-09-18：设备端/云端 /vod/home 的板块名是「最近热门 / 最新上映 / 豆瓣高分」，
+   旧键表只有好好看时代的「近期热门…」，豆瓣源下恒不命中 → hero 只能靠目录兜底，
+   目录一空 hero 就整条空掉（用户报障「影视界面崩了」）。两套键都留。 */
+const HOT_KEYS = ["近期热门", "最近更新", "近期热播", "热播", "近期热门电影", "近期热门剧集",
+  "最近热门", "最新上映", "豆瓣高分"];
 function buildHeroes(home, cat) {
   if (home && home.carousel && home.carousel.length >= 3)
     return home.carousel.map(c => {
@@ -949,7 +958,10 @@ function buildHeroes(home, cat) {
       .filter((v, i, a) => a.findIndex(x => x.id === v.id) === i)
     : [];
   if (hot.length) return hot.slice(0, 8);
-  return (cat ? cat.dedupedItems.filter(it => it.cover).slice(0, 6) : [])
+  /* 旧版 localStorage 缓存可能没有 dedupedItems（老接口叫 deduped）——直接 .filter 会抛
+     TypeError，把整个影视页的重绘打断。 */
+  const catItems = (cat && Array.isArray(cat.dedupedItems)) ? cat.dedupedItems : [];
+  return catItems.filter(it => it.cover).slice(0, 6)
     .map(it => ({ id: it.id, title: it.title, bg: it.hero || it.cover, tag: "" }));
 }
 
@@ -1244,7 +1256,8 @@ function renderVodLib() {
   const host = $("#vodSections");
   if (sel.id === "") {
     /* 「全部」分类 = 目录去重条目 take 18（App gridItems） */
-    const items = (vod.cat ? vod.cat.dedupedItems : []).slice(0, 18);
+    const allItems = (vod.cat && Array.isArray(vod.cat.dedupedItems)) ? vod.cat.dedupedItems : [];
+    const items = allItems.slice(0, 18);
     host.innerHTML = items.length
       ? `<div class="lib-grid" id="libGrid">${items.map(it => libCard(it)).join("")}</div><div style="height:80px"></div>`
       : `<div class="page-loading">暂无内容</div>`;
@@ -1324,7 +1337,12 @@ function renderVodHero() {
   const heroes = buildHeroes({ carousel: vod.car, sections: vod.homeSections }, vod.cat);
   vod.heroes = heroes;
   const c = heroes[vod.heroIdx || 0];
-  if (!c) { $("#vodHeroImg").removeAttribute("src"); return; }
+  if (!c) {
+    const im = $("#vodHeroImg");
+    if (im) im.removeAttribute("src");
+    $("#vodDots").innerHTML = "";
+    return;
+  }
   heroSwap($("#vodHero"), img(c.bg));
   refade($("#vodHero").querySelector(".vod-hero-content"));
   $("#vodHeroTitle").textContent = c.title;

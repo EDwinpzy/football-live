@@ -116,7 +116,9 @@ fun VodScreen(nav: NavController) {
 
     // hero 数据（原版 refreshVod 降级链：源站轮播 carousel≥3 优先 → 首页热门板块合并 → 目录前 6 兜底）
     val home by Graph.repo.homeFlow.collectAsStateWithLifecycle()
-    LaunchedEffect(Unit) { Graph.repo.refreshHome() }
+    /* 2026-09-18：进页兜底——目录为空（后端冷启动/热更重启期首轮抓取全失败）时补抓，
+       否则 hero 会退化成空底板、分类卡与三栏全空。 */
+    LaunchedEffect(Unit) { Graph.repo.ensureCatalogFresh(); Graph.repo.refreshHome() }
     val cat0 = catalogState.catalog
     val heroesTop = remember(cat0, home) { buildHeroes(cat0, home) }
     var heroIdxTop by remember(heroesTop) { mutableIntStateOf(0) }

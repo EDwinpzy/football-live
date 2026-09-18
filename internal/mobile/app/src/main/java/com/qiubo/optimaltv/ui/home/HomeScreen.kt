@@ -90,7 +90,9 @@ fun VodScreen(nav: NavController) {
 
     // hero 数据（原版 refreshVod 降级链：源站轮播 carousel≥3 优先 → 首页热门板块合并 → 目录前 6 兜底）
     val home by Graph.repo.homeFlow.collectAsStateWithLifecycle()
-    LaunchedEffect(Unit) { Graph.repo.refreshHome() }
+    /* 2026-09-18：进页兜底——目录为空（后端冷启动/热更重启期首轮抓取全失败）时补抓，
+       否则 hero 会退化成空底板、分类卡与三栏全空。 */
+    LaunchedEffect(Unit) { Graph.repo.ensureCatalogFresh(); Graph.repo.refreshHome() }
     val cat0 = catalogState.catalog
     val heroesTop = remember(cat0, home) { buildHeroes(cat0, home) }
 
@@ -304,7 +306,10 @@ private fun buildHeroes(cat0: com.qiubo.optimaltv.data.repo.Aggregated?, home: c
     if (home.carousel.size >= 3) {
         return home.carousel.map { HeroEntry("hhkan:" + it.vid, it.title, it.backdrop, it.tags.firstOrNull().orEmpty()) }
     }
-    val hotKeys = listOf("近期热门", "最近更新", "近期热播", "热播", "近期热门电影", "近期热门剧集")
+    /* 2026-09-18：键表与 VodRepository.heroRefs 保持一致（设备端豆瓣 /vod/home 的板块名
+       是「最近热门 / 最新上映 / 豆瓣高分」，旧键表只有好好看时代的「近期热门…」）。 */
+    val hotKeys = listOf("近期热门", "最近更新", "近期热播", "热播", "近期热门电影", "近期热门剧集",
+        "最近热门", "最新上映", "豆瓣高分")
     val hot = home.sections
         .filter { sec -> hotKeys.any { sec.name.contains(it) } }
         .flatMap { sec -> sec.items.map { HeroEntry(it.id, it.title, it.posterUrl, sec.name) } }

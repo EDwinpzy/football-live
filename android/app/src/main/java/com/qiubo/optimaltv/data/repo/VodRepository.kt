@@ -50,7 +50,11 @@ fun heroRefs(catalog: Aggregated?, home: VodRepository.HomeState): List<HeroRef>
     if (home.carousel.size >= 3) {
         return home.carousel.map { HeroRef("hhkan:" + it.vid, it.title, it.backdrop, it.tags.firstOrNull().orEmpty()) }
     }
-    val hotKeys = listOf("近期热门", "最近更新", "近期热播", "热播", "近期热门电影", "近期热门剧集")
+    /* 2026-09-18：设备端豆瓣模块 /vod/home 的板块名就是「最近热门 / 最新上映 / 豆瓣高分」
+       （douban_catalog.HOME_SECTION_NAMES），旧键表只有好好看时代的「近期热门…」，
+       豆瓣源下恒不命中 → hero 只能靠目录兜底；目录一空 hero 就整条空掉。两套键都留下。 */
+    val hotKeys = listOf("近期热门", "最近更新", "近期热播", "热播", "近期热门电影", "近期热门剧集",
+        "最近热门", "最新上映", "豆瓣高分")
     val hot = home.sections
         .filter { sec -> hotKeys.any { sec.name.contains(it) } }
         // hero 用大图：列表接口给的最小号铺满整屏会糊（见 VodItem.heroUrl）
@@ -94,6 +98,9 @@ private data class CatalogSnapshot(
     val categories: List<Category>,
     val items: List<VodItem>,
 )
+
+/** 目录连续空结果时的后台重试间隔（毫秒）：内嵌后端冷启动/热更重启需要的时间窗。 */
+private val CATALOG_RETRY_DELAYS = longArrayOf(5_000L, 10_000L, 20_000L, 30_000L)
 
 /** 内容仓库（技术方案 §3.1 业务层·内容仓库）：好好看目录 / 分类 / 搜索。 */
 class VodRepository(
@@ -175,6 +182,18 @@ class VodRepository(
                 }
             }
             val groups = allItems.groupBy { it.normTitle }
+            /* 2026-09-18 用户报障「影视界面崩了」：空结果绝不覆盖已有目录。
+               内嵌后端在热更解压 / 冷启动期（Chaquopy + 36MB 包解压 + 快照装载）可能
+               十几秒还没就绪，首轮 refresh 的 5 路 /vod/home 会集体连接失败；旧实现
+               仍然把目录替换成「有分类、0 条目」的空目录 → 影视页 hero 退化成空底板
+               （OtvColors.Panel）、片库分类卡与三栏全空，且本次会话不再重试。
+               现在：有旧目录就保留并后台退避重试；一次都没成功过才写入空目录。 */
+            val previous = _state.value.catalog
+            if (allItems.isEmpty() && previous != null && previous.dedupedItems.isNotEmpty()) {
+                _state.value = CatalogState(loading = false, catalog = previous, sourceStates = states)
+                scheduleCatalogRetry()
+                return@coroutineScope
+            }
             _state.value = CatalogState(
                 loading = false,
                 catalog = Aggregated(
@@ -184,6 +203,7 @@ class VodRepository(
                 ),
                 sourceStates = states,
             )
+            if (allItems.isEmpty()) scheduleCatalogRetry() else catalogRetry = 0
             // v1.10 目录磁盘快照：任一真实源成功才落盘（演示兜底不落），下次启动秒开
             if (results.any { it.snapshot != null }) {
                 val catsOut = cats.values.toList()
@@ -236,6 +256,33 @@ class VodRepository(
     private val repoScope = kotlinx.coroutines.CoroutineScope(
         kotlinx.coroutines.SupervisorJob() + Dispatchers.IO,
     )
+
+    /** 目录空结果的退避重试：连续为空时 5/10/20/30s 后台补抓（成功即清零）。
+     *  2026-09-18：内嵌后端冷启动/热更重启期首轮抓取会全失败，旧实现没有重试，
+     *  用户只有重启 app 才可能恢复。 */
+    private var catalogRetry = 0
+    private var catalogRetryJob: kotlinx.coroutines.Job? = null
+
+    /** 影视页进入兜底：目录还是空的（或条目为空）就补一次刷新。 */
+    fun ensureCatalogFresh() {
+        val cat = _state.value.catalog
+        if (cat != null && cat.dedupedItems.isNotEmpty()) return
+        if (_state.value.loading) return
+        repoScope.launch { runCatching { refresh() } }
+    }
+
+    private fun scheduleCatalogRetry() {
+        if (catalogRetry >= CATALOG_RETRY_DELAYS.size) return
+        if (catalogRetryJob?.isActive == true) return
+        val wait = CATALOG_RETRY_DELAYS[catalogRetry]
+        catalogRetry++
+        android.util.Log.w("OTV", "目录为空，${wait}ms 后重试（第 $catalogRetry 次）")
+        catalogRetryJob = repoScope.launch {
+            kotlinx.coroutines.delay(wait)
+            runCatching { refresh() }
+                .onFailure { android.util.Log.w("OTV", "目录重试失败: ${it.message}") }
+        }
+    }
 
     private var homeJob: kotlinx.coroutines.Job? = null
 
