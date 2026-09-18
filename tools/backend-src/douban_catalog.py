@@ -945,9 +945,10 @@ class DoubanCatalog:
             pages = [int(page)]
             if filtered:
                 pages += [int(page) + i for i in range(1, SHOW_FILTER_EXTRA_PAGES + 1)]
-            collected, seen, rows = [], set(), []
+            collected, seen, rows, last_full = [], set(), [], False
             for p in pages:
                 rows = self._explore(category, sort_code, p, genre, region, year, rating, send=send)
+                last_full = len(rows) >= EXPLORE_PAGE_SIZE
                 if not rows:
                     break
                 fresh = []
@@ -969,7 +970,9 @@ class DoubanCatalog:
                 if not filtered or len(collected) >= EXPLORE_PAGE_SIZE:
                     break
             items = collected[:EXPLORE_PAGE_SIZE]
-            has_more = bool(rows) if filtered else (len(items) >= EXPLORE_PAGE_SIZE)
+            # 诚实：只有「最后一次上游请求拿到满页」才说明还有下一页。旧实现带筛选时用
+            # `bool(rows)`（拿到任意一行就算有更多），于是「加载更多」点下去常常是空的。
+            has_more = last_full
             return {"category": category, "page": int(page), "items": items,
                     "has_more": has_more, "source": "douban", "stale": False}
 

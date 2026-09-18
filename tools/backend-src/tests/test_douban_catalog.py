@@ -479,6 +479,20 @@ class DoubanCatalogTest(unittest.TestCase):
             for dimension in douban_catalog.FILTER_DIMENSIONS:
                 self.assertIsInstance(raw[category][dimension], bool)
 
+    def test_has_more_is_false_when_upstream_runs_out(self):
+        """旧实现带筛选时用 `bool(rows)` 判断，用户会看到「加载更多」点下去是空的。"""
+        catalog = douban_catalog.DoubanCatalog(
+            fetch=lambda _url: search_payload([{"id": "1", "title": "唯一一条", "rate": "8"}]),
+            snapshot={})
+        self.assertFalse(catalog.show("movie", region="日本", page=1)["has_more"])
+
+    def test_has_more_is_true_when_last_upstream_page_is_full(self):
+        rows = [{"id": str(index), "title": "片%d" % index, "rate": "8.0",
+                 "card_subtitle": "2024 / 日本 / 剧情"}
+                for index in range(douban_catalog.EXPLORE_PAGE_SIZE)]
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: search_payload(rows), snapshot={})
+        self.assertTrue(catalog.show("movie", region="日本", page=1)["has_more"])
+
     def test_movie_rule_drops_concerts_and_stage_but_keeps_musical_films(self):
         """电影栏不许出现演唱会/舞台实录：豆瓣把这些也标成 movie，只能靠标题/又名认。"""
         rows = [explore_row(111, "陈奕迅DUO演唱会"), explore_row(222, "汉密尔顿"),
