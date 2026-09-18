@@ -72,6 +72,18 @@ TTL = {"home": 21600, "filters": 86400, "detail": 604800, "search": 1800, "show"
 CACHE_SCHEMA = 1
 CACHE_ENVELOPE_KEYS = {"schema", "fetched_at", "value"}
 SNAPSHOT_PATH = Path(__file__).with_name("douban_snapshot.json")
+FILTER_MATRIX_PATH = Path(__file__).with_name("douban_filter_matrix.json")
+FILTER_DIMENSIONS = ("genre", "region", "year", "rating")
+# 无实测数据时的保守缺省：只有电影类型有直接证据（线上 `genre=` 能返回正常结果，
+# 2026-09-18 `show(tv, genre=古装)` 也返回过结果），其余维度一律本地判定 —— 宁可少给，
+# 不给错。探测脚本（tools/probe_douban_filter_matrix.py）会用实测覆盖这份缺省。
+DEFAULT_FILTER_MATRIX = {
+    "movie": {"genre": True, "region": True, "year": True, "rating": True},
+    "tv": {"genre": False, "region": False, "year": False, "rating": True},
+    "anime": {"genre": False, "region": False, "year": False, "rating": True},
+    "variety": {"genre": False, "region": False, "year": False, "rating": True},
+    "short": {"genre": False, "region": False, "year": False, "rating": True},
+}
 
 
 def _text(value):
@@ -408,6 +420,46 @@ class DoubanThrottled(ValueError):
     """豆瓣 Explore 限流（HTTP 200 + 空 data）：按失败处理，走缓存/快照回落。"""
 
 
+class DoubanUnavailable(RuntimeError):
+    """上游异常（IP 被拦 / 非 JSON / 缺 data 键）——不是「这个筛选没有结果」。
+
+    2026-09-18：豆瓣对异常 IP 回 HTTP 200 + `{"msg": "检测到有异常请求…"}`（没有 `data`
+    键）。旧实现把它当成空列表，空壳于是被当作成功结果写进 6 小时缓存 —— 用户看到假空，
+    豆瓣恢复后也不会刷新。
+    """
+
+
+def explore_rows(payload):
+    """校验 Explore 响应形状；异常一律抛 [DoubanUnavailable]，合法空结果返回 `[]`。"""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        message = payload.get("msg") if isinstance(payload, dict) else ""
+        raise DoubanUnavailable(str(message or "unexpected Douban explore payload"))
+    return payload["data"]
+
+
+def early_year_cutoff(now=None):
+    """「更早」的上界：年份 chip 覆盖 [今年 .. 今年-11]，所以更早 = 今年-12 及以前。"""
+    return (now or time.localtime()).tm_year - 12
+
+
+def year_range_value(year):
+    """年份 chip → 豆瓣 `year_range` 参数；「全部」/空返回空串。"""
+    text = str(year or "").strip()
+    if not text or text == "全部":
+        return ""
+    if text == "更早":
+        return "1,%d" % early_year_cutoff()
+    return "%s,%s" % (text, text) if text.isdigit() else ""
+
+
+# 上游被拦后的冷却：冷却期内不再打上游（避免用户原地等超时），到期自动放行一次
+# 真实回源试探，成功即恢复正常。
+DOUBAN_UNAVAILABLE_COOLDOWN = 60.0
+# 冷却只针对「目录检索」这一类上游（movie.douban.com）。详情走的是另一个域
+# （m.douban.com/rexxar），实测在被拦时仍然可用，绝不能一起被打进冷却。
+COOLDOWN_KINDS = ("home", "show")
+
+
 def _section_items(value, title):
     """取（缓存或快照）分类首页里同名栏目的条目；没有则返回空列表。"""
     if not isinstance(value, dict):
@@ -419,13 +471,42 @@ def _section_items(value, title):
 
 
 class DoubanCatalog:
-    def __init__(self, fetch=None, cache=None, snapshot=None, media_index=None):
+    def __init__(self, fetch=None, cache=None, snapshot=None, media_index=None, matrix_path=None):
         self.fetch = fetch or self._fetch
         self.cache = cache
         self.snapshot = snapshot if isinstance(snapshot, dict) else self._load_snapshot()
         self.media_index = media_index
         self._conditions = {}
         self._condition_lock = threading.Lock()
+        self._matrix_path = Path(matrix_path) if matrix_path else FILTER_MATRIX_PATH
+        self._matrix_cache = None
+        self._unavailable_until = 0.0
+
+    def _filter_matrix(self):
+        """分类 → 上游是否可信该维度。缺文件/缺字段用保守缺省补齐，绝不抛错。"""
+        if self._matrix_cache is not None:
+            return self._matrix_cache
+        matrix = {category: dict(DEFAULT_FILTER_MATRIX[category]) for category in CATEGORY_VALUES}
+        try:
+            raw = json.loads(self._matrix_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            raw = {}
+        for category, values in (raw.items() if isinstance(raw, dict) else []):
+            if category not in matrix or not isinstance(values, dict):
+                continue
+            for dimension in FILTER_DIMENSIONS:
+                if isinstance(values.get(dimension), bool):
+                    matrix[category][dimension] = values[dimension]
+        self._matrix_cache = matrix
+        return matrix
+
+    def _mark_unavailable(self):
+        with self._condition_lock:
+            self._unavailable_until = time.monotonic() + DOUBAN_UNAVAILABLE_COOLDOWN
+
+    def _upstream_cooling(self):
+        with self._condition_lock:
+            return time.monotonic() < self._unavailable_until
 
     def _ingest(self, items):
         if not self.media_index:
@@ -538,9 +619,12 @@ class DoubanCatalog:
                 value = producer()
                 if value and self.cache:
                     self.cache.put(key, value)
-            except Exception:
-                # 后台刷新失败不打扰用户：旧值继续用，下次请求再试。
-                pass
+            except Exception as exc:
+                # 后台刷新失败不打扰用户：旧值继续用，下次请求再试。但上游不可用要记一笔
+                # 冷却，否则用户的每次请求都会在原地重等一轮上游超时。
+                if (key.split(":", 1)[0] in COOLDOWN_KINDS
+                        and isinstance(exc, (DoubanUnavailable, DoubanThrottled, OSError))):
+                    self._mark_unavailable()
             finally:
                 with condition:
                     condition._running = False
@@ -548,7 +632,32 @@ class DoubanCatalog:
 
         threading.Thread(target=run, name="douban-swr", daemon=True).start()
 
-    def _coalesced(self, key, kind, producer, snapshot_value=None):
+    @staticmethod
+    def _has_content(payload):
+        """回落结果里到底有没有东西给用户看（show 看 items，home 看 sections，detail 看 title）。"""
+        if not isinstance(payload, dict) or not payload:
+            return False
+        if payload.get("items") or payload.get("title"):
+            return True
+        return any((section or {}).get("items") for section in (payload.get("sections") or []))
+
+    def _degraded(self, key, snapshot_value):
+        """上游不可用时的回落：同筛选条件的最近成功 → 随包快照 → 明确不可用。
+
+        「上游不可用」与「没有符合条件的内容」必须能被区分：前者 `upstream_available=False`
+        且 source 为 douban-unavailable，客户端显示「暂时获取不到，请重试」。
+        """
+        stale = self.cache.get_stale(key) if self.cache else None
+        fallback = stale if stale is not None else copy.deepcopy(snapshot_value)
+        if not isinstance(fallback, dict):
+            fallback = {}
+        fallback["source"] = ("douban-cache" if stale is not None else "douban-snapshot") \
+            if self._has_content(fallback) else "douban-unavailable"
+        fallback["stale"] = True
+        fallback["upstream_available"] = False
+        return fallback
+
+    def _coalesced(self, key, kind, producer, snapshot_value=None, allow_snapshot_first=True):
         if self.cache:
             fresh = self.cache.get(key, TTL[kind])
             if fresh is not None:
@@ -568,12 +677,16 @@ class DoubanCatalog:
             # 「5 个分类 × 3 栏 × 最多 3 页 + 每条补详情」整轮跑完，手机上极易超过客户端
             # 45s 读超时 → 5 路全失败 → 影视页整页空掉（用户报障「影视界面崩了」）。
             # detail 不走这条：快照详情可能没有线路，秒回会让详情页显示「暂无片源」。
-            if kind in ("home", "show") and isinstance(snapshot_value, dict) and snapshot_value:
+            if (allow_snapshot_first and kind in ("home", "show")
+                    and isinstance(snapshot_value, dict) and snapshot_value):
                 self._refresh_async(key, producer)
                 fallback = copy.deepcopy(snapshot_value)
                 fallback["stale"] = True
                 fallback["source"] = "douban-snapshot"
                 return fallback
+        # 目录检索的上游刚失败过：冷却期内不再排队等网络，直接给回落结果。
+        if kind in COOLDOWN_KINDS and self._upstream_cooling():
+            return self._degraded(key, snapshot_value)
         with self._condition_lock:
             condition = self._conditions.setdefault(key, threading.Condition())
         with condition:
@@ -587,16 +700,15 @@ class DoubanCatalog:
             value = producer()
             if not value:
                 raise ValueError("empty Douban response")
+            if isinstance(value, dict):
+                value.setdefault("upstream_available", True)
             if self.cache:
                 self.cache.put(key, value)
             return value
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            stale = self.cache.get_stale(key) if self.cache else None
-            fallback = stale if stale is not None else copy.deepcopy(snapshot_value)
-            if isinstance(fallback, dict):
-                fallback["stale"] = True
-                fallback["source"] = "douban-cache" if stale is not None else "douban-snapshot"
-            return fallback or {"stale": True, "source": "douban-snapshot"}
+        except (OSError, ValueError, TypeError, json.JSONDecodeError, DoubanUnavailable):
+            if kind in COOLDOWN_KINDS:
+                self._mark_unavailable()
+            return self._degraded(key, snapshot_value)
         finally:
             with condition:
                 condition._running = False
@@ -620,8 +732,7 @@ class DoubanCatalog:
             query["genres"] = genre
         url = EXPLORE_API + "?" + urllib.parse.urlencode(query)
         for attempt in range(len(EXPLORE_RETRY_DELAYS) + 1):
-            payload = self.fetch(url)
-            rows = payload.get("data") if isinstance(payload, dict) else None
+            rows = explore_rows(self.fetch(url))
             if rows:
                 return [normalize_explore_row(row, category) for row in rows if isinstance(row, dict)]
             if not strict:
@@ -654,7 +765,7 @@ class DoubanCatalog:
         """一栏的抓取结果；限流返回空列表，由上层用同栏旧值/随包快照补位。"""
         try:
             return self._section_items(category, sort)
-        except DoubanThrottled:
+        except (DoubanThrottled, DoubanUnavailable):
             return []
 
     def _section_items(self, category, sort):
@@ -793,11 +904,11 @@ class DoubanCatalog:
             raise ValueError("unsupported category")
         sort_code = SORT_CODES.get(sort, "U")
         key = "show:%s:%s:%s:%s:%s:%s:%s" % (category, genre, region, year, rating, sort_code, page)
+        filtered = any(v and v != "全部" for v in (genre, region, year, rating))
 
         def produce():
-            # 豆瓣 Explore 对筛选参数的支持按分类而异（电视剧/综艺/短剧传 genres 返回空页），
-            # 所以带筛选时先照常请求，再用行内 genres/regions/year 兜底过滤，并多抓两页补足。
-            filtered = any(v and v != "全部" for v in (genre, region, year, rating))
+            # 豆瓣 Explore 对筛选参数的支持按分类而异（见 `_filter_matrix`），所以带筛选时
+            # 先照常请求，再对「上游不可信」的维度做本地兜底过滤，并多抓两页把一页补足。
             pages = [int(page)]
             if filtered:
                 pages += [int(page) + i for i in range(1, SHOW_FILTER_EXTRA_PAGES + 1)]
@@ -845,7 +956,9 @@ class DoubanCatalog:
                     "items": snapshot_items[offset:offset + page_size],
                     "has_more": len(snapshot_items) > offset + page_size,
                     "source": "douban-snapshot", "stale": True}
-        result = self._coalesced(key, "show", produce, fallback)
+        # 带筛选是用户显式查询：冷缓存不能先回快照就结束 —— 快照里能匹配的条目极少，
+        # 用户会再次看到「筛选没内容」。无筛选仍保留「秒回快照 + 后台刷新」。
+        result = self._coalesced(key, "show", produce, fallback, allow_snapshot_first=not filtered)
         self._ingest(result.get("items") or [])
         return result
 

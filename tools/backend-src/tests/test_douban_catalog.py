@@ -76,7 +76,10 @@ class DoubanCatalogTest(unittest.TestCase):
             self.assertEqual(cache.get_stale("home:movie", now=999999)["sections"], [1])
 
     def test_first_run_uses_bundled_snapshot(self):
-        snapshot = {"home": {"movie": {"sections": [{"title": "最近热门", "items": []}]}}}
+        """首装 + 上游离线：随包快照必须顶上来（有内容才算「用了快照」，空快照是
+        `douban-unavailable`，客户端据此显示「暂时获取不到」而不是「没有内容」）。"""
+        snapshot = {"home": {"movie": {"sections": [
+            {"title": "最近热门", "items": [{"douban_id": "1", "title": "快照片"}]}]}}}
         catalog = douban_catalog.DoubanCatalog(
             fetch=lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")),
             snapshot=snapshot,
@@ -84,6 +87,18 @@ class DoubanCatalogTest(unittest.TestCase):
         result = catalog.home("movie")
         self.assertTrue(result["stale"])
         self.assertEqual(result["source"], "douban-snapshot")
+        self.assertFalse(result["upstream_available"])
+        titles = [item["title"] for section in result["sections"] for item in section["items"]]
+        self.assertEqual(titles, ["快照片"])
+
+    def test_empty_snapshot_with_dead_upstream_reports_unavailable(self):
+        catalog = douban_catalog.DoubanCatalog(
+            fetch=lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")),
+            snapshot={"home": {"movie": {"sections": [{"title": "最近热门", "items": []}]}}},
+        )
+        result = catalog.home("movie")
+        self.assertEqual(result["source"], "douban-unavailable")
+        self.assertFalse(result["upstream_available"])
 
     def test_filters_match_product_rows_and_remove_language(self):
         catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: {})
@@ -287,6 +302,76 @@ class DoubanCatalogTest(unittest.TestCase):
         self.assertNotEqual(plain, us)
         self.assertNotEqual(us, jp)
         self.assertEqual(len({plain.name, us.name, jp.name}), 3)
+
+    def test_blocked_upstream_payload_raises_instead_of_looking_empty(self):
+        """豆瓣拦 IP 时回 HTTP 200 + `{"msg": ...}`（**没有 `data` 键**）。旧实现把它当成
+        「这个筛选没有结果」，空结果于是被写进 6 小时缓存：用户看到假空、恢复后也不刷新。"""
+        blocked = {"msg": "检测到有异常请求从您的IP发出，请登录再试", "r": 1}
+        with self.assertRaises(douban_catalog.DoubanUnavailable):
+            douban_catalog.explore_rows(blocked)
+        with self.assertRaises(douban_catalog.DoubanUnavailable):
+            douban_catalog.explore_rows("<html>502</html>")
+        # 合法的空结果是 `{"data": []}`，必须照常返回空列表。
+        self.assertEqual(douban_catalog.explore_rows({"data": []}), [])
+
+    def test_blocked_upstream_never_writes_a_cache_entry(self):
+        cache = douban_catalog.JsonDiskCache(tempfile.mkdtemp())
+        blocked = {"msg": "检测到有异常请求从您的IP发出，请登录再试", "r": 1}
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: blocked, cache=cache, snapshot={})
+        result = catalog.show("movie", region="日本", page=1)
+        self.assertFalse(result["upstream_available"])
+        self.assertEqual(result["source"], "douban-unavailable")
+        self.assertEqual(result["items"], [])
+        self.assertEqual(list(pathlib.Path(cache.directory).glob("*.json")), [])
+
+    def test_expired_cache_is_served_while_upstream_is_blocked(self):
+        """同筛选条件的最近一次成功结果必须能顶上来，而不是给用户一个假空。"""
+        cache = douban_catalog.JsonDiskCache(tempfile.mkdtemp())
+        key = "show:movie:::::U:1"
+        cache.put(key, {"category": "movie", "page": 1, "has_more": False, "source": "douban",
+                        "stale": False, "items": [{"id": "douban:1", "title": "好结果"}]},
+                  fetched_at=time.time() - douban_catalog.TTL["show"] - 60)
+        blocked = {"msg": "检测到有异常请求从您的IP发出，请登录再试", "r": 1}
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: blocked, cache=cache, snapshot={})
+        result = catalog.show("movie", page=1)
+        self.assertEqual([item["title"] for item in result["items"]], ["好结果"])
+        self.assertEqual(result["source"], "douban-cache")
+        self.assertTrue(result["stale"])
+
+    def test_detail_fetch_failure_does_not_put_catalogue_upstream_into_cooldown(self):
+        """详情走另一个域（m.douban.com），实测被拦时仍可用 —— 详情失败绝不能把
+        目录检索一起打进冷却，否则一次补详情失败会让整页筛选退化成快照。"""
+        def fetch(url):
+            if "/subject/" in url:
+                raise OSError("detail boom")
+            return search_payload([explore_row(1, "甲"), explore_row(2, "乙")])
+
+        catalog = douban_catalog.DoubanCatalog(fetch=fetch)
+        self.assertEqual([item["title"] for item in catalog._section_or_empty("movie", "U")],
+                         ["甲", "乙"])
+        self.assertFalse(catalog._upstream_cooling())
+
+    def test_valid_empty_page_keeps_upstream_available_true(self):
+        """`{"data": []}` 是合法空结果，不能被降级链当成上游故障。"""
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: search_payload([]), snapshot={})
+        result = catalog.show("movie", genre="灾难", page=1)
+        self.assertEqual(result["items"], [])
+        self.assertTrue(result["upstream_available"])
+        self.assertEqual(result["source"], "douban")
+
+    def test_filtered_show_does_not_serve_snapshot_first(self):
+        """带筛选是用户显式查询：冷缓存不能先回快照就结束（快照里能匹配的条目极少，
+        用户会再次看到「筛选没内容」）。无筛选仍保留「秒回快照 + 后台刷新」。"""
+        snapshot = {"home": {"movie": {"sections": [
+            {"title": "最近热门", "items": [{"douban_id": "9", "title": "快照片",
+                                             "genres": ["剧情"], "regions": ["日本"]}]}]}}}
+        live = [{"id": "1", "title": "线上片", "rate": "8.0", "card_subtitle": "2024 / 日本 / 剧情"}]
+        cache = douban_catalog.JsonDiskCache(tempfile.mkdtemp())
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: search_payload(live),
+                                               cache=cache, snapshot=snapshot)
+        filtered = catalog.show("movie", region="日本", page=1)
+        self.assertEqual([item["title"] for item in filtered["items"]], ["线上片"])
+        self.assertTrue(filtered["upstream_available"])
 
     def test_movie_rule_drops_concerts_and_stage_but_keeps_musical_films(self):
         """电影栏不许出现演唱会/舞台实录：豆瓣把这些也标成 movie，只能靠标题/又名认。"""
