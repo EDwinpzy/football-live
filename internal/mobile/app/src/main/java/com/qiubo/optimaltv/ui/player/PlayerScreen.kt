@@ -864,7 +864,7 @@ private fun MorePanel(
             Spacer(Modifier.height(20.dp))
             // 选集（需求⑨修订：电影不显示选集区，电视剧/动漫/短剧保留；分页每页 20 集 4 列）
             if (!ui.isMovie && ui.epCount > 1) {
-                SectionLabel("选集")
+                SectionLabel("选择集数")
                 val pageSize = EpisodeMenuPolicy.RANGE_SIZE
                 val pageCount = (ui.epCount + pageSize - 1) / pageSize
                 var page by remember(ui.epIndex / pageSize) { mutableIntStateOf(ui.epIndex / pageSize) }
