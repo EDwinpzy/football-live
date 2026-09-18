@@ -47,6 +47,7 @@ import com.qiubo.optimaltv.data.source.HhkanSource
 import com.qiubo.optimaltv.ui.components.PosterPlaceholder
 import com.qiubo.optimaltv.ui.components.tapCard
 import com.qiubo.optimaltv.ui.components.MobileBackButton
+import com.qiubo.optimaltv.ui.components.MobileBackButtonClearance
 import com.qiubo.optimaltv.ui.components.MobileVodCard
 import com.qiubo.optimaltv.ui.components.VodFilterRow
 import com.qiubo.optimaltv.ui.theme.OtvColors
@@ -181,8 +182,11 @@ fun AllScreen(nav: NavController) {
             contentPadding = androidx.compose.foundation.layout.PaddingValues(
                 // 本页不渲染顶部标签栏（与 TV 版同构），内容占满全屏（顶部仅留少量呼吸留白）
                 // 竖屏（需求12⑤）：top 让位悬浮返回钮（44dp + 间距），侧距 60→40
+                // 横屏：返回钮是固定 dp（贴边 12 + 命中区 44），而 36f 设计 px 在窄横屏上只缩放到
+                // ~20dp，比返回钮底边还高 → 首行「类别」被压住（2026-09-18 报障）。取两者较大者让位。
                 start = sidePad.sx(s), end = sidePad.sx(s),
-                top = (if (portrait) 110f else 36f).sx(s), bottom = 80f.sx(s),
+                top = if (portrait) 110f.sx(s) else maxOf(36f.sx(s), MobileBackButtonClearance),
+                bottom = 80f.sx(s),
             ),
         ) {
             // 筛选区（随内容滚动；紧凑单行 chips；竖屏=标签置顶+选项换行铺开，需求12③）

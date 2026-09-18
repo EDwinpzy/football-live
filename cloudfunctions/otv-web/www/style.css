@@ -196,6 +196,10 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
   width:calc(44px/var(--z,1));height:calc(44px/var(--z,1));
   display:flex;align-items:center;justify-content:center;
   font-size:calc(38px/var(--z,1));line-height:1;color:#fff;font-weight:600;padding-bottom:calc(4px/var(--z,1))}
+/* 横屏窄屏（zoom<1）下筛选面板顶部 36px 设计留白缩放后小于返回钮底边（12+44=56 物理 px），
+   首行「类别」标签被返回钮压住（2026-09-18 报障）。补足物理留白：面板顶边恒 ≥ 64 物理 px
+   （返回钮占位 56 + 8 呼吸）；宽屏 zoom≥1 时该式自然为 0，不影响既有版式。 */
+.all-body{padding-top:calc(max(0px, 64px / var(--z,1) - 36px))}
 
 /* ===== 详情页 ===== */
 .detail-body{min-height:var(--vh,100vh);display:flex;align-items:center;padding:0 80px}
