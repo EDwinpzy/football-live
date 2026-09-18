@@ -46,6 +46,13 @@ def main():
     if not run([PY, os.path.join(ROOT, "tools", "probe_douban_filter_matrix.py")], ROOT):
         print("[WARN] 筛选能力矩阵未刷新，沿用现有 douban_filter_matrix.json 继续构建")
 
+    # 首装离线目录种子（assets/catalog_seed.json）由快照派生：字段口径必须与
+    # VodRepository.decodeSnapshot 一致（v=2 / 仅豆瓣卡片 / 海报走内置后端中继）。
+    # 快照一刷新就必须重生成——2026-09-18 前的种子还是退役的好好看格式，
+    # 首装那一瞬没有目录可上屏（日志「内置种子 已损坏或含非好好看卡片，跳过」）。
+    if not run([PY, os.path.join(ROOT, "tools", "build_catalog_seed.py")], ROOT):
+        raise SystemExit("build_catalog_seed 失败（首装离线目录种子会缺失或过期）")
+
     ok1 = run([PY, os.path.join(ROOT, "tools", "build_web_function.py")], ROOT)
     if not ok1:
         raise SystemExit("build_web_function 失败")
