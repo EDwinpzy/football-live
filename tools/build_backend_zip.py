@@ -26,7 +26,8 @@ POSTER_DIR = r"D:\OneDrive\ZCode\football-posters"
 
 REPL = ["proxy.py", "hhkan.py", "hhkan_snapshot.py", "hhkan_snapshot.json",
         "team_backdrop.py", "scraper.py", "decrypt_stream.js",
-        "douban_catalog.py", "douban_snapshot.json", "media_index.py", "pinyin_map.json", "vod_api.py",
+        "douban_catalog.py", "douban_snapshot.json", "douban_filter_matrix.json",
+        "media_index.py", "pinyin_map.json", "vod_api.py",
         "vod_sources.py", "vod_sources.default.json"]
 # 需求⑤：热更包纳入前端（www 根文件 + www/assets 下全部前端资源；football 海报池仍走整池替换）
 WWW_FILES = ["index.html", "app.js", "style.css", "manifest.webmanifest"]
