@@ -47,6 +47,7 @@ object MobileUiTags {
     const val MainTabBar = "mobile-main-tab-bar"
     const val SearchTab = "mobile-tab-search"
     const val BackButton = "mobile-back-button"
+    const val FilterToggle = "mobile-vod-filter-toggle"
     const val DetailPlay = "detail-action-play"
     const val DetailFavorite = "detail-action-favorite"
     const val DetailRestart = "detail-action-restart"

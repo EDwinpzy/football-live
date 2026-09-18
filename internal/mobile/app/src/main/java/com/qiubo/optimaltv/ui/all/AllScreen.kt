@@ -31,11 +31,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -44,10 +51,12 @@ import coil.compose.AsyncImage
 import com.qiubo.optimaltv.Graph
 import com.qiubo.optimaltv.data.model.VodItem
 import com.qiubo.optimaltv.data.source.HhkanSource
+import com.qiubo.optimaltv.ui.components.MobileUiTags
 import com.qiubo.optimaltv.ui.components.PosterPlaceholder
 import com.qiubo.optimaltv.ui.components.tapCard
 import com.qiubo.optimaltv.ui.components.MobileBackButton
-import com.qiubo.optimaltv.ui.components.MobileBackButtonClearance
+import com.qiubo.optimaltv.ui.components.MobileBackButtonInset
+import com.qiubo.optimaltv.ui.components.MobileBackButtonTouchTarget
 import com.qiubo.optimaltv.ui.components.MobileVodCard
 import com.qiubo.optimaltv.ui.components.VodFilterRow
 import com.qiubo.optimaltv.ui.theme.OtvColors
@@ -61,6 +70,10 @@ import java.net.URLEncoder
 /**
  * 全部影视页（原版 view-all，v1.18 布局与 TV 版 1:1 同款）：
  * - 筛选区压缩成紧凑 chips 且随内容滚动（不再固定顶部，需求 我的#7）；
+ * - 筛选面板顶边与左上角悬浮返回钮同顶（2026-09-18 用户要求「返回和筛选顶部对齐」），
+ *   面板内首行是右侧的「筛选」开关——左侧整块留给返回钮，首行「类别」落在开关下方，
+ *   所以同顶也不会被返回钮压住（旧做法是把整个面板下推 64dp 让位，缝太大）；
+ * - 筛选组件可收起（2026-09-18 用户要求）：收起只留表头开关，有非默认筛选时开关高亮并显示「已选 N」；
  * - 筛选选项按所选类别拉取（需求 我的#8）；类型/地区/语言/年份行首均加「全部」（需求 我的#9）
  * - 已选项白底黑字（需求 我的#6；触控无聚焦态，选中即白底黑字）
  * - 海报墙 7 列（232×352 r12 + remark 角标 + ★评分）+ 触底自动加载
@@ -85,6 +98,9 @@ fun AllScreen(nav: NavController) {
     var rating by remember { mutableStateOf("") }
     var by by remember { mutableStateOf("hot") }
     var catLoaded by remember { mutableStateOf(false) }
+    // 筛选面板收起态（2026-09-18 用户要求「筛选组件要能够收起」）：默认展开，
+    // 页面被系统回收/转屏后保持用户选择（rememberSaveable），不影响筛选值本身。
+    var filterOpen by rememberSaveable { mutableStateOf(true) }
     LaunchedEffect(Unit) {
         cat = runCatching { Graph.settings.allLastCat() }.getOrNull() ?: ""
         catLoaded = true
@@ -184,12 +200,12 @@ fun AllScreen(nav: NavController) {
             modifier = Modifier
                 .fillMaxSize(),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                // 本页不渲染顶部标签栏（与 TV 版同构），内容占满全屏（顶部仅留少量呼吸留白）
-                // 竖屏（需求12⑤）：top 让位悬浮返回钮（44dp + 间距），侧距 60→40
-                // 横屏：返回钮是固定 dp（贴边 12 + 命中区 44），而 36f 设计 px 在窄横屏上只缩放到
-                // ~20dp，比返回钮底边还高 → 首行「类别」被压住（2026-09-18 报障）。取两者较大者让位。
+                // 本页不渲染顶部标签栏（与 TV 版同构），内容占满全屏；竖屏侧距 60→40。
+                // 顶边与悬浮返回钮同顶（同为贴边 12dp，2026-09-18 用户要求「返回和筛选顶部对齐」）。
+                // 注：返回钮贴边是固定 dp，而设计 px 在窄横屏只缩放到 ~20dp——同顶会让首行
+                // 「类别」落进返回钮命中区，所以让位交给面板内的表头（见下方 height(44.dp)）。
                 start = sidePad.sx(s), end = sidePad.sx(s),
-                top = if (portrait) 110f.sx(s) else maxOf(36f.sx(s), MobileBackButtonClearance),
+                top = MobileBackButtonInset,
                 bottom = 80f.sx(s),
             ),
         ) {
@@ -202,16 +218,31 @@ fun AllScreen(nav: NavController) {
                         .padding(horizontal = 22f.sx(s), vertical = 16f.sx(s))
                         .fillMaxWidth(),
                 ) {
-                    val catChips = listOf("" to "全部", "1" to "电影", "2" to "电视剧", "3" to "动漫", "4" to "综艺", "6" to "短剧")
-                    VodFilterRow("类别", catChips, cat, s, portrait) { value ->
-                        cat = value
-                        Graph.appScope.launch { runCatching { Graph.settings.rememberAllLastCat(value) } }
+                    // 表头：只有右侧的收起/展开开关（左侧整块留给悬浮返回钮，开关靠右就不抢地方）；
+                    // 高度取返回钮触控命中区——面板顶边与返回钮同顶后，首行「类别」仍落在它下面，
+                    // 横屏（设计 px 缩放后可能低于返回钮底边）与竖屏都不会被压住。
+                    val activeFilters = listOf(type, area, year, rating).count { it.isNotBlank() } +
+                        (if (by != "hot") 1 else 0) + (if (cat.isNotBlank()) 1 else 0)
+                    Box(
+                        contentAlignment = Alignment.CenterEnd,
+                        modifier = Modifier.fillMaxWidth().height(MobileBackButtonTouchTarget),
+                    ) {
+                        FilterToggle(open = filterOpen, activeCount = activeFilters, s = s) {
+                            filterOpen = !filterOpen
+                        }
                     }
-                    VodFilterRow("类型", listOf("" to "全部") + filters.types.filter { it != "全部" }.map { it to it }, type, s, portrait) { type = it }
-                    VodFilterRow("地区", listOf("" to "全部") + filters.areas.filter { it != "全部" }.map { it to it }, area, s, portrait) { area = it }
-                    VodFilterRow("年份", listOf("" to "全部") + filters.years.filter { it != "全部" }.map { it to it }, year, s, portrait) { year = it }
-                    VodFilterRow("评分", listOf("" to "全部") + filters.ratings.filter { it != "全部" }.map { it to it }, rating, s, portrait) { rating = it }
-                    VodFilterRow("排序", listOf("hot" to "热门", "new" to "最新上映", "rating" to "豆瓣高分"), by, s, portrait) { by = it }
+                    if (filterOpen) {
+                        val catChips = listOf("" to "全部", "1" to "电影", "2" to "电视剧", "3" to "动漫", "4" to "综艺", "6" to "短剧")
+                        VodFilterRow("类别", catChips, cat, s, portrait) { value ->
+                            cat = value
+                            Graph.appScope.launch { runCatching { Graph.settings.rememberAllLastCat(value) } }
+                        }
+                        VodFilterRow("类型", listOf("" to "全部") + filters.types.filter { it != "全部" }.map { it to it }, type, s, portrait) { type = it }
+                        VodFilterRow("地区", listOf("" to "全部") + filters.areas.filter { it != "全部" }.map { it to it }, area, s, portrait) { area = it }
+                        VodFilterRow("年份", listOf("" to "全部") + filters.years.filter { it != "全部" }.map { it to it }, year, s, portrait) { year = it }
+                        VodFilterRow("评分", listOf("" to "全部") + filters.ratings.filter { it != "全部" }.map { it to it }, rating, s, portrait) { rating = it }
+                        VodFilterRow("排序", listOf("hot" to "热门", "new" to "最新上映", "rating" to "豆瓣高分"), by, s, portrait) { by = it }
+                    }
                 }
             }
             // 上游降级：有内容时说「可能不是最新」，没内容时说「暂时获取不到」——
@@ -265,6 +296,47 @@ fun AllScreen(nav: NavController) {
  * 需求12③（2026-09-07 竖屏）：竖屏改常规竖屏布局——标签独占一行置顶，
  * 选项换行铺开（FlowRow）不再横向滚动藏选项；chips 触控区加大。
  */
+/**
+ * 筛选面板的收起/展开开关（2026-09-18 用户要求「筛选组件要能够收起」）。
+ * 收起后仍要有「筛选生效中」的可见线索：有非默认筛选时开关白底高亮并显示「已选 N」，
+ * 否则用户收起了面板又看不到自己选了什么。箭头方向与网页版 `#filterToggle` 同款
+ * （展开 = ⌄，收起 = 旋转 180°）。
+ */
+@Composable
+private fun FilterToggle(
+    open: Boolean,
+    activeCount: Int,
+    s: Float,
+    onToggle: () -> Unit,
+) {
+    val active = activeCount > 0
+    val fg = if (active) OtvColors.Bg else OtvColors.White75
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6f.sx(s)),
+        modifier = Modifier
+            .clip(RoundedCornerShape(15f.sx(s)))
+            .testTag(MobileUiTags.FilterToggle)
+            .semantics {
+                role = Role.Button
+                stateDescription = if (open) "已展开" else "已收起"
+            }
+            .tapCard { onToggle() }
+            .background(if (active) OtvColors.White else OtvColors.ChipBg, RoundedCornerShape(15f.sx(s)))
+            .padding(horizontal = 16f.sx(s), vertical = 8f.sx(s)),
+    ) {
+        Text(
+            if (active) "筛选（已选 $activeCount）" else "筛选",
+            color = fg, fontSize = 17f.sxs(s), fontWeight = FontWeight.SemiBold, maxLines = 1,
+        )
+        Text(
+            "⌄",
+            color = fg, fontSize = 17f.sxs(s), fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.graphicsLayer(rotationZ = if (open) 0f else 180f),
+        )
+    }
+}
+
 /** vcard（原版：poster 232×352 r12 + remark 角标 + vname 24 + vmeta 20 .5白；触控点卡进详情）
  *  竖屏优化：fillMaxWidth 填满网格 cell（1fr 均分，与网页版 poster-grid 同构） */
 @Composable

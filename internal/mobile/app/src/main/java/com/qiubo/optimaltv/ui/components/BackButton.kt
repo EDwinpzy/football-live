@@ -18,13 +18,15 @@ import androidx.compose.ui.unit.dp
 import com.qiubo.optimaltv.R
 
 /**
- * 悬浮返回钮的占位（dp）：贴边 12dp + 触控命中区 44dp = 56dp，另加 8dp 呼吸。
+ * 悬浮返回钮贴边留白（dp）：左/上各 12dp，与 [MobileBackButton] 内部 padding 同值。
  *
- * 页面顶部留白小于它时，返回钮会压住首屏内容：窄横屏上按设计 px 缩放的留白
- * （如 36f.sx ≈ 20dp）比返回钮底边还高，移动片库页首行「类别」标签就被压住了。
- * 需要让位的页面取「设计值」与它的较大者，与竖屏「顶部让位返回钮」同一套策略。
+ * 需要与返回钮「顶部对齐」的页面（片库页筛选面板，2026-09-18 用户要求）直接拿它做
+ * 内容顶边距，不要在页面里另写 12dp——两处各写会漂移，对齐就破了。
  */
-val MobileBackButtonClearance = 64.dp
+val MobileBackButtonInset = 12.dp
+
+/** 悬浮返回钮触控命中区边长（dp）：贴边 12 + 44 = 56 是页面顶部内容的最低安全线。 */
+val MobileBackButtonTouchTarget = 44.dp
 
 /**
  * 移动版返回按钮（总体#6 2026-09-03 加；2026-09-04 二次换装）：
@@ -45,8 +47,8 @@ fun MobileBackButton(
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
-            .padding(PaddingValues(start = 12.dp, top = 12.dp))
-            .size(44.dp)
+            .padding(PaddingValues(start = MobileBackButtonInset, top = MobileBackButtonInset))
+            .size(MobileBackButtonTouchTarget)
             .testTag(MobileUiTags.BackButton)
             .clickable(interactionSource = interaction, indication = null, onClick = onBack),
     ) {

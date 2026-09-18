@@ -173,8 +173,24 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
 /* ===== 海报网格（全部影视/搜索结果） ===== */
 .poster-grid{display:grid;gap:30px 20px;padding:0 60px 80px}
 /* v1.25 需求①筛选显示不全：筛选行换行展示全部选项（旧版横向滚动且无滚动条=选项被藏） */
-.filter-panel{margin:36px 60px 0;background:rgba(255,255,255,.07);border-radius:20px;padding:16px 22px;
+/* 2026-09-18 用户要求：筛选面板顶边与悬浮返回钮顶边对齐（同为 12 设计 px + 安全区）。
+   首行内容在返回钮右侧（面板左边距 60/z + 内边距 22/z ≥ 82/z ≥ 82 物理 px > 56 命中区），
+   同顶也不会被压住；收起/展开开关放在表头右侧，进一步避开左上角的返回钮。 */
+.filter-panel{margin:calc(12px/var(--z,1) + env(safe-area-inset-top)) 60px 0;
+  background:rgba(255,255,255,.07);border-radius:20px;padding:16px 22px;
   display:flex;flex-direction:column;gap:9px}
+/* 表头：只有右侧的收起/展开开关（左侧留给悬浮返回钮） */
+.fp-head{display:flex;align-items:center;justify-content:flex-end;min-height:calc(30px/var(--z,1))}
+.fp-toggle{display:flex;align-items:center;gap:calc(6px/var(--z,1));
+  padding:calc(4px/var(--z,1)) calc(14px/var(--z,1));border-radius:calc(15px/var(--z,1));
+  font-size:calc(16px/var(--z,1));font-weight:600;color:rgba(255,255,255,.78);
+  background:rgba(255,255,255,.12)}
+/* 收起态仍要有「筛选生效中」的可见线索：有非默认选项时开关高亮 */
+.fp-toggle.has-filter{color:#0E0E0F;background:#fff}
+.fp-caret{display:inline-block;font-size:calc(13px/var(--z,1));line-height:1;transition:transform .18s}
+.filter-panel.collapsed .fp-caret{transform:rotate(-180deg)}
+.fp-rows{display:flex;flex-direction:column;gap:9px}
+.filter-panel.collapsed .fp-rows{display:none}
 .poster-grid + .all-more,.filter-panel ~ .poster-grid{margin-top:0}
 #allGrid{margin-top:30px}
 .fp-row{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;row-gap:8px}
@@ -196,10 +212,6 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
   width:calc(44px/var(--z,1));height:calc(44px/var(--z,1));
   display:flex;align-items:center;justify-content:center;
   font-size:calc(38px/var(--z,1));line-height:1;color:#fff;font-weight:600;padding-bottom:calc(4px/var(--z,1))}
-/* 横屏窄屏（zoom<1）下筛选面板顶部 36px 设计留白缩放后小于返回钮底边（12+44=56 物理 px），
-   首行「类别」标签被返回钮压住（2026-09-18 报障）。补足物理留白：面板顶边恒 ≥ 64 物理 px
-   （返回钮占位 56 + 8 呼吸）；宽屏 zoom≥1 时该式自然为 0，不影响既有版式。 */
-.all-body{padding-top:calc(max(0px, 64px / var(--z,1) - 36px))}
 
 /* ===== 详情页 ===== */
 .detail-body{min-height:var(--vh,100vh);display:flex;align-items:center;padding:0 80px}
@@ -553,7 +565,9 @@ body.portrait .search-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,
 body.portrait .search-tabs .stab{min-width:0;padding:10px 8px;justify-content:center;font-size:23px;white-space:nowrap}
 body.portrait .search-tabs .stab .cnt{font-size:18px}
 /* 全部影视筛选面板/网格侧距 60 → 40 */
-body.portrait .filter-panel{margin:36px 40px 0}
+/* 竖屏同样与返回钮同顶（返回钮 12px 贴边）。12px 必须像返回钮一样除以 --z：
+   竖屏 body zoom ≈ 0.52，漏除会让面板顶边落在 6.2px，比返回钮还高、并不对齐。 */
+body.portrait .filter-panel{margin:calc(12px/var(--z,1) + env(safe-area-inset-top)) 40px 0}
 body.portrait .poster-grid{padding:0 40px 80px}
 /* 加载占位文案侧距收窄 */
 body.portrait .page-loading{padding:60px 40px}
@@ -566,9 +580,13 @@ body.portrait .filter-panel{padding:20px 24px;gap:14px}
 body.portrait .fp-row{flex-wrap:wrap;gap:8px 10px}
 body.portrait .fp-row .fp-label{width:100%;font-size:22px;margin-bottom:2px}
 body.portrait .fp-row .fchip{padding:8px 20px;border-radius:16px;font-size:20px}
+/* 竖屏：收起/展开开关同比例放大（触控目标 ≥44px） */
+body.portrait .fp-head{min-height:34px}
+body.portrait .fp-toggle{padding:8px 20px;border-radius:17px;font-size:20px;gap:8px}
+body.portrait .fp-caret{font-size:16px}
 
-/* 需求12⑤：竖屏推送页（全部/详情）顶部让位返回钮，元素不再重叠 */
-body.portrait .all-body{padding-top:64px}
+/* 需求12⑤：竖屏推送页（详情）顶部让位返回钮；全部页改为筛选面板与返回钮同顶，无需额外留白 */
+body.portrait .all-body{padding-top:0}
 body.portrait .detail-body{padding-top:110px}
 
 /* 需求12⑥：竖屏播放器重构——顶部 16:9 视频 + 下方常驻控制区（常规竖屏播放器形态） */
