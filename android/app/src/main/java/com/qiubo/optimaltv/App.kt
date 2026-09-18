@@ -225,7 +225,14 @@ object AppStartup {
                         .joinAll()
                 }.onFailure { OtvLog.w("hero 简介预载失败（进页后按需拉取）: ${it.message}") }
             }
-            cats.map { async { Graph.repo.awaitLibBlocks(it.id) } }.awaitAll()
+            /* 2026-09-18（用户报障「为什么不等界面有数据再进 APP，每次进来啥也没有」）：
+               旧实现只等三栏 Job 结束——热更重启内嵌后端时首轮 5 路整批连接拒绝，Job 也算
+               「结束」，门闸于是在空数据上放行。改成等「真的有内容」，预算内的空结果会
+               绕过 60s 退避重抓（预算用尽才放行，剩余交给后台补抓阶梯）。 */
+            val blocksReady = cats.map { async { Graph.repo.awaitLibBlocksContent(it.id) } }.awaitAll()
+            if (blocksReady.any { !it }) {
+                OtvLog.w("启动预热：${blocksReady.count { !it }}/${blocksReady.size} 个分类三栏预算内仍为空（按预算放行，后台阶梯补抓）")
+            }
         }
         val blocks = Graph.repo.libBlocksFlow.value
         val home = Graph.repo.homeFlow.value

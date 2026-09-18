@@ -337,6 +337,18 @@ class VodRepository(
     private val libFailAt = java.util.concurrent.ConcurrentHashMap<Int, Long>()
     private val libJobs = java.util.concurrent.ConcurrentHashMap<Int, kotlinx.coroutines.Job>()
 
+    /** 三栏空结果的自动补抓阶梯（毫秒）。
+     *  2026-09-18（用户报障「要切一下页签才会有数据」）：热更重启内嵌后端的那次启动里，
+     *  首轮 5 路三栏抓取整批连接拒绝；旧实现只记 libFailAt 就收工——页面上屏
+     *  「暂无最近热门内容」，且 60s 内再进页也不重试，用户只能切页签/等一分钟才看到数据。
+     *  现在失败即按阶梯后台补抓，成功立刻覆盖上屏，不需要用户任何操作。 */
+    private val LIB_RETRY_DELAYS = longArrayOf(2_000L, 4_000L, 8_000L, 15_000L, 25_000L, 40_000L)
+    private val libRetries = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+    private val libRetryJobs = java.util.concurrent.ConcurrentHashMap<Int, kotlinx.coroutines.Job>()
+
+    /** 门闸等「三栏真的有内容」的轮询步长：判据读内存，2s 足够且不空转 CPU */
+    private val LIB_CONTENT_POLL_MS = 2_000L
+
     /**
      * 等待指定分类的三块拉取 Job 完成（启动门闸深预载用）：
      * 幂等触发（已完成/进行中不重复拉），非 hhkan 分类（演示兜底/全部）直接返回。
@@ -345,6 +357,31 @@ class VodRepository(
         val cid = categoryNumber(categoryId.removePrefix("douban:")) ?: return
         libBlocks(categoryId)
         libJobs[cid]?.join()
+    }
+
+    /** 该分类三栏是否已有内容（启动门闸放行判据） */
+    fun libBlocksHaveContent(cid: Int): Boolean =
+        _libBlocks.value[cid].orEmpty().any { it.items.isNotEmpty() }
+
+    /**
+     * 启动门闸用：等该分类三栏【真的有内容】才返回；没有内容就绕过失败退避重抓，
+     * 直到 [budgetMs] 预算用尽。
+     *
+     * 2026-09-18 用户报障「为什么不等界面有数据再进 APP，每次进来啥也没有」：
+     * 旧实现门闸只等 Job 结束——首轮整批连接拒绝时 Job 同样算「结束」，门闸于是在空数据上
+     * 放行，用户进页看到空三栏。返回 false 表示预算内仍没拿到内容（门闸按预算放行，
+     * 剩余预载转后台，由 [LIB_RETRY_DELAYS] 阶梯继续补抓）。
+     */
+    suspend fun awaitLibBlocksContent(categoryId: String, budgetMs: Long = 45_000L): Boolean {
+        val cid = categoryNumber(categoryId.removePrefix("douban:")) ?: return false
+        val deadline = System.currentTimeMillis() + budgetMs
+        while (true) {
+            libBlocks(categoryId, force = true)
+            libJobs[cid]?.join()
+            if (libBlocksHaveContent(cid)) return true
+            if (System.currentTimeMillis() + LIB_CONTENT_POLL_MS >= deadline) return false
+            kotlinx.coroutines.delay(LIB_CONTENT_POLL_MS)
+        }
     }
 
     /** 三块展示顺序与网页、后端一致；空栏目也保留，防止标题被吞。 */
@@ -371,12 +408,17 @@ class VodRepository(
      * 全挂后的兜底，源站稍有波动便丢标题。
      */
     fun libBlocks(categoryId: String) {
+        libBlocks(categoryId, force = false)
+    }
+
+    /** [force]=true 绕过 60s 失败退避（门闸等待 / 自动补抓专用）。 */
+    fun libBlocks(categoryId: String, force: Boolean) {
         val category = categoryId.removePrefix("douban:")
         val cid = categoryNumber(category) ?: return
         if (cid in libDone || libJobs[cid]?.isActive == true) return
         // 失败退避：距上次全挂不足 60s 不重试（防源真挂时每次进页都冷抓）
         val failAt = libFailAt[cid]
-        if (failAt != null && System.currentTimeMillis() - failAt < 60_000L) return
+        if (!force && failAt != null && System.currentTimeMillis() - failAt < 60_000L) return
         libJobs[cid] = repoScope.launch {
             val base = settings.current().hhkanBaseUrl
             if (base.isBlank()) {
@@ -394,8 +436,10 @@ class VodRepository(
             if (doubanSections.any { it.items.isNotEmpty() }) {
                 libDone += cid
                 libFailAt.remove(cid)
+                libRetries.remove(cid)
             } else {
                 libFailAt[cid] = System.currentTimeMillis()
+                scheduleLibRetry(cid)
             }
             markHotSettled(cid)
         }
@@ -403,6 +447,21 @@ class VodRepository(
         repoScope.launch {
             kotlinx.coroutines.delay(8_000L)
             markHotSettled(cid)
+        }
+    }
+
+    /** 三栏空结果的后台自动补抓：按 [LIB_RETRY_DELAYS] 阶梯重试，成功即停（libDone 收敛）。 */
+    private fun scheduleLibRetry(cid: Int) {
+        val attempt = libRetries.getOrDefault(cid, 0)
+        if (attempt >= LIB_RETRY_DELAYS.size) return
+        if (libRetryJobs[cid]?.isActive == true) return
+        val wait = LIB_RETRY_DELAYS[attempt]
+        libRetries[cid] = attempt + 1
+        android.util.Log.w("OTV", "分类 $cid 三栏为空，${wait}ms 后自动补抓（第 ${attempt + 1} 次）")
+        libRetryJobs[cid] = repoScope.launch {
+            kotlinx.coroutines.delay(wait)
+            libBlocks(categoryKey(cid), force = true)
+            libJobs[cid]?.join()
         }
     }
 

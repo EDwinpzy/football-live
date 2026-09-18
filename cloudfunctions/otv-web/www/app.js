@@ -1538,13 +1538,24 @@ async function loadAllPage(reset) {
         paint(hit.items, !!hit.hasMore, true);
       }
     }
-    const q = new URLSearchParams({ page: reqPage, sort: all.by, genre: all.sel.type, region: all.sel.area, rating: all.sel.rating, year: all.sel.year === "更早" ? "" : all.sel.year });
+    /* 「更早」必须原样传给后端（后端翻成 year_range=1,<今年-12>）：旧实现把它发成空串，
+       等于用户选了「更早」却什么都没筛。 */
+    const q = new URLSearchParams({ page: reqPage, sort: all.by, genre: all.sel.type, region: all.sel.area, rating: all.sel.rating, year: all.sel.year });
     const category = all.cat || "movie";
     const d = await fetchJSON(BASE + `/vod/show/${category}?` + q,
       { timeout: 60000, signal: controller.signal });
     if (!current()) return;
     const items = (d.items || []).map(it => normalizeDoubanItem(it, category));
     paint(items, !!d.has_more, reset);   /* reset=整页覆盖画（缓存占位被顶掉）；翻页=追加 */
+    /* 上游降级（豆瓣被拦/超时）：有内容就说「可能不是最新」，没内容就说「暂时获取不到」——
+       绝不把上游故障显示成「没有符合条件的内容」。 */
+    if (d.upstream_available === false) {
+      $("#allMore").hidden = false;
+      $("#allMore").textContent = items.length
+        ? "数据可能不是最新，正在重试…"
+        : "暂时获取不到片库，请稍后重试";
+      return;
+    }
     if (reset && items.length) {
       try { sessionStorage.setItem(allCacheKey(), JSON.stringify({ ts: Date.now(), items, hasMore: !!d.has_more })); } catch (e) {}
     }

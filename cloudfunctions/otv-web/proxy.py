@@ -5056,10 +5056,14 @@ def main(port=None, bind=None):
             port = 8090
     if bind is None:
         bind = os.environ.get("OTV_BIND") or "127.0.0.1"
+    # 多线程：视频分片/播放列表是并发请求，单线程服务器会互相阻塞
+    # 2026-09-18：先绑定端口再预热。TV 版/移动版同装一台设备时 8090 只有一方能绑定，
+    # 绑定失败方由 proxy_runner 每 5s 重试；旧实现把预热放在绑定之前 → 每次重试都重建
+    # 一遍影视索引（MediaIndex + 22MB 快照），失败方会在 20 分钟里每 5 秒空转一次
+    # （实测模拟器上持续占 CPU，并拖慢同机另一侧的请求）。
+    server = ThreadingHTTPServer((bind, port), Handler)
     threading.Thread(target=_startup_warm, daemon=True).start()
     threading.Thread(target=_img_domain_refresher, daemon=True).start()
-    # 多线程：视频分片/播放列表是并发请求，单线程服务器会互相阻塞
-    server = ThreadingHTTPServer((bind, port), Handler)
     print("球迹直播 数据代理服务器 http://%s:%d  (数据源 %s)" % (bind, port, _active_source["url"]))
     try:
         server.serve_forever()
