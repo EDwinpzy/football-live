@@ -78,10 +78,11 @@ fun FavoritesScreen(nav: NavController) {
     val backScope = androidx.compose.runtime.rememberCoroutineScope()
     var hint by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(hint) { if (hint != null) { kotlinx.coroutines.delay(2500); hint = null } }
-    val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
+    // 2026-09-19：已在顶部 → 双击退出（首次轻提示），与影视/足球页同口径
+    val exitApp = com.qiubo.optimaltv.ui.components.rememberDoubleBackExit { hint = it }
     BackHandler {
         val atTop = favListState.firstVisibleItemIndex == 0 && favListState.firstVisibleItemScrollOffset == 0
-        if (atTop) activity?.finishAffinity()
+        if (atTop) exitApp()
         else backScope.launch { favListState.scrollToItem(0) }
     }
     // 顶栏下潜：滚过 300 设计px 隐藏、回顶显示（与 TV 版 chromeHide 同阈值）

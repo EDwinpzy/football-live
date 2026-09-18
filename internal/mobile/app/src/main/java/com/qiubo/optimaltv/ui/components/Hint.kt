@@ -22,20 +22,37 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * 主 tab 已到顶时按返回 = 彻底退出应用（用户 2026-09-16 明确要求，与 TV 版同步）。
+ * 主 tab 已到顶时按返回：**双击退出**（用户 2026-09-19 要求：按一下只提示、连按两下才退，
+ * 防误触；与 TV 版同步）。窗口内第二次按才执行完整退出，第一次不改变任何生命周期状态。
  *
- * 旧实现是「2.5s 内连按两次才退出」，第一次只弹提示——实测按一次返回后进程与内嵌
- * 后端都还活着（只是回了桌面），再次进入直接复用那个已经卡死的会话。现在一次返回
- * 就执行 ExitCoordinator 的完整退出。
+ * 历史口径（别搞反）：2026-09-16 曾把「2.5s 内连按两次才退出」改成「一次即退」，
+ * 原因是当时旧双击实现里**第一次按下就已经把 Activity 交回桌面**、进程与内嵌后端全活着，
+ * 再次进入复用那个卡死会话，于是「退出重进还是卡」。现在第一次按键纯提示（不 finish、
+ * 不停后端），只有真正触发的那一次才走 ExitCoordinator（与 TV 版同一条退出链）：
+ * 释放播放器/解码器 → 关解密桥 → 停内嵌后端 → finishAffinity → 杀主进程。
+ *
+ * 说明：本版之前移动版各屏走 `finishAffinity()` 直退（不杀 `:backend` 进程），
+ * 与 TV 版「退出不干净」是同一个坑；本次一并收到 ExitCoordinator 上。
  */
 @Composable
 fun rememberDoubleBackExit(onHint: (String) -> Unit): () -> Unit {
     val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
+    var lastBackAt by remember { mutableLongStateOf(0L) }
     return {
-        onHint("已退出应用")
-        activity?.let { com.qiubo.optimaltv.lifecycle.ExitCoordinator.exit(it) }
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastBackAt <= DOUBLE_BACK_WINDOW_MS) {
+            lastBackAt = 0L
+            onHint("已退出应用")
+            activity?.let { com.qiubo.optimaltv.lifecycle.ExitCoordinator.exit(it) }
+        } else {
+            lastBackAt = now
+            onHint("再按一次退出应用")
+        }
     }
 }
+
+/** 双击退出的时间窗（用户连按两次判定为「要退出」） */
+private const val DOUBLE_BACK_WINDOW_MS = 2500L
 
 /** 底部轻提示（需求 足球#5：只保留文字，背景半透明灰色；v1.18 尺寸与 TV 版 1:1 同款）。
  *  需求 影视#3：全站浮窗提示统一贴屏幕最下方（底边距 40，不再浮在半空）。

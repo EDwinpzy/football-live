@@ -119,11 +119,12 @@ fun VodScreen(nav: NavController) {
     val backScope = androidx.compose.runtime.rememberCoroutineScope()
     var hint by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(hint) { if (hint != null) { kotlinx.coroutines.delay(2500); hint = null } }
-    // 总体#5：一次返回直接退出（先回顶再退）
-    val vodActivity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
+    // 2026-09-19：顶部再按返回 → 双击退出（首次只轻提示），走与 TV 版同一条
+    // ExitCoordinator 退出链；内容区返回仍先滚回顶部
+    val exitApp = com.qiubo.optimaltv.ui.components.rememberDoubleBackExit { hint = it }
     BackHandler {
         val atTop = vodListState.firstVisibleItemIndex == 0 && vodListState.firstVisibleItemScrollOffset == 0
-        if (atTop) vodActivity?.finishAffinity() else backScope.launch { vodListState.scrollToItem(0) }
+        if (atTop) exitApp() else backScope.launch { vodListState.scrollToItem(0) }
     }
     // 顶栏下潜：滚过 300 设计px 隐藏、回顶显示（与 TV 版 chromeHide 同阈值）
     val ctx = androidx.compose.ui.platform.LocalContext.current

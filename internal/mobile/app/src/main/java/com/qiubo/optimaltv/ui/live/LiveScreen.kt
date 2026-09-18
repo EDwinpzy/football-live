@@ -223,12 +223,11 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
         }
     }
 
-    // 需求⑥：已在顶部双击返回才彻底退出应用，首按轻提示；内容区返回先滚回顶部
-    // 总体#5：一次返回直接退出（先回顶再退）
-    val liveActivity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
+    // 需求⑥ + 2026-09-19：已在顶部 → 双击退出（首次轻提示）；内容区返回先滚回顶部
+    val exitApp = com.qiubo.optimaltv.ui.components.rememberDoubleBackExit { hint = it }
     BackHandler {
         val atTop = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
-        if (atTop) liveActivity?.finishAffinity() else backScope.launch { listState.scrollToItem(0) }
+        if (atTop) exitApp() else backScope.launch { listState.scrollToItem(0) }
     }
     // 顶栏下潜：滚过 300 设计px 隐藏、回顶显示（与 TV 版 chromeHide 同阈值）
     val ctx = androidx.compose.ui.platform.LocalContext.current
