@@ -493,6 +493,18 @@ class DoubanCatalogTest(unittest.TestCase):
         catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: search_payload(rows), snapshot={})
         self.assertTrue(catalog.show("movie", region="日本", page=1)["has_more"])
 
+    def test_filter_options_merge_values_seen_in_snapshot(self):
+        """筛选项要覆盖随包快照里真实出现过的值，否则会出现「点了没内容」。"""
+        snapshot = {"index": [{"douban_id": "1", "title": "片", "category": "movie",
+                               "genres": ["西部"], "regions": ["爱尔兰"]}]}
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: {}, snapshot=snapshot)
+        result = catalog.filters("movie")
+        self.assertIn("西部", result["types"])
+        self.assertIn("爱尔兰", result["areas"])
+        self.assertEqual(result["types"][0], "全部")
+        self.assertEqual(result["areas"][0], "全部")
+        self.assertTrue(result["upstream_available"])
+
     def test_movie_rule_drops_concerts_and_stage_but_keeps_musical_films(self):
         """电影栏不许出现演唱会/舞台实录：豆瓣把这些也标成 movie，只能靠标题/又名认。"""
         rows = [explore_row(111, "陈奕迅DUO演唱会"), explore_row(222, "汉密尔顿"),

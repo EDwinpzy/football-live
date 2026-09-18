@@ -580,6 +580,26 @@ class DoubanCatalog:
             unique.append(item)
         return unique
 
+    def _snapshot_facets(self, category):
+        """随包快照里该分类真实出现过的类型/地区（用来保证筛选项「点了有内容」）。"""
+        genres, regions = [], []
+        for item in self.snapshot_subjects():
+            if str(item.get("category") or "") != category:
+                continue
+            genres.extend(item.get("genres") or [])
+            regions.extend(item.get("regions") or [])
+        return genres, regions
+
+    @staticmethod
+    def _merge_options(base, extra):
+        """保留 base 的顺序（「全部」在首位），附加 extra 里还没出现过的值。"""
+        options = list(base)
+        for value in extra:
+            name = str(value or "").strip()
+            if name and name != "全部" and name not in options:
+                options.append(name)
+        return options
+
     def warm_index(self):
         """用内置快照预热搜索索引，冷实例无需触网即可本地搜索。
 
@@ -880,7 +900,14 @@ class DoubanCatalog:
                    "新西兰", "俄罗斯"]
         years = ["全部"] + [str(year) for year in range(current_year, current_year - 12, -1)] + ["更早"]
         ratings = ["全部", "9分以上", "8分以上", "7分以上", "暂无评分"]
-        return {"category": category, "types": genres, "areas": regions, "years": years, "ratings": ratings, "rows": [
+        # 三层合并：内置词汇表（上一段）∪ 随包快照里真实出现过的值。后者保证「点了有内容」。
+        # 豆瓣官方 `search_tags` 给的是浏览标签（热门/最新/华语/欧美…），不是探索页的
+        # 类型/地区词汇表，表达不了「类型」，所以不作为一层。
+        seen_genres, seen_regions = self._snapshot_facets(category)
+        genres = self._merge_options(genres, seen_genres)
+        regions = self._merge_options(regions, seen_regions)
+        return {"category": category, "types": genres, "areas": regions, "years": years,
+                "ratings": ratings, "upstream_available": True, "rows": [
             {"name": "类别", "key": "category", "options": ["电影", "电视剧", "动漫", "综艺", "短剧"]},
             {"name": "类型", "key": "genre", "options": genres},
             {"name": "地区", "key": "region", "options": regions},
