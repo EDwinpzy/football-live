@@ -101,6 +101,9 @@ object Graph {
  *   影视各分类三栏 + hero 简介 + 封面预热全部纳入门闸等待，预算上限取
  *   [BuildConfig.STARTUP_GATE_MS]（TV 90s / 移动 30s）；到上限仍放行，剩余转后台继续，
  *   避免弱网/断网时把用户永久扣在启动屏。
+ * - 2026-09-18（用户需求「片源加载好后才能进入 app」）：hero 前几条的**片源匹配**
+ *   （多源搜索 + 线路探测，单条冷路径实测 12~30s）也纳入门闸——否则进 app 点开影片
+ *   只能看「正在查找片源」。到 [SOURCE_WAIT_MS] 预算放行，剩余候选转后台继续预热。
  */
 object AppStartup {
     private val _ready = kotlinx.coroutines.flow.MutableStateFlow(false)
@@ -122,6 +125,24 @@ object AppStartup {
 
     /** 封面等待预算：门闸要「有图才放行」，但弱网不能让启动屏无限等；超时剩余转后台。 */
     private const val COVER_WAIT_MS = 20_000L
+
+    /**
+     * 首屏片源等待预算（2026-09-18 用户需求「片源加载好后才能进入 app」）：
+     * 门闸要等 hero 前几条的线路匹配真的跑完（进详情页即「立即播放」），但单条冷匹配
+     * 12~30s、还要留出封面与其他预热的余量，故取总预算的 2/3（TV 60s / 移动 20s）；
+     * 到点仍放行，剩余匹配在独立 scope 里继续跑完。
+     */
+    private val SOURCE_WAIT_MS = FULL_GATE_MS * 2 / 3
+
+    /** 门闸必等的 hero 条数：与 hero 简介预载同批（首屏最大、最可能被点到的候选） */
+    private const val SOURCE_HERO_MAX = 6
+
+    /** 放行后继续后台预热的候选条数（首屏卡片行：最近观看 / 电影三栏首条） */
+    private const val SOURCE_EXTRA_MAX = 6
+
+    /** hero 片源匹配并发；额外候选在放行后跑，再压低一档避免与用户的点击抢上游 */
+    private const val SOURCE_CONCURRENCY = 3
+    private const val SOURCE_EXTRA_CONCURRENCY = 2
 
     fun begin() {
         val scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -211,6 +232,11 @@ object AppStartup {
         Graph.repo.awaitCatalogAvailable()
         val cats = Graph.repo.state.value.catalog?.categories ?: return
         cats.forEach { Graph.repo.libBlocks(it.id) }       // 全部分类三块并行拉取（幂等）
+        // hero 口径上提到这里：简介预载与首屏片源预热必须取同一批 id（与 UI 同一套 heroRefs）
+        Graph.repo.awaitHome()
+        val heroIds = runCatching {
+            heroRefs(Graph.repo.state.value.catalog, Graph.repo.homeFlow.value).map { it.id }.distinct()
+        }.getOrDefault(emptyList()).take(SOURCE_HERO_MAX)
         // 两件事并行：等各分类三块拉完（下面还要收封面 URL）+ 预取 hero 简介。
         // hero 简介（豆瓣详情）以前要等页面组合时才发请求，实测进页后 15s+ 才到货
         // （用户反馈「影视信息加载太慢」）；这里按 UI 同一套 hero 口径（heroRefs）
@@ -218,10 +244,7 @@ object AppStartup {
         kotlinx.coroutines.coroutineScope {
             launch {
                 runCatching {
-                    Graph.repo.awaitHome()
-                    heroRefs(Graph.repo.state.value.catalog, Graph.repo.homeFlow.value)
-                        .map { it.id }.distinct().take(6)
-                        .map { id -> launch { runCatching { Graph.repo.vodBrief(id) } } }
+                    heroIds.map { id -> launch { runCatching { Graph.repo.vodBrief(id) } } }
                         .joinAll()
                 }.onFailure { OtvLog.w("hero 简介预载失败（进页后按需拉取）: ${it.message}") }
             }
@@ -257,8 +280,64 @@ object AppStartup {
         runCatching {
             Graph.db.vodDao().historyFlow(12).first().forEach { if (it.posterUrl.isNotBlank()) urls += it.posterUrl }
         }
-        val n = preloadCovers(urls.distinct(), heroCount = home.carousel.size)
-        OtvLog.i("影视 tab 页预载完成：${catsForUrls.size} 分类 / $n 张封面（${System.currentTimeMillis() - t0}ms）")
+        // 封面预载与首屏片源预热并行：前者打图床、后者打影视源，互不抢上游；
+        // 片源预热自带预算（到点放行，剩余转后台），所以两边一起 join 也不会超门闸预算。
+        kotlinx.coroutines.coroutineScope {
+            val srcJob = launch { preloadFirstScreenSources(heroIds) }
+            val n = preloadCovers(urls.distinct(), heroCount = home.carousel.size)
+            OtvLog.i("影视 tab 页预载完成：${catsForUrls.size} 分类 / $n 张封面（${System.currentTimeMillis() - t0}ms）")
+            srcJob.join()
+        }
+    }
+
+    /**
+     * 首屏片源预热（2026-09-18 用户需求「片源加载好后才能进入 app」）：
+     *
+     * 用户报障：进 app 后点开影片，详情页只有「正在查找片源」，十几秒后才变「立即播放」。
+     * 片源匹配（多源搜索 + 线路探测）单条冷路径实测 12~30s，等点开再跑就一定会看到等待态，
+     * 所以在门闸里先跑：结果落 VodRepository 的 detailCache/detailInfoCache，详情页进页即命中。
+     *
+     * 门闸只等 hero 前 [SOURCE_HERO_MAX] 条（首屏最大点击目标），到 [SOURCE_WAIT_MS] 放行；
+     * 预热整体跑在独立 scope，放行后剩余 hero 与首屏卡片行候选继续在后台匹配完成。
+     */
+    private suspend fun preloadFirstScreenSources(heroIds: List<String>) {
+        if (heroIds.isEmpty()) return
+        val scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val heroDone = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val heroReady = java.util.concurrent.atomic.AtomicInteger(0)
+        val t0 = System.currentTimeMillis()
+        scope.launch {
+            heroReady.set(Graph.repo.preloadDetailSources(heroIds, batch = SOURCE_CONCURRENCY))
+            heroDone.complete(Unit)
+            // 放行后继续（不拖门闸）：首屏卡片行——最近观看 + 电影三栏每栏首条
+            val extras = runCatching { firstScreenExtraIds() }.getOrDefault(emptyList())
+                .filterNot { it in heroIds }.take(SOURCE_EXTRA_MAX)
+            if (extras.isNotEmpty()) {
+                val n = Graph.repo.preloadDetailSources(extras, batch = SOURCE_EXTRA_CONCURRENCY)
+                OtvLog.i("首屏片源预热（后台续跑）：卡片行 ${n}/${extras.size} 条线路就绪")
+            }
+        }
+        if (kotlinx.coroutines.withTimeoutOrNull(SOURCE_WAIT_MS) { heroDone.await() } == null) {
+            OtvLog.i("首屏片源预热到预算上限（${SOURCE_WAIT_MS}ms）：hero 未全部就绪，剩余转后台继续")
+        } else {
+            OtvLog.i("首屏片源预热完成：hero ${heroReady.get()}/${heroIds.size} 条线路就绪" +
+                "（${System.currentTimeMillis() - t0}ms）")
+        }
+    }
+
+    /** 放行后继续预热的「首屏卡片行」候选：最近观看前 3 + 电影三栏每栏首条（去重后取前几条） */
+    private suspend fun firstScreenExtraIds(): List<String> {
+        val ids = mutableListOf<String>()
+        runCatching {
+            Graph.db.vodDao().historyFlow(3).first()
+                .forEach { if (it.vodId.isNotBlank()) ids += it.vodId }
+        }
+        runCatching {
+            Graph.repo.libBlocksFlow.value[1].orEmpty().forEach { sec ->
+                sec.items.firstOrNull()?.id?.takeIf { it.isNotBlank() }?.let { ids += it }
+            }
+        }
+        return ids.distinct()
     }
 
     /**

@@ -483,8 +483,36 @@ class VodRepository(
         }
     }
 
-    /** hero 简介补全（原版 showVod：/hhkan/detail 异步补 meta/desc/评分；目录外条目如 carousel 直接按 ref 解析） */
+    /** hero 简介补全（原版 showVod：异步补 meta/desc/评分；目录外条目如 carousel 直接按 ref 解析） */
     private val briefCache = java.util.concurrent.ConcurrentHashMap<String, Triple<String, String, Double>>()
+
+    /**
+     * 简介专用客户端（读超时 20s）。
+     *
+     * 2026-09-18（用户报障「简介加载不出来」）：旧实现与 [fetchDetailCached] 共用全量
+     * `/vod/detail`——后端得为它把 22 个站点的搜索+探测全跑完（本机实测 7.5s，电视弱网
+     * 远超客户端 45s 读超时），hero 于是长时间停在「加载简介…」，超时后又退化成
+     * 「XXX · My TV 精选内容，一键播放。」这种通用占位文案，真正的豆瓣简介永远上不了屏。
+     */
+    private val briefClient by lazy {
+        okHttp.newBuilder().readTimeout(20, java.util.concurrent.TimeUnit.SECONDS).build()
+    }
+
+    /**
+     * 简介专用详情缓存：**不可复用 [detailInfoCache]**——`defer_sources=1` 的响应
+     * `sources` 恒为空，写进共用缓存会让详情页/播放器以为该片没有线路（「暂无片源」）。
+     */
+    private val briefDetailCache = java.util.concurrent.ConcurrentHashMap<String, DetailInfo>()
+
+    private suspend fun fetchBriefDetail(ref: String): DetailInfo? {
+        briefDetailCache[ref]?.let { return it }
+        val d = runCatching {
+            VodApiSource.fetchDetail(settings.current().hhkanBaseUrl, briefClient, ref, deferSources = true)
+        }.onFailure { android.util.Log.w("OTV", "hero 简介拉取失败 ref=$ref : ${it.message}") }
+            .getOrNull() ?: return null
+        briefDetailCache[ref] = d
+        return d
+    }
 
     suspend fun vodBrief(vodId: String): Triple<String, String, Double>? = withContext(Dispatchers.IO) {
         briefCache[vodId]?.let { return@withContext it }
@@ -492,10 +520,15 @@ class VodRepository(
         val ref = item?.detailRef?.takeIf { it.isNotBlank() }
             ?: vodId.removePrefix("douban:").takeIf { vodId.startsWith("douban:") }
             ?: return@withContext null
-        val d = fetchDetailCached(ref) ?: return@withContext null
-        val meta = d.meta.takeIf { it.isNotBlank() }
-            ?: item?.let { (listOf(it.year, it.area).filter { b -> b.isNotBlank() } + it.tags).joinToString(" / ") }
-            ?: ""
+        val itemMeta = item
+            ?.let { (listOf(it.year, it.area).filter { b -> b.isNotBlank() } + it.tags).joinToString(" / ") }
+            .orEmpty()
+        val d = fetchBriefDetail(ref)
+        if (d == null) {
+            // 失败不写 briefCache（翻回这个 hero 还能重试），但条目自带的元数据先顶上
+            return@withContext item?.let { Triple(itemMeta, it.desc, it.rating) }
+        }
+        val meta = d.meta.takeIf { it.isNotBlank() } ?: itemMeta
         Triple(meta, d.desc, if (item != null && item.rating > 0) item.rating else d.rating)
             .also { briefCache[vodId] = it }
     }
@@ -640,6 +673,36 @@ class VodRepository(
             meta = item.meta.ifBlank { d.meta },
             actors = item.actors.ifBlank { d.actors },
         ).also { detailCache[vodId] = it }
+    }
+
+    /**
+     * 首屏片源预热（2026-09-18 用户需求「片源加载好后才能进入 app」）：
+     * 启动门闸里先把首屏最可能点到的影片线路匹配跑完——[resolveDetail] 的结果落
+     * detailCache/detailInfoCache，详情页进页即命中，主按钮直接是「立即播放」，
+     * 不再出现「正在查找片源」的等待态。返回「线路就绪（有选集）」的条数。
+     *
+     * [batch] 必须限并发：一次详情匹配在服务端要同时打多个影视源并探测线路（实测单条冷
+     * 路径 12~30s），一次全放出去会被上游限流、整体反而更慢，也会和门闸里其它预载抢出口。
+     * 按 [ids] 顺序分批——排在前面的（hero 第一条）先跑，用户最可能先点的那条最早就绪。
+     */
+    suspend fun preloadDetailSources(ids: List<String>, batch: Int = 2): Int {
+        val targets = ids.filter { it.isNotBlank() }.distinct()
+        if (targets.isEmpty()) return 0
+        val size = batch.coerceAtLeast(1)
+        var ready = 0
+        for (chunk in targets.chunked(size)) {
+            val results = coroutineScope {
+                chunk.map { id ->
+                    async {
+                        runCatching { resolveDetail(id) }
+                            .onFailure { android.util.Log.w("OTV", "首屏片源预热失败 id=$id : ${it.message}") }
+                            .getOrNull()
+                    }
+                }.awaitAll()
+            }
+            ready += results.count { !it?.episodes.isNullOrEmpty() }
+        }
+        return ready
     }
 
     /** 构建当前集的可换线路列表：普通源取 episodes 直链；hhkan 源解析多线路（url 懒填） */

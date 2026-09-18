@@ -48,7 +48,13 @@ class VodApiSource(
         object VodRoutes {
             fun home(category: String) = "/vod/home?category=$category"
             fun filters(category: String) = "/vod/filters/$category"
-            fun detail(id: String) = "/vod/detail/${id.removePrefix("douban:")}"
+            /**
+             * [deferSources] 只取豆瓣元数据（简介/评分/年份地区类型），跳过全量片源解析。
+             * hero 简介只要元数据：带上它会等后端把 22 个站点的搜索+探测全跑完（实测桌面
+             * 7.5s，电视弱网远超客户端 45s 读超时）→ 简介长时间停在「加载简介…」。
+             */
+            fun detail(id: String, deferSources: Boolean = false) =
+                "/vod/detail/${id.removePrefix("douban:")}" + if (deferSources) "?defer_sources=1" else ""
         }
 
         private fun fetchJson(base: String, path: String, client: OkHttpClient): JSONObject {
@@ -137,8 +143,13 @@ class VodApiSource(
             )
         }
 
-        fun fetchDetail(base: String, client: OkHttpClient, id: String): HhkanSource.Companion.DetailInfo {
-            val json = fetchJson(base, VodRoutes.detail(id), client)
+        fun fetchDetail(
+            base: String,
+            client: OkHttpClient,
+            id: String,
+            deferSources: Boolean = false,
+        ): HhkanSource.Companion.DetailInfo {
+            val json = fetchJson(base, VodRoutes.detail(id, deferSources), client)
             val lineArray = json.optJSONArray("sources")
             val lines = (0 until (lineArray?.length() ?: 0)).mapNotNull lineMap@ { lineIndex ->
                 val line = lineArray?.optJSONObject(lineIndex) ?: return@lineMap null
