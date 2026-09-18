@@ -837,7 +837,8 @@ private fun TvGroupChip(
                 RoundedCornerShape(20f.sx(s)),
             )
             .padding(horizontal = 22f.sx(s))
-            .height(if (portrait) 48f.sx(s) else 52f.sx(s)),
+            // 2026-09-19 用户需求：一级分组按钮必须明显大于二级频道行（原一级 17/19 反而小于二级 20/24）
+            .height(if (portrait) 60f.sx(s) else 68f.sx(s)),
     ) {
         Text(
             text,
@@ -846,7 +847,7 @@ private fun TvGroupChip(
                 active -> OtvColors.Bg
                 else -> OtvColors.White60
             },
-            fontSize = if (portrait) 17f.sxs(s) else 19f.sxs(s),
+            fontSize = if (portrait) 24f.sxs(s) else 28f.sxs(s),
             fontWeight = if (active && accent) FontWeight.SemiBold else if (active) FontWeight.Bold else FontWeight.Medium,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
@@ -905,7 +906,7 @@ private fun ChannelRow(
         Text(
             ch.name,
             color = if (playing) OtvColors.White else OtvColors.White75,
-            fontSize = if (portrait) 20f.sxs(s) else 24f.sxs(s),
+            fontSize = if (portrait) 18f.sxs(s) else 21f.sxs(s),
             fontWeight = if (playing) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f, fill = false),
