@@ -638,11 +638,12 @@ private fun VodPlayerOverlay(
     Box(Modifier.fillMaxSize()) {
         if (castOn) {
             // 投屏中横幅（2026-09-05 视觉稿定稿：蓝调胶囊——绿点 + 投屏中 + 设备名；点击断开回本地续播）
+            // 2026-09-19 用户需求：胶囊移到画面正上方居中（原左上角）
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(start = 80f.sx(ps), top = 90f.sx(ps))
+                    .align(Alignment.TopCenter)
+                    .padding(top = 90f.sx(ps))
                     .clip(RoundedCornerShape(50))
                     .background(AccentBlue.copy(alpha = 0.28f))
                     .border(1.dp, AccentBlue.copy(alpha = 0.55f), RoundedCornerShape(50))
