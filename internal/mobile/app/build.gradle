@@ -34,7 +34,7 @@ android {
         // v1.19 版本重规划：内测/公测双 flavor 退役——只保留原公测移动一条线（命名「移动版」）。
         // 卡密门控为正式线标配；热更新与 TV 版共用同一通道（同一后端 zip）
         resValue 'string', 'app_name', 'My TV 移动版'
-        buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'   // 正式包：卡密门禁生效（未激活/过期走激活页）   // 正式包：卡密门禁生效（未激活/过期走激活页）
+        buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'   // 正式包：卡密门禁生效（未激活/过期走激活页）
         buildConfigField 'String', 'LICENSE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/activate"'
         buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'true'
         buildConfigField 'String', 'HOTUPDATE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/hotupdate"'
