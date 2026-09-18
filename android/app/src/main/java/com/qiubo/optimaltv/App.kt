@@ -307,7 +307,10 @@ object AppStartup {
         val heroReady = java.util.concurrent.atomic.AtomicInteger(0)
         val t0 = System.currentTimeMillis()
         scope.launch {
-            heroReady.set(Graph.repo.preloadDetailSources(heroIds, batch = SOURCE_CONCURRENCY))
+            // 异常也必须 complete：门闸只认 heroDone，不能因为一次意外异常白等到预算上限
+            runCatching { Graph.repo.preloadDetailSources(heroIds, batch = SOURCE_CONCURRENCY) }
+                .onSuccess { heroReady.set(it) }
+                .onFailure { OtvLog.w("首屏片源预热失败（放行后按需拉取）: ${it.message}") }
             heroDone.complete(Unit)
             // 放行后继续（不拖门闸）：首屏卡片行——最近观看 + 电影三栏每栏首条
             val extras = runCatching { firstScreenExtraIds() }.getOrDefault(emptyList())
