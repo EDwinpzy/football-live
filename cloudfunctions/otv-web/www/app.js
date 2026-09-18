@@ -1091,7 +1091,15 @@ async function vodBrief(id) {
       const ref = String(id || "").replace(/^douban:/, "");
       const d = await fetchJSON(BASE + "/vod/detail/" + ref + "?defer_sources=1", { timeout: 60000 });
       if (!d.title) { briefCache[id] = null; return null; }
-      const v = { meta: d.meta || "", desc: d.desc || "", rating: +d.score || 0 };
+      /* 2026-09-18：详情接口已是豆瓣 subject 形态（summary/rating/year/regions/genres）。
+         旧代码读好好看口径的 meta/desc/score——三个字段都取不到，简介恒为空、评分恒 0，
+         hero 只剩「XXX · My TV 精选内容，一键播放。」占位。meta 拼法与 App 端保持一致。 */
+      const v = {
+        meta: [d.year, (d.regions || []).join(" / "), (d.genres || []).join(" / ")]
+          .filter(Boolean).join(" / "),
+        desc: d.summary || "",
+        rating: +d.rating || 0,
+      };
       briefCache[id] = v;
       return v;
     } catch (e) { return null; }
@@ -1394,6 +1402,8 @@ const all = {
   cat: "", page: 1, hasMore: false, loading: false, filters: null,
   sel: { type: "", area: "", year: "", rating: "" }, by: "hot",
   pageRequest: null, filterRequest: null, filterSeq: 0,
+  /* 筛选面板收起态（2026-09-18 需求）：记忆上次选择，默认展开 */
+  filterOpen: store.get("otvw:filterOpen", true) !== false,
 };
 const ALL_CATS = [["movie", "电影"], ["tv", "电视剧"], ["anime", "动漫"], ["variety", "综艺"], ["short", "短剧"]];
 
@@ -1474,14 +1484,29 @@ function renderAllFilters() {
     ["rating", "评分", (f.ratings || ["全部", "9+", "8+", "7+", "暂无评分"]).map(v => [v, v])],
     ["by", "排序", VOD_SORTS],
   ].filter(([, , values]) => values.length > 0);
-  $("#filterPanel").innerHTML = rows.map(([k, label, arr]) =>
+  const panel = $("#filterPanel");
+  /* 收起/展开开关（2026-09-18 用户要求「筛选组件要能够收起」）：放表头右侧——
+     面板顶边已与左上角悬浮返回钮同顶，开关靠右就不会和返回钮抢地方。 */
+  const open = all.filterOpen !== false;
+  panel.className = "filter-panel" + (open ? "" : " collapsed");
+  const activeCount = ["type", "area", "year", "rating"].filter(k => all.sel[k]).length +
+    (all.by && all.by !== "hot" ? 1 : 0) + (all.cat && all.cat !== "movie" ? 1 : 0);
+  panel.innerHTML =
+    `<div class="fp-head"><button class="fp-toggle${activeCount ? " has-filter" : ""}" id="filterToggle">` +
+    `筛选${activeCount ? "（已选 " + activeCount + "）" : ""}<span class="fp-caret">⌄</span></button></div>` +
+    `<div class="fp-rows">` + rows.map(([k, label, arr]) =>
     `<div class="fp-row"><span class="fp-label">${label}</span>
       ${arr.map(([v, n]) => {
         const cur = k === "cat" ? all.cat : k === "by" ? all.by : all.sel[k];
         const on = String(cur) === String(v) || (k === "year" && v === "更早" && all.sel.year === "更早");
         return `<button class="fchip ${on ? "on" : ""}" data-k="${k}" data-v="${esc(v)}">${esc(n)}</button>`;
       }).join("")}
-    </div>`).join("");
+    </div>`).join("") + `</div>`;
+  $("#filterToggle").addEventListener("click", () => {
+    all.filterOpen = !(all.filterOpen !== false);
+    try { store.set("otvw:filterOpen", all.filterOpen); } catch (e) {}
+    renderAllFilters();
+  });
   $$("#filterPanel .fchip").forEach(c => c.addEventListener("click", () => {
     const k = c.dataset.k, v = c.dataset.v;
     if (k === "cat") {
