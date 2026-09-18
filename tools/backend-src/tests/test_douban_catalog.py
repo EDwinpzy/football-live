@@ -125,7 +125,9 @@ class DoubanCatalogTest(unittest.TestCase):
         query = urllib.parse.parse_qs(urllib.parse.urlparse(calls[0]).query)
         self.assertEqual(query["sort"], ["S"])
         self.assertEqual(query["range"], ["9,10"])
-        self.assertEqual(query["tags"], ["电影,美国,1994"])
+        self.assertEqual(query["tags"], ["电影"])
+        self.assertEqual(query["countries"], ["美国"])
+        self.assertEqual(query["year_range"], ["1994,1994"])
         self.assertEqual(query["genres"], ["剧情"])
         self.assertEqual(query["start"], ["20"])
 
@@ -372,6 +374,32 @@ class DoubanCatalogTest(unittest.TestCase):
         filtered = catalog.show("movie", region="日本", page=1)
         self.assertEqual([item["title"] for item in filtered["items"]], ["线上片"])
         self.assertTrue(filtered["upstream_available"])
+
+    def test_explore_uses_dedicated_country_and_year_params(self):
+        """地区/年份必须走 `countries=` / `year_range=`，不能塞进 `tags=` —— 旧实现把
+        `tags=电影,日本` 交给豆瓣，上游根本没按地区筛，「选了地区像没选」就是这么来的。"""
+        calls = []
+        catalog = douban_catalog.DoubanCatalog(
+            fetch=lambda url: calls.append(url) or search_payload([]), snapshot={})
+        catalog.show("movie", region="日本", year="1994", page=1)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(calls[0]).query)
+        self.assertEqual(query["tags"], ["电影"])
+        self.assertEqual(query["countries"], ["日本"])
+        self.assertEqual(query["year_range"], ["1994,1994"])
+
+    def test_early_year_uses_a_range_instead_of_being_ignored(self):
+        """「更早」旧实现等价于不筛选（网页端直接发空年份，后端也忽略它）。"""
+        current = time.localtime().tm_year
+        self.assertEqual(douban_catalog.year_range_value("更早"), "1,%d" % (current - 12))
+        self.assertEqual(douban_catalog.year_range_value("2024"), "2024,2024")
+        self.assertEqual(douban_catalog.year_range_value("全部"), "")
+        calls = []
+        catalog = douban_catalog.DoubanCatalog(
+            fetch=lambda url: calls.append(url) or search_payload([]), snapshot={})
+        catalog.show("movie", year="更早", page=1)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(calls[0]).query)
+        self.assertEqual(query["year_range"], ["1,%d" % (current - 12)])
+        self.assertNotIn("更早", query["tags"][0])
 
     def test_movie_rule_drops_concerts_and_stage_but_keeps_musical_films(self):
         """电影栏不许出现演唱会/舞台实录：豆瓣把这些也标成 movie，只能靠标题/又名认。"""

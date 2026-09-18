@@ -721,15 +721,19 @@ class DoubanCatalog:
         [DoubanThrottled]，由上层回落最近一次缓存或随包快照——绝不把空栏当成功
         结果缓存。带筛选的「全部」页保持宽松：空结果是合法结果。
         """
-        tags = [EXPLORE_TAGS[category]]
-        if region and region != "全部":
-            tags.append(region)
-        if year and year not in ("全部", "更早"):
-            tags.append(year)
-        query = {"sort": sort, "range": rating_range(rating), "tags": ",".join(tags),
+        # `tags=` 只放大类。地区/年份/类型各有专用参数：旧实现把它们拼进 tags=，豆瓣
+        # 服务端其实没按这些条件筛（`tags=电影,日本` 只按「电影」筛），于是「选了地区
+        # 像没选」；「更早」更是等于不筛选。年份区间还能让「更早」真正生效。
+        query = {"sort": sort, "range": rating_range(rating),
+                 "tags": ",".join([EXPLORE_TAGS[category]]),
                  "start": max(0, int(page) - 1) * EXPLORE_PAGE_SIZE}
         if genre and genre != "全部":
             query["genres"] = genre
+        if region and region != "全部":
+            query["countries"] = region
+        span = year_range_value(year)
+        if span:
+            query["year_range"] = span
         url = EXPLORE_API + "?" + urllib.parse.urlencode(query)
         for attempt in range(len(EXPLORE_RETRY_DELAYS) + 1):
             rows = explore_rows(self.fetch(url))
