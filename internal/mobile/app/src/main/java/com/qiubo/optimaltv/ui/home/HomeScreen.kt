@@ -382,13 +382,13 @@ private fun VodHeroBand(
                             .height(160f.sx(s))
                             .background(Brush.verticalGradient(0f to Color.Transparent, 1f to OtvColors.Bg)),
                     )
-                    // vcontent（横屏 top 340 / 竖屏 top 170；竖屏宽 640 防溢出窄屏）
+                    // vcontent（2026-09-19 用户需求：文字/按钮整体上移，横屏 top 340→250 / 竖屏 170→120）
                     Column(
                         Modifier
                             .align(Alignment.TopStart)
                             .padding(
                                 start = if (portrait) 40f.sx(s) else 91f.sx(s),
-                                top = (if (portrait) 170f else 340f).sx(s),
+                                top = (if (portrait) 120f else 250f).sx(s),
                             )
                             .width((if (portrait) 640f else 760f).sx(s)),
                     ) {
