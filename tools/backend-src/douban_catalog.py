@@ -563,6 +563,17 @@ class DoubanCatalog:
                 fallback["stale"] = True
                 fallback["source"] = "douban-cache"
                 return fallback
+            # 2026-09-18 冷缓存（首装 / 热更换了缓存文件名后第一次运行）不再同步等源站：
+            # 目录类（home/show）内置快照足以撑起首屏，先秒回快照 + 后台预热。旧实现要等
+            # 「5 个分类 × 3 栏 × 最多 3 页 + 每条补详情」整轮跑完，手机上极易超过客户端
+            # 45s 读超时 → 5 路全失败 → 影视页整页空掉（用户报障「影视界面崩了」）。
+            # detail 不走这条：快照详情可能没有线路，秒回会让详情页显示「暂无片源」。
+            if kind in ("home", "show") and isinstance(snapshot_value, dict) and snapshot_value:
+                self._refresh_async(key, producer)
+                fallback = copy.deepcopy(snapshot_value)
+                fallback["stale"] = True
+                fallback["source"] = "douban-snapshot"
+                return fallback
         with self._condition_lock:
             condition = self._conditions.setdefault(key, threading.Condition())
         with condition:
@@ -708,6 +719,10 @@ class DoubanCatalog:
             return result
 
         result = self._coalesced(key, "home", produce, snapshot_value)
+        # 兜底路径（快照缺失/为空）可能只有 stale/source 两个键；补齐标准三栏，
+        # 客户端不必再处理「没有 sections」这种形态。
+        if not result.get("sections"):
+            result["sections"] = [{"title": title, "items": []} for title in HOME_SECTION_NAMES]
         # 快照/缓存兜底路径没有经过 [_section_items]，这里再套一次规则。
         result = _apply_section_policy(category, result)
         self._ingest([item for section in (result.get("sections") or []) for item in (section.get("items") or [])])

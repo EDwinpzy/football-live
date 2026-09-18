@@ -123,10 +123,10 @@ class VodRepository(
      *  boot() 在 Main dispatcher 直接调用本函数，主线程同步网络在部分 ROM/模拟器上
      *  被 BlockGuard 拒绝（异常被 runCatching 吞 → 30 轮全空转 = 稳定白等 15s，
      *  「进入播放页加载慢」的直接来源；后端已就绪时本应毫秒级通过）。 */
-    private suspend fun waitBackendReady(base: String) {
+    private suspend fun waitBackendReady(base: String, tries: Int = 30) {
         if (!base.contains("127.0.0.1") && !base.contains("localhost")) return
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            repeat(30) {
+            repeat(tries) {
                 val ok = runCatching {
                     val req = okhttp3.Request.Builder().url(base.trimEnd('/') + "/api/health").build()
                     okHttp.newCall(req).execute().use { it.isSuccessful }
@@ -152,13 +152,16 @@ class VodRepository(
     suspend fun refresh() {
         _state.value = _state.value.copy(loading = true)
         val cfg = settings.current()
-        // 内置后端就绪探测：app 内置 proxy 冷启动需几秒，先轮询 /api/health（仅当指向 127.0.0.1）
-        waitBackendReady(cfg.hhkanBaseUrl)
+        // 内置后端就绪探测：app 内置 proxy 冷启动需几秒，先轮询 /api/health（仅当指向 127.0.0.1）。
+        // 2026-09-18：预算 15s → 40s。热更刚落地的第一次启动要重解压 38MB 包 + Chaquopy 起
+        // Python + 装载 22MB 快照，15s 常常刚好不够；探测本身是本地回环，超预算即放弃。
+        waitBackendReady(cfg.hhkanBaseUrl, tries = 80)
         // 目录和元数据只来自设备端豆瓣模块；播放源只在详情/播放阶段参与匹配。
         val sources = buildList {
             if (cfg.hhkanBaseUrl.isNotBlank()) add(VodApiSource(cfg.hhkanBaseUrl, okHttp))
         }
-        coroutineScope {
+        try {
+          coroutineScope {
             val results: List<SourceResult> = sources.map { s ->
                 async {
                     try {
@@ -210,6 +213,13 @@ class VodRepository(
                 val itemsOut = allItems.toList()
                 repoScope.launch { runCatching { writeSnapshot(catsOut, itemsOut) } }
             }
+          }
+        } catch (e: Throwable) {
+            /* 启动门闸超时会取消 refresh（withTimeoutOrNull），异常也会中断；这里保证
+               loading 一定落回 false——否则 ensureCatalogFresh() 的 loading 守卫会永久
+               挡住后续补抓，影视页再也回不来。 */
+            _state.value = _state.value.copy(loading = false)
+            throw e
         }
     }
 

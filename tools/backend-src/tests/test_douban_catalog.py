@@ -405,6 +405,47 @@ class DoubanCatalogTest(unittest.TestCase):
                 tick.wait(0.02)
             self.assertEqual(cache.get_stale("home:variety")["sections"][0]["items"][0]["title"], "新一版")
 
+    def test_cold_cache_serves_snapshot_first_and_refreshes_in_background(self):
+        """冷缓存（首装 / 热更换了缓存文件名后的第一次运行）不许同步等源站。
+
+        旧实现：没有 fresh、也没有 stale 就直接跑 produce —— 影视页 5 个分类并发冷抓
+        （每类 3 栏 × 最多 3 页 + 每条补详情），手机上整轮跑不完，客户端 45s 读超时
+        一到 5 路全失败，整页影视变空（2026-09-18 用户报障）。
+        现在：内置快照先秒回（stale），抓取转后台，下一次请求读到新值。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = douban_catalog.JsonDiskCache(tmp)
+            snapshot = {"home": {"variety": {"category": "variety", "sections": [
+                {"title": title, "items": [{"douban_id": "1", "title": "快照"}]}
+                for title in douban_catalog.HOME_SECTION_NAMES]}}}
+            catalog = douban_catalog.DoubanCatalog(
+                fetch=lambda _url: search_payload([{"id": "2", "title": "新一版", "rate": "8.0"}]),
+                cache=cache, snapshot=snapshot)
+
+            result = catalog.home("variety")
+            self.assertEqual(result["source"], "douban-snapshot")
+            self.assertTrue(result["stale"])
+            self.assertEqual(result["sections"][0]["items"][0]["title"], "快照")
+
+            # 后台刷新（真实等待：time.sleep 已被本用例补丁成空操作）
+            tick = threading.Event()
+            for _ in range(250):
+                refreshed = cache.get_stale("home:variety")
+                if refreshed and refreshed["sections"][0]["items"][0]["title"] == "新一版":
+                    break
+                tick.wait(0.02)
+            self.assertEqual(cache.get_stale("home:variety")["sections"][0]["items"][0]["title"], "新一版")
+            # 后台写入后，后续请求直接吃新值（源站结果，不再是快照）
+            self.assertEqual(catalog.home("variety")["source"], "douban")
+
+    def test_home_without_snapshot_still_returns_three_sections(self):
+        """快照缺失时也要给出标准三栏形状，客户端不必再处理「没有 sections」。"""
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: {"data": []}, snapshot={})
+        result = catalog.home("variety")
+        self.assertEqual([section["title"] for section in result["sections"]],
+                         list(douban_catalog.HOME_SECTION_NAMES))
+        self.assertEqual([section["items"] for section in result["sections"]], [[], [], []])
+
     def test_hero_poster_url_upgrades_to_the_largest_douban_size(self):
         """影视页顶部 hero 全宽铺图：列表给的最小号会把 1920 宽拉糊，统一换最大尺寸前缀。"""
         self.assertEqual(

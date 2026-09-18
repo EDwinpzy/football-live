@@ -3460,7 +3460,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
         if parsed.path == "/api/health":
-            body = json.dumps({"ok": True, "time": time.strftime("%H:%M:%S")},
+            # vod 字段（2026-09-18）：影视服务是否已预热。App 侧只把它当诊断信息，
+            # 便于区分「后端没起来」和「后端起来了但影视还没就绪」。
+            body = json.dumps({"ok": True, "time": time.strftime("%H:%M:%S"),
+                               "vod": VOD_SERVICE is not None},
                               ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -5005,7 +5008,19 @@ def mcms_enriched_play(vodid, pid, vid):
 
 
 def _startup_warm():
-    """启动预热（后台线程）：图片域探测 + 搜索 token 预取，让首个请求零等待。"""
+    """启动预热（后台线程）：影视服务 + 图片域探测 + 搜索 token 预取，让首个请求零等待。
+
+    2026-09-18：影视服务改成开机预热（一次性，不是常驻线程）。旧实现是「首个 /vod/*
+    请求现场构建」——MediaIndex 建库 + 22MB 快照预热搜索索引都压在那一次请求上，
+    手机上叠加第一轮豆瓣冷抓很容易顶到客户端 45s 读超时（用户报障「影视界面崩了」）。
+    注：这里只构建服务，不预抓豆瓣；目录数据的冷抓由请求触发、且已在快照兜底后
+    转后台（见 douban_catalog._coalesced 的冷缓存分支）。
+    """
+    try:
+        _get_vod_service()
+        print("影视服务预热完成")
+    except Exception as e:
+        print("影视服务预热失败（请求时再试）: %r" % (e,))
     try:
         dom = hhkan.probe_img_domain()
         print("图片资源域首选: %s" % dom)
