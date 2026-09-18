@@ -40,6 +40,12 @@ def main():
     if not run([PY, os.path.join(ROOT, "tools", "build_douban_snapshot.py")], ROOT):
         print("[WARN] 豆瓣快照未刷新，沿用现有 douban_snapshot.json 继续构建")
 
+    # 筛选能力矩阵：豆瓣 Explore 对筛选参数的支持按分类而异，这个矩阵决定某个维度交给
+    # 上游筛还是本地兜底判。矩阵是数据文件，重跑本脚本即可随包更新，不用改代码。
+    # 探测要能连通豆瓣，失败不阻塞构建（沿用现有 douban_filter_matrix.json）。
+    if not run([PY, os.path.join(ROOT, "tools", "probe_douban_filter_matrix.py")], ROOT):
+        print("[WARN] 筛选能力矩阵未刷新，沿用现有 douban_filter_matrix.json 继续构建")
+
     ok1 = run([PY, os.path.join(ROOT, "tools", "build_web_function.py")], ROOT)
     if not ok1:
         raise SystemExit("build_web_function 失败")

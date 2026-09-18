@@ -1,0 +1,29 @@
+{
+  "_note": "豆瓣 Explore 各分类的筛选能力实测结果；由 tools/probe_douban_filter_matrix.py 生成。false = 该维度不可信上游，必须本地兜底判定。当前值是无实测网络时的保守缺省：只有电影类型有直接证据（线上 genre= 能返回正常结果）。",
+  "_probedAt": null,
+  "movie": {
+    "genre": true,
+    "region": true,
+    "year": true
+  },
+  "tv": {
+    "genre": false,
+    "region": false,
+    "year": false
+  },
+  "anime": {
+    "genre": false,
+    "region": false,
+    "year": false
+  },
+  "variety": {
+    "genre": false,
+    "region": false,
+    "year": false
+  },
+  "short": {
+    "genre": false,
+    "region": false,
+    "year": false
+  }
+}

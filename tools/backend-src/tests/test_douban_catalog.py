@@ -450,6 +450,35 @@ class DoubanCatalogTest(unittest.TestCase):
         self.assertEqual([item["regions"] for item in result["items"]], [["日本"], ["日本"]])
         self.assertEqual(fetched, ["2"])
 
+    def test_matrix_file_makes_upstream_trusted_for_a_dimension(self):
+        """矩阵数据说了算：实测某分类支持某参数，就把该维度交给上游、本地不再复判。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "douban_filter_matrix.json"
+            path.write_text(json.dumps({"movie": {"genre": True}}), encoding="utf-8")
+            catalog = douban_catalog.DoubanCatalog(
+                fetch=lambda _url: search_payload([{"id": "1", "title": "无元数据", "rate": "8"}]),
+                snapshot={}, matrix_path=path)
+            self.assertTrue(catalog._filter_matrix()["movie"]["genre"])
+            self.assertEqual([i["title"] for i in catalog.show("movie", genre="科幻")["items"]],
+                             ["无元数据"])
+
+    def test_missing_matrix_file_falls_back_to_conservative_defaults(self):
+        catalog = douban_catalog.DoubanCatalog(
+            fetch=lambda _url: search_payload([]), snapshot={},
+            matrix_path=pathlib.Path(tempfile.mkdtemp()) / "absent.json")
+        matrix = catalog._filter_matrix()
+        self.assertTrue(matrix["movie"]["genre"])
+        self.assertFalse(matrix["tv"]["genre"])
+
+    def test_bundled_matrix_file_covers_every_category(self):
+        """随包矩阵必须覆盖全部分类与维度：缺项会让 `_filter_matrix` 静默用缺省，
+        这种「配置写漏了」必须被测试挡住。"""
+        raw = json.loads(douban_catalog.FILTER_MATRIX_PATH.read_text(encoding="utf-8"))
+        for category in douban_catalog.CATEGORY_VALUES:
+            self.assertIn(category, raw)
+            for dimension in douban_catalog.FILTER_DIMENSIONS:
+                self.assertIsInstance(raw[category][dimension], bool)
+
     def test_movie_rule_drops_concerts_and_stage_but_keeps_musical_films(self):
         """电影栏不许出现演唱会/舞台实录：豆瓣把这些也标成 movie，只能靠标题/又名认。"""
         rows = [explore_row(111, "陈奕迅DUO演唱会"), explore_row(222, "汉密尔顿"),
