@@ -22,7 +22,8 @@ android {
     // v1.29（2026-09-16）：影视源全通修复批——源匹配失败重试 / 代理 fake-IP 放行 /
     //                      探测预算收敛 / 豆瓣海报 Referer 与占位图兜底（热更 v21 同源）
     // v1.32（2026-09-16）：云端接口从 Sites 切回腾讯云 CloudBase（国内可直连）。
-    // ⚠ 本轮为【测试版】：LICENSE_ENABLED=false —— 默认视为已激活，测完必须改回 true 再发正式包。
+    // 2026-09-18：正式包已开卡密门禁（LICENSE_ENABLED=true）。同一版本此前出过一版
+    // 「测试版：false —— 默认视为已激活」的构建，已归档到 apk/归档-测试版-门禁关/。
     versionCode 34
     versionName "1.32"
         // 方案 §5：双 ABI split 思路——真机 arm64/v7a + 模拟器 x86_64（开发验证用）
@@ -32,7 +33,7 @@ android {
         // 卡密门控/热更新为正式线标配（LICENSE_*/HOTUPDATE_* 常量原公测口径）。
         // v1.18 热更新：云端下发内嵌后端 zip，启动时静默检查+预下载，下次冷启动生效
         resValue 'string', 'app_name', 'My TV'
-        buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'   // ⚠ 测试版：默认已激活
+        buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'    // 正式包：卡密门禁生效（未激活/过期走激活页）
         buildConfigField 'String', 'LICENSE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/activate"'
         buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'true'
         buildConfigField 'String', 'HOTUPDATE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/hotupdate"'

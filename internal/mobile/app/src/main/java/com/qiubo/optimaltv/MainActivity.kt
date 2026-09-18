@@ -3,6 +3,7 @@ package com.qiubo.optimaltv
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -238,9 +239,24 @@ private fun AppRoot() {
         Graph.repo.refresh()
     }
 
+    // 启动门禁（2026-09-18）：开启卡密后，未激活 / 已过期 / 已封禁 → 直接落在激活页，
+    // 不给进主界面。判定与 LicensePlayerGate 同款（isPremium：24h 离线宽限 + 未过期）；
+    // 激活成功后 ActivateScreen 自行跳足球页（见该页 resultOk 分支）。
+    val licenseOn = com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED
+    val licState: com.qiubo.optimaltv.license.LicenseState? =
+        if (licenseOn) com.qiubo.optimaltv.license.LicenseManager.state.collectAsStateWithLifecycle().value else null
+    if (licenseOn && licState == null) {
+        // 授权状态尚未落地（启动门闸后才读，瞬时）→ 先不建 NavHost，
+        // 免得把已激活用户误判成未激活
+        Box(Modifier.fillMaxSize().background(Color.Black))
+        return
+    }
+    val startDestination =
+        if (licenseOn && !com.qiubo.optimaltv.license.LicenseManager.isPremium()) "activate" else "live"
+
     // v1.20 全局浮层：运营公告（顶部半透明悬浮窗）+ 非强更提案弹窗 + 下载进度层
     Box(Modifier.fillMaxSize()) {
-        NavHost(navController = nav, startDestination = "live") {
+        NavHost(navController = nav, startDestination = startDestination) {
                 composable("live") { LiveScreen(nav) }
 
                 composable("vod") { VodScreen(nav) }
