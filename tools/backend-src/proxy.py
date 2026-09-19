@@ -338,7 +338,6 @@ def parse_matches(html):
                         elif elapsed <= 60: prog = 45               # 中场休息，停在 45'
                         else: prog = elapsed - 15                   # 下半场，扣 15 分钟中场
                         minute = str(max(min(prog, 90), 0))
-                        time_str = "第%s'" % minute
             elif "第" in (time_str or "") or "'" in (time_str or ""):
                 # "第67'" / "67'" = 实时分钟（数据源已含中场扣除）→ 直接提取
                 #（v1.23 同上去掉 -10 偏移）
@@ -362,7 +361,6 @@ def parse_matches(html):
                         elif elapsed <= 60: prog = 45               # 中场休息，停在 45'
                         else: prog = elapsed - 15                   # 下半场
                         minute = str(max(min(prog, 90), 0))
-                        time_str = "第%s'" % minute
                 # k > today_key → 明日 → 保持未开始
 
         # 6. 比分: 直播行若含 "1:0" / "1 - 0" 形式则提取（数据源当前不提供，预留字段）

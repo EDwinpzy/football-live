@@ -35,6 +35,13 @@ object PlaybackRecoveryPolicy {
         }
     }
 
+    /** A live source gets one fresh same-source retry before we move on. */
+    fun liveLineFailureAction(retryCount: Int, hasAlternate: Boolean): RecoveryAction = when {
+        retryCount <= 0 -> RecoveryAction.REFRESH_CURRENT
+        hasAlternate -> RecoveryAction.SWITCH_SOURCE
+        else -> RecoveryAction.GIVE_UP
+    }
+
     fun resumePosition(positionMs: Long): Long = (positionMs - RESUME_REWIND_MS).coerceAtLeast(0L)
 
     class Generation {

@@ -20,6 +20,21 @@ class PlaybackRecoveryPolicyTest {
         assertEquals(expected, (0..4).map { PlaybackRecoveryPolicy.action(PlaybackKind.LIVE, it) })
     }
 
+    @Test fun `live line failure retries once then switches to an available source`() {
+        assertEquals(
+            RecoveryAction.REFRESH_CURRENT,
+            PlaybackRecoveryPolicy.liveLineFailureAction(retryCount = 0, hasAlternate = true),
+        )
+        assertEquals(
+            RecoveryAction.SWITCH_SOURCE,
+            PlaybackRecoveryPolicy.liveLineFailureAction(retryCount = 1, hasAlternate = true),
+        )
+        assertEquals(
+            RecoveryAction.GIVE_UP,
+            PlaybackRecoveryPolicy.liveLineFailureAction(retryCount = 1, hasAlternate = false),
+        )
+    }
+
     @Test fun `vod recovery reloads then refreshes and keeps resume context`() {
         assertEquals(RecoveryAction.RELOAD_CURRENT, PlaybackRecoveryPolicy.action(PlaybackKind.VOD, 0))
         assertEquals(RecoveryAction.REFRESH_CURRENT, PlaybackRecoveryPolicy.action(PlaybackKind.VOD, 1))

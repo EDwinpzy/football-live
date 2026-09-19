@@ -1219,9 +1219,8 @@ class PlayerViewModel(
     }
 
     /** 失败 → 自动换下一条未试过的线路；全试过 → ErrorWidget 兜底（防线三）。
-     *  直播特例（2026-08-30 用户指令「一定都用原版足球直播2」）：失败**不自动换线**——
-     *  只对当前源（默认 bb）fresh 重解析重试（上游签名按分钟轮换，重解析通常即恢复）；
-     *  重试耗尽进错误态，30s 自动重试重新 boot 仍从 bb 起。其他信号源仅用户手动选择 */
+     *  直播特例：当前源只 fresh 重解析一次，仍失败就切换未尝试的备用源，
+     *  所有源都失败后才进错误态，避免某条线路短暂失效拖死整场比赛。 */
     private var sameLineRetries = 0
     /** 直播软解兜底已尝试（每 VM 一次） */
     private var softwareFallbackTried = false
@@ -1297,19 +1296,34 @@ class PlayerViewModel(
                 scheduleLiveAutoRetry()
                 return
             }
-            if (sameLineRetries < 3) {
-                sameLineRetries++
-                val cur = _ui.value.activeLine
-                OtvLog.w("line fail($cur): $reason → 同线 fresh 重解析（$sameLineRetries/3，不换线）")
-                viewModelScope.launch { startSession(cur, 0L) }
-                return
+            val cur = _ui.value.activeLine
+            val hasAlternate = _ui.value.lines.indices.any { it != cur && it !in triedLines }
+            when (PlaybackRecoveryPolicy.liveLineFailureAction(sameLineRetries, hasAlternate)) {
+                RecoveryAction.REFRESH_CURRENT -> {
+                    sameLineRetries++
+                    OtvLog.w("line fail($cur): $reason → 同线 fresh 重解析（仅重试一次）")
+                    viewModelScope.launch { startSession(cur, 0L) }
+                }
+                RecoveryAction.SWITCH_SOURCE -> {
+                    sameLineRetries = 0
+                    val next = _ui.value.lines.indices.firstOrNull { it != cur && it !in triedLines }
+                    if (next == null) {
+                        _ui.value = _ui.value.copy(fatalMsg = reason, controlsVisible = false)
+                        scheduleLiveAutoRetry()
+                    } else {
+                        OtvLog.w("line fail($cur): $reason → 切换备用源 $next")
+                        viewModelScope.launch { startSession(next, 0L) }
+                    }
+                }
+                else -> {
+                    sameLineRetries = 0
+                    OtvLog.w("line fail($cur): $reason → 所有直播源失败，进入错误态")
+                    viewModelScope.launch { saveProgress(force = false) }
+                    _ui.value = _ui.value.copy(fatalMsg = reason, controlsVisible = false)
+                    // 直播：错误态 30s 自动重试（fresh）——未开赛/上游抖动不用用户守着重试
+                    scheduleLiveAutoRetry()
+                }
             }
-            sameLineRetries = 0
-            OtvLog.w("line fail(${_ui.value.activeLine}): $reason → 重试耗尽进错误态；30s 自动重试仍从原版足球直播2 起")
-            viewModelScope.launch { saveProgress(force = false) }
-            _ui.value = _ui.value.copy(fatalMsg = reason, controlsVisible = false)
-            // 直播：错误态 30s 自动重试（fresh）——未开赛/上游抖动不用用户守着手动重试
-            scheduleLiveAutoRetry()
             return
         }
         sameLineRetries = 0
