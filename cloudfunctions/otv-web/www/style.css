@@ -532,6 +532,15 @@ body.portrait .src-picker .sp-chips{flex-wrap:wrap;justify-content:center}
 #gestInd .gi-bar{width:calc(180px/var(--z,1));height:calc(5px/var(--z,1));border-radius:calc(3px/var(--z,1));
   background:rgba(255,255,255,.3);overflow:hidden;margin:0 auto}
 #gestInd .gi-bar i{display:block;height:100%;background:#fff;border-radius:calc(3px/var(--z,1))}
+/* 简 4（2026-09-19 v3 终定）：双击/拖动快进退 = 无底色双三角 + 目标时间，仅投影可读 */
+#gestInd.gi-plain{background:none;border-radius:0;padding:0;text-shadow:0 3px 10px rgba(0,0,0,.6)}
+#gestInd .gi-tri{display:block;width:calc(40px/var(--z,1));height:calc(40px/var(--z,1));margin:0 auto;
+  fill:#fff;filter:drop-shadow(0 3px 10px rgba(0,0,0,.6))}
+#gestInd .gi-time{display:block;margin-top:calc(8px/var(--z,1));font-size:calc(14px/var(--z,1));
+  font-weight:600;font-variant-numeric:tabular-nums}
+#gestInd .gi-ico{display:inline-block;width:calc(18px/var(--z,1));height:calc(18px/var(--z,1));
+  vertical-align:calc(-4px/var(--z,1));margin-right:calc(8px/var(--z,1));
+  fill:none;stroke:#fff;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 
 /* 播放错误态（App ErrorWidget：720dp 卡片，物理 dp） */
 #pError{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
@@ -648,14 +657,15 @@ body.portrait .detail-body{padding-top:110px}
 body.portrait #pPlayer{display:flex;flex-direction:column;background:#0E0E0F}
 body.portrait #pPlayer video{width:100%;height:auto;aspect-ratio:16/9;flex-shrink:0;background:#000}
 body.portrait #pPlayer video.asp-169,body.portrait #pPlayer video.asp-43{width:100%;height:auto;max-width:100%}
-body.portrait #controls{position:static;flex:1 1 auto;overflow-y:auto;pointer-events:auto;
-  background:none;padding:0 40px 40px}
-body.portrait .ctl-bottom{padding:26px 0 0}
-body.portrait .ctl-title{font-size:38px;-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden;white-space:normal}
-body.portrait .ctl-meta{font-size:22px}
-/* 更多面板竖屏=底部抽屉（92vw × 64vh） */
-body.portrait #morePanel{top:auto;left:0;right:0;bottom:0;width:100%;height:64vh;
-  border-radius:24px 24px 0 0;zoom:calc(1/var(--z,1))}
+/* 2026-09-19 v2 定稿：竖屏不再放常驻控制条/⋯ 钮——播放控制回归视频浮层（CSS 隐藏，
+   进度仍随 timeupdate 更新）+ 手势；下方整块 =「更多」区段平铺常驻 */
+body.portrait #controls{display:none}
+body.portrait #moreBtn{display:none}
+body.portrait #morePanel{position:static;width:100%;height:auto;flex:1 1 auto;min-height:0;
+  border-radius:0;background:#0E0E0F;backdrop-filter:none;-webkit-backdrop-filter:none;
+  padding-bottom:env(safe-area-inset-bottom);zoom:calc(1/var(--z,1))}
+body.portrait #morePanel .mp-inner{padding:20px 26px 26px}
+body.portrait #morePanel .mp-poster{width:72px;height:102px}
 /* 手势指示/缓冲居中于视频区（422 设计px） */
 body.portrait #gestInd{top:211px}
 body.portrait .buf-spin{top:211px}
@@ -729,8 +739,6 @@ body.portrait .epp::after,
 body.portrait .lchip::after,
 body.portrait .spchip::after{
   content:"";position:absolute;left:0;right:0;top:-11px;bottom:-11px;border-radius:inherit}
-body.portrait #morePanel{background:rgba(18,18,22,.86);padding-bottom:env(safe-area-inset-bottom);
-  backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px)}
 body.portrait .src-picker{background:rgba(17,17,20,.72);
   backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px)}
 body.portrait #tvSidebar{padding-bottom:calc(26px + env(safe-area-inset-bottom))}

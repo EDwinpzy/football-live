@@ -259,21 +259,46 @@ function uiBack() {
   scrollTo({ top: 0, behavior: "smooth" });
 }
 (function () {
-  let sx = 0, sy = 0, live = false;
-  addEventListener("touchstart", e => {
-    const t = e.touches[0];
-    /* #video（影视播放器）不参与左缘返回：它与横滑快进/竖滑亮度手势同区，容易误触退播；
-       电视播放器 #tvVideo 上没有滑动手势，左缘右滑必须可用——横屏时视频铺满整屏，
-       否则电视播放态在横屏没有可见退出入口（FAB/侧栏都不常驻）。 */
-    live = t.clientX < 36 && !e.target.closest("#video, #cTrack, .ctl-track, input, textarea");
-    sx = t.clientX; sy = t.clientY;
-  }, { passive: true });
-  addEventListener("touchend", e => {
-    if (!live) return;
-    live = false;
-    const t = e.changedTouches[0];
-    if (sx < 36 && t.clientX - sx > 64 && Math.abs(t.clientY - sy) < 90) uiBack();
-  }, { passive: true });
+  /* 设计像素阈值：与 App 的左缘返回意图一致，但不依赖 body.zoom，避免横竖屏切换时
+     触控命中区随页面缩放失真。播放器横滑快进/亮度手势继续由 #video 自己处理。 */
+  const EDGE_BACK_ZONE = 44;
+  const EDGE_BACK_DISTANCE = 64;
+  const EDGE_BACK_VERTICAL_TOLERANCE = 90;
+  let pointer = null;
+  const blocked = target => target && target.closest("#video, #cTrack, .ctl-track, input, textarea");
+  const beginPointer = e => {
+    /* 只接管主指针的触控/手写笔；鼠标拖动不应触发页面返回。 */
+    if (!e.isPrimary || e.pointerType === "mouse") return;
+    if (e.clientX > EDGE_BACK_ZONE || blocked(e.target)) return;
+    pointer = { id: e.pointerId, startX: e.clientX, startY: e.clientY };
+  };
+  const endPointer = e => {
+    if (!pointer || e.pointerId !== pointer.id) return;
+    const { startX, startY } = pointer;
+    pointer = null;
+    const endX = e.clientX, endY = e.clientY;
+    if (endX - startX > EDGE_BACK_DISTANCE && Math.abs(endY - startY) < EDGE_BACK_VERTICAL_TOLERANCE) uiBack();
+  };
+  const cancelPointer = () => { pointer = null; };
+  if ("PointerEvent" in window) {
+    addEventListener("pointerdown", beginPointer, { passive: true });
+    addEventListener("pointerup", endPointer, { passive: true });
+    addEventListener("pointercancel", cancelPointer, { passive: true });
+  } else {
+    /* 老 WebView 兜底：没有 Pointer Events 时沿用 Touch Events，且多指直接放弃。 */
+    addEventListener("touchstart", e => {
+      if (e.touches.length !== 1 || blocked(e.target)) return;
+      const t = e.touches[0];
+      if (t.clientX > EDGE_BACK_ZONE) return;
+      pointer = { id: "touch", startX: t.clientX, startY: t.clientY };
+    }, { passive: true });
+    addEventListener("touchend", e => {
+      if (!pointer || pointer.id !== "touch" || e.changedTouches.length !== 1) return;
+      const t = e.changedTouches[0];
+      endPointer({ pointerId: "touch", clientX: t.clientX, clientY: t.clientY });
+    }, { passive: true });
+    addEventListener("touchcancel", cancelPointer, { passive: true });
+  }
 })();
 
 function hideBoot() { /* v1.25：启动过渡屏已按需求移除，保留空函数兼容旧调用点 */ }
@@ -2364,12 +2389,12 @@ function openPlayer(ctx) {
   setPlayIcon(false);
   const v = $("#video"); pv.video = v;
   applyAspect();
-  /* 竖屏播放器（需求12⑥）：控制条常驻视频下方，不再浮层自动隐藏 */
+  /* 竖屏播放器（2026-09-19 v2 定稿）：视频下方 =「更多」区段平铺常驻；
+     播放控制回归视频浮层（点按唤出）+ 手势，不再放常驻控制条与 ⋯ 钮 */
   if (state.portrait) {
-    pv.controls = true;
-    $("#controls").hidden = false;
+    renderMorePanel();
+    $("#morePanel").hidden = false;
     $("#ctlBack").hidden = false;
-    $("#moreBtn").hidden = false;
   }
   try {
     if (ctx.kind === "vod") resolveVodAndPlay(ctx);
@@ -2668,15 +2693,17 @@ function armHide() {
 function showControls() {
   if (pv.ctx.kind === "live") { pv.picker = true; renderSrcPicker(); armHide(); return; }
   pv.controls = true;
-  $("#controls").hidden = false; $("#morePanel").hidden = true; $("#moreDim").hidden = true;
-  $("#ctlBack").hidden = false; $("#moreBtn").hidden = false;
+  $("#controls").hidden = false;
+  /* 竖屏（v2）：morePanel 平铺常驻、⋯ 钮不渲染，显隐控制条都不碰它们 */
+  if (!state.portrait) { $("#morePanel").hidden = true; $("#moreDim").hidden = true; $("#moreBtn").hidden = false; }
+  $("#ctlBack").hidden = false;
   armHide();
 }
 function hideControls() {
   pv.controls = false;
   $("#controls").hidden = true;
-  $("#ctlBack").hidden = true; $("#moreBtn").hidden = true;
-  $("#morePanel").hidden = true; $("#moreDim").hidden = true;
+  $("#ctlBack").hidden = true;
+  if (!state.portrait) { $("#moreBtn").hidden = true; $("#morePanel").hidden = true; $("#moreDim").hidden = true; }
 }
 $("#cPlayBtn").addEventListener("click", () => {
   const v = pv.video; if (!v) return;
@@ -2839,6 +2866,10 @@ function renderMorePanel() {
     store.set("otvw:aspect", pv.aspectIdx);
     applyAspect(); renderMorePanel();
   }));
+  /* 直播不可变速：不渲染倍速区（App PlayerMoreSections 同口径） */
+  $("#mpSpeedSec").hidden = c.kind === "live";
+  /* 竖屏（v2 定稿）：面板平铺常驻，任何状态重渲后保持可见 */
+  if (state.portrait) $("#morePanel").hidden = false;
 }
 if ("mediaSession" in navigator) {
   navigator.mediaSession.setActionHandler("play", () => pv.video && pv.video.play());
@@ -2852,9 +2883,18 @@ if ("mediaSession" in navigator) {
   let down = null, mode = null, seekStart = 0, seekCur = 0, vbKind = null, vbStart = 0.5, vbCur = 0.5;
   let lastTap = 0, lastX = 0, lastY = 0, tapPending = 0;
   const ind = () => $("#gestInd");
-  function showInd(html) { const el = ind(); el.innerHTML = html; el.hidden = false; }
+  /* 简 4（2026-09-19 v3 终定，App 同构）：双击/拖动快进退 = 无底色双三角 + 目标时间；
+     亮度/音量保持毛玻璃胶囊并补图标 */
+  const TRI_F = '<svg class="gi-tri" viewBox="0 0 60 60"><path d="M10 12l18 18-18 18z"/><path d="M32 12l18 18-18 18z"/></svg>';
+  const TRI_B = '<svg class="gi-tri" viewBox="0 0 60 60"><path d="M50 12L32 30l18 18z"/><path d="M28 12L10 30l18 18z"/></svg>';
+  const ICO_SUN = '<svg class="gi-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2" fill="#fff" stroke="none"/><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5 5l1.8 1.8M17.2 17.2L19 19M19 5l-1.8 1.8M6.8 17.2L5 19"/></svg>';
+  const ICO_SPK = '<svg class="gi-ico" viewBox="0 0 24 24"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5H4z" fill="#fff" stroke="none"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6M18 6.6a7.6 7.6 0 0 1 0 10.8"/></svg>';
+  function showInd(html, plain) { const el = ind(); el.innerHTML = html; el.classList.toggle("gi-plain", !!plain); el.hidden = false; }
   function hideInd() { ind().hidden = true; }
+  let indTimer = 0;
+  function flashInd(html) { showInd(html, true); clearTimeout(indTimer); indTimer = setTimeout(hideInd, 700); }
   function fmtT(s) { return fmtTime(s); }
+  const seekInd = (fwd, sec) => (fwd ? TRI_F : TRI_B) + `<span class="gi-time">${fmtT(sec)}</span>`;
   layer.addEventListener("pointerdown", e => {
     if (!pv.ctx || pv.ctx.kind !== "vod" && pv.ctx.kind !== "live") return;
     down = { x: e.clientX, y: e.clientY, t: Date.now() };
@@ -2876,15 +2916,15 @@ if ("mediaSession" in navigator) {
     }
     if (mode === "seek" && v && v.duration) {
       seekCur = Math.max(0, Math.min(v.duration - 1, seekStart + dx / innerWidth * 120));
-      showInd(`⏩ ${fmtT(seekCur)}`);
+      showInd(seekInd(seekCur >= seekStart, seekCur), true);
     } else if (mode === "vb") {
       vbCur = Math.max(0.02, Math.min(1, vbStart - dy / innerHeight * 1.2));
       if (vbKind === "brightness") {
         pv.bright = vbCur;
         v.style.filter = `brightness(${vbCur})`;
       } else if (v) { v.volume = vbCur; v.muted = false; }
-      showInd(`<div class="gi-label">${vbKind === "brightness" ? "亮度" : "音量"}</div>
-        <div class="gi-bar"><i style="width:${Math.round(vbCur * 100)}%"></i></div>`);
+      showInd(`<div class="gi-label">${vbKind === "brightness" ? ICO_SUN : ICO_SPK}${vbKind === "brightness" ? "亮度" : "音量"}</div>
+        <div class="gi-bar"><i style="width:${Math.round(vbCur * 100)}%"></i></div>`, false);
     }
   });
   const end = e => {
@@ -2901,21 +2941,20 @@ if ("mediaSession" in navigator) {
         lastTap = 0;
         if (pv.ctx && pv.ctx.kind === "vod") {
           const third = innerWidth / 3;
-          if (e.clientX < third) { pv.video.currentTime = Math.max(0, pv.video.currentTime - 10); hint("快退 10 秒"); }
-          else if (e.clientX > third * 2) { pv.video.currentTime = Math.min(pv.video.duration - 1, pv.video.currentTime + 10); hint("快进 10 秒"); }
-          else { pv.video.paused ? pv.video.play().catch(() => {}) : pv.video.pause(); }
+          if (e.clientX < third) {
+            pv.video.currentTime = Math.max(0, pv.video.currentTime - 10);
+            flashInd(seekInd(false, pv.video.currentTime));
+          } else if (e.clientX > third * 2) {
+            pv.video.currentTime = Math.min(pv.video.duration - 1, pv.video.currentTime + 10);
+            flashInd(seekInd(true, pv.video.currentTime));
+          } else { pv.video.paused ? pv.video.play().catch(() => {}) : pv.video.pause(); }
         }
       } else {
         lastTap = now; lastX = e.clientX; lastY = e.clientY;
         tapPending = setTimeout(() => {
           if (!pv.ctx) return;
           if (pv.ctx.kind === "live") { pv.picker = !pv.picker; renderSrcPicker(); if (pv.picker) armHide(); }
-          else if (state.portrait) {
-            /* 竖屏：控制条常驻，点视频开/关更多面板（选集线路速达） */
-            const mp = $("#morePanel");
-            if (mp.hidden) { renderMorePanel(); mp.hidden = false; $("#moreDim").hidden = false; }
-            else { mp.hidden = true; $("#moreDim").hidden = true; }
-          }
+          /* 竖屏（v2）：更多面板已平铺常驻，点视频统一开/关控制浮层 */
           else { pv.controls ? hideControls() : showControls(); }
         }, 280);
       }
