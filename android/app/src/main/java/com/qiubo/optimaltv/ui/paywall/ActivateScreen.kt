@@ -97,12 +97,14 @@ fun ActivateScreen(nav: NavController) {
             )
         }
 
-        // 需求③（2026-09-04）：内容左对齐（页头/码位/键盘/按钮/标语统一左构图，不再居中）
+        // 2026-09-19 需求③（老板）：**页头保持左对齐**，页头以下整块水平居中。
+        // 做法：外层 Column 左对齐（页头用），下半部分包一个 fillMaxWidth +
+        // CenterHorizontally 的子 Column —— 居中参照系是整屏宽，不是页头宽度。
         Column(
             horizontalAlignment = Alignment.Start,
-            modifier = Modifier.fillMaxSize().padding(start = 96f.sx(s), end = 60f.sx(s), top = 130f.sx(s)),
+            modifier = Modifier.fillMaxSize().padding(start = 96f.sx(s), end = 96f.sx(s), top = 130f.sx(s)),
         ) {
-            // ---- 页头：金属标徽章 + 标题 ----
+            // ---- 页头：金属标徽章 + 标题（需求③：唯一保持左对齐的区域）----
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier,
@@ -136,159 +138,165 @@ fun ActivateScreen(nav: NavController) {
 
             Spacer(Modifier.height(52f.sx(s)))
 
-            // ---- 分段码位：OTV- 前缀 + 5+5，中横杠；已填大字 / 当前位亮框+脉冲光标 / 空位暗点 ----
-            // v1.20（用户需求 激活#7）：码位前默认显示固定「OTV-」前缀——用户只输
-            // 后 10 位，前缀由界面明示，不再靠副标题提示
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier,
-            ) {
-                Text(
-                    "OTV-",
-                    color = OtvColors.White50, fontSize = 46f.sxs(s), fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(end = 18f.sx(s)),
-                )
-                repeat(5) { i ->
-                    CodeSlot(ch = input.getOrNull(i), active = input.length == i, s = s)
-                    if (i < 4) Spacer(Modifier.width(10f.sx(s)))
-                }
-                Spacer(Modifier.width(16f.sx(s)))
-                Box(
-                    Modifier
-                        .width(26f.sx(s))
-                        .height(6f.sx(s))
-                        .alpha(0.8f)
-                        .background(Color(0x38FFFFFF), RoundedCornerShape(3f.sx(s))),
-                )
-                Spacer(Modifier.width(16f.sx(s)))
-                repeat(5) { i ->
-                    CodeSlot(ch = input.getOrNull(5 + i), active = input.length == 5 + i, s = s)
-                    if (i < 4) Spacer(Modifier.width(10f.sx(s)))
-                }
-            }
-
-            Spacer(Modifier.height(50f.sx(s)))
-
-            // ---- Apple TV 风格键盘（渐变键帽）：
-            //      首行 = 「清空」白胶囊 + 小写字母 + ⌫；次行 = 数字（左右居中）----
-            val firstKey = remember { FocusRequester() }
-            InitialFocusEffect(firstKey, "activate-first", enabled = true)
-
-            // 焦点自愈（搜索页同款）：OK 输入引发键节点重组会掉焦点，
-            // 600ms 窗口内自动恢复到原键，连续打字焦点不中断
-            var keyFocusLostAt by remember { mutableStateOf(0L) }
-            var lastLostKeyFr by remember { mutableStateOf<FocusRequester?>(null) }
-            val noteKeyLost: (FocusRequester?) -> Unit = { fr ->
-                keyFocusLostAt = System.currentTimeMillis(); lastLostKeyFr = fr
-            }
-            val noteKeyGained = { keyFocusLostAt = 0L; lastLostKeyFr = null }
-            LaunchedEffect(input) {
-                if (input.isEmpty()) return@LaunchedEffect
-                kotlinx.coroutines.delay(150)
-                if (keyFocusLostAt > 0 && System.currentTimeMillis() - keyFocusLostAt < 600) {
-                    val fr = lastLostKeyFr
-                    keyFocusLostAt = 0; lastLostKeyFr = null
-                    runCatching { (fr ?: firstKey).requestFocus() }
-                }
-            }
-
-            // horizontalAlignment：数字行 fillMaxWidth 会把本容器撑满全宽，
-            // 字母行必须显式居中（否则默认 Start 贴左）
+            // ================= 以下整块水平居中（需求③） =================
             Column(
-                verticalArrangement = Arrangement.spacedBy(22f.sx(s)),
                 horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth(),
             ) {
+                // ---- 分段码位：OTV- 前缀 + 5+5，中横杠；已填大字 / 当前位亮框+脉冲光标 / 空位暗点 ----
+                // v1.20（用户需求 激活#7）：码位前默认显示固定「OTV-」前缀——用户只输
+                // 后 10 位，前缀由界面明示，不再靠副标题提示
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(11f.sx(s)),
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier,
                 ) {
-                    val clearFr = remember { FocusRequester() }
-                    AcKey("清空", s, pill = true, focus = clearFr,
-                        onFocusChange = { if (it) noteKeyGained() else noteKeyLost(clearFr) },
-                    ) { input = "" }
-                    CODE_LETTERS.forEachIndexed { i, k ->
-                        // 键帽小写（Apple TV 风格），注入大写（卡密为大写字母表）
-                        val keyFr = remember { FocusRequester() }
-                        val handle = if (i == 0) firstKey else keyFr
-                        AcKey(
-                            k.lowercaseChar().toString(), s,
-                            focus = handle,
-                            onFocusChange = { if (it) noteKeyGained() else noteKeyLost(handle) },
-                        ) { if (input.length < 10) input += k }
+                    Text(
+                        "OTV-",
+                        color = OtvColors.White50, fontSize = 46f.sxs(s), fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(end = 18f.sx(s)),
+                    )
+                    repeat(5) { i ->
+                        CodeSlot(ch = input.getOrNull(i), active = input.length == i, s = s)
+                        if (i < 4) Spacer(Modifier.width(10f.sx(s)))
                     }
-                    val bsFr = remember { FocusRequester() }
-                    AcKey("⌫", s, boxed = true, focus = bsFr,
-                        onFocusChange = { if (it) noteKeyGained() else noteKeyLost(bsFr) },
-                    ) { if (input.isNotEmpty()) input = input.dropLast(1) }
-                }
-                // 数字行：v1.20 需求#7 补「1」（1 与 I/l 在大写字体可辨），仅剔 0；左右居中
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(11f.sx(s), Alignment.CenterHorizontally),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    CODE_DIGITS.forEach { k ->
-                        val keyFr = remember { FocusRequester() }
-                        AcKey(k.toString(), s, focus = keyFr,
-                            onFocusChange = { if (it) noteKeyGained() else noteKeyLost(keyFr) },
-                        ) { if (input.length < 10) input += k }
+                    Spacer(Modifier.width(16f.sx(s)))
+                    Box(
+                        Modifier
+                            .width(26f.sx(s))
+                            .height(6f.sx(s))
+                            .alpha(0.8f)
+                            .background(Color(0x38FFFFFF), RoundedCornerShape(3f.sx(s))),
+                    )
+                    Spacer(Modifier.width(16f.sx(s)))
+                    repeat(5) { i ->
+                        CodeSlot(ch = input.getOrNull(5 + i), active = input.length == 5 + i, s = s)
+                        if (i < 4) Spacer(Modifier.width(10f.sx(s)))
                     }
                 }
-            }
 
-            // ---- 激活按钮 + 结果 ----
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(18f.sx(s)),
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(top = 30f.sx(s)),
-            ) {
-                val ready = input.length == 10 && !busy
-                val actFr = remember { FocusRequester() }
-                AcKey("激活卡密", s, wide = true, enabled = ready, focus = actFr,
-                    onFocusChange = { if (it) noteKeyGained() else noteKeyLost(actFr) },
+                Spacer(Modifier.height(50f.sx(s)))
+
+                // ---- Apple TV 风格键盘（渐变键帽）：
+                //      首行 = 「清空」白胶囊 + 小写字母 + ⌫；次行 = 数字（左右居中）----
+                val firstKey = remember { FocusRequester() }
+                InitialFocusEffect(firstKey, "activate-first", enabled = true)
+
+                // 焦点自愈（搜索页同款）：OK 输入引发键节点重组会掉焦点，
+                // 600ms 窗口内自动恢复到原键，连续打字焦点不中断
+                var keyFocusLostAt by remember { mutableStateOf(0L) }
+                var lastLostKeyFr by remember { mutableStateOf<FocusRequester?>(null) }
+                val noteKeyLost: (FocusRequester?) -> Unit = { fr ->
+                    keyFocusLostAt = System.currentTimeMillis(); lastLostKeyFr = fr
+                }
+                val noteKeyGained = { keyFocusLostAt = 0L; lastLostKeyFr = null }
+                LaunchedEffect(input) {
+                    if (input.isEmpty()) return@LaunchedEffect
+                    kotlinx.coroutines.delay(150)
+                    if (keyFocusLostAt > 0 && System.currentTimeMillis() - keyFocusLostAt < 600) {
+                        val fr = lastLostKeyFr
+                        keyFocusLostAt = 0; lastLostKeyFr = null
+                        runCatching { (fr ?: firstKey).requestFocus() }
+                    }
+                }
+
+                // horizontalAlignment：数字行 fillMaxWidth 会把本容器撑满全宽，
+                // 字母行必须显式居中（否则默认 Start 贴左）
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(22f.sx(s)),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    if (ready) {
-                        busy = true
-                        result = null
-                        scope.launch {
-                            when (val r = LicenseManager.activate(input)) {
-                                is ActivateResult.Ok -> {
-                                    resultOk = true
-                                    result = if (LicenseManager.isLifetime()) "激活成功 · 终身会员"
-                                    else "激活成功 · 剩余 ${LicenseManager.daysLeft()} 天"
-                                }
-                                is ActivateResult.Error -> result = r.msg
-                            }
-                            busy = false
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(11f.sx(s)),
+                        modifier = Modifier,
+                    ) {
+                        val clearFr = remember { FocusRequester() }
+                        AcKey("清空", s, pill = true, focus = clearFr,
+                            onFocusChange = { if (it) noteKeyGained() else noteKeyLost(clearFr) },
+                        ) { input = "" }
+                        CODE_LETTERS.forEachIndexed { i, k ->
+                            // 键帽小写（Apple TV 风格），注入大写（卡密为大写字母表）
+                            val keyFr = remember { FocusRequester() }
+                            val handle = if (i == 0) firstKey else keyFr
+                            AcKey(
+                                k.lowercaseChar().toString(), s,
+                                focus = handle,
+                                onFocusChange = { if (it) noteKeyGained() else noteKeyLost(handle) },
+                            ) { if (input.length < 10) input += k }
+                        }
+                        val bsFr = remember { FocusRequester() }
+                        AcKey("⌫", s, boxed = true, focus = bsFr,
+                            onFocusChange = { if (it) noteKeyGained() else noteKeyLost(bsFr) },
+                        ) { if (input.isNotEmpty()) input = input.dropLast(1) }
+                    }
+                    // 数字行：v1.20 需求#7 补「1」（1 与 I/l 在大写字体可辨），仅剔 0；左右居中
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(11f.sx(s), Alignment.CenterHorizontally),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        CODE_DIGITS.forEach { k ->
+                            val keyFr = remember { FocusRequester() }
+                            AcKey(k.toString(), s, focus = keyFr,
+                                onFocusChange = { if (it) noteKeyGained() else noteKeyLost(keyFr) },
+                            ) { if (input.length < 10) input += k }
                         }
                     }
                 }
-                result?.let {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier
-                                .size(12f.sx(s))
-                                .background(
-                                    if (resultOk) Color(0xFF30D158) else Color(0xFFFF453A),
-                                    CircleShape,
-                                ),
-                        )
-                        Spacer(Modifier.width(12f.sx(s)))
-                        Text(
-                            it,
-                            color = if (resultOk) Color(0xFF30D158) else Color(0xFFFF453A),
-                            fontSize = 28f.sxs(s),
-                            fontWeight = FontWeight.Medium,
-                        )
+
+                // ---- 激活按钮 + 结果 ----
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(18f.sx(s)),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(top = 30f.sx(s)),
+                ) {
+                    val ready = input.length == 10 && !busy
+                    val actFr = remember { FocusRequester() }
+                    AcKey("激活卡密", s, wide = true, enabled = ready, focus = actFr,
+                        onFocusChange = { if (it) noteKeyGained() else noteKeyLost(actFr) },
+                    ) {
+                        if (ready) {
+                            busy = true
+                            result = null
+                            scope.launch {
+                                when (val r = LicenseManager.activate(input)) {
+                                    is ActivateResult.Ok -> {
+                                        resultOk = true
+                                        result = if (LicenseManager.isLifetime()) "激活成功 · 终身会员"
+                                        else "激活成功 · 剩余 ${LicenseManager.daysLeft()} 天"
+                                    }
+                                    is ActivateResult.Error -> result = r.msg
+                                }
+                                busy = false
+                            }
+                        }
+                    }
+                    result?.let {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(12f.sx(s))
+                                    .background(
+                                        if (resultOk) Color(0xFF30D158) else Color(0xFFFF453A),
+                                        CircleShape,
+                                    ),
+                            )
+                            Spacer(Modifier.width(12f.sx(s)))
+                            Text(
+                                it,
+                                color = if (resultOk) Color(0xFF30D158) else Color(0xFFFF453A),
+                                fontSize = 28f.sxs(s),
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
                     }
                 }
-            }
 
-            Spacer(Modifier.height(20f.sx(s)))
-            Text(
-                "激活后立即生效 · 一码可绑 2 台设备",
-                color = OtvColors.White30,
-                fontSize = 22f.sxs(s),
-            )
+                Spacer(Modifier.height(20f.sx(s)))
+                Text(
+                    "激活后立即生效 · 一码可绑 2 台设备",
+                    color = OtvColors.White30,
+                    fontSize = 22f.sxs(s),
+                )
+            }
         }
     }
 }

@@ -48,6 +48,8 @@ object DebugNavBus {
     @Volatile var pendingEp: Int = 0
     /** 直播引擎强制（仅测试注入：am start --es otvEngine vlc） */
     @Volatile var pendingEngine: String? = null
+    /** 启动落点覆盖（仅 debug：am start --es otvDebugRoute paywall|activate）；release 无写入方 */
+    @Volatile var pendingRoute: String? = null
 }
 
 /** v1.18 强制更新阻断屏（与 TV 版同款）：黑底 + 字标 + 版本/阶段 + 细转圈 */
@@ -170,6 +172,14 @@ class MainActivity : ComponentActivity() {
             com.qiubo.optimaltv.ui.search.SearchDebugBus.pendingQuery = it
             com.qiubo.optimaltv.OtvLog.i("debug-nav（intent extra）query=$it")
         }
+        // 调试直达二级页（仅 debug；release 无写入方）：
+        // adb shell am start -n <pkg>/com.qiubo.optimaltv.MainActivity --es otvDebugRoute paywall
+        if (com.qiubo.optimaltv.BuildConfig.DEBUG) {
+            intent?.getStringExtra("otvDebugRoute")?.takeIf { it.isNotBlank() }?.let {
+                DebugNavBus.pendingRoute = it
+                com.qiubo.optimaltv.OtvLog.i("debug-nav（intent extra）route=$it")
+            }
+        }
         // v1.17 调试注入激活码（模拟器注键丢键，测试用；码本身仍走完整验证链路：
         // 云端查表+设备绑定+本地 ECDSA 验签，无任何安全豁免；公测版 debug 构建限定）
         if (com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED && com.qiubo.optimaltv.BuildConfig.DEBUG) {
@@ -251,8 +261,14 @@ private fun AppRoot() {
         Box(Modifier.fillMaxSize().background(Color.Black))
         return
     }
-    val startDestination =
-        if (licenseOn && !com.qiubo.optimaltv.license.LicenseManager.isPremium()) "activate" else "live"
+    // 调试直达页（2026-09-19）：debug 构建下可用 adb 直接落在指定二级页，
+    // 便于对会员页/激活页做版式截图与回归（release 无写入方，恒为 null）。
+    // adb shell am start -n <pkg>/com.qiubo.optimaltv.MainActivity --es otvDebugRoute paywall
+    val debugRoute = if (com.qiubo.optimaltv.BuildConfig.DEBUG) {
+        DebugNavBus.pendingRoute
+    } else null
+    val startDestination = debugRoute
+        ?: if (licenseOn && !com.qiubo.optimaltv.license.LicenseManager.isPremium()) "activate" else "live"
 
     // v1.20 全局浮层：运营公告（顶部半透明悬浮窗）+ 非强更提案弹窗 + 下载进度层
     Box(Modifier.fillMaxSize()) {

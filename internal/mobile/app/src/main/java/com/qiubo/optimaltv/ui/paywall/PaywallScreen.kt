@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -24,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.navigation.NavController
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -53,62 +55,104 @@ import com.qiubo.optimaltv.ui.theme.sxs
 fun PaywallScreen(nav: NavController, tabKey: String = "") {
     val s = rememberUiScale()
     val st by LicenseManager.state.collectAsStateWithLifecycle()
+    val portrait = LocalConfiguration.current.orientation ==
+        android.content.res.Configuration.ORIENTATION_PORTRAIT
 
     BackHandler { nav.popBackStack() }
 
+    // 2026-09-19 老板需求①：移动版竖屏适配。
+    // 竖屏 s = 屏宽dp/750，横屏留白 96 设计px 在竖屏下只剩 52.7dp（够用），
+    // 但顶部 120 会被顶栏（150 设计px 渐变 + 胶囊）压住，故竖屏改贴顶栏下沿。
+    val sidePad = if (portrait) 30f else 96f
+    val topPad = if (portrait) 100f else 120f
+
     Box(Modifier.fillMaxSize().background(OtvColors.Bg)) {
-        Column(Modifier.fillMaxSize().padding(top = 120f.sx(s))) {
+        Column(Modifier.fillMaxSize().padding(top = topPad.sx(s))) {
             // ---- 标题 + 状态 ----
-            Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(start = 96f.sx(s))) {
-                Text("会员", color = OtvColors.White, fontSize = 52f.sxs(s), fontWeight = FontWeight.Bold)
-                Spacer(Modifier.width(28f.sx(s)))
+            Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(start = sidePad.sx(s))) {
+                Text(
+                    "会员", color = OtvColors.White,
+                    fontSize = (if (portrait) 40f else 52f).sxs(s), fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.width((if (portrait) 18f else 28f).sx(s)))
                 Text(
                     statusLine(st),
-                    color = OtvColors.White60, fontSize = 26f.sxs(s),
+                    color = OtvColors.White60, fontSize = (if (portrait) 20f else 26f).sxs(s),
                     modifier = Modifier.padding(bottom = 8f.sx(s)),
                 )
             }
             Spacer(Modifier.height(12f.sx(s)))
             Text(
                 "开通会员观看全部直播、足球与影视内容 · 一码可绑 2 台设备",
-                color = OtvColors.White50, fontSize = 24f.sxs(s),
-                modifier = Modifier.padding(start = 96f.sx(s)),
+                color = OtvColors.White50, fontSize = (if (portrait) 19f else 24f).sxs(s),
+                modifier = Modifier.padding(start = sidePad.sx(s)),
             )
 
-            Spacer(Modifier.height(24f.sx(s)))
+            Spacer(Modifier.height((if (portrait) 18f else 24f).sx(s)))
 
-            // ---- 四张套餐卡 + 右侧购买二维码（v1.20：矮屏/横屏可滚，防把底部激活按钮挤出屏） ----
-            Box(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            // ---- 四张套餐卡 + 续费按钮（v1.20：矮屏/横屏可滚，防把底部激活按钮挤出屏） ----
+            // 竖屏：内容不满一屏，用 Box(contentAlignment=Center) 把套餐组竖向居中——
+            // 否则卡片组贴在标题下方、底部留一大片死白，与底部固定按钮之间断层明显。
+            // 仍保留 verticalScroll：矮屏/大字体时内容超高可以滚动，不会被裁掉。
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+            ) {
                 // showActivate=false：激活按钮保持「固定底部」矮屏结构，由下方单独渲染
                 PaywallOffers(
                     nav = nav,
                     s = s,
                     showActivate = false,
-                    modifier = Modifier.padding(start = 96f.sx(s)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = sidePad.sx(s), end = sidePad.sx(s)),
                 )
             }
 
             // ---- 底部：输入卡密激活（固定可见；上方套餐区可滚） ----
-            Row(modifier = Modifier.padding(start = 96f.sx(s), top = 16f.sx(s), bottom = 60f.sx(s))) {
+            // 竖屏：按钮与说明改成上下两行（一行并排会把「购买后获得 10 位卡密…」挤到屏外）
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(
+                    start = sidePad.sx(s), end = sidePad.sx(s),
+                    top = 14f.sx(s), bottom = if (portrait) 34f.sx(s) else 60f.sx(s),
+                ),
+            ) {
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
                         .clip(RoundedCornerShape(30f.sx(s)))
                         .tapCard { nav.navigate("activate") }
                         .background(Color(0x24FFFFFF), RoundedCornerShape(30f.sx(s)))
-                        .padding(horizontal = 54f.sx(s), vertical = 24f.sx(s)),
+                        .padding(
+                            horizontal = (if (portrait) 40f else 54f).sx(s),
+                            vertical = (if (portrait) 18f else 24f).sx(s),
+                        ),
                 ) {
                     Text(
                         "输入卡密激活",
                         color = OtvColors.White,
-                        fontSize = 30f.sxs(s), fontWeight = FontWeight.SemiBold,
+                        fontSize = (if (portrait) 26f else 30f).sxs(s), fontWeight = FontWeight.SemiBold,
                     )
                 }
-                Spacer(Modifier.width(30f.sx(s)))
+                if (!portrait) {
+                    Spacer(Modifier.width(30f.sx(s)))
+                    Text(
+                        "购买后获得 10 位卡密（OTV-XXXXX-XXXXX）",
+                        color = OtvColors.White50, fontSize = 24f.sxs(s),
+                        modifier = Modifier.align(Alignment.CenterVertically),
+                    )
+                }
+            }
+            // 竖屏把说明挪到按钮下方单独一行（字号收小，卡密格式文案保留）
+            if (portrait) {
                 Text(
                     "购买后获得 10 位卡密（OTV-XXXXX-XXXXX）",
-                    color = OtvColors.White50, fontSize = 24f.sxs(s),
-                    modifier = Modifier.align(Alignment.CenterVertically),
+                    color = OtvColors.White50, fontSize = 18f.sxs(s),
+                    modifier = Modifier.padding(
+                        start = sidePad.sx(s), end = sidePad.sx(s),
+                        bottom = 14f.sx(s),
+                    ),
                 )
             }
         }
@@ -156,22 +200,28 @@ fun PaywallOffers(nav: NavController, s: Float, showActivate: Boolean = true, mo
                 }
             }
         } else {
-            // 竖屏：2×2 套餐卡换行 + 续费按钮居中在下（原二维码位置）
+            // 竖屏（2026-09-19 老板需求①）：4 张卡横排要 674dp、屏宽只有 411dp，必须换行。
+            // 卡宽取 230 设计px：2 列 = 2×230+20 = 480 设计px = 263dp（占可用宽 70%），
+            // 而 3 列要 400dp 已超可用 378dp —— 自然锁死 2×2，不随屏宽抖动。
             @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
             androidx.compose.foundation.layout.FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(28f.sx(s)),
-                verticalArrangement = Arrangement.spacedBy(22f.sx(s)),
+                horizontalArrangement = Arrangement.spacedBy(20f.sx(s)),
+                verticalArrangement = Arrangement.spacedBy(16f.sx(s)),
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 PLANS.forEach { pl ->
                     PlanCard(
                         pl, s,
                         selected = pl.plan == selectedPlan,
                         onSelect = { selectedPlan = pl.plan },
+                        w = 230f, h = 250f, compact = true,
                     )
                 }
             }
-            Spacer(Modifier.height(30f.sx(s)))
-            RenewPanel(p, s)
+            Spacer(Modifier.height(24f.sx(s)))
+            Row(horizontalArrangement = Arrangement.Center, modifier = Modifier.fillMaxWidth()) {
+                RenewPanel(p, s, compact = true)
+            }
         }
 
         if (showActivate) {
@@ -201,13 +251,17 @@ fun PaywallOffers(nav: NavController, s: Float, showActivate: Boolean = true, mo
     }
 }
 
-/** 套餐卡（Apple TV 风格：深色卡身；选中白底反色，触控点选） */
+/** 套餐卡（Apple TV 风格：深色卡身；选中白底反色，触控点选）。
+ *  w/h/compact 供竖屏收窄档使用（横屏保持与 TV 版同款 286×330）。 */
 @Composable
 private fun PlanCard(
     p: PlanUi,
     s: Float,
     selected: Boolean,
     onSelect: () -> Unit,
+    w: Float = 286f,
+    h: Float = 330f,
+    compact: Boolean = false,
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -215,24 +269,34 @@ private fun PlanCard(
             .clip(RoundedCornerShape(20f.sx(s)))
             .tapCard(onSelect)
             .background(if (selected) OtvColors.White else Color(0xFF1C1C22), RoundedCornerShape(20f.sx(s)))
-            .width(286f.sx(s))
-            .height(330f.sx(s))
-            .padding(top = 46f.sx(s)),
+            .width(w.sx(s))
+            .height(h.sx(s))
+            .padding(top = (if (compact) 24f else 46f).sx(s)),
     ) {
-        Text(p.name, color = if (selected) OtvColors.Bg else OtvColors.White, fontSize = 30f.sxs(s), fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(22f.sx(s)))
-        Text(p.price, color = if (selected) OtvColors.Bg else OtvColors.White, fontSize = 52f.sxs(s), fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(18f.sx(s)))
-        Text(p.sub, color = if (selected) Color(0x990E0E0F) else OtvColors.White50, fontSize = 24f.sxs(s))
+        Text(
+            p.name, color = if (selected) OtvColors.Bg else OtvColors.White,
+            fontSize = (if (compact) 26f else 30f).sxs(s), fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.height((if (compact) 14f else 22f).sx(s)))
+        Text(
+            p.price, color = if (selected) OtvColors.Bg else OtvColors.White,
+            fontSize = (if (compact) 42f else 52f).sxs(s), fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.height((if (compact) 12f else 18f).sx(s)))
+        Text(
+            p.sub, color = if (selected) Color(0x990E0E0F) else OtvColors.White50,
+            fontSize = (if (compact) 21f else 24f).sxs(s),
+        )
     }
 }
 
 /**
  * 续费面板（2026-09-18 起替代扫码二维码）：点击按钮发起续费。
  * 续费接口尚未接通时 [RenewalGateway.request] 返回 false，页面给出卡密兜底提示。
+ * compact（竖屏）：整体收小，避免把底部「输入卡密激活」挤出屏。
  */
 @Composable
-private fun RenewPanel(p: PlanUi, s: Float) {
+private fun RenewPanel(p: PlanUi, s: Float, compact: Boolean = false) {
     var pending by remember(p.plan) { mutableStateOf(false) }
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
@@ -244,19 +308,26 @@ private fun RenewPanel(p: PlanUi, s: Float) {
                     pending = true
                 }
                 .background(OtvColors.White, RoundedCornerShape(60f.sx(s)))
-                .padding(horizontal = 76f.sx(s), vertical = 32f.sx(s)),
+                .padding(
+                    horizontal = (if (compact) 56f else 76f).sx(s),
+                    vertical = (if (compact) 24f else 32f).sx(s),
+                ),
         ) {
             Text(
                 "续费 ${p.name}",
-                color = OtvColors.Bg, fontSize = 34f.sxs(s), fontWeight = FontWeight.SemiBold,
+                color = OtvColors.Bg,
+                fontSize = (if (compact) 28f else 34f).sxs(s), fontWeight = FontWeight.SemiBold,
             )
         }
-        Spacer(Modifier.height(20f.sx(s)))
-        Text("${p.name} · ${p.price}", color = OtvColors.White, fontSize = 30f.sxs(s), fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height((if (compact) 14f else 20f).sx(s)))
+        Text(
+            "${p.name} · ${p.price}", color = OtvColors.White,
+            fontSize = (if (compact) 24f else 30f).sxs(s), fontWeight = FontWeight.SemiBold,
+        )
         Spacer(Modifier.height(8f.sx(s)))
         Text(
             if (pending) "续费通道准备中，可先用下方「输入卡密激活」" else "点击按钮续费 · 自动发货",
-            color = OtvColors.White50, fontSize = 24f.sxs(s),
+            color = OtvColors.White50, fontSize = (if (compact) 20f else 24f).sxs(s),
         )
     }
 }
