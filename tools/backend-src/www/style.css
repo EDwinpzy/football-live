@@ -157,8 +157,11 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
 .pcard .pc-prog{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,.18)}
 .pcard .pc-prog i{display:block;height:100%;background:rgba(255,255,255,.92)}
 /* 「上次看到」角标：首页与「我的」页历史卡片统一同一套（2026-09-18 用户要求：
-   历史记录卡片右下角「上次看到XXXX」的底色/高度/透明度要对齐影视页「最近观看」卡片） */
-.pcard .pc-hist-tag{position:absolute;left:6px;right:6px;bottom:10px;background:rgba(102,102,104,.6);border-radius:5px;
+   历史记录卡片右下角「上次看到XXXX」的底色/高度/透明度要对齐影视页「最近观看」卡片）。
+   2026-09-19 老板要求：角标靠右贴边（此前 left:6px+right:6px 左右撑满，文字自然贴左）。
+   改 width:fit-content + right 单边定位，标签按内容收窄并贴海报右下角。 */
+.pcard .pc-hist-tag{position:absolute;right:6px;bottom:10px;width:fit-content;max-width:calc(100% - 12px);
+  background:rgba(102,102,104,.6);border-radius:5px;
   padding:3px 8px;font-size:17px;line-height:20px;color:#fff;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pcard .pc-title{font-size:24px;font-weight:500;color:#fff;margin-top:12px;

@@ -160,7 +160,9 @@ function pushHistory(it) {
   const list = store.get("otvw:hist", []).filter(h => h.id !== it.id);
   list.unshift(it); store.set("otvw:hist", list.slice(0, 50));
 }
-function getHistory() { return store.get("otvw:hist", []); }
+/* 只看影视历史（与 App HistoryEntity 同构：直播不入历史）。
+   filter 兼作存量清理：旧版本把足球写成了 "live:<matchId>"，已落盘的记录不再回显。 */
+function getHistory() { return store.get("otvw:hist", []).filter(h => !String(h.id || "").startsWith("live:")); }
 function getFavs() { return store.get("otvw:favs", []); }
 function toggleFav(it) {
   const list = getFavs();
@@ -2381,7 +2383,10 @@ async function resolveLiveAndPlay(ctx) {
     pv.sources = [first.url]; pv.srcNames = [first.src];
     renderSrcPicker();
     attachPlayer(relay(first.url), 0);
-    pushHistory({ id: "live:" + ctx.matchId, title: ctx.title, cover: "", epIndex: 0 });
+    /* 2026-09-19 修：足球直播不再写进观看历史。App 端 history 表只由影视页写入
+       （HistoryEntity.vodId），直播从不入历史 —— 旧版这里 pushHistory("live:xxx")
+       导致网页版「最近观看」混进「热刺 对阵 埃弗顿」这类比赛卡，且封面恒为空
+       （live 无 poster）显示成空卡。去掉即与 App 同构。 */
     /* 需求②：其余源到货一个上屏一个（不等最慢源） */
     rest.forEach(ch => tryOne(ch).then(appendSource).catch(() => {}));
   } catch (e) {
@@ -2393,7 +2398,6 @@ async function resolveLiveAndPlay(ctx) {
     pv.srcNames = ok.map(s => s.src);
     renderSrcPicker();
     attachPlayer(relay(pv.sources[0]), 0);
-    pushHistory({ id: "live:" + ctx.matchId, title: ctx.title, cover: "", epIndex: 0 });
   }
 }
 
