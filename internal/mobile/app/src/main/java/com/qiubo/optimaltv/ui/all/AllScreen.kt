@@ -209,13 +209,14 @@ fun AllScreen(nav: NavController) {
                 bottom = 80f.sx(s),
             ),
         ) {
-            // 筛选区（随内容滚动；紧凑单行 chips；竖屏=标签置顶+选项换行铺开，需求12③）
+            // 筛选区（随内容滚动；「轨」样式 2026-09-19 设计稿 v2 方案①：面板白 5% 底、
+            // 行间 1px 发丝分隔、裸文字选项 + 选中白胶囊；竖屏=标签置顶+选项换行铺开，需求12③）
             item(span = { GridItemSpan(maxLineSpan) }, key = "filters") {
                 Column(
-                    verticalArrangement = Arrangement.spacedBy((if (portrait) 14f else 9f).sx(s)),
+                    verticalArrangement = Arrangement.spacedBy(0f.sx(s)),
                     modifier = Modifier
-                        .background(Color(0x12FFFFFF), RoundedCornerShape(20f.sx(s)))
-                        .padding(horizontal = 22f.sx(s), vertical = 16f.sx(s))
+                        .background(Color(0x0DFFFFFF), RoundedCornerShape(18f.sx(s)))
+                        .padding(horizontal = 20f.sx(s), vertical = 10f.sx(s))
                         .fillMaxWidth(),
                 ) {
                     // 表头：只有右侧的收起/展开开关（左侧整块留给悬浮返回钮，开关靠右就不抢地方）；
@@ -232,15 +233,25 @@ fun AllScreen(nav: NavController) {
                         }
                     }
                     if (filterOpen) {
+                        // 「轨」行分隔：1px 白 5% 发丝线（首行不画）
+                        @Composable
+                        fun RowDivider() = Box(
+                            Modifier.fillMaxWidth().height(1f.sx(s)).background(Color(0x0DFFFFFF)),
+                        )
                         val catChips = listOf("" to "全部", "1" to "电影", "2" to "电视剧", "3" to "动漫", "4" to "综艺", "6" to "短剧")
                         VodFilterRow("类别", catChips, cat, s, portrait) { value ->
                             cat = value
                             Graph.appScope.launch { runCatching { Graph.settings.rememberAllLastCat(value) } }
                         }
+                        RowDivider()
                         VodFilterRow("类型", listOf("" to "全部") + filters.types.filter { it != "全部" }.map { it to it }, type, s, portrait) { type = it }
+                        RowDivider()
                         VodFilterRow("地区", listOf("" to "全部") + filters.areas.filter { it != "全部" }.map { it to it }, area, s, portrait) { area = it }
+                        RowDivider()
                         VodFilterRow("年份", listOf("" to "全部") + filters.years.filter { it != "全部" }.map { it to it }, year, s, portrait) { year = it }
+                        RowDivider()
                         VodFilterRow("评分", listOf("" to "全部") + filters.ratings.filter { it != "全部" }.map { it to it }, rating, s, portrait) { rating = it }
+                        RowDivider()
                         VodFilterRow("排序", listOf("hot" to "热门", "new" to "最新上映", "rating" to "豆瓣高分"), by, s, portrait) { by = it }
                     }
                 }

@@ -1,6 +1,7 @@
 package com.qiubo.optimaltv.ui.all
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -228,15 +229,21 @@ fun AllScreen(nav: NavController) {
                 start = 60f.sx(s), end = 60f.sx(s), top = 36f.sx(s), bottom = 80f.sx(s),
             ),
         ) {
-        // 筛选区（随内容滚动；紧凑单行 chips）
+        // 筛选区（随内容滚动；「轨」样式 2026-09-19 设计稿 v2 方案①：面板白 5% 底、
+        // 行间 1px 发丝分隔、裸文字选项 + 选中白胶囊、焦点白环不落底）
         item(span = { GridItemSpan(maxLineSpan) }, key = "filters") {
             Column(
-                verticalArrangement = Arrangement.spacedBy(9f.sx(s)),
+                verticalArrangement = Arrangement.spacedBy(0f.sx(s)),
                 modifier = Modifier
-                    .background(Color(0x12FFFFFF), RoundedCornerShape(20f.sx(s)))
-                    .padding(horizontal = 22f.sx(s), vertical = 16f.sx(s))
+                    .background(Color(0x0DFFFFFF), RoundedCornerShape(18f.sx(s)))
+                    .padding(horizontal = 20f.sx(s), vertical = 8f.sx(s))
                     .fillMaxWidth(),
             ) {
+                    // 「轨」行分隔：1px 白 5% 发丝线（首行不画）
+                    @Composable
+                    fun RowDivider() = Box(
+                        Modifier.fillMaxWidth().height(1f.sx(s)).background(Color(0x0DFFFFFF)),
+                    )
                     // 需求⑯（2026-09-11）：类别行去掉「全部」——默认/兜底都是电影（cid=1）；
                     // 类型/地区/语言/年份各行的「全部」保留（是清除对应筛选的唯一途径）
                     val catChips = listOf("1" to "电影", "2" to "电视剧", "3" to "动漫", "4" to "综艺", "6" to "短剧")
@@ -250,23 +257,28 @@ fun AllScreen(nav: NavController) {
                         cat = value
                         Graph.appScope.launch { runCatching { Graph.settings.rememberAllLastCat(value) } }
                     }
+                    RowDivider()
                     FilterRow("类型", listOf("" to "全部") + filters.types.filter { it != "全部" }.map { it to it }, type, s, null,
                         onFocusIn = { filterFocused = true },
                         onFocusOut = { filterFocused = false },
                         onSelect = { type = it })
+                    RowDivider()
                     FilterRow("地区", listOf("" to "全部") + filters.areas.filter { it != "全部" }.map { it to it }, area, s, null,
                         onFocusIn = { filterFocused = true },
                         onFocusOut = { filterFocused = false },
                         onSelect = { area = it })
+                    RowDivider()
                     // 年份含「更早」（原版 (d.years||[]).concat(['更早'])）
                     FilterRow("年份", listOf("" to "全部") + filters.years.filter { it != "全部" }.map { it to it }, year, s, null,
                         onFocusIn = { filterFocused = true },
                         onFocusOut = { filterFocused = false },
                         onSelect = { year = it })
+                    RowDivider()
                     FilterRow("评分", listOf("" to "全部") + filters.ratings.filter { it != "全部" }.map { it to it }, rating, s, null,
                         onFocusIn = { filterFocused = true },
                         onFocusOut = { filterFocused = false },
                         onSelect = { rating = it })
+                    RowDivider()
                     FilterRow("排序", listOf("hot" to "热门", "new" to "最新上映", "rating" to "豆瓣高分"), by, s, null,
                         onFocusIn = { filterFocused = true },
                         onFocusOut = { filterFocused = false },
@@ -322,9 +334,9 @@ fun AllScreen(nav: NavController) {
 }
 
 /**
- * 紧凑筛选行：标签 21px + 小号 chips。
- * 需求 影视#10：胶囊高度降为原来的 2/3（字号 19→17、上下内边距 8→3）。
- * 需求③：选中项白底黑字（聚焦同为白底黑字，聚焦另有 scale 放大区分）。
+ * 「轨」筛选行（2026-09-19 设计稿 v2 方案①）：label 18px 白 35% + 裸文字选项。
+ * 选中 = 白胶囊黑字加粗（200ms 颜色渐变）；聚焦 = 白环 + 文字转白 + scale 1.04（不落白底），
+ * 与选中态一眼可分；聚焦落在已选项上时仍是白胶囊（dpadFocusable 亮色底自动免环）。
  */
 @Composable
 private fun FilterRow(
@@ -339,19 +351,29 @@ private fun FilterRow(
     selectedChipFocus: FocusRequester? = null,
     onSelect: (String) -> Unit,
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(vertical = 6f.sx(s)),
+    ) {
         Text(
-            label, color = OtvColors.White50, fontSize = 21f.sxs(s), fontWeight = FontWeight.Medium,
-            modifier = Modifier.width(76f.sx(s)),
+            label, color = OtvColors.White.copy(alpha = 0.35f), fontSize = 18f.sxs(s), fontWeight = FontWeight.Medium,
+            modifier = Modifier.width(56f.sx(s)),
         )
-        Spacer(Modifier.width(14f.sx(s)))
+        Spacer(Modifier.width(12f.sx(s)))
         Row(
-            horizontalArrangement = Arrangement.spacedBy(8f.sx(s)),
+            horizontalArrangement = Arrangement.spacedBy(2f.sx(s)),
             modifier = Modifier.horizontalScroll(rememberScrollState()),
         ) {
             chips.forEachIndexed { i, (value, name) ->
                 val active = selected == value
                 var focused by remember { mutableStateOf(false) }
+                val chipBg by animateColorAsState(
+                    if (active) OtvColors.White else Color.Transparent, label = "filterChipBg",
+                )
+                val chipFg by animateColorAsState(
+                    if (active) OtvColors.Bg else if (focused) OtvColors.White else OtvColors.White55,
+                    label = "filterChipFg",
+                )
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
@@ -359,23 +381,23 @@ private fun FilterRow(
                         .then(if (active && selectedChipFocus != null) Modifier.focusRequester(selectedChipFocus) else Modifier)
                         .dpadFocusable(
                             scaleFocused = 1.04f,
-                            focusedBg = OtvColors.White,
-                            focusedBgRadius = 14f.sx(s),
+                            // 焦点不再画白底（「轨」焦点=白环）；仅当 chip 已选中时补白胶囊
+                            //（选中胶囊由下方 background 绘制，此处同铺一层保持旧视觉链路）
+                            focusedBg = if (active) OtvColors.White else null,
+                            focusedBgRadius = 20f.sx(s),
                             onFocusedChange = {
                                 focused = it
                                 if (it) onFocusIn() else onFocusOut()
                             },
                         ) { onSelect(value) }
-                        .background(
-                            if (focused || active) OtvColors.White else OtvColors.ChipBg,
-                            RoundedCornerShape(14f.sx(s)),
-                        )
-                        .padding(horizontal = 16f.sx(s), vertical = 3f.sx(s)),
+                        .background(chipBg, RoundedCornerShape(percent = 50))
+                        .padding(horizontal = 16f.sx(s), vertical = 6f.sx(s)),
                 ) {
                     Text(
                         name,
-                        color = if (focused || active) OtvColors.Bg else OtvColors.White.copy(alpha = 0.72f),
-                        fontSize = 17f.sxs(s), fontWeight = FontWeight.Medium,
+                        color = chipFg,
+                        fontSize = 17f.sxs(s),
+                        fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                         maxLines = 1,
                     )
                 }

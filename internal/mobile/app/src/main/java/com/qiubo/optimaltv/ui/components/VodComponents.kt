@@ -2,6 +2,7 @@ package com.qiubo.optimaltv.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +24,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -234,52 +236,63 @@ fun VodFilterRow(
     @Composable
     fun FilterChip(value: String, name: String) {
         val active = selected == value
+        // 「轨」样式（2026-09-19 设计稿 v2 方案①）：未选=裸文字（白 55%），选中=白胶囊黑字加粗；
+        // 颜色随选中态 200ms 渐变，模拟胶囊滑入感（tapCard 自带按压 0.96 缩放）
+        val chipBg by animateColorAsState(
+            if (active) OtvColors.White else Color.Transparent, label = "filterChipBg",
+        )
+        val chipFg by animateColorAsState(
+            if (active) OtvColors.Bg else OtvColors.White55, label = "filterChipFg",
+        )
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
-                .clip(RoundedCornerShape(14f.sx(s)))
+                .clip(RoundedCornerShape(percent = 50))
                 .testTag(MobileUiTags.filter(label, value))
                 .semantics { this.selected = active; role = Role.Tab }
                 .tapCard { onSelect(value) }
-                .background(if (active) OtvColors.White else OtvColors.ChipBg, RoundedCornerShape(14f.sx(s)))
-                .padding(horizontal = 16f.sx(s), vertical = 3f.sx(s)),
+                .background(chipBg, RoundedCornerShape(percent = 50))
+                .padding(horizontal = 16f.sx(s), vertical = 6f.sx(s)),
         ) {
             Text(
                 name,
-                color = if (active) OtvColors.Bg else OtvColors.White.copy(alpha = 0.72f),
+                color = chipFg,
                 fontSize = 17f.sxs(s),
-                fontWeight = FontWeight.Medium,
+                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                 maxLines = 1,
             )
         }
     }
 
     if (portrait) {
-        Column {
+        Column(Modifier.padding(vertical = 8f.sx(s))) {
             Text(
                 label,
-                color = OtvColors.White50,
-                fontSize = 22f.sxs(s),
+                color = OtvColors.White.copy(alpha = 0.35f),
+                fontSize = 16f.sxs(s),
                 fontWeight = FontWeight.Medium,
-                modifier = Modifier.padding(bottom = 8f.sx(s)),
+                modifier = Modifier.padding(bottom = 4f.sx(s)),
             )
             FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(10f.sx(s)),
-                verticalArrangement = Arrangement.spacedBy(10f.sx(s)),
+                horizontalArrangement = Arrangement.spacedBy(6f.sx(s)),
+                verticalArrangement = Arrangement.spacedBy(8f.sx(s)),
             ) { chips.forEach { (value, name) -> FilterChip(value, name) } }
         }
     } else {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(vertical = 6f.sx(s)),
+        ) {
             Text(
                 label,
-                color = OtvColors.White50,
-                fontSize = 21f.sxs(s),
+                color = OtvColors.White.copy(alpha = 0.35f),
+                fontSize = 18f.sxs(s),
                 fontWeight = FontWeight.Medium,
-                modifier = Modifier.width(76f.sx(s)),
+                modifier = Modifier.width(56f.sx(s)),
             )
-            Spacer(Modifier.width(14f.sx(s)))
+            Spacer(Modifier.width(12f.sx(s)))
             Row(
-                horizontalArrangement = Arrangement.spacedBy(8f.sx(s)),
+                horizontalArrangement = Arrangement.spacedBy(2f.sx(s)),
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
             ) { chips.forEach { (value, name) -> FilterChip(value, name) } }
         }

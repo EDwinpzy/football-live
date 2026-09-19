@@ -186,7 +186,7 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
    首行内容在返回钮右侧（面板左边距 60/z + 内边距 22/z ≥ 82/z ≥ 82 物理 px > 56 命中区），
    同顶也不会被压住；收起/展开开关放在表头右侧，进一步避开左上角的返回钮。 */
 .filter-panel{margin:calc(12px/var(--z,1) + env(safe-area-inset-top)) 60px 0;
-  background:rgba(255,255,255,.07);border-radius:20px;padding:16px 22px;
+  background:rgba(255,255,255,.05);border-radius:18px;padding:12px 20px 8px;
   display:flex;flex-direction:column;gap:9px}
 /* 表头：只有右侧的收起/展开开关（左侧留给悬浮返回钮） */
 .fp-head{display:flex;align-items:center;justify-content:flex-end;min-height:calc(30px/var(--z,1))}
@@ -198,15 +198,21 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
 .fp-toggle.has-filter{color:#0E0E0F;background:#fff}
 .fp-caret{display:inline-block;font-size:calc(13px/var(--z,1));line-height:1;transition:transform .18s}
 .filter-panel.collapsed .fp-caret{transform:rotate(-180deg)}
-.fp-rows{display:flex;flex-direction:column;gap:9px}
+.fp-rows{display:flex;flex-direction:column}
 .filter-panel.collapsed .fp-rows{display:none}
 .poster-grid + .all-more,.filter-panel ~ .poster-grid{margin-top:0}
 #allGrid{margin-top:30px}
-.fp-row{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;row-gap:8px}
-.fp-row .fp-label{width:76px;flex-shrink:0;font-size:21px;font-weight:500;color:rgba(255,255,255,.5)}
-.fp-row .fchip{flex-shrink:0;padding:3px 16px;border-radius:14px;font-size:17px;font-weight:500;
-  color:rgba(255,255,255,.72);background:rgba(255,255,255,.12)}
-.fp-row .fchip.on{background:#fff;color:#0E0E0F}
+/* 「轨」样式（2026-09-19 设计稿 v2 方案①）：未选=裸文字（白 55%），选中=白胶囊黑字加粗，
+   行间 1px 发丝分隔；不再有满屏小灰丸 */
+.fp-row{display:flex;align-items:center;gap:6px 2px;flex-wrap:wrap;row-gap:4px;padding:7px 0}
+.fp-row + .fp-row{border-top:1px solid rgba(255,255,255,.05)}
+.fp-row .fp-label{width:52px;flex-shrink:0;font-size:13px;font-weight:500;letter-spacing:1px;color:rgba(255,255,255,.35)}
+.fp-row .fchip{flex-shrink:0;padding:6px 14px;border-radius:999px;font-size:15px;font-weight:500;
+  color:rgba(255,255,255,.55);background:transparent;
+  transition:color .15s,background-color .15s,transform .1s}
+.fp-row .fchip:hover{color:rgba(255,255,255,.85)}
+.fp-row .fchip:active{transform:scale(.96)}
+.fp-row .fchip.on{background:#fff;color:#0E0E0F;font-weight:700}
 /* 网格内卡片满宽（1fr 列内自适应拉伸；竖屏 3 列均分的前提） */
 .poster-grid .pcard,.lib-grid .pcard,.search-grid .pcard{width:auto}
 .poster-grid .pcard .pc-img,.lib-grid .pcard .pc-img,.search-grid .pcard .pc-img{width:100%;height:auto;aspect-ratio:232/352}
@@ -623,11 +629,12 @@ body.portrait .page-loading{padding:60px 40px}
 /* ============================================================
    竖屏 v1.25 重构（2026-09-07 需求12：播放器/电视播放器/筛选/返回钮）
    ============================================================ */
-/* 需求12③：筛选面板竖屏常规布局——标签置顶、选项换行铺满，不再横滚藏选项 */
-body.portrait .filter-panel{padding:20px 24px;gap:14px}
-body.portrait .fp-row{flex-wrap:wrap;gap:8px 10px}
-body.portrait .fp-row .fp-label{width:100%;font-size:22px;margin-bottom:2px}
-body.portrait .fp-row .fchip{padding:8px 20px;border-radius:16px;font-size:20px}
+/* 需求12③：筛选面板竖屏常规布局——标签置顶、选项换行铺满，不再横滚藏选项；
+   「轨」样式竖屏沿用：裸文字选项 + 选中白胶囊，label 仍独占一行（2026-09-19 设计稿 v2 方案①） */
+body.portrait .filter-panel{padding:14px 18px 8px;gap:12px}
+body.portrait .fp-row{flex-wrap:wrap;gap:6px 2px;row-gap:6px;padding:9px 0}
+body.portrait .fp-row .fp-label{width:100%;font-size:15px;letter-spacing:1px;color:rgba(255,255,255,.35);margin-bottom:3px}
+body.portrait .fp-row .fchip{padding:8px 16px;border-radius:999px;font-size:17px}
 /* 竖屏：收起/展开开关同比例放大（触控目标 ≥44px） */
 body.portrait .fp-head{min-height:34px}
 body.portrait .fp-toggle{padding:8px 20px;border-radius:17px;font-size:20px;gap:8px}

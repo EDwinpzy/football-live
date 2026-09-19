@@ -110,5 +110,53 @@ class MobileFilterPanelContractTest(unittest.TestCase):
         self.assertEqual([], hits)
 
 
+class RailStyleContractTest(unittest.TestCase):
+    """「轨」样式契约（2026-09-19 设计稿 v2 方案①，老板拍板）：裸文字选项 + 选中白胶囊。
+
+    钉死三端同源的关键样式锚点，防止后续美化改回「满屏小灰丸」：
+    1. 未选 chip 无底色（白 55% 文字），选中 = 白底黑字 + 字重 700 + 全圆角；
+    2. 行间 1px 白 5% 发丝分隔（首行不画）；
+    3. TV 端焦点 = 白环不落底（focusedBg 仅当选中时才给白胶囊）。
+    """
+
+    def test_web_chips_are_bare_text_until_selected(self):
+        cs = CSS.read_text(encoding="utf-8").replace(" ", "")
+        # 未选：透明底 + 白 55% 字 + 全圆角 + hover/pressed 反馈
+        self.assertIn("color:rgba(255,255,255,.55);background:transparent", cs)
+        self.assertIn("border-radius:999px", cs)
+        self.assertIn(".fp-row.fchip:hover{color:rgba(255,255,255,.85)}", cs)
+        self.assertIn(".fp-row.fchip:active{transform:scale(.96)}", cs)
+        # 选中：白底黑字加粗
+        self.assertIn(".fp-row.fchip.on{background:#fff;color:#0E0E0F;font-weight:700}", cs)
+        # 旧「灰丸」样式不得复活
+        self.assertNotIn("color:rgba(255,255,255,.72);background:rgba(255,255,255,.12)", cs)
+
+    def test_web_rows_have_hairline_separators(self):
+        cs = CSS.read_text(encoding="utf-8").replace(" ", "")
+        self.assertIn(".fp-row+.fp-row{border-top:1pxsolidrgba(255,255,255,.05)}", cs)
+        self.assertIn(".fp-row .fp-label{width:52px;".replace(" ", ""), cs)
+        # 面板底色降到白 5%
+        self.assertIn("background:rgba(255,255,255,.05);border-radius:18px", cs)
+
+    def test_mobile_and_tv_share_the_rail_style(self):
+        comp = COMPONENTS.read_text(encoding="utf-8")
+        # 移动版：全圆角 + 选中白/未选透明 + 200ms 颜色渐变
+        self.assertIn("RoundedCornerShape(percent = 50)", comp)
+        self.assertIn("animateColorAsState(", comp)
+        self.assertIn("if (active) OtvColors.White else Color.Transparent", comp)
+        self.assertIn("if (active) OtvColors.Bg else OtvColors.White55", comp)
+        self.assertIn("if (active) FontWeight.Bold else FontWeight.Medium", comp)
+
+        tv = (ROOT / "android" / "app" / "src" / "main" / "java" / "com" / "qiubo" / "optimaltv"
+              / "ui" / "all" / "AllScreen.kt").read_text(encoding="utf-8")
+        # TV 版：焦点不再落白底（白环），仅选中 chip 才给白胶囊
+        self.assertIn("focusedBg = if (active) OtvColors.White else null,", tv)
+        self.assertIn("RoundedCornerShape(percent = 50)", tv)
+        self.assertIn("if (active) FontWeight.Bold else FontWeight.Medium", tv)
+        # 两端面板都用白 5% 底 + 发丝分隔
+        self.assertIn("Color(0x0DFFFFFF)", tv)
+        self.assertIn("Color(0x0DFFFFFF)", ALL_SCREEN.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()
