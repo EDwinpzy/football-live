@@ -24,6 +24,7 @@
   日志    activate_log 审计记录按码过滤
   补货    license_gen.py 私钥签发 → 自动入库 → cards.csv（云端未注入私钥时禁用）
   热更新  发布/上下线/删除热更包、设备上报日志（v1.18）
+  APK 更新  TV/移动版 APK 分片上传、SHA-256 校验、稳定 update.json 发布
   公告    运营公告发布/下线（v1.20）
   电视源  频道 CRUD、M3U 导入（文件/文本/URL）、上游 API 同步、版本发布、
           回滚、排序/批量启停、操作日志导出、自动/托管模式切换（v1.20 后台#8）
@@ -66,6 +67,14 @@ sys.path.insert(0, str(ROOT / "backend-src"))
 import db_import  # noqa: E402  复用 signin/URL 白名单（凭据读 keys/svc_import_*.txt 或 env）
 import hhkan  # noqa: E402
 import vod_sources  # noqa: E402
+from apk_update import (  # noqa: E402
+    CHANNELS as APK_CHANNELS,
+    build_manifest,
+    normalize_certificates,
+    validate_apk_bytes,
+    validate_manifest_for_channel,
+    safe_apk_filename,
+)
 
 PORT = int(os.environ.get("PORT") or 8791)
 CLOUD = bool(os.environ.get("PORT")) or os.environ.get("OTV_CLOUD") == "1"
@@ -231,9 +240,25 @@ HU_MAX_BYTES = 220 * 1024 * 1024
 # 显式指定热更版本号的上限（防手滑输入天文数字把设备端比较逻辑顶掉）
 HU_MAX_VERSION = 10_000_000
 
+# ---------------- APK 应用内更新（与 APK_UPDATE_URL 对接） ----------------
+# APK 与 update.json 共用已配置的 CloudBase 公开桶，但使用独立前缀，避免
+# 与 python-backend.zip 热更对象混淆。清单由网页函数 /web/apk-update/*.json
+# 代理读取，APK 本体直接使用下方对象 URL 下载。
+APK_MAX_BYTES = 300 * 1024 * 1024
+APK_UPLOAD_CHUNK_MAX = 4 * 1024 * 1024
+APK_UPLOAD_DIRECT_MAX = 5 * 1024 * 1024
+APK_UPLOAD_UID_RE = re.compile(r"^[0-9a-f]{8,32}$")
+APK_MANIFEST_PREFIX = "apk-update"
+APK_CERT_ENV = "OTV_APK_CERT_SHA256"
+
 
 def obj_url(key: str) -> str:
     return f"{db_import.BASE}/v1/storages/object/{HU_BUCKET}/{key}"
+
+
+def _apk_obj_url(key: str) -> str:
+    """APK 文件名允许中文，清单中的下载 URL 必须进行路径编码。"""
+    return f"{db_import.BASE}/v1/storages/object/{HU_BUCKET}/{urllib.parse.quote(key, safe='/')}"
 
 
 def pg_put(key: str, raw: bytes, ctype: str) -> None:
@@ -255,6 +280,198 @@ def pg_get_public(key: str, max_bytes: int = 32 * 1024 * 1024):
     req = urllib.request.Request(url, method="GET")
     with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=120) as r:
         return r.read(max_bytes)
+
+
+def _apk_manifest_key(channel: str) -> str:
+    if channel not in APK_CHANNELS:
+        raise ValueError("渠道必须是 tv 或 mobile")
+    return f"{APK_MANIFEST_PREFIX}/{channel}.json"
+
+
+def _apk_read_manifest(channel: str) -> dict | None:
+    """读取当前公开清单；首次发布时对象不存在视为 None。"""
+    try:
+        raw = pg_get_public(_apk_manifest_key(channel), max_bytes=512 * 1024)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("已有 update.json 不是有效 JSON") from exc
+    if not isinstance(data, dict):
+        raise ValueError("已有 update.json 根节点必须是对象")
+    validate_manifest_for_channel(data, channel)
+    return data
+
+
+def _apk_meta(qs: dict) -> dict:
+    """解析 APK 发布表单的 query string。"""
+    def q(name: str, default: str = "") -> str:
+        value = qs.get(name)
+        return str(value[0] if value else default).strip()
+
+    channel = q("channel").lower()
+    if channel not in APK_CHANNELS:
+        raise ValueError("渠道必须是 tv 或 mobile")
+    try:
+        version_code = int(q("versionCode", "0"))
+        min_supported = int(q("minSupportedVersionCode", "0"))
+    except ValueError as exc:
+        raise ValueError("versionCode 和最低支持版本必须是数字") from exc
+    status = q("status", "published")
+    if status not in ("published", "offline"):
+        raise ValueError("发布状态只能是 published 或 offline")
+    certs = q("certificateSha256")
+    if not certs:
+        certs = os.environ.get(APK_CERT_ENV, "")
+    if not certs:
+        raise ValueError(f"请填写签名证书 SHA-256（或配置 {APK_CERT_ENV}）")
+    # 先校验证书摘要，避免上传完才发现清单不可解析。
+    normalize_certificates(certs)
+    filename = safe_apk_filename(q("fileName", "update.apk"))
+    return {
+        "channel": channel,
+        "version_code": version_code,
+        "version_name": q("versionName"),
+        "min_supported": min_supported,
+        "force_update": q("forceUpdate").lower() in ("1", "true", "yes", "on"),
+        "title": q("title", "发现新版本"),
+        "changelog": q("changelog"),
+        "certificate_sha256": certs,
+        "status": status,
+        "file_name": filename,
+    }
+
+
+def _apk_publish(raw: bytes, meta: dict) -> dict:
+    """校验 APK、写入对象，并在 published 状态原子覆盖渠道清单。"""
+    if not 1 <= len(raw) <= APK_MAX_BYTES:
+        return {"error": f"APK 大小不合法（1B–{APK_MAX_BYTES // 1048576}MB）"}
+    try:
+        validate_apk_bytes(raw)
+        current = _apk_read_manifest(meta["channel"])
+        if current and meta["version_code"] <= int(current.get("versionCode") or 0):
+            return {"error": f"versionCode 必须大于当前已发布版本 v{current['versionCode']}"}
+        sha = hashlib.sha256(raw).hexdigest()
+        key = (f"{APK_MANIFEST_PREFIX}/{meta['channel']}/v{meta['version_code']}/"
+               f"{meta['file_name']}")
+        apk_url = _apk_obj_url(key)
+        manifest = build_manifest(
+            channel=meta["channel"],
+            version_code=meta["version_code"],
+            version_name=meta["version_name"],
+            min_supported_version_code=meta["min_supported"],
+            force_update=meta["force_update"],
+            title=meta["title"],
+            changelog=meta["changelog"],
+            file_name=meta["file_name"],
+            apk_url=apk_url,
+            size_bytes=len(raw),
+            sha256=sha,
+            certificate_sha256=meta["certificate_sha256"],
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+    try:
+        pg_put(key, raw, "application/vnd.android.package-archive")
+        if meta["status"] == "published":
+            manifest_raw = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), indent=2).encode("utf-8")
+            pg_put(_apk_manifest_key(meta["channel"]), manifest_raw, "application/json; charset=utf-8")
+    except urllib.error.HTTPError as exc:
+        return {"error": f"APK/清单上传失败 HTTP {exc.code}: {exc.read().decode('utf-8', 'ignore')[:200]}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"APK/清单上传失败: {exc}"}
+    return {
+        "ok": True,
+        "status": meta["status"],
+        "channel": meta["channel"],
+        "versionCode": meta["version_code"],
+        "versionName": meta["version_name"],
+        "size": len(raw),
+        "sha256": sha,
+        "key": key,
+        "apkUrl": apk_url,
+        "manifestUrl": f"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/web/apk-update/{meta['channel']}.json",
+        "manifest": manifest,
+    }
+
+
+def h_apk_update_get(d: dict) -> dict:
+    """后台读取 TV/移动版当前公开清单。"""
+    channel = str(d.get("channel") or "").strip().lower()
+    if channel not in APK_CHANNELS:
+        return {"error": "渠道必须是 tv 或 mobile"}
+    try:
+        manifest = _apk_read_manifest(channel)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"读取清单失败: {exc}"}
+    return {"ok": True, "channel": channel, "manifest": manifest}
+
+
+def h_apk_update_upload(qs: dict, raw: bytes) -> dict:
+    try:
+        meta = _apk_meta(qs)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    if len(raw) > APK_UPLOAD_DIRECT_MAX:
+        return {"error": f"APK 超过直传上限（约 {APK_UPLOAD_DIRECT_MAX // 1048576}MB），请使用分片上传"}
+    return _apk_publish(raw, meta)
+
+
+def h_apk_update_chunk(qs: dict, raw: bytes) -> dict:
+    uid = (qs.get("uid") or [""])[0]
+    try:
+        seq = int((qs.get("seq") or ["-1"])[0])
+    except ValueError:
+        seq = -1
+    if not APK_UPLOAD_UID_RE.fullmatch(uid):
+        return {"error": "bad_uid"}
+    if not 0 <= seq <= 2047:
+        return {"error": "bad_seq"}
+    if not 1 <= len(raw) <= APK_UPLOAD_CHUNK_MAX:
+        return {"error": f"分片大小不合法（1B–{APK_UPLOAD_CHUNK_MAX // 1048576}MB）"}
+    try:
+        pg_put(f"{APK_MANIFEST_PREFIX}/uploads/{uid}/part-{seq:04d}", raw, "application/octet-stream")
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"APK 分片暂存失败: {exc}"}
+    return {"ok": True, "seq": seq, "size": len(raw)}
+
+
+def h_apk_update_commit(qs: dict) -> dict:
+    uid = (qs.get("uid") or [""])[0]
+    try:
+        total = int((qs.get("total") or ["0"])[0])
+        size = int((qs.get("size") or ["0"])[0])
+    except ValueError:
+        return {"error": "bad_total_or_size"}
+    if not APK_UPLOAD_UID_RE.fullmatch(uid):
+        return {"error": "bad_uid"}
+    if not 1 <= total <= 2048 or not 1 <= size <= APK_MAX_BYTES:
+        return {"error": "bad_total_or_size"}
+    keys = [f"{APK_MANIFEST_PREFIX}/uploads/{uid}/part-{i:04d}" for i in range(total)]
+    buf = bytearray()
+    for key in keys:
+        try:
+            part = pg_get_public(key, max_bytes=APK_UPLOAD_CHUNK_MAX + 1)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return {"error": "分片不完整，请重新上传"}
+            return {"error": f"读取分片失败 HTTP {exc.code}"}
+        if not part:
+            return {"error": "分片不完整，请重新上传"}
+        buf += part
+    if len(buf) != size:
+        return {"error": f"重组尺寸不符（期望 {size}，实得 {len(buf)}）"}
+    try:
+        meta = _apk_meta(qs)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    result = _apk_publish(bytes(buf), meta)
+    for key in keys:
+        _hu_obj_delete(key)
+    return result
 
 
 # ---------------- 还原（按页面清库；破坏性操作，双闸 + 强制备份） ----------------
@@ -569,6 +786,16 @@ def h_mark_sold(d: dict) -> dict:
     if not re.fullmatch(r"OTV-[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}", code):
         return {"error": "bad_code"}
     return rpc("admin_mark_sold", {"p_code": code, "p_sold": sold})
+
+
+def h_update_note(d: dict) -> dict:
+    code = str(d.get("code") or "").strip().upper()
+    note = str(d.get("note") or "").strip()
+    if not re.fullmatch(r"OTV-[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}", code):
+        return {"error": "bad_code"}
+    if len(note) > 200:
+        return {"error": "note_too_long"}
+    return rpc("admin_update_note", {"p_code": code, "p_note": note})
 
 
 def h_logs(d: dict) -> dict:
@@ -1598,6 +1825,7 @@ ROUTES = {
     "/api/set_status": h_set_status,
     "/api/unbind": h_unbind,
     "/api/mark_sold": h_mark_sold,
+    "/api/update_note": h_update_note,
     "/api/logs": h_logs,
     "/api/gen": h_gen,
     "/api/hu_list": h_hu_list,
@@ -1605,6 +1833,7 @@ ROUTES = {
     "/api/hu_set_status": h_hu_set_status,
     "/api/hu_delete": h_hu_delete,
     "/api/hu_health": h_hu_health,
+    "/api/apk_update_get": h_apk_update_get,
     "/api/ann_get": h_ann_get,
     "/api/ann_publish": h_ann_publish,
     # 还原（按页面清库）：密码 + 逐页确认短语双重闸，且强制先导出备份
@@ -1764,6 +1993,41 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(result, ensure_ascii=False).encode("utf-8"),
                        "application/json; charset=utf-8")
             return
+        # APK 直传：小包直接写入对象桶；大包由下方分片链路处理。
+        if path == "/api/apk_update_upload":
+            n = int(self.headers.get("Content-Length") or 0)
+            if not 1 <= n <= APK_MAX_BYTES:
+                self._send(200, json.dumps({"error": "APK 大小不合法"}, ensure_ascii=False).encode("utf-8"),
+                           "application/json; charset=utf-8")
+                return
+            if n > APK_UPLOAD_DIRECT_MAX:
+                self._send(200, json.dumps({"error": "APK 超过直传上限，请使用分片上传"}, ensure_ascii=False).encode("utf-8"),
+                           "application/json; charset=utf-8")
+                return
+            raw = self.rfile.read(n)
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            result = h_apk_update_upload(qs, raw)
+            self._send(200, json.dumps(result, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
+            return
+        if path == "/api/apk_update_chunk":
+            n = int(self.headers.get("Content-Length") or 0)
+            if not 1 <= n <= APK_UPLOAD_CHUNK_MAX:
+                self._send(200, json.dumps({"error": "APK 分片大小不合法"}, ensure_ascii=False).encode("utf-8"),
+                           "application/json; charset=utf-8")
+                return
+            raw = self.rfile.read(n)
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            result = h_apk_update_chunk(qs, raw)
+            self._send(200, json.dumps(result, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
+            return
+        if path == "/api/apk_update_commit":
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            result = h_apk_update_commit(qs)
+            self._send(200, json.dumps(result, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
+            return
         # M3U 文件导入：浏览器直传 m3u 文本，模式走 query string
         if path == "/api/iptv_upload":
             n = int(self.headers.get("Content-Length") or 0)
@@ -1813,7 +2077,7 @@ def main() -> None:
     srv = ThreadingHTTPServer((bind, PORT), Handler)
     url = f"http://127.0.0.1:{PORT}/" if not CLOUD else f"http://0.0.0.0:{PORT}/（容器平台对外域名）"
     print(f"My TV 后台管理系统 v1.20 已启动: {url}")
-    print(f"功能: 卡密 · 补货 · 热更新 · 公告 · 电视源管理（v1.20）")
+    print(f"功能: 卡密 · 补货 · 热更新 · APK 更新 · 公告 · 电视源管理（v1.20）")
     if CLOUD:
         if os.environ.get("OTV_ADMIN_PASS"):
             print("登录门禁: 账号 OTV_ADMIN_USER / 密码 OTV_ADMIN_PASS（环境变量）")

@@ -2,6 +2,14 @@ package com.qiubo.optimaltv.ui.live
 
 import com.qiubo.optimaltv.data.model.MatchItem
 
+enum class MatchStatusKind { LIVE, UPCOMING, FINISHED }
+
+fun matchStatusKind(match: MatchItem): MatchStatusKind = when {
+    match.isLive -> MatchStatusKind.LIVE
+    match.isFinished -> MatchStatusKind.FINISHED
+    else -> MatchStatusKind.UPCOMING
+}
+
 data class TodayMatchPage(val rows: List<List<MatchItem>>)
 object TodayMatchPager { fun pages(items: List<MatchItem>) = items.chunked(8).map { TodayMatchPage(listOf(it.take(4), it.drop(4))) } }
 object ImportantTeamPolicy {
@@ -11,7 +19,7 @@ object ImportantTeamPolicy {
 }
 object MatchClockPolicy {
     fun project(m: MatchItem, start: Long?, now: Long): MatchItem {
-        if (m.status == "finished" || start == null) return m
+        if (m.isFinished || start == null) return m
         val e = ((now - start) / 60_000).toInt(); if (e < 0) return m
         if (e >= 110) return m.copy(status = "finished")
         val played = if (e <= 45) e else if (e <= 60) 45 else e - 15

@@ -41,7 +41,7 @@ RESOLVE_TOTAL_BUDGET = 10.0
 RESOLVE_EARLY_SOURCES = 2
 RESOLVE_CACHE_TTL = 1800
 """探测预算：9 个源全通时线路能到 40+ 条，逐条探测会把详情拖到 15~40 秒（实测），
-而播放器只展示综合排名前 5。这里按源轮转取前 N 条探测，其余保留「未探测」状态
+播放器会保留全部线路。这里按源轮转取前 N 条探测，其余保留「未探测」状态
 （alive=None，排序垫后但不判死），既保住排序质量又压住耗时。"""
 PROBE_MAX_LINES = 18
 PROBE_MAX_WORKERS = 18
@@ -116,7 +116,7 @@ class SourceRegistry:
     def to_dict(self):
         return {"schema": 1, "version": self.version, "sources": [asdict(source) for source in self.sources]}
 
-    def resolve_subject(self, subject):
+    def resolve_subject(self, subject, wait_for_all=False):
         """Search enabled adapters and return only confident, normalized lines.
 
         竞速契约（2026-09-19）：源按画像得分排序发车、熔断源跳过；≥EARLY_SOURCES 台
@@ -148,6 +148,25 @@ class SourceRegistry:
             if lines or not failures or attempt + 1 >= max(1, RESOLVE_ATTEMPTS):
                 break
             time.sleep(RESOLVE_RETRY_DELAY)
+
+        # 详情/播放请求必须把所有已启用源带回客户端。竞速接口仍保留给其它
+        # 调用方，但影视详情不能把尚未返回的 360 等线路误报成“全部失败”。
+        if wait_for_all and pending_searches:
+            remaining = []
+            try:
+                for future in concurrent.futures.as_completed(
+                        pending_searches, timeout=max(0.1, deadline - time.monotonic())):
+                    try:
+                        source, group, error, elapsed = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        continue
+                    if stats:
+                        stats.record_search(source.id, error is None, elapsed)
+                    if group:
+                        lines.extend(group)
+            except concurrent.futures.TimeoutError:
+                remaining = [future for future in pending_searches if not future.done()]
+            pending_searches = remaining
 
         picked = _pick_probe_lines(lines, PROBE_MAX_LINES)
         pending_probes = self._race_probe(picked, deadline)
@@ -285,7 +304,10 @@ class SourceRegistry:
             item = self._resolve_cache.get(key)
         if not item or time.time() - item[0] > max(60, RESOLVE_CACHE_TTL):
             return None
-        return copy.deepcopy(item[1])
+        lines = copy.deepcopy(item[1])
+        history = ({line["id"]: self.history.success_rate(line["id"]) for line in lines}
+                   if self.history else None)
+        return rank_lines(lines, history)
 
     def _cache_put(self, key, lines):
         if not key or not lines:
@@ -575,7 +597,10 @@ def probe_stream(url, fetch=None):
         return {"alive": False, "latency_ms": None, "height": 0}
     try:
         result = (fetch or _probe_fetch)(url)
-        heights = [int(value) for value in re.findall(r"RESOLUTION=\d+x(\d+)", str(result.get("body") or ""), re.I)]
+        body = str(result.get("body") or "")
+        if "#EXTM3U" not in body.upper() and "#EXT-X-" not in body.upper():
+            return {"alive": False, "latency_ms": None, "height": 0}
+        heights = [int(value) for value in re.findall(r"RESOLUTION=\d+x(\d+)", body, re.I)]
         return {"alive": True, "latency_ms": int(result.get("elapsed_ms") or 0),
                 "height": max(heights, default=0)}
     except Exception:
@@ -660,8 +685,39 @@ class MacCmsAdapter:
             raise LookupError("线路没有可播放集")
         index = max(0, min(int(episode_index), len(episodes) - 1))
         episode = episodes[index]
+        url = self._resolve_media_url(str(episode.get("url") or "").strip())
+        if not url:
+            raise LookupError("播放线路未返回媒体地址")
         return {"line_id": line.get("id"), "name": episode.get("name"),
-                "url": episode.get("url"), "headers": {}}
+                "url": url, "headers": {}}
+
+    def _resolve_media_url(self, url):
+        """把 MacCMS 的 yun 播放页解析为播放器可消费的媒体直链。
+
+        不少源同时提供 ``hnyun``（HTML 播放页）和 ``hnm3u8``（直链）。
+        详情排序可能暂时把前者放在首位；把 HTML 交给网页中继只会得到
+        DPlayer 页面，Hls.js 会反复恢复直到超时。直链保持零额外请求，
+        只有无媒体扩展名的候选才抓页并提取 m3u8/mp4/flv。
+        """
+        if not url:
+            return ""
+        if re.search(r"\.(?:m3u8|mp4|flv)(?:[?#]|$)", url, re.I):
+            return url
+        try:
+            page = self.fetch(url)
+            html = str(page.get("body") or "")
+            html = (html.replace(r"\/", "/")
+                        .replace(r"\u0026", "&")
+                        .replace(r"\u003f", "?")
+                        .replace(r"\u003d", "="))
+            media = re.search(
+                r"https?://[^\"'<>\s\\]+?\.(?:m3u8|mp4|flv)(?:\?[^\"'<>\s\\]*)?",
+                html, re.I)
+            if media:
+                return urllib.parse.unquote(media.group(0))
+        except Exception:
+            pass
+        return ""
 
 
 class HhkanAdapter:

@@ -21,7 +21,7 @@ TOOLS = Path(__file__).resolve().parent
 PROJ = TOOLS.parent
 FUNC = PROJ / "cloudfunctions" / "otv-admin"
 
-FILES = ("admin_server.py", "scf_main.py", "admin.html", "db_import.py", "license_gen.py",
+FILES = ("admin_server.py", "apk_update.py", "scf_main.py", "admin.html", "db_import.py", "license_gen.py",
          "requirements.txt")
 # 影视源后台接口运行时依赖。admin_server.py 在云函数包根目录加载这些模块。
 BACKEND_FILES = ("vod_sources.py", "vod_sources.default.json", "hhkan.py")

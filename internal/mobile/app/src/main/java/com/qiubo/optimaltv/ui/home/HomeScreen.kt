@@ -331,11 +331,11 @@ private fun buildHeroes(cat0: com.qiubo.optimaltv.data.repo.Aggregated?, home: c
         "最近热门", "最新上映", "豆瓣高分")
     val hot = home.sections
         .filter { sec -> hotKeys.any { sec.name.contains(it) } }
-        .flatMap { sec -> sec.items.map { HeroEntry(it.id, it.title, it.posterUrl, sec.name) } }
+        .flatMap { sec -> sec.items.map { HeroEntry(it.id, it.title, it.heroUrl.ifBlank { it.posterUrl }, sec.name) } }
         .distinctBy { it.id }
     if (hot.isNotEmpty()) return hot.take(8)
     return cat0?.dedupedItems?.filter { it.posterUrl.isNotBlank() }?.take(6)
-        ?.map { HeroEntry(it.id, it.title, it.posterUrl, "") }.orEmpty()
+        ?.map { HeroEntry(it.id, it.title, it.heroUrl.ifBlank { it.posterUrl }, "") }.orEmpty()
 }
 
 /**

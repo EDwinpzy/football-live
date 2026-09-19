@@ -96,13 +96,17 @@ data class MatchItem(
     val leagueColor: String = "",
     val date: String = "",        // MM-DD
     val time: String = "",        // 开赛时间或分钟数
-    val status: String = "",      // live / upcoming / ended
+    val status: String = "",      // live / upcoming / finished（兼容旧 ended）
     val minute: String = "",
     val homeScore: String = "",   // score.h，空 = 无比分
     val awayScore: String = "",
     val channels: List<MatchChannel> = emptyList(),   // 该场动态信号线路（空=旧数据/快照，回退默认源表）
 ) {
-    val isLive: Boolean get() = status == "live"
+    /** 上游旧快照曾写 ended；统一由模型归一，避免卡片/点击链路各自判断出不同状态。 */
+    val isLive: Boolean get() = status.trim().equals("live", ignoreCase = true)
+    val isFinished: Boolean get() = status.trim().equals("finished", ignoreCase = true) ||
+        status.trim().equals("ended", ignoreCase = true) ||
+        status.trim().equals("close", ignoreCase = true)
     val hasScore: Boolean get() = homeScore.isNotEmpty() && awayScore.isNotEmpty()
 }
 

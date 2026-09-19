@@ -76,6 +76,17 @@ class CatalogSeedContractTest(unittest.TestCase):
             self.assertIn('.put("h", it.heroUrl)', source, path)
             self.assertIn('heroUrl = e.optString("h")', source, path)
 
+    def test_影视首页hero优先使用高清字段(self):
+        """目录/热门板块进入 hero 时不能退回 240px posterUrl。"""
+        internal_home = ROOT / "internal" / "mobile" / "app" / "src" / "main" / "java" / "com" / "qiubo" / "optimaltv" / "ui" / "home" / "HomeScreen.kt"
+        self.assertIn('it.heroUrl.ifBlank { it.posterUrl }', internal_home.read_text(encoding="utf-8"))
+        for path in (
+            ROOT / "android" / "app" / "src" / "main" / "java" / "com" / "qiubo" / "optimaltv" / "data" / "repo" / "VodRepository.kt",
+            ROOT / "internal" / "mobile" / "app" / "src" / "main" / "java" / "com" / "qiubo" / "optimaltv" / "data" / "repo" / "VodRepository.kt",
+        ):
+            source = path.read_text(encoding="utf-8")
+            self.assertIn('it.heroUrl.ifBlank { it.posterUrl }', source, path)
+
     def test_两份工程种子完全一致(self):
         self.assertEqual(SEEDS[0].read_text(encoding="utf-8"),
                          SEEDS[1].read_text(encoding="utf-8"))

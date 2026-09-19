@@ -58,6 +58,12 @@ CLOUD_RELAY_BASE = os.environ.get(
     "OTV_CLOUD_BASE",
     "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/web")
 CLOUD_RELAY_ENABLED = os.environ.get("OTV_CLOUD_RELAY", "1") != "0"
+# APK 应用内更新清单由后台写入 CloudBase 公开桶；网页函数只负责以稳定的
+# /web/apk-update/{tv,mobile}.json 地址代理它，避免每次发 APK 都重新部署网页函数。
+APK_UPDATE_OBJECT_BASE = os.environ.get(
+    "OTV_APK_UPDATE_OBJECT_BASE",
+    "https://appletv-d5ge1bth794873f76.api.tcloudbasegateway.com/v1/storages/object/hotupdate",
+).rstrip("/")
 _HHKAN_CHANNELS = {1: "电影", 2: "电视剧", 3: "动漫", 4: "综艺", 6: "短剧"}
 CACHE_TTL = 30  # 秒（v1.23 实时性：60→30——开赛/比分变化上屏延迟减半；
 #                配合 _matches_keepwarm_thread 保热，前端每次拉取都是 ≤40s 新数据）
@@ -3361,8 +3367,38 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _apk_update_manifest(self, parsed):
+        """代理后台发布的公开 APK 清单，不把 APK 二进制经过网页函数。"""
+        match = re.fullmatch(r"/apk-update/(tv|mobile)\.json", parsed.path)
+        if not match:
+            return False
+        key = f"apk-update/{match.group(1)}.json"
+        try:
+            req = urlreq.Request(
+                f"{APK_UPDATE_OBJECT_BASE}/{quote(key, safe='/')}",
+                headers={"Accept": "application/json", "User-Agent": UA},
+            )
+            with urlreq.urlopen(req, timeout=8) as resp:
+                body = resp.read(512 * 1024)
+                status = resp.status
+        except urlreq.HTTPError as exc:
+            body = exc.read(4096)
+            status = exc.code
+        except Exception as exc:
+            body = json.dumps({"error": "apk_manifest_unavailable", "detail": str(exc)[:120]}).encode("utf-8")
+            status = 502
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store, max-age=0")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return True
+
     def do_GET(self):
         parsed = urlparse(self.path)
+        if self._apk_update_manifest(parsed):
+            return
         if parsed.path.startswith("/vod/") or parsed.path == "/api/search":
             self._vod_api(parsed)
             return

@@ -369,6 +369,7 @@ button.act{background:var(--grad);border:0;border-radius:10px;color:#070810;font
   <button data-tab="gen"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M8 5.5v5M5.5 8h5"/></svg>补货</button>
   <div class="rail-grp">发布</div>
   <button data-tab="hu"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6"/><path d="M8 11V5.5M5.5 8 8 5.5 10.5 8"/></svg>热更新</button>
+  <button data-tab="apk"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="1.75" width="10" height="12.5" rx="1.6"/><path d="M6 4.5h4M6 7.5h4M6 10.5h2"/></svg>APK 更新</button>
   <button data-tab="ann"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.75 6.25v3.5h2.4l4.1 3.1V3.15l-4.1 3.1z"/><path d="M11.75 5.75a3.6 3.6 0 0 1 0 4.5"/></svg>公告</button>
   <div class="rail-grp">渠道</div>
   <button data-tab="iptv"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.75" y="2.75" width="12.5" height="8.5" rx="1.5"/><path d="M8 11.25V13.5M5.5 13.5h5"/></svg>电视源</button>
@@ -485,6 +486,37 @@ button.act{background:var(--grad);border:0;border-radius:10px;color:#070810;font
   <div class="panel">
     <div class="secthead"><h2>设备上报日志</h2><span class="sub">最新 100 条</span><span class="spring"></span><button class="ghost mini" id="btn-hulogs-refresh">刷新</button></div>
     <div class="gridwrap" id="hulog-table"></div>
+  </div>
+</section>
+
+<!-- ============ APK 更新 ============ -->
+<section id="tab-apk" style="display:none">
+  <div class="w-head"><h1>发布 APK 更新</h1><span class="sub">上传后自动计算 SHA-256，并生成客户端读取的 update.json</span><span class="spring"></span></div>
+  <div class="formgrid" style="max-width:1100px">
+    <label class="f">APK 文件（≤300MB）<input type="file" id="apk-file" accept=".apk" style="padding:5px">
+      <span id="apk-fileinfo" style="letter-spacing:0;font-family:var(--mono);color:var(--faint)"></span></label>
+    <label class="f">渠道
+      <select id="apk-channel"><option value="tv">TV 版</option><option value="mobile">移动版</option></select></label>
+    <label class="f">versionCode<input id="apk-version-code" class="mono" type="number" min="1" placeholder="例如 35"></label>
+    <label class="f">versionName<input id="apk-version-name" placeholder="例如 1.33"></label>
+    <label class="f">最低支持 versionCode<input id="apk-min-version" class="mono" type="number" min="0" value="0"></label>
+    <label class="f">发布状态
+      <select id="apk-status"><option value="published">立即发布（覆盖公开清单）</option><option value="offline">仅上传（不影响用户）</option></select></label>
+    <label class="f">强制更新
+      <span class="inline" style="align-items:center;color:var(--paper);white-space:nowrap"><input type="checkbox" id="apk-force"> <span style="font-size:12px">旧版本必须更新后才能继续使用</span></span></label>
+    <label class="f">更新标题<input id="apk-title" value="发现新版本"></label>
+    <label class="f">签名证书 SHA-256（必填，可填多条）<input id="apk-cert" class="mono" placeholder="64 位 hex；多个用逗号或换行分隔"></label>
+    <label class="f wide">更新说明（每行一条）<textarea id="apk-changelog" rows="4" placeholder="修复播放问题；优化启动速度"></textarea></label>
+  </div>
+  <div class="formfoot">
+    <button class="act" id="btn-apk-upload">上传并生成清单</button>
+    <span class="hint">大于 5MB 会自动使用 4MB 分片上传；当前 APK 不会直接经过网页函数下载。</span>
+  </div>
+  <div class="errbox" id="apk-err"></div>
+  <div class="okbox" id="apk-ok"></div>
+  <div class="panel">
+    <div class="secthead"><h2>当前公开清单</h2><span class="sub">客户端稳定读取地址</span><span class="spring"></span><button class="ghost mini" id="btn-apk-refresh">刷新</button></div>
+    <div class="gridwrap" id="apk-table"></div>
   </div>
 </section>
 
@@ -812,6 +844,7 @@ button.act{background:var(--grad);border:0;border-radius:10px;color:#070810;font
 const PLAN = {monthly:"月卡", quarterly:"季卡", yearly:"年卡", lifetime:"终身", weekly:"周卡"};
 const RESULT = {ok:"激活成功", rebind:"重复激活", bound_full:"设备数已满", not_found:"码不存在",
                 banned:"已封禁", unbind:"后台解绑", admin_active:"后台解封", admin_banned:"后台封禁",
+                admin_note:"后台备注",
                 admin_sold:"后台标记出售", admin_unsold:"后台取消出售", bad_param:"参数错误"};
 const HU_RESULT = {downloaded:"已下载", applied:"已生效", failed:"失败", apply_failed:"启动失败隔离", probe:"探测"};
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -939,7 +972,7 @@ fetch(API_BASE + "api/whoami", {credentials:"same-origin"}).then(r => {
 });
 function resultTag(r) {
   const map = {ok:["ok","ok"], rebind:["","ok"], bound_full:["warn","warn"], not_found:["","warn"],
-               banned:["bad","bad"], unbind:["warn","warn"], admin_active:["ok","ok"], admin_banned:["bad","bad"],
+               banned:["bad","bad"], unbind:["warn","warn"], admin_active:["ok","ok"], admin_banned:["bad","bad"], admin_note:["warn","warn"],
                admin_sold:["warn","warn"], admin_unsold:["",""]};
   const [cls] = map[r] || [""];
   return `<span class="tag ${cls}">${esc(RESULT[r] || r)}</span>`;
@@ -1008,12 +1041,12 @@ async function loadOvLedger() {
   if (d.error) { el.innerHTML = `<div class="empty">加载失败：${esc(d.error)}</div>`; return; }
   if (!d.rows.length) { el.innerHTML = `<div class="empty">还没有卡密——去「补货」页生成第一批。</div>`; return; }
   el.innerHTML = ledgerTable(d.rows, false, true, "ov");
-  pulseDiff("ov-ledger", "ov", Object.fromEntries(d.rows.map(r => [r.code, r.status + r.devices.length + (r.sold_at || "")])));
+  pulseDiff("ov-ledger", "ov", Object.fromEntries(d.rows.map(r => [r.code, r.status + r.devices.length + (r.note || "") + (r.sold_at || "")])));
 }
 function ledgerTable(rows, withOps, fixed, stateId) {
-  const cols = fixed ? '<colgroup><col style="width:17%"><col style="width:6%"><col style="width:9%"><col style="width:10%"><col style="width:10%"><col style="width:12%"><col style="width:12%"><col></colgroup>' : '';
+  const cols = fixed ? '<colgroup><col style="width:17%"><col style="width:6%"><col style="width:9%"><col style="width:10%"><col style="width:10%"><col style="width:11%"><col style="width:11%"><col style="width:12%"><col></colgroup>' : '';
   return `<table class="grid"${fixed ? ' style="table-layout:fixed"' : ''}>` + cols +
-    `<tr>${thSort(stateId, "code", "卡密")}${thSort(stateId, "plan", "套餐")}${thSort(stateId, "status", "状态")}${thSort(stateId, "activated_at", "首次激活")}${thSort(stateId, "expire_at", "统一到期")}${thSort(stateId, "", "续费去向")}${thSort(stateId, "devices", "已绑设备")}${thSort(stateId, "updated_at", "最近操作")}${withOps ? "<th></th>" : ""}</tr>` +
+    `<tr>${thSort(stateId, "code", "卡密")}${thSort(stateId, "plan", "套餐")}${thSort(stateId, "status", "状态")}${thSort(stateId, "activated_at", "首次激活")}${thSort(stateId, "expire_at", "统一到期")}${thSort(stateId, "", "续费去向")}${thSort(stateId, "devices", "已绑设备")}${thSort(stateId, "", "备注")}${thSort(stateId, "updated_at", "最近操作")}${withOps ? "<th></th>" : ""}</tr>` +
     rows.map(r => {
       const redeemed = !!r.redeemed_at;
       const status = r.status === "banned" ? '<span class="st bad">✕ 封禁</span>'
@@ -1031,6 +1064,7 @@ function ledgerTable(rows, withOps, fixed, stateId) {
       <td>${r.devices.length ? r.devices.map(dev =>
           `<span class="chip"><code style="font-size:11px">${esc(dev.slice(0,12))}${dev.length > 12 ? '…' : ''}</code>${redeemed ? '' : `<span class="x" title="解绑此设备" onclick="unbindDev('${esc(r.code)}','${esc(dev)}')">✕</span>`}</span>`).join("")
         : '<span class="dim">未绑定</span>'}</td>
+      <td class="note-cell" data-note="${esc(r.note || "")}">${noteView(r.code, r.note, withOps)}</td>
       <td title="创建 ${fmtT(r.created_at)}${r.note ? ` · ${esc(r.note)}` : ''}">${fmtT(r.updated_at)}</td>
       ${withOps ? `<td style="white-space:nowrap">
         <button class="ghost mini" onclick="copyCode('${esc(r.code)}')">复制</button>
@@ -1045,6 +1079,46 @@ function ledgerTable(rows, withOps, fixed, stateId) {
         ${r.devices.length ? ` <button class="ghost mini" style="color:var(--amber)" onclick="unbindAll('${esc(r.code)}',${r.devices.length})">解绑全部</button>` : ""}`}
       </td>` : ""}</tr>`;
     }).join("") + "</table>";
+}
+function noteView(code, note, withOps) {
+  const text = note ? `<span class="lbl" title="${esc(note)}">${esc(note)}</span>` : '<span class="dim">未备注</span>';
+  return text + (withOps ? ` <button class="ghost mini" onclick="editNote('${esc(code)}')">编辑</button>` : "");
+}
+function noteCell(code) {
+  return document.querySelector(`tr[data-key="${code}"] .note-cell`);
+}
+function editNote(code) {
+  const cell = noteCell(code);
+  if (!cell) return;
+  const note = cell.dataset.note || "";
+  cell.innerHTML = `<input class="note-editor" maxlength="200" value="${esc(note)}" placeholder="填写备注" aria-label="卡密备注">` +
+    ` <button class="act mini" onclick="saveNote('${esc(code)}')">保存</button>` +
+    ` <button class="ghost mini" onclick="cancelNote('${esc(code)}')">取消</button>`;
+  const input = cell.querySelector(".note-editor");
+  input.focus();
+  input.select();
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") saveNote(code);
+    if (event.key === "Escape") cancelNote(code);
+  });
+}
+function cancelNote(code) {
+  const cell = noteCell(code);
+  if (cell) cell.innerHTML = noteView(code, cell.dataset.note || "", true);
+}
+async function saveNote(code) {
+  const cell = noteCell(code), input = cell && cell.querySelector(".note-editor");
+  if (!input) return;
+  const note = input.value.trim();
+  input.disabled = true;
+  const d = await api("update_note", {code, note});
+  if (d.ok) {
+    toast(note ? "已保存备注 " + code : "已清空备注 " + code);
+    loadList(true);
+  } else {
+    input.disabled = false;
+    toast("备注保存失败：" + (d.msg || d.error), true);
+  }
 }
 
 /* ---- 卡密 ----
@@ -1287,6 +1361,108 @@ async function huDoUpload(f, btn) {
 document.getElementById("btn-hu-upload").onclick = function () {
   huDoUpload(document.getElementById("hu-file").files[0], this);
 };
+/* ---- APK 应用内更新 ---- */
+const APK_CHUNK = 4 * 1024 * 1024;
+const APK_DIRECT = 5 * 1024 * 1024;
+let apkCurrent = {tv: null, mobile: null};
+function apkMb(n) { return (n / 1048576).toFixed(1) + " MB"; }
+async function loadApkUpdates() {
+  const el = document.getElementById("apk-table");
+  el.innerHTML = skel(3);
+  const rows = [];
+  for (const channel of ["tv", "mobile"]) {
+    const d = await api("apk_update_get", {channel});
+    apkCurrent[channel] = d.manifest || null;
+    if (d.manifest) rows.push({channel, m: d.manifest});
+  }
+  if (!rows.length) { el.innerHTML = `<div class="empty">还没有公开清单。上传 APK 后选择「立即发布」。</div>`; return; }
+  el.innerHTML = `<table class="grid"><tr><th>渠道</th><th>版本</th><th>最低支持</th><th>大小</th><th>SHA-256</th><th>强制</th><th>清单地址</th></tr>` +
+    rows.map(({channel, m}) => `<tr><td>${channel === "tv" ? "TV 版" : "移动版"}</td><td><b>v${m.versionCode}</b> · ${esc(m.versionName)}</td><td>${m.minSupportedVersionCode || 0}</td><td>${apkMb(m.apk?.size || 0)}</td><td class="mono" title="${esc(m.apk?.sha256 || "")}">${esc((m.apk?.sha256 || "").slice(0, 12))}…</td><td>${m.forceUpdate ? '<span class="tag bad">强制</span>' : '<span class="tag ok">可选</span>'}</td><td class="mono" style="font-size:10px">/web/apk-update/${channel}.json</td></tr>`).join("") + `</table>`;
+  apkFillDefaults();
+}
+function apkFillDefaults() {
+  const channel = document.getElementById("apk-channel").value;
+  const current = apkCurrent[channel];
+  if (!current) return;
+  const code = document.getElementById("apk-version-code");
+  const name = document.getElementById("apk-version-name");
+  if (!code.value) code.value = Number(current.versionCode || 0) + 1;
+  if (!name.value) name.value = current.versionName || "";
+  const certs = (current.apk?.certificateSha256 || []).join("\n");
+  if (!document.getElementById("apk-cert").value && certs) document.getElementById("apk-cert").value = certs;
+}
+async function apkPostJson(url, opts) {
+  const r = await fetch(url, opts);
+  const txt = await r.text();
+  if (!txt) throw new Error(`服务端空响应（HTTP ${r.status}）`);
+  try { return JSON.parse(txt); } catch { throw new Error(`响应异常（HTTP ${r.status}）`); }
+}
+function apkMetaQs(f) {
+  return new URLSearchParams({
+    channel: document.getElementById("apk-channel").value,
+    versionCode: document.getElementById("apk-version-code").value.trim(),
+    versionName: document.getElementById("apk-version-name").value.trim(),
+    minSupportedVersionCode: document.getElementById("apk-min-version").value.trim() || "0",
+    forceUpdate: document.getElementById("apk-force")?.checked ? "true" : "false",
+    title: document.getElementById("apk-title").value.trim(),
+    certificateSha256: document.getElementById("apk-cert").value.trim(),
+    changelog: document.getElementById("apk-changelog").value,
+    status: document.getElementById("apk-status").value,
+    fileName: f.name,
+  });
+}
+async function apkDoUpload(f, btn) {
+  const err = document.getElementById("apk-err"), ok = document.getElementById("apk-ok");
+  err.style.display = ok.style.display = "none";
+  if (!f) { err.textContent = "请先选择 APK 文件"; err.style.display = "block"; return; }
+  if (!/\.apk$/i.test(f.name)) { err.textContent = "请选择 .apk 文件"; err.style.display = "block"; return; }
+  const oldTxt = btn.textContent;
+  btn.disabled = true;
+  try {
+    const meta = apkMetaQs(f);
+    let d;
+    if (f.size > APK_DIRECT) {
+      const uid = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}${Math.random()}`).replace(/-/g, "").slice(0, 16);
+      const total = Math.ceil(f.size / APK_CHUNK);
+      for (let i = 0; i < total; i++) {
+        const part = f.slice(i * APK_CHUNK, Math.min((i + 1) * APK_CHUNK, f.size));
+        btn.textContent = `上传 APK 分片 ${i + 1}/${total}（${Math.round((i * APK_CHUNK) / f.size * 100)}%）…`;
+        let lastErr = null;
+        for (let t = 0; t < 3; t++) {
+          try {
+            const cd = await apkPostJson(API_BASE + "api/apk_update_chunk?" + new URLSearchParams({uid, seq: i}), {method: "POST", headers: {"Content-Type": "application/octet-stream"}, credentials: "same-origin", body: part});
+            if (cd.error) throw new Error(cd.error);
+            lastErr = null; break;
+          } catch (e) { lastErr = e; }
+        }
+        if (lastErr) throw new Error(`分片 ${i + 1}/${total} 三次重试仍失败：${lastErr.message}`);
+      }
+      btn.textContent = "重组、校验并生成清单…";
+      d = await apkPostJson(API_BASE + "api/apk_update_commit?" + (meta.toString() + "&" + new URLSearchParams({uid, total, size: f.size})), {method: "POST", credentials: "same-origin"});
+    } else {
+      btn.textContent = `上传 APK（${apkMb(f.size)}）…`;
+      d = await apkPostJson(API_BASE + "api/apk_update_upload?" + meta.toString(), {method: "POST", headers: {"Content-Type": "application/vnd.android.package-archive"}, credentials: "same-origin", body: f});
+    }
+    if (d.error) throw new Error(d.error);
+    ok.innerHTML = `${d.status === "published" ? "APK 已上传并发布" : "APK 已上传（下线态，未影响用户）"}：<b>v${d.versionCode}</b> · ${apkMb(d.size)}<br>SHA-256 <code style="font-size:11px">${esc(d.sha256 || "")}</code><br>清单地址 <code style="font-size:11px">${esc(d.manifestUrl || "")}</code>`;
+    ok.style.display = "block";
+    toast(d.status === "published" ? `已发布 ${d.channel} APK v${d.versionCode}` : `已上传 ${d.channel} APK v${d.versionCode}（下线态）`);
+    loadApkUpdates();
+  } catch (e) { err.textContent = "上传失败：" + (e.message || e); err.style.display = "block"; }
+  finally { btn.disabled = false; btn.textContent = oldTxt; }
+}
+document.getElementById("apk-file").onchange = e => {
+  const f = e.target.files[0];
+  document.getElementById("apk-fileinfo").textContent = f ? `${f.name} · ${apkMb(f.size)}` : "";
+};
+document.getElementById("apk-channel").onchange = () => {
+  document.getElementById("apk-version-code").value = "";
+  document.getElementById("apk-version-name").value = "";
+  document.getElementById("apk-cert").value = "";
+  apkFillDefaults();
+};
+document.getElementById("btn-apk-upload").onclick = function () { apkDoUpload(document.getElementById("apk-file").files[0], this); };
+document.getElementById("btn-apk-refresh").onclick = loadApkUpdates;
 /* ---- 上传最新版本：File System Access API 直读本地目录里最新的 zip（Chrome/Edge 桌面版） ----
    首次点击选目录（build_backend_zip.py 输出处，如 android/app/src/main/assets/backend），
    目录句柄存 IndexedDB，之后一键直传，跳过手动选文件。 */
@@ -2237,12 +2413,13 @@ async function vodSourceTestRun() {
 /* ---- tab 切换 ---- */
 document.querySelectorAll("nav.verbs button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav.verbs button").forEach(x => x.classList.toggle("on", x === b));
-  ["overview","licenses","logs","gen","hu","ann","iptv","vod-sources"].forEach(t =>
+  ["overview","licenses","logs","gen","hu","apk","ann","iptv","vod-sources"].forEach(t =>
     document.getElementById("tab-" + t).style.display = t === b.dataset.tab ? "" : "none");
   if (b.dataset.tab === "overview") { loadStats(); loadHealth(); loadOvLedger(); }
   if (b.dataset.tab === "licenses") loadList();
   if (b.dataset.tab === "logs") loadLogs();
   if (b.dataset.tab === "hu") loadHu();
+  if (b.dataset.tab === "apk") loadApkUpdates();
   if (b.dataset.tab === "ann") loadAnn();
   if (b.dataset.tab === "iptv") { loadIptv(); loadIptvVersions(); loadIptvLogs(); iptvGroupLoad(); }
   if (b.dataset.tab === "vod-sources") loadVodSources();
@@ -2390,7 +2567,7 @@ loadOvLedger();
 vodLatLoad();
 /* hash 深链：#licenses 直开对应标签页 */
 const h = location.hash.slice(1);
-if (["overview","licenses","logs","gen","hu","ann","iptv","vod-sources"].includes(h) && h !== "overview")
+if (["overview","licenses","logs","gen","hu","apk","ann","iptv","vod-sources"].includes(h) && h !== "overview")
   document.querySelector(`nav.verbs button[data-tab="${h}"]`).click();
 </script>
 <!-- v1.22 试播浮层用的 hls.js 改成"点播放时才按需加载"（见 ensureHls），不再随页面启动去连外部 CDN -->

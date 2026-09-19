@@ -125,6 +125,8 @@ class PlayerViewModel(
     private var startedThisSession = false
     /** 会话代数：并发的 startSession 只允许最新一代操作引擎（防旧源倒灌） */
     private var sessionGen = 0
+    /** 防止同一引擎会话重复收到 ENDED 时重复切集。 */
+    private var handledEndedSessionGen = -1
     private var stallRecoveries = 0
     /** Unified recovery ladder step; reset only after the new session reaches READY. */
     private var recoveryAttempt = 0
@@ -565,6 +567,7 @@ class PlayerViewModel(
                     speed = st.speed,
                 )
                 when {
+                    st.state == EnginePlayState.ENDED -> handlePlaybackEnded()
                     st.state == EnginePlayState.READY && !startedThisSession -> onSessionStarted(st.positionMs)
                     st.state == EnginePlayState.ERROR -> {
                         OtvLog.e("engine ERROR: ${st.errorMsg}")
@@ -598,6 +601,21 @@ class PlayerViewModel(
                 }
             }
         }
+    }
+
+    /** 点播集结束后自动进入下一集；直播和最后一集保持结束态。 */
+    private fun handlePlaybackEnded() {
+        if (handledEndedSessionGen == sessionGen) return
+        handledEndedSessionGen = sessionGen
+        val current = _ui.value
+        val next = AutoPlayPolicy.nextEpisodeIndex(
+            isLive = current.isLive,
+            isMovie = current.isMovie,
+            currentIndex = current.epIndex,
+            episodeCount = current.epCount,
+        ) ?: return
+        OtvLog.i("点播自动连播：${current.epIndex + 1} → ${next + 1}")
+        switchEpisode(next)
     }
 
     private suspend fun boot(fresh: Boolean = false) {

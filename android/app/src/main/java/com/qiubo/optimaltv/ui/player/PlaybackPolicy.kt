@@ -4,6 +4,12 @@ import com.qiubo.optimaltv.data.model.LineInfo
 
 object PlaybackPolicy { const val SEEK_STEP_MS = 10_000L }
 
+/** Decide whether a completed item should continue with the next VOD episode. */
+object AutoPlayPolicy {
+    fun nextEpisodeIndex(isLive: Boolean, isMovie: Boolean, currentIndex: Int, episodeCount: Int): Int? =
+        if (!isLive && !isMovie && currentIndex >= 0 && currentIndex + 1 < episodeCount) currentIndex + 1 else null
+}
+
 object EpisodeMenuPolicy {
     const val RANGE_SIZE = 10
     fun hasRanges(count: Int) = count >= 20

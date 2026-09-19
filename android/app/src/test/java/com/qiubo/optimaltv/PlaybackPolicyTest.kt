@@ -2,6 +2,7 @@ package com.qiubo.optimaltv
 
 import com.qiubo.optimaltv.data.model.LineInfo
 import com.qiubo.optimaltv.ui.player.EpisodeMenuPolicy
+import com.qiubo.optimaltv.ui.player.AutoPlayPolicy
 import com.qiubo.optimaltv.ui.player.PlaybackPolicy
 import com.qiubo.optimaltv.ui.player.VisibleVodLinePolicy
 import org.junit.Assert.assertEquals
@@ -36,4 +37,11 @@ class PlaybackPolicyTest {
     }
 
     @Test fun seekStepIsTenSeconds() = assertEquals(10_000L, PlaybackPolicy.SEEK_STEP_MS)
+
+    @Test fun autoPlayAdvancesOnlyToTheNextVodEpisode() {
+        assertEquals(3, AutoPlayPolicy.nextEpisodeIndex(isLive = false, isMovie = false, currentIndex = 2, episodeCount = 4))
+        assertEquals(null, AutoPlayPolicy.nextEpisodeIndex(isLive = false, isMovie = false, currentIndex = 3, episodeCount = 4))
+        assertEquals(null, AutoPlayPolicy.nextEpisodeIndex(isLive = true, isMovie = false, currentIndex = 2, episodeCount = 4))
+        assertEquals(null, AutoPlayPolicy.nextEpisodeIndex(isLive = false, isMovie = true, currentIndex = 0, episodeCount = 2))
+    }
 }

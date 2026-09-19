@@ -243,7 +243,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
         // 需求 足球#4：开赛前 10 分钟内才允许进入直播，其余情况提示；已完场提示结束
         // v1.23：后端完场状态值是 "finished"（parse_matches），旧版误查 "ended"
         // 判定从未生效——完场卡还能点进播放页再吃「未开播」报错（状态不准观感来源之一）
-        if (m.status == "finished") {
+        if (m.isFinished) {
             hint = "比赛已结束"
             return
         }
@@ -624,7 +624,7 @@ private fun LiveHeroBand(
                             )
                         } else {
                             Text(
-                                if (animatedHero.status == "upcoming") "未开赛" else "完场",
+                                if (animatedHero.isFinished) "完场" else "未开赛",
                                 color = OtvColors.White.copy(alpha = 0.85f), fontSize = 28f.sxs(s), fontWeight = FontWeight.SemiBold,
                             )
                             Spacer(Modifier.width(14f.sx(s)))
@@ -871,6 +871,15 @@ private fun GameCard(
                                 "${m.homeScore} - ${m.awayScore}",
                                 color = OtvColors.White, fontSize = 34f.sxs(s), lineHeight = 36f.sxs(s), fontWeight = FontWeight.Bold,
                             )
+                        }
+                    } else if (m.isFinished) {
+                        if (m.hasScore) {
+                            Text(
+                                "${m.homeScore} - ${m.awayScore}",
+                                color = OtvColors.White, fontSize = 34f.sxs(s), lineHeight = 36f.sxs(s), fontWeight = FontWeight.Bold,
+                            )
+                        } else {
+                            Text("完场", color = OtvColors.White60, fontSize = 30f.sxs(s), lineHeight = 32f.sxs(s), fontWeight = FontWeight.Bold)
                         }
                     } else if (m.hasScore) {
                         Text(
