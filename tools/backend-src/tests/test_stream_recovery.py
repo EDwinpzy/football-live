@@ -19,14 +19,19 @@ class Clock:
 
 class StreamCacheRecoveryTest(unittest.TestCase):
     def setUp(self):
-        self.old = (proxy.fetch_url, proxy.decrypt_page, proxy._stream_via_cloud, proxy.time)
+        self.old = (proxy.fetch_url, proxy.decrypt_page, proxy._stream_via_cloud,
+                    proxy._probe_alive, proxy.time)
         proxy.STREAM_CACHE.clear()
         proxy._stream_via_cloud = lambda *_args, **_kwargs: None
+        # v1.32 起 resolve_stream 对成功解析做交付前活性探测；缓存语义测试与
+        # 网络无关，一律按存活处理（探测行为本身由 test_stream_liveness_probe 覆盖）。
+        proxy._probe_alive = lambda *_args, **_kwargs: True
         self.clock = Clock()
         proxy.time = self.clock
 
     def tearDown(self):
-        proxy.fetch_url, proxy.decrypt_page, proxy._stream_via_cloud, proxy.time = self.old
+        (proxy.fetch_url, proxy.decrypt_page, proxy._stream_via_cloud,
+         proxy._probe_alive, proxy.time) = self.old
         proxy.STREAM_CACHE.clear()
 
     def test_missing_player_is_retried_on_next_request(self):

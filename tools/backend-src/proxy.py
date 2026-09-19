@@ -941,13 +941,15 @@ def resolve_stream(match_id, src="bb", fresh=False):
             payload["url"] = None
         # v1.22（2026-09-05 需求⑦）：qqlive 高清线是「固定频道播放器」（qqliveHD{n}.php
         # 不带比赛 id），解出的流地址常是 CDN 上已轮换/下架的旧 ls id（实测 404）。
-        # 交付前做一次清单活性探测（relay_url 自带双 Referer 策略，~0.2-1s），
-        # 死链按「未开播」语义返回（ts=0 不缓存）——前端/VM 直接换下一源，
-        # 不再把 20s 起播看门狗浪费在死地址上。bb/plu 是比赛专属频道页，不探测。
-        if payload["url"] and src.startswith("qqlive"):
+        # v1.32（2026-09-19）：交付前活性探测扩展到 bb/plu 全源——原「bb/plu 是比赛
+        # 专属频道页，不探测」在遇到「挂起型死地址」时让死链直达播放器，用户白等
+        # ~20s 起播看门狗（当日奥克兰FC 友谊赛 plu 线 lmpull.va02.com 实测，见
+        # _probe_alive 注释）。_probe_alive 短超时判死后按「未开播」语义返回
+        # （ts=0 不缓存）——前端 30s 自动重试时重新解析，站点来流后自愈；
+        # 探测自身异常 fail-open（保留地址交播放器裁决）。
+        if payload["url"]:
             try:
-                probe_st = relay_url(payload["url"], None)[0]
-                if probe_st != 200:
+                if not _probe_alive(payload["url"], None):
                     payload["url"] = None
             except Exception:
                 pass
@@ -1287,7 +1289,7 @@ _no_redirect_opener = urlreq.build_opener(_NoRedirectHandler)
 _REDIRECT_CODES = (301, 302, 303, 307, 308)
 
 
-def _open_upstream(u, headers, read_timeout, preload=True):
+def _open_upstream(u, headers, read_timeout, preload=True, connect_timeout=5):
     """打开上游 GET 连接，返回 (resp, final_url)。
 
     2026-09-04 v1.21 网页版：urllib3 2.x 自动重定向会丢 query —— IPTV 源站
@@ -1301,7 +1303,7 @@ def _open_upstream(u, headers, read_timeout, preload=True):
     while True:
         if HAS_URLLIB3:
             resp = _http.request("GET", cur, headers=headers,
-                                 timeout=urllib3.Timeout(connect=5, read=read_timeout),
+                                 timeout=urllib3.Timeout(connect=connect_timeout, read=read_timeout),
                                  preload_content=preload, redirect=False)
             if resp.status in _REDIRECT_CODES:
                 loc = resp.headers.get("Location") or ""
@@ -1324,6 +1326,45 @@ def _open_upstream(u, headers, read_timeout, preload=True):
         hops += 1
         if hops > 3 or _blocked_internal_url(cur):
             raise RuntimeError("blocked redirect chain: %s -> %s" % (u, cur))
+
+
+def _probe_alive(u, ref=None, per_try=3):
+    """流地址交付前活性探测：任一 Referer 策略在 per_try 秒内拿到 2xx/3xx + 首字节
+    → True；全部策略失败（连接/读超时、4xx/5xx、空响应）→ False。
+
+    v1.32（2026-09-19）：奥克兰FC 友谊赛 plu 线 lmpull.va02.com 是「挂起型死地址」
+    ——TCP 通、裸 GET 根路径秒回 404、一切 /sport/* 请求挂起 ~16s 后断连（本机
+    直连/Clash 代理/腾讯云 SCF 三路径一致，假签名与不存在流 id 行为相同，即边缘
+    在线、回源无推流）。relay_url 默认 12s×2 策略的探测要白等 24s+，故探测专用
+    短超时（connect/read 均 per_try，双策略最坏 6s）。只读首 4KB：「direct」型
+    大文件 URL 不会整段下载；空响应换策略再试，两策略都空也判死。"""
+    if not u or not u.startswith(("http://", "https://")):
+        return False
+    for headers in _relay_strategies(ref):
+        resp = None
+        try:
+            resp, _final = _open_upstream(u, headers, read_timeout=per_try,
+                                          preload=False, connect_timeout=per_try)
+            if not (200 <= resp.status < 400):
+                continue
+            if HAS_URLLIB3:
+                chunk = resp.read(4096, decode_content=False)
+            else:
+                chunk = resp.read(4096)
+            if chunk:
+                return True
+        except Exception:
+            continue
+        finally:
+            if resp is not None:
+                try:
+                    if HAS_URLLIB3:
+                        resp.release_conn()
+                    else:
+                        resp.close()
+                except Exception:
+                    pass
+    return False
 
 
 def relay_url(u, ref=None):
