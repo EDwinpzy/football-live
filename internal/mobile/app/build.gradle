@@ -31,9 +31,13 @@ android {
         // 与 TV 版一致的三 ABI（Chaquopy/libVLC so 需要）；移动版无 cpp 拼音解码器
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
 
-        // v1.19 版本重规划：内测/公测双 flavor 退役——只保留原公测移动一条线（命名「移动版」）。
+        // v1.19 版本重规划：内测/公测双 flavor 退役——只保留原公测移动一条线。
         // 卡密门控为正式线标配；热更新与 TV 版共用同一通道（同一后端 zip）
-        resValue 'string', 'app_name', 'My TV 移动版'
+        // 2026-09-19 老板要求：**桌面应用名不带「TV版/移动版」**，两端统一 'My TV'；
+        // 区分只保留在 APK 产物文件名（MyTV-TV版.apk / MyTV-移动版.apk，见文件末尾归档块）。
+        // 注意：两端 label 相同，故**同一台设备不要同时装 TV 版与移动版**（靠 applicationId
+        // 可以共存，但桌面会出现两个同名图标），分发时按设备类型二选一。
+        resValue 'string', 'app_name', 'My TV'
         buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'   // 正式包：卡密门禁生效（未激活/过期走激活页）
         buildConfigField 'String', 'LICENSE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/activate"'
         buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'true'

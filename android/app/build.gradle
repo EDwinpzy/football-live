@@ -32,6 +32,10 @@ android {
         // v1.19 版本重规划：内测/公测双 flavor 退役——只保留一条正式分发线（原公测版）。
         // 卡密门控/热更新为正式线标配（LICENSE_*/HOTUPDATE_* 常量原公测口径）。
         // v1.18 热更新：云端下发内嵌后端 zip，启动时静默检查+预下载，下次冷启动生效
+        // 2026-09-19 老板要求：**桌面应用名不带「TV版/移动版」**，两端统一 'My TV'；
+        // 区分只保留在 APK 产物文件名（MyTV-TV版.apk / MyTV-移动版.apk，见文件末尾归档块）。
+        // 注意：两端 label 相同，故**同一台设备不要同时装 TV 版与移动版**（靠 applicationId
+        // 可以共存，但桌面会出现两个同名图标），分发时按设备类型二选一。
         resValue 'string', 'app_name', 'My TV'
         buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'    // 正式包：卡密门禁生效（未激活/过期走激活页）
         buildConfigField 'String', 'LICENSE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/activate"'
