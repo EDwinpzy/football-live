@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My TV · 快进快退手势图标 · 精简方案 v3</title>
+<style>
+  :root{
+    --card:#1C1C21; --hair:rgba(255,255,255,.08); --w85:rgba(255,255,255,.85);
+    --w70:rgba(255,255,255,.70); --w50:rgba(255,255,255,.50); --w35:rgba(255,255,255,.35); --accent:#0A84FF;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0E0E12;color:#fff;font-family:"PingFang SC","Microsoft YaHei",-apple-system,sans-serif;padding:48px 24px 96px}
+  .wrap{max-width:1180px;margin:0 auto}
+  header h1{font-size:28px;font-weight:700}
+  header .sub{margin-top:10px;color:var(--w50);font-size:13.5px;line-height:1.8;max-width:840px}
+  header .sub b{color:var(--w70);font-weight:600}
+  header .sub code{background:rgba(255,255,255,.08);border-radius:4px;padding:1px 6px;font-size:12px;color:#9ec9ff;font-family:ui-monospace,Consolas,monospace}
+
+  .grid{margin-top:36px;display:grid;grid-template-columns:repeat(5,1fr);gap:18px}
+  .gcard{background:var(--card);border:1px solid var(--hair);border-radius:16px;overflow:hidden;position:relative}
+  .gcard.rec{border-color:rgba(10,132,255,.55);box-shadow:0 0 0 1px rgba(10,132,255,.35),0 10px 34px rgba(10,132,255,.10)}
+  .demo{height:170px;display:flex;align-items:center;justify-content:center;position:relative;
+      background:radial-gradient(120% 100% at 60% 25%, #3a4a63 0%, #20283a 50%, #12151d 100%)}
+  .demo .vignette{position:absolute;inset:0;background:radial-gradient(70% 70% at 50% 42%, rgba(0,0,0,.25), transparent 72%)}
+  .cap{padding:12px 14px 14px}
+  .cap .nm{font-size:13px;font-weight:700;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .cap .ds{margin-top:5px;font-size:11.5px;color:var(--w50);line-height:1.7}
+  .rec-badge{position:absolute;top:10px;right:10px;z-index:2;font-size:10px;font-weight:700;color:#fff;background:var(--accent);border-radius:999px;padding:3px 9px}
+  .min-badge{font-size:9.5px;font-weight:700;color:#0B0B0E;background:#fff;border-radius:5px;padding:1.5px 6px}
+
+  /* 胶囊（方案C 容器规格，全部方案共用） */
+  .capsule{display:flex;align-items:center;gap:10px;background:rgba(0,0,0,.62);border-radius:999px;
+      padding:12px 18px;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+  .capsule .t1{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.15}
+  .capsule .t2{font-size:10px;color:rgba(255,255,255,.62);margin-top:2px}
+  .capsule .only{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums}
+  .capsule .pm{font-size:12px;font-weight:600;color:rgba(255,255,255,.65);margin-right:2px}
+
+  .sec{margin-top:52px}
+  .sec-h{display:flex;align-items:baseline;gap:14px;margin-bottom:8px}
+  .sec-h .no{font-size:13px;color:var(--accent);font-weight:700;letter-spacing:1px}
+  .sec-h h2{font-size:20px;font-weight:700}
+  .sec-desc{color:var(--w50);font-size:13px;line-height:1.8;margin-bottom:20px;max-width:800px}
+  .sec-desc code{background:rgba(255,255,255,.08);border-radius:4px;padding:1px 6px;font-size:12px;color:#9ec9ff;font-family:ui-monospace,Consolas,monospace}
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--hair);border-radius:14px;overflow:hidden}
+  th,td{text-align:left;font-size:12.5px;padding:11px 16px;border-bottom:1px solid var(--hair);vertical-align:top}
+  th{color:var(--w50);font-weight:600;background:rgba(255,255,255,.03)}
+  td{color:var(--w85);line-height:1.7}
+  tr:last-child td{border-bottom:none}
+  @media (max-width:1100px){.grid{grid-template-columns:repeat(3,1fr)}}
+  @media (max-width:720px){.grid{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>快进 / 快退手势图标 · 精简方案 v3</h1>
+  <div class="sub">2026-09-19 · 精简对比页。<b>老板 18:55 终定「简 4」：无胶囊纯字形——双三角箭头 + 下方时间、仅靠投影保证可读性</b>，与 2026-09-17「去深色底」口径一致；此前「简 2」定稿标记作废，方案 C 胶囊容器不再用于快进/快退浮层（亮度/音量浮层仍保持胶囊）。</div>
+</header>
+
+<div class="grid">
+
+  <!-- 对照：现状 -->
+  <div class="gcard">
+    <div class="demo"><div class="vignette"></div>
+      <div class="capsule" style="padding:13px 20px 13px 15px">
+        <svg width="30" height="30" viewBox="0 0 60 60" fill="none">
+          <circle cx="30" cy="30" r="21" pathLength="360" stroke="#fff" stroke-width="4.4" stroke-linecap="round" stroke-dasharray="308 52" stroke-dashoffset="-296"/>
+          <path d="M44.5 9.5 L37 12 L42.5 18 Z" fill="#fff"/>
+        </svg>
+        <div><div class="t1">12:49</div><div class="t2">快进 15 秒</div></div>
+      </div>
+    </div>
+    <div class="cap">
+      <div class="nm">C0 · 现状（v2 定稿）</div>
+      <div class="ds">圆环箭头 + 时间 + 步长文案。信息最全，但元素最多、两行字。</div>
+    </div>
+  </div>
+
+  <!-- 简1 -->
+  <div class="gcard">
+    <div class="demo"><div class="vignette"></div>
+      <div class="capsule">
+        <svg width="22" height="22" viewBox="0 0 60 60" fill="#fff">
+          <path d="M10 16 L28 30 L10 44 Z"/><path d="M32 16 L50 30 L32 44 Z"/>
+        </svg>
+        <span class="only">12:49</span>
+      </div>
+    </div>
+    <div class="cap">
+      <div class="nm">简 1 · 双三角 + 单行时间</div>
+      <div class="ds">方向与目标时间一眼即得；15 秒步长是固定值，用两次就记住，不必每次都写。元素最少且自解释。</div>
+    </div>
+  </div>
+
+  <!-- 简2 -->
+  <div class="gcard">
+    <div class="demo"><div class="vignette"></div>
+      <div class="capsule">
+        <svg width="24" height="24" viewBox="0 0 60 60" fill="none">
+          <circle cx="30" cy="30" r="22" pathLength="360" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-dasharray="308 52" stroke-dashoffset="-296"/>
+          <path d="M45.5 8.5 L37 11.5 L43 17.5 Z" fill="#fff"/>
+          <text x="30" y="36" text-anchor="middle" font-size="17" font-weight="700" fill="#fff">15</text>
+        </svg>
+        <span class="only">12:49</span>
+      </div>
+    </div>
+    <div class="cap">
+      <div class="nm">简 2 · 细环 15 + 单行时间</div>
+      <div class="ds">保留步长可见（环内 15），描边从 4.4 降到 3、尺寸收缩、去掉第二行字。比现状轻，但仍是三元素。</div>
+    </div>
+  </div>
+
+  <!-- 简3 -->
+  <div class="gcard">
+    <div class="demo"><div class="vignette"></div>
+      <div class="capsule" style="padding:12px 20px">
+        <span class="pm">+15</span><span class="only">12:49</span>
+      </div>
+    </div>
+    <div class="cap">
+      <div class="nm">简 3 · 纯文字 <span class="min-badge">最极简</span></div>
+      <div class="ds">「+15 / −15」前缀 + 时间，零图标。方向还可由胶囊出现在左/右半屏天然表达。代价：扫读性最依赖文字。</div>
+    </div>
+  </div>
+
+  <!-- 简4 -->
+  <div class="gcard rec">
+    <span class="rec-badge">定稿</span>
+    <div class="demo"><div class="vignette"></div>
+      <div style="text-align:center;filter:drop-shadow(0 3px 10px rgba(0,0,0,.6))">
+        <svg width="34" height="34" viewBox="0 0 60 60" fill="#fff">
+          <path d="M10 16 L28 30 L10 44 Z"/><path d="M32 16 L50 30 L32 44 Z"/>
+        </svg>
+        <div style="margin-top:6px;font-size:13px;font-weight:600">12:49</div>
+      </div>
+    </div>
+    <div class="cap">
+      <div class="nm">简 4 · 无胶囊纯字形</div>
+      <div class="ds">连胶囊底也去掉的备用项（回到 9-17 无底色口径）。画面最干净，但与亮度/音量胶囊语言不统一，仅备查。</div>
+    </div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><span class="no">规格</span><h2>变与不变</h2></div>
+  <div class="sec-desc">四个精简方案只替换胶囊<b>内容物</b>；快退一律为图示的左右镜像。</div>
+  <table>
+    <tr><th style="width:22%">项</th><th>说明</th></tr>
+    <tr><td>不变（方案 C 已定稿）</td><td>胶囊底 <code>rgba(0,0,0,.62)</code> + 背景模糊、全圆角、投影；出现位置 = 双击侧 1/4 居中；700ms 自隐；连续双击只更新时间/方向；直播态显示「直播」</td></tr>
+    <tr><td>变（四选一）</td><td>简 1：双三角 22dp + 15sp 单行时间（推荐）；简 2：细环 24dp 环内 15 + 单行时间；简 3：「+15 / −15」+ 单行时间（零图标）；简 4：去胶囊仅字形 + 投影（备用）</td></tr>
+    <tr><td>实现量</td><td>只改 <code>PlayerScreen.kt</code> 中胶囊内容 composable 一处；手势、动画、亮度/音量浮层均不动</td></tr>
+  </table>
+</div>
+
+</div>
+</body>
+</html>

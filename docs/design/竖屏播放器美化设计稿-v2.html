@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My TV · 竖屏播放器美化设计稿 v2</title>
+<style>
+  :root{
+    --bg:#0B0B0E; --panel:#121216; --card:#1C1C21;
+    --hair:rgba(255,255,255,.08); --w100:#fff; --w85:rgba(255,255,255,.85);
+    --w70:rgba(255,255,255,.70); --w50:rgba(255,255,255,.50); --w35:rgba(255,255,255,.35);
+    --accent:#0A84FF; --chipbg:rgba(255,255,255,.14);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0E0E12;color:var(--w100);font-family:"PingFang SC","Microsoft YaHei",-apple-system,sans-serif;padding:48px 24px 96px}
+  .wrap{max-width:1180px;margin:0 auto}
+  header h1{font-size:30px;font-weight:700;letter-spacing:.5px}
+  header .sub{margin-top:10px;color:var(--w50);font-size:14px;line-height:1.8;max-width:860px}
+  header .sub b{color:var(--w70);font-weight:600}
+  .chg{display:inline-block;margin-top:12px;font-size:12px;color:#6fb4ff;background:rgba(10,132,255,.12);
+      border:1px solid rgba(10,132,255,.3);border-radius:8px;padding:6px 12px}
+  .sec{margin-top:56px}
+  .sec-h{display:flex;align-items:baseline;gap:14px;margin-bottom:8px}
+  .sec-h .no{font-size:13px;color:var(--accent);font-weight:700;letter-spacing:1px}
+  .sec-h h2{font-size:21px;font-weight:700}
+  .sec-desc{color:var(--w50);font-size:13.5px;line-height:1.8;margin-bottom:24px;max-width:800px}
+  .sec-desc em{color:var(--w70);font-style:normal}
+  .sec-desc code{background:rgba(255,255,255,.08);border-radius:4px;padding:1px 6px;font-size:12px;color:#9ec9ff;font-family:ui-monospace,Consolas,monospace}
+
+  /* ---------- 手机框 ---------- */
+  .stage{display:flex;gap:48px;flex-wrap:wrap;align-items:flex-start}
+  .phone{width:390px;border-radius:44px;background:#000;border:1px solid #2a2a30;box-shadow:0 30px 80px rgba(0,0,0,.6),inset 0 0 0 2px #151518;overflow:hidden;flex:none}
+  .statusbar{height:34px;display:flex;align-items:center;justify-content:space-between;padding:0 26px;font-size:12px;font-weight:600;background:#000}
+  .statusbar .icons{font-size:11px}
+  .video{position:relative;width:100%;aspect-ratio:16/9;background:
+      radial-gradient(120% 90% at 70% 20%, #3a4a63 0%, #232c3f 45%, #12151d 100%)}
+  .video .scrim{position:absolute;inset:0;background:
+      radial-gradient(75% 75% at 50% 35%, rgba(0,0,0,.20), transparent 70%),
+      linear-gradient(to bottom, transparent 45%, rgba(0,0,0,.55) 80%, rgba(0,0,0,.85))}
+  .v-back{position:absolute;top:12px;left:12px;width:34px;height:34px;border-radius:50%;
+      background:rgba(20,20,20,.5);border:1px solid rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center}
+  .v-bottom{position:absolute;left:16px;right:16px;bottom:10px}
+  .v-title{font-size:16px;font-weight:700;text-shadow:0 2px 12px rgba(0,0,0,.6)}
+  .v-meta{margin-top:3px;font-size:10.5px;color:var(--w85)}
+  .v-progress{margin-top:10px;display:flex;align-items:center;gap:8px}
+  .v-playbtn{width:22px;height:22px;border-radius:50%;background:rgba(20,20,20,.5);border:1px solid rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center;flex:none}
+  .v-time{font-size:10px;font-weight:600;color:rgba(255,255,255,.9);font-variant-numeric:tabular-nums}
+  .v-track{flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,.30);position:relative}
+  .v-track .fill{position:absolute;left:0;top:0;bottom:0;width:34%;border-radius:2px;background:#fff}
+  .v-track .knob{position:absolute;left:34%;top:50%;width:9px;height:9px;border-radius:50%;background:#fff;transform:translate(-50%,-50%)}
+  .v-fs{width:26px;height:26px;border-radius:8px;background:rgba(20,20,20,.5);border:1px solid rgba(255,255,255,.12);
+      display:flex;align-items:center;justify-content:center;flex:none;color:#fff}
+
+  /* ---------- 竖屏内容区（= MorePanel 平铺） ---------- */
+  .pcontent{position:relative;background:var(--bg);padding:20px 18px 30px;min-height:560px}
+  .pcontent .fade{position:absolute;left:0;right:0;bottom:0;height:70px;pointer-events:none;
+      background:linear-gradient(to bottom, transparent, rgba(11,11,14,.95))}
+  .info{display:flex;gap:14px}
+  .poster{width:72px;height:102px;border-radius:10px;flex:none;
+      background:linear-gradient(150deg,#4a5a75,#232c3f 70%);border:1px solid rgba(255,255,255,.10)}
+  .info .tt{font-size:16.5px;font-weight:700;line-height:1.35}
+  .info .mt{margin-top:5px;font-size:11px;color:var(--w50);line-height:1.7}
+  .info .ln{margin-top:5px;font-size:11px;color:var(--w35)}
+  .desc{margin-top:14px;font-size:12px;color:var(--w70);line-height:1.85}
+  .sec-label{margin-top:22px;font-size:13px;font-weight:600;color:var(--w50);letter-spacing:.5px}
+  .chiprow{margin-top:10px;display:flex;gap:9px;flex-wrap:wrap}
+  .chip2{font-size:11.5px;font-weight:600;color:#fff;background:var(--chipbg);border-radius:9px;padding:7px 12px;white-space:nowrap}
+  .chip2.on{background:var(--accent)}
+  .ep-grid{margin-top:12px;display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+  .ep-grid .ep{font-size:12px;font-weight:600;text-align:center;color:#fff;background:var(--chipbg);border-radius:9px;padding:9px 0}
+  .ep-grid .ep.on{background:var(--accent)}
+  .cast-row{margin-top:12px;display:flex;align-items:center;gap:11px;background:var(--chipbg);border-radius:11px;padding:12px 15px;font-size:12.5px}
+  .cast-row .nm{flex:1;font-weight:600}
+  .cast-row .act{font-size:11.5px;font-weight:600;color:#fff}
+  .rescan{margin-top:10px;text-align:center;font-size:11.5px;font-weight:600;color:var(--w85);
+      border:1px solid rgba(255,255,255,.20);border-radius:11px;padding:10px 0}
+
+  /* ---------- 标注 ---------- */
+  .notes{flex:1;min-width:300px;display:flex;flex-direction:column;gap:14px}
+  .note{background:var(--card);border:1px solid var(--hair);border-radius:14px;padding:16px 18px}
+  .note h3{font-size:13.5px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .note h3 .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+  .note ul{list-style:none}
+  .note li{font-size:12.5px;color:var(--w70);line-height:1.9;padding-left:14px;position:relative}
+  .note li::before{content:"";position:absolute;left:0;top:11px;width:5px;height:5px;border-radius:50%;background:var(--w35)}
+  .note li b{color:#fff;font-weight:600}
+  .note li code{background:rgba(255,255,255,.08);border-radius:4px;padding:1px 6px;font-size:11.5px;color:#9ec9ff;font-family:ui-monospace,Consolas,monospace}
+  .note li .warn{color:#ffb84d}
+
+  /* ---------- 结构表 ---------- */
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--hair);border-radius:14px;overflow:hidden}
+  th,td{text-align:left;font-size:12.5px;padding:11px 16px;border-bottom:1px solid var(--hair);vertical-align:top}
+  th{color:var(--w50);font-weight:600;background:rgba(255,255,255,.03)}
+  td{color:var(--w85);line-height:1.7}
+  td code{background:rgba(255,255,255,.08);border-radius:4px;padding:1px 7px;font-size:11.5px;color:#9ec9ff;font-family:ui-monospace,Consolas,monospace}
+  tr:last-child td{border-bottom:none}
+
+  /* ---------- 方案C 胶囊 ---------- */
+  .caps-stage{display:flex;gap:24px;flex-wrap:wrap;align-items:stretch}
+  .caps-demo{flex:1.2;min-width:340px;border-radius:16px;border:1px solid var(--hair);min-height:300px;
+      background:radial-gradient(120% 100% at 60% 25%, #3a4a63 0%, #20283a 50%, #12151d 100%);
+      display:flex;align-items:center;justify-content:center;gap:26px;position:relative;overflow:hidden}
+  .caps-demo .vignette{position:absolute;inset:0;background:radial-gradient(70% 70% at 50% 42%, rgba(0,0,0,.25), transparent 72%)}
+  .capsule{display:flex;align-items:center;gap:12px;background:rgba(0,0,0,.62);border-radius:999px;
+      padding:13px 20px 13px 15px;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+  .capsule .tx .t1{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.2}
+  .capsule .tx .t2{font-size:10.5px;color:rgba(255,255,255,.62);margin-top:2px}
+  .caps-notes{flex:1;min-width:300px;display:flex;flex-direction:column;gap:14px}
+  .mini-row{display:flex;gap:14px;align-items:center;background:rgba(0,0,0,.62);border-radius:999px;padding:10px 16px}
+  .mini-row .bar{flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,.25);position:relative}
+  .mini-row .bar i{position:absolute;left:0;top:0;bottom:0;border-radius:2px;background:#fff}
+  .mini-row span{font-size:11.5px;font-weight:600;color:rgba(255,255,255,.85)}
+  @media (max-width:900px){.caps-stage{flex-direction:column}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>My TV 移动版 · 竖屏播放器美化设计稿 v2</h1>
+  <div class="sub">2026-09-19 · 按 v1 评审意见修订：<b>①竖屏视频下方整块区域改为「更多」面板内容的平铺</b>（影片详情 / 选集 / 换源 / 倍速 / 画幅 / 投屏，与原右上角 ⋯ 抽屉内容 1:1）；<b>②快进/快退手势浮层定稿「简 4」（无胶囊纯字形，经 v3 评审终定）</b>。v1 的「控制按钮行」方案作废。</div>
+  <span class="chg">v1 → v2：播放控制回归视频浮层 + 手势，下方区域全部让给内容；v3：手势图标改定无底色纯字形</span>
+</header>
+
+<!-- ================= 1. 整机效果 ================= -->
+<div class="sec">
+  <div class="sec-h"><span class="no">01</span><h2>整机效果（390×844 竖屏）</h2></div>
+  <div class="sec-desc">上半 = 视频区（tvOS 浮层不变，仅右下新增一颗 ⛶ 全屏小钮承接竖屏进横屏）；下半 = <em>可滚动的内容区</em>，区段与现有 MorePanel 抽屉完全一致、数据与动作全部复用，上下滑动浏览。</div>
+  <div class="stage">
+    <div class="phone">
+      <div class="statusbar"><span>9:41</span><span class="icons">●●●● 5G ▮</span></div>
+      <div class="video">
+        <div class="scrim"></div>
+        <div class="v-back"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M15 5l-7 7 7 7" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="v-bottom">
+          <div class="v-title">漫长的季节 第3集</div>
+          <div class="v-meta">2023 · 中国大陆 · 剧情 / 悬疑 · 豆瓣 9.4</div>
+          <div class="v-progress">
+            <div class="v-playbtn"><svg width="8" height="8" viewBox="0 0 24 24" fill="#fff"><rect x="5" y="4" width="5" height="16" rx="1.6"/><rect x="14" y="4" width="5" height="16" rx="1.6"/></svg></div>
+            <span class="v-time">12:34</span>
+            <div class="v-track"><div class="fill"></div><div class="knob"></div></div>
+            <span class="v-time">-55:12</span>
+            <div class="v-fs"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></svg></div>
+          </div>
+        </div>
+      </div>
+      <div class="pcontent">
+        <div class="info">
+          <div class="poster"></div>
+          <div>
+            <div class="tt">漫长的季节 第3集</div>
+            <div class="mt">2023 · 中国大陆 · 剧情 / 悬疑<br>豆瓣 9.4 · 全 12 集</div>
+            <div class="ln">线路 1/5 · ExoPlayer</div>
+          </div>
+        </div>
+        <div class="desc">没落的北方工厂、一桩碎尸悬案，牵出跨越十八年的命运交织。出租司机王响、妹夫龚彪与退休警察马德胜，在时代的响指里寻找未完成的答案……</div>
+        <div class="sec-label">选择集数</div>
+        <div class="chiprow"><span class="chip2 on">第1-10集</span><span class="chip2">第11-12集</span></div>
+        <div class="ep-grid">
+          <span class="ep">1</span><span class="ep">2</span><span class="ep on">3</span><span class="ep">4</span>
+          <span class="ep">5</span><span class="ep">6</span><span class="ep">7</span><span class="ep">8</span>
+          <span class="ep">9</span><span class="ep">10</span>
+        </div>
+        <div class="sec-label">换源线路</div>
+        <div class="chiprow"><span class="chip2 on">线路1</span><span class="chip2">线路2</span><span class="chip2">线路3</span><span class="chip2">线路4</span><span class="chip2">线路5</span></div>
+        <div class="sec-label">倍速</div>
+        <div class="chiprow"><span class="chip2">0.5x</span><span class="chip2">0.75x</span><span class="chip2 on">1.0x</span><span class="chip2">1.25x</span><span class="chip2">1.5x</span><span class="chip2">2.0x</span><span class="chip2">3.0x</span></div>
+        <div class="sec-label">画幅</div>
+        <div class="chiprow"><span class="chip2 on">原始</span><span class="chip2">裁切填充</span><span class="chip2">16:9</span><span class="chip2">4:3</span></div>
+        <div class="sec-label">投屏</div>
+        <div class="cast-row">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.75)" stroke-width="2" stroke-linecap="round"><path d="M3 16.5a5.5 5.5 0 0 1 4.5 4.5M3 12a9 9 0 0 1 9 9M3 7.5A13.5 13.5 0 0 1 16.5 21"/><rect x="3" y="4" width="18" height="14" rx="2.5" stroke-dasharray="0"/></svg>
+          <span class="nm">客厅电视</span><span class="act">投屏</span>
+        </div>
+        <div class="rescan">重新扫描</div>
+        <div class="fade"></div>
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="note">
+        <h3><span class="dot"></span>布局逻辑</h3>
+        <ul>
+          <li>竖屏 = <b>上视频 + 下内容</b>两段；内容区整片可滚，滚动不触发视频区手势（各管各）</li>
+          <li>内容区<b>不再是悬浮抽屉</b>：无暗区、无关闭按钮，常显在视频下方</li>
+          <li>播放控制全部回归<em>视频浮层（点按唤出，3s 自隐）+ 手势</em>，与主流竖屏播放器一致</li>
+          <li>竖屏右上角 <b>⋯ 按钮移除</b>（内容已平铺，避免一个功能两个入口）；<em>横屏保留 ⋯ 右侧抽屉现状</em></li>
+          <li>竖屏进横屏：浮层右下新增 <b>⛶ 全屏小钮</b>（26dp）+ 重力感应自动旋转，双通道</li>
+        </ul>
+      </div>
+      <div class="note">
+        <h3><span class="dot"></span>与 MorePanel 的关系</h3>
+        <ul>
+          <li>区段、顺序、文案、chip 样式（圆角 10 / 底色 0x24FFFFFF / 选中 <code>AccentBlue</code>）<b>全部 1:1 复用</b>，视觉零新造</li>
+          <li>实现上把 MorePanel 的各区段抽成共用 composable，竖屏平铺与横屏抽屉调同一套</li>
+          <li>打开内容区即自动扫投屏设备（沿用「不用再点一次」的既有行为）</li>
+        </ul>
+      </div>
+      <div class="note">
+        <h3><span class="dot"></span>边界情形</h3>
+        <ul>
+          <li><b>电影</b>：按需求⑨不渲染选集区，其余区段照常</li>
+          <li><b>直播（电视页）</b>：下方仍是现有「信号源」横滑条，<b>不套用本设计</b></li>
+          <li>选集 ≥20 集：10 集/页分页 chip；&lt;20 集全量展示（<code>EpisodeMenuPolicy</code> 口径不变）</li>
+          <li>剧集标题带「第N集」，电影只显示片名</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 2. 区段对照表 ================= -->
+<div class="sec">
+  <div class="sec-h"><span class="no">02</span><h2>内容区区段 · 与 MorePanel 对照</h2></div>
+  <div class="sec-desc">七个区段全部来自现有抽屉，数据源与点击动作不变；仅承载容器从「右侧抽屉」变为「竖屏下方平铺」。</div>
+  <table>
+    <tr><th style="width:14%">区段</th><th style="width:40%">内容</th><th>复用的数据 / 动作</th></tr>
+    <tr><td><b>影片信息</b></td><td>海报 72×102（圆角 10）+ 标题（≤2 行）+ meta + 豆瓣分/集数 + 线路 x/N · 引擎名</td><td><code>ui.posterUrl / title / meta / lines / activeLine / engineName</code></td></tr>
+    <tr><td><b>简介</b></td><td>正文 ≤4 行，12sp White70，超出省略</td><td><code>ui.desc</code></td></tr>
+    <tr><td><b>选择集数</b></td><td>分页 chip（≥20 集）+ 4 列集数网格，当前集 AccentBlue</td><td><code>EpisodeMenuPolicy.visibleRange</code> · <code>onPickEpisode</code></td></tr>
+    <tr><td><b>换源线路</b></td><td>横滚 chip 条（线路数 &gt;1 才显示）</td><td><code>vm.switchLine(idx)</code></td></tr>
+    <tr><td><b>倍速</b></td><td>0.5 / 0.75 / 1.0 / 1.25 / 1.5 / 2.0 / 3.0 x</td><td><code>vm.setSpeed(sp)</code> · <code>SPEED_STEPS</code></td></tr>
+    <tr><td><b>画幅</b></td><td>原始 / 裁切填充 / 16:9 / 4:3</td><td><code>vm.setAspect(ordinal)</code> · <code>AspectMode</code></td></tr>
+    <tr><td><b>投屏</b></td><td>投屏中设备（置顶断开）/ 设备列表 / 重新扫描描边钮；空态文案三态（扫描中/报错/未发现）</td><td><code>vm.scanCastDevices / startCast / stopCast</code></td></tr>
+  </table>
+</div>
+
+<!-- ================= 3. 方案C 定稿 ================= -->
+<div class="sec">
+  <div class="sec-h"><span class="no">03</span><h2>快进 / 快退手势浮层 · 定稿「简 4」无底色纯字形</h2></div>
+  <div class="sec-desc">双三角箭头 + 下方目标时间，<em>无底、无边框，仅靠柔和投影保证可读性</em>——回归 2026-09-17「Apple 极简风、去深色底」口径，与视频区 tvOS 浮层语言一致。图标形态经 v3 评审由老板终定（方案 C 胶囊及「简 2」均作废）。</div>
+  <div class="caps-stage">
+    <div class="caps-demo">
+      <div class="vignette"></div>
+      <div style="text-align:center;filter:drop-shadow(0 3px 10px rgba(0,0,0,.6))">
+        <svg width="40" height="40" viewBox="0 0 60 60" fill="#fff">
+          <path d="M50 16 L32 30 L50 44 Z"/><path d="M28 16 L10 30 L28 44 Z"/>
+        </svg>
+        <div style="margin-top:8px;font-size:14px;font-weight:600">12:19</div>
+      </div>
+      <div style="text-align:center;filter:drop-shadow(0 3px 10px rgba(0,0,0,.6))">
+        <svg width="40" height="40" viewBox="0 0 60 60" fill="#fff">
+          <path d="M10 16 L28 30 L10 44 Z"/><path d="M32 16 L50 30 L32 44 Z"/>
+        </svg>
+        <div style="margin-top:8px;font-size:14px;font-weight:600">12:49</div>
+      </div>
+    </div>
+    <div class="caps-notes">
+      <div class="note">
+        <h3><span class="dot"></span>纯字形规格</h3>
+        <ul>
+          <li><b>无底、无边框</b>：不加任何底色/胶囊/毛玻璃</li>
+          <li>字形：双三角 <b>40dp</b> 纯白，快退为左右镜像；整体投影 <code>0 3px 10px rgba(0,0,0,.6)</code></li>
+          <li>时间：<b>14sp SemiBold 等宽数字</b>，位于字形下方 8dp，同投影</li>
+          <li>位置与动画不变：双击侧 1/4 居中，700ms 自隐；连续双击只更新时间与方向</li>
+          <li>直播态时间位置显示「直播」不变</li>
+        </ul>
+      </div>
+      <div class="note">
+        <h3><span class="dot"></span>三类手势浮层语言</h3>
+        <ul>
+          <li>单击滑动类（亮度 / 音量 / 横滑进度）：保持现有<b>毛玻璃胶囊</b>，仅补图标（见下示意）</li>
+          <li>双击快进退：<b>无底色纯字形</b>（本稿定稿）——瞬时反馈不给画面加盖任何东西</li>
+          <li style="list-style:none;padding-left:0">
+            <div class="mini-row">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5 5l1.8 1.8M17.2 17.2L19 19M19 5l-1.8 1.8M6.8 17.2L5 19"/></svg>
+              <div class="bar"><i style="width:62%"></i></div><span>62%</span>
+            </div>
+          </li>
+          <li style="list-style:none;padding-left:0;margin-top:2px">
+            <div class="mini-row">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5H4z" fill="#fff" stroke="none"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6M18 6.6a7.6 7.6 0 0 1 0 10.8"/></svg>
+              <div class="bar"><i style="width:40%"></i></div><span>40%</span>
+            </div>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 4. 变化点与落地 ================= -->
+<div class="sec" style="margin-bottom:0">
+  <div class="sec-h"><span class="no">04</span><h2>变化点与落地影响</h2></div>
+  <table>
+    <tr><th style="width:26%">项</th><th>说明</th></tr>
+    <tr><td>v1 作废部分</td><td>「↺15 ｜ 白圆主钮 ｜ 15↻」控制行、「选集」chip、手势提示行全部废弃；竖屏不再放常驻播放按钮</td></tr>
+    <tr><td>改动文件</td><td><code>PortraitPlayerControls.kt</code> 重写为竖屏内容区（区段与 MorePanel 抽共用）；<code>PlayerScreen.kt</code> 竖屏 ⋯ 入口移除 + 浮层右下加全屏小钮 + <code>SeekDirectionGlyph</code> 处换成方案 C 胶囊</td></tr>
+    <tr><td>testTag 迁移</td><td><code>PlayerSeek / PlayerPlayPause</code> 迁至视频浮层进度行/播放钮；<code>PlayerFullscreen</code> 挂到新的 ⛶ 小钮；<code>PlayerMore</code> 竖屏废弃、横屏保留。已核实 <code>tools/</code> 下无脚本引用这四个 tag，迁移零成本</td></tr>
+    <tr><td>落地状态（2026-09-19）</td><td>App 移动版已实现：<code>PlayerMoreSections.kt</code>（新增共用区段）+ <code>PlayerScreen.kt</code>（竖屏平铺/⋯移除/全屏小钮/简 4 手势字形）+ <code>PortraitPlayerControls.kt</code> 删除，编译通过；<b>网页版已同步</b>：<code>www/app.js</code>（竖屏平铺+简 4 手势指示）/ <code>index.html</code> / <code>style.css</code>，语法与 12 项 www 契约测试通过；TV 版不涉及（无竖屏）</td></tr>
+    <tr><td>不动的部分</td><td>手势体系（双击 ±10s / 横滑 / 亮度音量）、MorePanel 横屏抽屉、直播信号源条、续播/看门狗/投屏逻辑；TV 版与后端零改动</td></tr>
+  </table>
+</div>
+
+</div>
+</body>
+</html>

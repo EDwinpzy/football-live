@@ -12,7 +12,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
@@ -29,9 +28,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.LocalTextStyle
@@ -50,7 +46,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -58,11 +53,12 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -75,13 +71,12 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
-import coil.compose.AsyncImage
 import com.qiubo.optimaltv.Graph
 import com.qiubo.optimaltv.data.model.formatTime
 import com.qiubo.optimaltv.playback.EnginePlayState
 import com.qiubo.optimaltv.ui.components.AppleLoading
+import com.qiubo.optimaltv.ui.components.MobileUiTags
 import com.qiubo.optimaltv.ui.components.OtvHint
-import com.qiubo.optimaltv.ui.components.PortraitPlayerControls
 import com.qiubo.optimaltv.ui.components.tapCard
 import com.qiubo.optimaltv.ui.detail.simpleFactory
 import com.qiubo.optimaltv.ui.theme.AccentBlue
@@ -434,25 +429,31 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
     } // Column
 }
 
-/** 竖屏播放器操作区（需求12⑥⑦）：标题/meta + 进度条（点按 seek）+ 播放/全屏/更多。
- *  全屏 = 请求横屏（沉浸全屏播放器即系统级全屏），退出本页自动恢复方向跟随。 */
+/** 竖屏播放器内容区（2026-09-19 v2 设计稿定稿）：视频下方常驻 =「更多」区段平铺
+ *  （影片信息/简介/选集/换源/倍速/画幅/投屏，与横屏抽屉同源 PlayerMoreSections）。
+ *  播放控制全部回归视频浮层 + 手势；竖屏进横屏走浮层右下全屏小钮（VodPlayerOverlay）。 */
 @Composable
 private fun PortraitPlayerPanel(ui: PlayerUiState, vm: PlayerViewModel) {
-    val activity = LocalContext.current as Activity
-    PortraitPlayerControls(
-        title = ui.title,
-        meta = ui.meta,
-        positionMs = ui.positionMs,
-        durationMs = ui.durationMs,
-        isLive = ui.isLive,
-        isPlaying = ui.isPlaying,
-        onSeek = vm::seekTo,
-        onTogglePlay = vm::togglePlay,
-        onFullscreen = {
-            activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        },
-        onMore = { vm.setPanel(Panel.MORE) },
-    )
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(OtvColors.Bg)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 18.dp, vertical = 16.dp),
+    ) {
+        PlayerMoreSections(
+            ui = ui,
+            onPickEpisode = { vm.switchEpisode(it) },
+            onSwitchLine = vm::switchLine,
+            onSetSpeed = vm::setSpeed,
+            onSetAspect = vm::setAspect,
+            onStartCast = vm::startCast,
+            onStopCast = { vm.stopCast(resumeLocal = true) },
+            onRescanCast = { vm.scanCastDevices() },
+            posterWidth = 72.dp,
+            posterHeight = 102.dp,
+        )
+    }
 }
 
 /**
@@ -472,13 +473,13 @@ private fun GestureIndicator(
     if (seekPreviewMs == null && vbKind == null) return
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         if (seekPreviewMs != null) {
-            /* 无底色：只用白色描边图标 + 时间，靠投影保证在浅色画面上也能看清 */
+            /* 简 4 定稿（2026-09-19 v3 评审）：无底色双三角纯字形 + 下方时间，仅靠投影保证可读性 */
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                SeekDirectionGlyph(forward = seekDir >= 0, size = 88.dp)
-                Spacer(Modifier.height(16.dp))
+                SeekTrianglesGlyph(forward = seekDir >= 0, size = 40.dp)
+                Spacer(Modifier.height(8.dp))
                 Text(
                     formatTime(seekPreviewMs),
-                    color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.SemiBold,
+                    color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
                     style = with(LocalDensity.current) {
                         LocalTextStyle.current.copy(
                             shadow = Shadow(color = Color(0x99000000), blurRadius = 20f, offset = Offset(0f, 3f)),
@@ -493,11 +494,17 @@ private fun GestureIndicator(
                     .background(Color(0xB3000000), RoundedCornerShape(18.dp))
                     .padding(horizontal = 28.dp, vertical = 20.dp),
             ) {
-                Text(
-                    if (vbKind == "brightness") "亮度" else "音量",
-                    color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium,
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.padding(bottom = 10.dp),
-                )
+                ) {
+                    if (vbKind == "brightness") SunGlyph(18.dp, Color.White) else SpeakerGlyph(18.dp, Color.White)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        if (vbKind == "brightness") "亮度" else "音量",
+                        color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium,
+                    )
+                }
                 Box(
                     Modifier
                         .width(180.dp)
@@ -517,50 +524,106 @@ private fun GestureIndicator(
 }
 
 /**
- * Apple 风格「快进 / 快退」圆箭头（SF Symbols `goforward` / `gobackward` 同款）：
- * 白描边圆环缺口开在正上方，收口处一个实心箭头沿圆周切向指向前进方向，完全无底色。
- *
- * 屏幕坐标角度：0°=右、90°=下、270°=上。forward 走顺时针（330°→260°），
- * backward 水平镜像（210°→280°），两者箭头都落在正上方、分别朝右 / 朝左。
+ * 快进/快退「双三角」纯字形（2026-09-19 v3 评审终定「简 4」：无底色，仅投影——
+ * 回归 9-17「Apple 极简风、去深色底」口径）。先画一层黑色偏移底当投影，再画白色字形；
+ * forward 朝右，backward 为水平镜像。
  */
 @Composable
-private fun SeekDirectionGlyph(forward: Boolean, size: Dp) {
+private fun SeekTrianglesGlyph(forward: Boolean, size: Dp) {
+    Canvas(Modifier.size(size)) {
+        val w = this.size.width
+        val h = this.size.height
+        val s = if (forward) 1f else -1f
+        // 以画布中心为原点的水平镜像映射：s=-1 时所有 x 左右翻转
+        fun x(frac: Float) = w / 2f + s * (frac - 0.5f) * w
+        fun tri(cx: Float): Path = Path().apply {
+            moveTo(x(cx - 0.15f), h * 0.20f)
+            lineTo(x(cx + 0.15f), h * 0.50f)
+            lineTo(x(cx - 0.15f), h * 0.80f)
+            close()
+        }
+        val shadow = Color(0x73000000)
+        translate(top = h * 0.06f) {
+            drawPath(tri(0.33f), shadow)
+            drawPath(tri(0.63f), shadow)
+        }
+        drawPath(tri(0.33f), Color.White)
+        drawPath(tri(0.63f), Color.White)
+    }
+}
+
+/** 太阳（亮度）小图标：实心圆 + 八束光芒 */
+@Composable
+private fun SunGlyph(size: Dp, color: Color) {
     Canvas(Modifier.size(size)) {
         val s = this.size.minDimension
-        val stroke = s * 0.075f
-        val radius = s / 2f - stroke / 2f - s * 0.05f
-        val center = Offset(this.size.width / 2f, this.size.height / 2f)
-
-        fun at(deg: Float, r: Float = radius): Offset {
-            val rad = Math.toRadians(deg.toDouble())
-            return Offset(center.x + r * kotlin.math.cos(rad).toFloat(),
-                          center.y + r * kotlin.math.sin(rad).toFloat())
+        val c = Offset(this.size.width / 2f, this.size.height / 2f)
+        drawCircle(color, radius = s * 0.18f, center = c)
+        val r0 = s * 0.30f
+        val r1 = s * 0.44f
+        for (i in 0 until 8) {
+            val a = Math.toRadians(i * 45.0)
+            val cos = kotlin.math.cos(a).toFloat()
+            val sin = kotlin.math.sin(a).toFloat()
+            drawLine(
+                color,
+                Offset(c.x + r0 * cos, c.y + r0 * sin),
+                Offset(c.x + r1 * cos, c.y + r1 * sin),
+                strokeWidth = s * 0.07f, cap = StrokeCap.Round,
+            )
         }
+    }
+}
 
-        val dir = if (forward) 1f else -1f
+/** 扬声器（音量）小图标：实心喇叭 + 两道声波弧 */
+@Composable
+private fun SpeakerGlyph(size: Dp, color: Color) {
+    Canvas(Modifier.size(size)) {
+        val w = this.size.width
+        val h = this.size.height
+        val body = Path().apply {
+            moveTo(w * 0.14f, h * 0.38f)
+            lineTo(w * 0.34f, h * 0.38f)
+            lineTo(w * 0.56f, h * 0.18f)
+            lineTo(w * 0.56f, h * 0.82f)
+            lineTo(w * 0.34f, h * 0.62f)
+            lineTo(w * 0.14f, h * 0.62f)
+            close()
+        }
+        drawPath(body, color)
         drawArc(
-            color = Color.White,
-            startAngle = if (forward) 330f else 210f,
-            sweepAngle = 290f * dir,
-            useCenter = false,
-            topLeft = Offset(center.x - radius, center.y - radius),
-            size = androidx.compose.ui.geometry.Size(radius * 2f, radius * 2f),
-            style = Stroke(width = stroke, cap = StrokeCap.Round),
+            color = color, startAngle = -55f, sweepAngle = 110f, useCenter = false,
+            topLeft = Offset(w * 0.48f, h * 0.30f),
+            size = androidx.compose.ui.geometry.Size(w * 0.36f, h * 0.40f),
+            style = Stroke(width = w * 0.07f, cap = StrokeCap.Round),
         )
-        // 箭头：底边钉在圆弧收口处（270° - 10°·dir），尖端再往前 24° 沿切向
-        val arcEnd = 270f - 10f * dir
-        val tip = at(arcEnd + 24f * dir)
-        val baseA = at(arcEnd, radius + stroke * 1.7f)
-        val baseB = at(arcEnd, radius - stroke * 1.7f)
-        drawPath(
-            Path().apply {
-                moveTo(tip.x, tip.y)
-                lineTo(baseA.x, baseA.y)
-                lineTo(baseB.x, baseB.y)
-                close()
-            },
-            Color.White,
+        drawArc(
+            color = color, startAngle = -55f, sweepAngle = 110f, useCenter = false,
+            topLeft = Offset(w * 0.42f, h * 0.16f),
+            size = androidx.compose.ui.geometry.Size(w * 0.56f, h * 0.68f),
+            style = Stroke(width = w * 0.07f, cap = StrokeCap.Round), alpha = 0.7f,
         )
+    }
+}
+
+/** 全屏小图标：四角向外 */
+@Composable
+private fun FullscreenGlyph(color: Color, size: Dp) {
+    Canvas(Modifier.size(size)) {
+        val w = this.size.width
+        val h = this.size.height
+        val s = this.size.minDimension
+        val stroke = s * 0.11f
+        val arm = s * 0.30f
+        val m = s * 0.08f
+        fun corner(cx: Float, cy: Float, dx: Float, dy: Float) {
+            drawLine(color, Offset(cx + dx * arm, cy), Offset(cx, cy), strokeWidth = stroke, cap = StrokeCap.Round)
+            drawLine(color, Offset(cx, cy + dy * arm), Offset(cx, cy), strokeWidth = stroke, cap = StrokeCap.Round)
+        }
+        corner(m, m, 1f, 1f)
+        corner(w - m, m, -1f, 1f)
+        corner(m, h - m, 1f, -1f)
+        corner(w - m, h - m, -1f, -1f)
     }
 }
 
@@ -576,6 +639,10 @@ private fun LiveSourcePicker(
     onTick: () -> Unit,
 ) {
     val ps = rememberUiScale()
+    // 竖屏直播不渲染常驻操作区（v2），全屏入口挪进信号源条右端
+    val portrait = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+        android.content.res.Configuration.ORIENTATION_PORTRAIT
+    val activity = LocalContext.current as? Activity
     if (!ui.srcPickerVisible) return
 
     Column(
@@ -613,6 +680,14 @@ private fun LiveSourcePicker(
                     )
                 }
             }
+            // 竖屏全屏小钮（替代原常驻操作区的「全屏播放」文字钮）
+            if (portrait) {
+                CircleButton(size = 30.dp, onClick = {
+                    activity?.requestedOrientation =
+                        android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    onTick()
+                }) { c -> FullscreenGlyph(color = c, size = 14.dp) }
+            }
         }
     }
 }
@@ -629,6 +704,11 @@ private fun VodPlayerOverlay(
     onTick: () -> Unit,
 ) {
     val ps = rememberUiScale()
+    // 2026-09-19 v2 定稿：竖屏视频下方已平铺「更多」全部区段，浮层不再放 ⋯；
+    // 竖屏进横屏 = 进度行右端全屏小钮（保留原「请求横屏」语义）
+    val portrait = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+        android.content.res.Configuration.ORIENTATION_PORTRAIT
+    val activity = LocalContext.current as? Activity
     // v1.21 投屏：进度镜像改渲染器上报值；投屏中横幅。
     // 2026-09-17 用户要求：投屏入口从画面左上角挪到「更多」面板里（放在「画幅」下面），
     // 可用设备直接列在入口下方，不再弹独立底部 sheet。
@@ -661,13 +741,17 @@ private fun VodPlayerOverlay(
         }
     Box(Modifier.fillMaxSize()) {
         if (ui.controlsVisible && ui.fatalMsg == null) {
-            // 「更多」钮（需求 影视#5）：右上角，TV 版 1:1 位置与尺寸
-            Box(
+            // 「更多」钮（需求 影视#5）：右上角，TV 版 1:1 位置与尺寸；仅横屏（竖屏内容已平铺）
+            if (!portrait) Box(
                 Modifier
                     .align(Alignment.TopEnd)
                     .padding(end = 80f.sx(ps), top = 90f.sx(ps)),
             ) {
-                CircleButton(size = 52.dp, onClick = { vm.setPanel(Panel.MORE); onTick() }) { c ->
+                CircleButton(
+                    size = 52.dp,
+                    modifier = Modifier.testTag(MobileUiTags.PlayerMore),
+                    onClick = { vm.setPanel(Panel.MORE); onTick() },
+                ) { c ->
                     Canvas(Modifier.size(30.dp)) {
                         val r = 2.6f
                         val gap = 10f
@@ -710,7 +794,11 @@ private fun VodPlayerOverlay(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     // 播放/暂停（进度条前面）
-                    CircleButton(size = 30.dp, onClick = { vm.togglePlay(); onTick() }) { c ->
+                    CircleButton(
+                        size = 30.dp,
+                        modifier = Modifier.testTag(MobileUiTags.PlayerPlayPause),
+                        onClick = { vm.togglePlay(); onTick() },
+                    ) { c ->
                         PlayPauseIcon(playing = ui.isPlaying, iconColor = c, iconSize = 13.dp)
                     }
                     Spacer(Modifier.width(24f.sx(ps)))
@@ -722,6 +810,7 @@ private fun VodPlayerOverlay(
                     Box(
                         Modifier
                             .weight(1f)
+                            .testTag(MobileUiTags.PlayerSeek)
                             .padding(horizontal = 28.dp)
                             .pointerInput(durMs) {
                                 detectTapGestures(
@@ -771,6 +860,19 @@ private fun VodPlayerOverlay(
                         "-" + formatTime((durMs - posMs).coerceAtLeast(0)),
                         color = Color(0xE6FFFFFF), fontSize = 24f.sxs(ps), fontWeight = FontWeight.SemiBold,
                     )
+                    // 竖屏全屏小钮（v2 定稿：替代原常驻操作区的「全屏播放」文字钮）
+                    if (portrait) {
+                        Spacer(Modifier.width(24f.sx(ps)))
+                        CircleButton(
+                            size = 26.dp,
+                            modifier = Modifier.testTag(MobileUiTags.PlayerFullscreen),
+                            onClick = {
+                                activity?.requestedOrientation =
+                                    android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                onTick()
+                            },
+                        ) { c -> FullscreenGlyph(color = c, size = 12.dp) }
+                    }
                 }
             }
         } else if (ui.playState == EnginePlayState.IDLE && ui.fatalMsg == null) {
@@ -796,8 +898,6 @@ private fun MorePanel(
     onDismiss: () -> Unit,
     onPickEpisode: (Int) -> Unit,
 ) {
-    // 打开面板即扫一次局域网，设备自动列在「投屏」下方（用户要求：不用再点一次才出列表）
-    LaunchedEffect(Unit) { vm.scanCastDevices() }
     Box(Modifier.fillMaxSize()) {
         // 全屏暗区：视觉压暗视频；点暗区关闭浮窗（对应 TV 版 BACK 关闭）
         Box(
@@ -810,9 +910,9 @@ private fun MorePanel(
             Modifier
                 .align(Alignment.CenterEnd)
                 .width(with(androidx.compose.ui.platform.LocalConfiguration.current) {
-    if (orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT)
-        (screenWidthDp * 0.92f).dp else 560.dp
-})
+                    if (orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT)
+                        (screenWidthDp * 0.92f).dp else 560.dp
+                })
                 .fillMaxHeight()
                 .background(
                     Color(0xE9121216),
@@ -821,281 +921,19 @@ private fun MorePanel(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 34.dp, vertical = 28.dp),
         ) {
-            // 影片信息
-            Row(verticalAlignment = Alignment.Top) {
-                if (ui.posterUrl.isNotBlank()) {
-                    AsyncImage(
-                        model = ui.posterUrl,
-                        contentDescription = ui.title,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .width(96.dp)
-                            .height(136.dp)
-                            .clip(RoundedCornerShape(10.dp)),
-                    )
-                    Spacer(Modifier.width(18.dp))
-                }
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        ui.title.ifBlank { "影片" },
-                        color = TextPrimary, style = MaterialTheme.typography.titleMedium,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    )
-                    if (ui.meta.isNotBlank()) {
-                        Spacer(Modifier.height(6.dp))
-                        Text(ui.meta, color = TextPrimary.copy(alpha = 0.6f), style = MaterialTheme.typography.bodySmall, maxLines = 2)
-                    }
-                    if (ui.lines.isNotEmpty()) {
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            "线路${ui.activeLine + 1}/${ui.lines.size} · ${ui.engineName}",
-                            color = TextPrimary.copy(alpha = 0.5f), style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
-            }
-            if (ui.desc.isNotBlank()) {
-                Spacer(Modifier.height(14.dp))
-                Text(
-                    ui.desc, color = TextPrimary.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall,
-                    maxLines = 4, overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Spacer(Modifier.height(20.dp))
-            // 选集（需求⑨修订：电影不显示选集区，电视剧/动漫/短剧保留；
-            // ≥20 集按 10 集/页 + 分页 chip；<20 集全量展示）
-            if (!ui.isMovie && ui.epCount > 1) {
-                SectionLabel("选择集数")
-                val pageSize = EpisodeMenuPolicy.RANGE_SIZE
-                val pageCount = (ui.epCount + pageSize - 1) / pageSize
-                var page by remember(ui.epIndex / pageSize) { mutableIntStateOf(ui.epIndex / pageSize) }
-                if (EpisodeMenuPolicy.hasRanges(ui.epCount)) Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier
-                        .padding(bottom = 10.dp)
-                        .horizontalScroll(rememberScrollState()),
-                ) {
-                    for (p in 0 until pageCount) {
-                        val from = p * pageSize + 1
-                        val to = minOf((p + 1) * pageSize, ui.epCount)
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(10.dp))
-                                .tapCard { page = p }
-                                .background(
-                                    if (p == page) AccentBlue else Color(0x24FFFFFF),
-                                    RoundedCornerShape(10.dp),
-                                )
-                                .padding(horizontal = 14.dp, vertical = 8.dp),
-                        ) {
-                            Text("第$from-${to}集", color = Color.White, style = MaterialTheme.typography.labelMedium)
-                        }
-                    }
-                }
-                // 2026-09-19 集数不全修复：展示范围收口到 EpisodeMenuPolicy.visibleRange
-                //（<20 集全量；旧版 11~19 集落在无 chip 的第 2 页，前 10 集够不着；TV 版同修）
-                val pageEps = EpisodeMenuPolicy.visibleRange(ui.epCount, page)
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(4),
-                    modifier = Modifier.height(((pageEps.count() + 3) / 4 * 52).dp),
-                ) {
-                    items(pageEps.toList()) { i ->
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .padding(4.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .tapCard { onPickEpisode(i) }
-                                .background(
-                                    if (i == ui.epIndex) AccentBlue else Color(0x24FFFFFF),
-                                    RoundedCornerShape(10.dp),
-                                )
-                                .padding(vertical = 10.dp),
-                        ) {
-                            Text(
-                                EpisodeMenuPolicy.episodeLabel(i),
-                                color = Color.White, style = MaterialTheme.typography.labelMedium,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(18.dp))
-            }
-            // 换源（horizontalScroll：14+ 条线路不裁切）
-            if (ui.lines.size > 1) {
-                SectionLabel("换源线路")
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                ) {
-                    ui.lines.forEachIndexed { idx, line ->
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(10.dp))
-                                .tapCard { vm.switchLine(idx) }
-                                .background(
-                                    if (idx == ui.activeLine) AccentBlue else Color(0x24FFFFFF),
-                                    RoundedCornerShape(10.dp),
-                                )
-                                .padding(horizontal = 14.dp, vertical = 9.dp),
-                        ) {
-                            Text(line.label, color = Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1)
-                        }
-                    }
-                }
-                Spacer(Modifier.height(18.dp))
-            }
-            // 倍速
-            SectionLabel("倍速")
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                PlayerViewModel.SPEED_STEPS.forEach { sp ->
-                    val active = kotlin.math.abs(sp - ui.speed) < 0.01f
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .tapCard { vm.setSpeed(sp) }
-                            .background(
-                                if (active) AccentBlue else Color(0x24FFFFFF),
-                                RoundedCornerShape(10.dp),
-                            )
-                            .padding(horizontal = 12.dp, vertical = 9.dp),
-                    ) {
-                        Text("%.1fx".format(sp), color = Color.White, style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-            }
-            Spacer(Modifier.height(18.dp))
-            // 画幅
-            SectionLabel("画幅")
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                com.qiubo.optimaltv.data.prefs.AspectMode.entries.forEach { mode ->
-                    val active = mode.ordinal == ui.aspectOrdinal
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .tapCard { vm.setAspect(mode.ordinal) }
-                            .background(
-                                if (active) AccentBlue else Color(0x24FFFFFF),
-                                RoundedCornerShape(10.dp),
-                            )
-                            .padding(horizontal = 12.dp, vertical = 9.dp),
-                    ) {
-                        Text(mode.label, color = Color.White, style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-            }
-            Spacer(Modifier.height(18.dp))
-            // 投屏（2026-09-17 用户要求）：入口挪到「画幅」下面，可投屏设备自动列在下方，
-            // 不再需要先点一次按钮才出列表、也不弹独立底部 sheet。
-            SectionLabel("投屏")
-            val otherCastDevices = ui.castDevices.filter { it.uuid != ui.castDevice?.uuid }
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                // 投屏中设备：置顶显示断开
-                ui.castDevice?.let { dev ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0x240A84FF))
-                            .clickable { vm.stopCast(resumeLocal = true) }
-                            .padding(horizontal = 18.dp, vertical = 14.dp),
-                    ) {
-                        CastGlyph(24.dp, AccentBlue)
-                        Spacer(Modifier.width(12.dp))
-                        Text(
-                            "正在投屏 · ${dev.name}", color = AccentBlue, modifier = Modifier.weight(1f),
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        )
-                        Text("断开", color = TextPrimary.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-                otherCastDevices.forEach { dev ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0x24FFFFFF))
-                            .clickable { vm.startCast(dev) }
-                            .padding(horizontal = 18.dp, vertical = 14.dp),
-                    ) {
-                        CastGlyph(24.dp, TextPrimary.copy(alpha = 0.7f))
-                        Spacer(Modifier.width(12.dp))
-                        Text(
-                            dev.name, color = TextPrimary, modifier = Modifier.weight(1f),
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        )
-                        Text("投屏", color = Color.White, style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-                if (otherCastDevices.isEmpty() && ui.castDevice == null) {
-                    val castHint = ui.castError
-                    Text(
-                        when {
-                            ui.castScanning -> "正在扫描局域网…"
-                            castHint != null -> castHint
-                            else -> "未发现设备（电视需与本机同一 Wi-Fi）"
-                        },
-                        color = if (castHint != null && !ui.castScanning) Color(0xFFFFB84D)
-                                else TextPrimary.copy(alpha = 0.55f),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                Row(
-                    horizontalArrangement = Arrangement.Center,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .border(0.5.dp, Color(0x33FFFFFF), RoundedCornerShape(12.dp))
-                        .clickable { vm.scanCastDevices() }
-                        .padding(horizontal = 18.dp, vertical = 12.dp),
-                ) {
-                    Text("重新扫描", color = TextPrimary.copy(alpha = 0.8f), style = MaterialTheme.typography.labelMedium)
-                }
-            }
-            Spacer(Modifier.height(28.dp))
+            // 区段与竖屏视频下方内容区同源（PlayerMoreSections，2026-09-19 v2 定稿）：
+            // 影片信息/简介/选集/换源/倍速/画幅/投屏；打开即自动扫投屏设备（区段内 LaunchedEffect）
+            PlayerMoreSections(
+                ui = ui,
+                onPickEpisode = onPickEpisode,
+                onSwitchLine = vm::switchLine,
+                onSetSpeed = vm::setSpeed,
+                onSetAspect = vm::setAspect,
+                onStartCast = vm::startCast,
+                onStopCast = { vm.stopCast(resumeLocal = true) },
+                onRescanCast = { vm.scanCastDevices() },
+            )
         }
-    }
-}
-
-@Composable
-private fun SectionLabel(text: String) {
-    Text(
-        text, color = TextPrimary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold,
-        modifier = Modifier.padding(bottom = 10.dp),
-    )
-}
-
-/** 标准 DLNA 投屏图标（Cast 风格：双波纹 + 实心屏角）——投屏胶囊/状态卡共用 */
-@Composable
-private fun CastGlyph(size: Dp, color: Color) {
-    Canvas(Modifier.size(size)) {
-        val s = this.size.width
-        drawArc(
-            color = color,
-            startAngle = 200f, sweepAngle = 100f, useCenter = false,
-            topLeft = Offset(s * 0.08f, s * 0.30f),
-            size = androidx.compose.ui.geometry.Size(s * 0.84f, s * 0.84f),
-            style = Stroke(width = s * 0.09f, cap = StrokeCap.Round),
-        )
-        drawArc(
-            color = color,
-            startAngle = 200f, sweepAngle = 100f, useCenter = false,
-            topLeft = Offset(s * 0.24f, s * 0.46f),
-            size = androidx.compose.ui.geometry.Size(s * 0.52f, s * 0.52f),
-            style = Stroke(width = s * 0.09f, cap = StrokeCap.Round),
-        )
-        drawRoundRect(
-            color = color,
-            topLeft = Offset(s * 0.42f, s * 0.66f),
-            size = androidx.compose.ui.geometry.Size(s * 0.18f, s * 0.24f),
-            cornerRadius = CornerRadius(s * 0.05f),
-        )
     }
 }
 
@@ -1103,12 +941,13 @@ private fun CastGlyph(size: Dp, color: Color) {
 @Composable
 private fun CircleButton(
     size: Dp = 56.dp,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit,
     content: @Composable (iconColor: Color) -> Unit,
 ) {
     Box(
         contentAlignment = Alignment.Center,
-        modifier = Modifier
+        modifier = modifier
             .size(size)
             .clip(CircleShape)
             .tapCard(onClick)

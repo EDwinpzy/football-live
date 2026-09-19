@@ -3,18 +3,18 @@ package com.qiubo.optimaltv.mobileui
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTouchInput
 import com.qiubo.optimaltv.data.model.Episode
+import com.qiubo.optimaltv.data.model.LineInfo
 import com.qiubo.optimaltv.data.model.VodItem
 import com.qiubo.optimaltv.ui.components.DetailActionButton
 import com.qiubo.optimaltv.ui.components.MobileUiTags
-import com.qiubo.optimaltv.ui.components.PortraitPlayerControls
 import com.qiubo.optimaltv.ui.detail.shouldShowEpisodePicker
+import com.qiubo.optimaltv.ui.player.PlayerMoreSections
+import com.qiubo.optimaltv.ui.player.PlayerUiState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -65,62 +65,80 @@ class MobileDetailPlayerComponentsTest {
         assertTrue(shouldShowEpisodePicker(series))
     }
 
+    /** 竖屏内容区（2026-09-19 v2：「更多」区段平铺）——选集/换源/倍速/画幅点击全走回调，
+     *  打开即自动触发一次投屏扫描。 */
     @Test
-    fun portraitPlayerControlsDispatchPlayFullscreenMoreAndSeek() {
-        var play = 0
-        var fullscreen = 0
-        var more = 0
-        var seekTo = -1L
+    fun portraitMoreSectionsDispatchEpisodeLineSpeedAspect() {
+        var ep = -1
+        var line = -1
+        var speed = 0f
+        var aspect = -1
+        var rescan = 0
+        val ui = PlayerUiState(
+            title = "自动化测试影片",
+            meta = "2025 / 中国 / 剧情",
+            desc = "简介",
+            epCount = 12,
+            epIndex = 2,
+            isMovie = false,
+            lines = listOf(LineInfo("a", "线路A", ""), LineInfo("b", "线路B", "")),
+            activeLine = 0,
+            engineName = "ExoPlayer",
+            speed = 1.0f,
+            aspectOrdinal = 0,
+        )
         MobileUiHarness.scene = {
-            PortraitPlayerControls(
-                title = "自动化测试影片",
-                meta = "2025 / 中国 / 剧情",
-                positionMs = 2_000,
-                durationMs = 10_000,
-                isLive = false,
-                isPlaying = true,
-                onSeek = { seekTo = it },
-                onTogglePlay = { play++ },
-                onFullscreen = { fullscreen++ },
-                onMore = { more++ },
+            PlayerMoreSections(
+                ui = ui,
+                onPickEpisode = { ep = it },
+                onSwitchLine = { line = it },
+                onSetSpeed = { speed = it },
+                onSetAspect = { aspect = it },
+                onStartCast = {},
+                onStopCast = {},
+                onRescanCast = { rescan++ },
             )
         }
         rule.waitForIdle()
 
-        rule.onNodeWithText("暂停").assertExists()
-        rule.onNodeWithText("-0:08").assertExists()
-        rule.onNodeWithTag(MobileUiTags.PlayerSeek).performTouchInput { click(center) }
-        rule.onNodeWithTag(MobileUiTags.PlayerPlayPause).performClick()
-        rule.onNodeWithTag(MobileUiTags.PlayerFullscreen).performClick()
-        rule.onNodeWithTag(MobileUiTags.PlayerMore).performClick()
+        rule.onNodeWithText("选择集数").assertExists()
+        rule.onNodeWithText("5").performClick()
+        rule.onNodeWithText("线路B").performClick()
+        rule.onNodeWithText("1.5x").performClick()
+        rule.onNodeWithText("4:3").performClick()
         rule.runOnIdle {
-            assertTrue("点击进度条中点应定位到约 5 秒", seekTo in 4_900L..5_100L)
-            assertEquals(1, play)
-            assertEquals(1, fullscreen)
-            assertEquals(1, more)
+            assertEquals(4, ep)
+            assertEquals(1, line)
+            assertEquals(1.5f, speed, 0.001f)
+            assertEquals(3, aspect)
+            assertTrue("打开区段应自动扫描投屏设备", rescan >= 1)
         }
     }
 
+    /** 电影不渲染选集区（需求⑨），直播不渲染倍速区。 */
     @Test
-    fun livePortraitControlsHideMoreAndShowLiveLabel() {
+    fun moreSectionsHideEpisodePickerForMovieAndSpeedForLive() {
         MobileUiHarness.scene = {
-            PortraitPlayerControls("CCTV-5", "", 0, 0, true, true, {}, {}, {}, {})
+            PlayerMoreSections(
+                ui = PlayerUiState(title = "电影", isMovie = true, epCount = 1, speed = 1.0f),
+                onPickEpisode = {}, onSwitchLine = {}, onSetSpeed = {}, onSetAspect = {},
+                onStartCast = {}, onStopCast = {}, onRescanCast = {},
+            )
         }
         rule.waitForIdle()
+        rule.onNodeWithText("选择集数").assertDoesNotExist()
+        rule.onNodeWithText("倍速").assertExists()
+        rule.onNodeWithText("画幅").assertExists()
 
-        rule.onNodeWithText("直播", useUnmergedTree = true).assertExists()
-        rule.onNodeWithTag(MobileUiTags.PlayerMore).assertDoesNotExist()
-    }
-
-    @Test
-    fun zeroDurationNeverProducesInvalidSeek() {
-        var seekTo = -1L
         MobileUiHarness.scene = {
-            PortraitPlayerControls("冷启动", "", 0, 0, false, false, { seekTo = it }, {}, {}, {})
+            PlayerMoreSections(
+                ui = PlayerUiState(title = "CCTV-5", isLive = true, speed = 1.0f),
+                onPickEpisode = {}, onSwitchLine = {}, onSetSpeed = {}, onSetAspect = {},
+                onStartCast = {}, onStopCast = {}, onRescanCast = {},
+            )
         }
         rule.waitForIdle()
-
-        rule.onNodeWithTag(MobileUiTags.PlayerSeek).performTouchInput { click(center) }
-        rule.runOnIdle { assertEquals(-1L, seekTo) }
+        rule.onNodeWithText("倍速").assertDoesNotExist()
+        rule.onNodeWithText("画幅").assertExists()
     }
 }

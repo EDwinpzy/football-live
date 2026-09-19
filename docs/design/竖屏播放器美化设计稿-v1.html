@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My TV · 竖屏播放器美化设计稿 v1</title>
+<style>
+  :root{
+    --bg:#0B0B0E; --panel:#131316; --panel2:#18181C; --card:#1C1C21;
+    --hair:rgba(255,255,255,.08); --w100:#fff; --w85:rgba(255,255,255,.85);
+    --w70:rgba(255,255,255,.70); --w50:rgba(255,255,255,.50); --w35:rgba(255,255,255,.35);
+    --accent:#0A84FF; --green:#30D158; --red:#FF453A;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0E0E12;color:var(--w100);font-family:"PingFang SC","Microsoft YaHei",-apple-system,sans-serif;padding:48px 24px 96px}
+  .wrap{max-width:1180px;margin:0 auto}
+  header h1{font-size:30px;font-weight:700;letter-spacing:.5px}
+  header .sub{margin-top:10px;color:var(--w50);font-size:14px}
+  header .sub b{color:var(--w70);font-weight:600}
+  .sec{margin-top:56px}
+  .sec-h{display:flex;align-items:baseline;gap:14px;margin-bottom:8px}
+  .sec-h .no{font-size:13px;color:var(--accent);font-weight:700;letter-spacing:1px}
+  .sec-h h2{font-size:21px;font-weight:700}
+  .sec-desc{color:var(--w50);font-size:13.5px;line-height:1.8;margin-bottom:24px;max-width:760px}
+  .sec-desc em{color:var(--w70);font-style:normal}
+
+  /* ---------- 手机框 ---------- */
+  .stage{display:flex;gap:48px;flex-wrap:wrap;align-items:flex-start}
+  .phone{width:390px;border-radius:44px;background:#000;border:1px solid #2a2a30;box-shadow:0 30px 80px rgba(0,0,0,.6),inset 0 0 0 2px #151518;overflow:hidden;flex:none}
+  .statusbar{height:34px;display:flex;align-items:center;justify-content:space-between;padding:0 26px;font-size:12px;font-weight:600;color:#fff;background:#000}
+  .statusbar .icons{display:flex;gap:6px;align-items:center;color:#fff;font-size:11px}
+  /* 视频区 */
+  .video{position:relative;width:100%;aspect-ratio:16/9;background:
+      radial-gradient(120% 90% at 70% 20%, #3a4a63 0%, #232c3f 45%, #12151d 100%)}
+  .video .scrim{position:absolute;inset:0;background:
+      radial-gradient(75% 75% at 50% 35%, rgba(0,0,0,.20), transparent 70%),
+      linear-gradient(to bottom, transparent 45%, rgba(0,0,0,.55) 80%, rgba(0,0,0,.85))}
+  .v-back{position:absolute;top:12px;left:12px;width:34px;height:34px;border-radius:50%;
+      background:rgba(20,20,20,.5);border:1px solid rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center}
+  .v-more{position:absolute;top:12px;right:14px;width:34px;height:34px;border-radius:50%;
+      background:rgba(20,20,20,.5);border:1px solid rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center}
+  .v-bottom{position:absolute;left:16px;right:16px;bottom:10px}
+  .v-title{font-size:16px;font-weight:700;text-shadow:0 2px 12px rgba(0,0,0,.6)}
+  .v-meta{margin-top:3px;font-size:10.5px;color:var(--w85)}
+  .v-progress{margin-top:10px;display:flex;align-items:center;gap:8px}
+  .v-playbtn{width:22px;height:22px;border-radius:50%;background:rgba(20,20,20,.5);border:1px solid rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center;flex:none}
+  .v-time{font-size:10px;font-weight:600;color:rgba(255,255,255,.9);font-variant-numeric:tabular-nums}
+  .v-track{flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,.30);position:relative}
+  .v-track .fill{position:absolute;left:0;top:0;bottom:0;width:34%;border-radius:2px;background:#fff}
+  .v-track .knob{position:absolute;left:34%;top:50%;width:9px;height:9px;border-radius:50%;background:#fff;transform:translate(-50%,-50%)}
+  /* 竖屏操作区（新设计） */
+  .ppanel{position:relative;background:var(--panel);border-radius:20px 20px 0 0;margin-top:-14px;
+      border-top:1px solid var(--hair);padding:18px 18px 26px;min-height:540px}
+  .grab{width:36px;height:4px;border-radius:2px;background:rgba(255,255,255,.18);margin:0 auto 14px}
+  .info{display:flex;gap:12px;align-items:center}
+  .poster{width:46px;height:64px;border-radius:8px;flex:none;
+      background:linear-gradient(150deg,#4a5a75,#232c3f 70%);border:1px solid rgba(255,255,255,.10)}
+  .info .tt{font-size:16.5px;font-weight:700}
+  .info .mt{margin-top:4px;font-size:11.5px;color:var(--w50)}
+  .info .sp{flex:1}
+  .chip{flex:none;font-size:11.5px;font-weight:600;color:var(--w85);border:1px solid var(--hair);
+      background:rgba(255,255,255,.06);border-radius:999px;padding:7px 13px}
+  .prog{margin-top:18px;display:flex;align-items:center;gap:10px}
+  .prog .t{font-size:11.5px;font-weight:600;color:var(--w70);font-variant-numeric:tabular-nums;width:40px}
+  .prog .t.r{text-align:right}
+  .ptrack{flex:1;height:22px;display:flex;align-items:center;position:relative}
+  .ptrack .rail{position:absolute;left:0;right:0;height:4px;border-radius:2px;background:rgba(255,255,255,.22)}
+  .ptrack .buf{position:absolute;left:0;height:4px;border-radius:2px;background:rgba(255,255,255,.38);width:46%}
+  .ptrack .fill{position:absolute;left:0;height:4px;border-radius:2px;background:#fff;width:34%}
+  .ptrack .knob{position:absolute;left:34%;top:50%;width:13px;height:13px;border-radius:50%;background:#fff;
+      transform:translate(-50%,-50%);box-shadow:0 1px 6px rgba(0,0,0,.55)}
+  .ctrl{margin-top:20px;display:flex;align-items:center}
+  .ctrl .mid{flex:1;display:flex;align-items:center;justify-content:center;gap:34px}
+  .ibtn{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--w85)}
+  .ibtn.ghost{background:rgba(255,255,255,.07);border:1px solid var(--hair)}
+  .play-main{width:58px;height:58px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;
+      box-shadow:0 4px 18px rgba(0,0,0,.45)}
+  .ctrl .side{width:44px;display:flex;justify-content:center}
+  .hint-row{margin-top:22px;display:flex;justify-content:center;gap:8px;font-size:10.5px;color:var(--w35)}
+
+  /* ---------- 标注 ---------- */
+  .notes{flex:1;min-width:300px;display:flex;flex-direction:column;gap:14px}
+  .note{background:var(--card);border:1px solid var(--hair);border-radius:14px;padding:16px 18px}
+  .note h3{font-size:13.5px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .note h3 .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+  .note ul{list-style:none}
+  .note li{font-size:12.5px;color:var(--w70);line-height:1.9;padding-left:14px;position:relative}
+  .note li::before{content:"";position:absolute;left:0;top:11px;width:5px;height:5px;border-radius:50%;background:var(--w35)}
+  .note li b{color:#fff;font-weight:600}
+  .note li code{background:rgba(255,255,255,.08);border-radius:4px;padding:1px 6px;font-size:11.5px;color:#9ec9ff;font-family:ui-monospace,Consolas,monospace}
+
+  /* ---------- 新旧对比 ---------- */
+  .compare{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+  .cmp-card{background:var(--card);border:1px solid var(--hair);border-radius:16px;overflow:hidden}
+  .cmp-card .cap{padding:12px 16px;font-size:12.5px;font-weight:700;border-bottom:1px solid var(--hair);display:flex;align-items:center;gap:8px}
+  .cmp-card .cap .tag{font-size:10px;font-weight:700;border-radius:5px;padding:2px 7px}
+  .tag.old{background:rgba(255,255,255,.10);color:var(--w70)}
+  .tag.new{background:rgba(10,132,255,.18);color:#6fb4ff}
+  .cmp-body{padding:22px 18px 26px;background:var(--panel)}
+  .old-btn{display:inline-block;font-size:12px;font-weight:600;border-radius:10px;padding:9px 18px}
+  .old-btn.p{background:#fff;color:#0B0B0E}
+  .old-btn.n{background:rgba(255,255,255,.16);color:#fff}
+
+  /* ---------- 手势方案 ---------- */
+  .gest-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:20px}
+  .gest-card{background:var(--card);border:1px solid var(--hair);border-radius:16px;overflow:hidden;position:relative}
+  .gest-card.rec{border-color:rgba(10,132,255,.55);box-shadow:0 0 0 1px rgba(10,132,255,.35),0 10px 34px rgba(10,132,255,.10)}
+  .gest-demo{height:190px;display:flex;align-items:center;justify-content:center;position:relative;
+      background:radial-gradient(120% 100% at 60% 25%, #3a4a63 0%, #20283a 50%, #12151d 100%)}
+  .gest-cap{padding:12px 14px 14px}
+  .gest-cap .nm{font-size:13px;font-weight:700;display:flex;align-items:center;gap:7px}
+  .gest-cap .ds{margin-top:5px;font-size:11.5px;color:var(--w50);line-height:1.7}
+  .rec-badge{position:absolute;top:10px;right:10px;z-index:2;font-size:10px;font-weight:700;color:#fff;
+      background:var(--accent);border-radius:999px;padding:3px 9px}
+  .capsule{display:flex;align-items:center;gap:9px;background:rgba(0,0,0,.62);border-radius:999px;padding:10px 16px}
+
+  /* ---------- token 表 ---------- */
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--hair);border-radius:14px;overflow:hidden}
+  th,td{text-align:left;font-size:12.5px;padding:11px 16px;border-bottom:1px solid var(--hair)}
+  th{color:var(--w50);font-weight:600;background:rgba(255,255,255,.03)}
+  td{color:var(--w85)}
+  td code{background:rgba(255,255,255,.08);border-radius:4px;padding:1px 7px;font-size:11.5px;color:#9ec9ff;font-family:ui-monospace,Consolas,monospace}
+  tr:last-child td{border-bottom:none}
+  .sw{display:inline-block;width:13px;height:13px;border-radius:4px;vertical-align:-2px;margin-right:8px;border:1px solid rgba(255,255,255,.15)}
+  @media (max-width:900px){.compare,.gest-grid{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>My TV 移动版 · 竖屏播放器美化设计稿</h1>
+  <div class="sub">v1 · 2026-09-19 · 范围：<b>竖屏常驻操作区</b>（PortraitPlayerControls）+<b>手势快进/快退浮层图标</b>（SeekDirectionGlyph）· 仅视觉与布局，不改动手势/换源/续播等既有逻辑</div>
+</header>
+
+<!-- ================= 1. 整机效果 ================= -->
+<div class="sec">
+  <div class="sec-h"><span class="no">01</span><h2>整机效果（390×844 竖屏）</h2></div>
+  <div class="sec-desc">视频区浮层保持 tvOS 同款不动；美化集中在<em>视频下方的常驻操作区</em>：卡片式上浮衔接、信息行带海报、进度条带常驻拖柄、文字按钮全部图标化、播放主按钮加大居中。</div>
+  <div class="stage">
+    <div class="phone">
+      <div class="statusbar"><span>9:41</span><span class="icons">●●●● 5G ▮</span></div>
+      <div class="video">
+        <div class="scrim"></div>
+        <div class="v-back"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M15 5l-7 7 7 7" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="v-more"><svg width="15" height="15" viewBox="0 0 24 24" fill="#fff"><circle cx="12" cy="5" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="12" cy="19" r="1.9"/></svg></div>
+        <div class="v-bottom">
+          <div class="v-title">漫长的季节 第3集</div>
+          <div class="v-meta">2023 · 中国大陆 · 剧情 / 悬疑 · 豆瓣 9.4</div>
+          <div class="v-progress">
+            <div class="v-playbtn"><svg width="8" height="8" viewBox="0 0 24 24" fill="#fff"><rect x="5" y="4" width="5" height="16" rx="1.6"/><rect x="14" y="4" width="5" height="16" rx="1.6"/></svg></div>
+            <span class="v-time">12:34</span>
+            <div class="v-track"><div class="fill"></div><div class="knob"></div></div>
+            <span class="v-time">-55:12</span>
+          </div>
+        </div>
+      </div>
+      <!-- 新操作区 -->
+      <div class="ppanel">
+        <div class="grab"></div>
+        <div class="info">
+          <div class="poster"></div>
+          <div>
+            <div class="tt">漫长的季节 第3集</div>
+            <div class="mt">剧情 / 悬疑 · 全 12 集 · 线路 1/5</div>
+          </div>
+          <div class="sp"></div>
+          <div class="chip">选集</div>
+        </div>
+        <div class="prog">
+          <span class="t">12:34</span>
+          <div class="ptrack">
+            <div class="rail"></div><div class="buf"></div><div class="fill"></div><div class="knob"></div>
+          </div>
+          <span class="t r">-55:12</span>
+        </div>
+        <div class="ctrl">
+          <div class="side">
+            <div class="ibtn ghost" title="更多">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
+            </div>
+          </div>
+          <div class="mid">
+            <div class="ibtn" title="快退 15 秒">
+              <svg width="30" height="30" viewBox="0 0 60 60" fill="none">
+                <circle cx="30" cy="30" r="21" pathLength="360" stroke="#fff" stroke-width="4.2" stroke-linecap="round" stroke-dasharray="308 52" stroke-dashoffset="-296" transform="scale(-1,1) translate(-60,0)"/>
+                <path d="M15.5 9.5 L23 12 L17.5 18 Z" fill="#fff"/>
+                <text x="30" y="36.5" text-anchor="middle" font-size="17" font-weight="700" fill="#fff" font-family="inherit">15</text>
+              </svg>
+            </div>
+            <div class="play-main" title="播放 / 暂停">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="#0B0B0E"><rect x="5" y="4" width="5" height="16" rx="1.8"/><rect x="14" y="4" width="5" height="16" rx="1.8"/></svg>
+            </div>
+            <div class="ibtn" title="快进 15 秒">
+              <svg width="30" height="30" viewBox="0 0 60 60" fill="none">
+                <circle cx="30" cy="30" r="21" pathLength="360" stroke="#fff" stroke-width="4.2" stroke-linecap="round" stroke-dasharray="308 52" stroke-dashoffset="-296"/>
+                <path d="M44.5 9.5 L37 12 L42.5 18 Z" fill="#fff"/>
+                <text x="30" y="36.5" text-anchor="middle" font-size="17" font-weight="700" fill="#fff" font-family="inherit">15</text>
+              </svg>
+            </div>
+          </div>
+          <div class="side">
+            <div class="ibtn ghost" title="全屏">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></svg>
+            </div>
+          </div>
+        </div>
+        <div class="hint-row"><span>双击画面 ±15s</span><span>·</span><span>横滑快进</span><span>·</span><span>左滑亮度 / 右滑音量</span></div>
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="note">
+        <h3><span class="dot"></span>衔接与信息区</h3>
+        <ul>
+          <li>面板<b>上移 14dp 叠住视频底缘</b>，顶部 20dp 圆角 + 1px 发丝线（<code>rgba(255,255,255,.08)</code>），纯黑视频区与面板不再生硬对接</li>
+          <li>面板底色 <code>#131316</code>（比全局 Bg 亮半档的 elevated surface）</li>
+          <li>信息行：<b>46×64 海报</b>（圆角 8）+ 标题 17sp Bold + 次行 12sp White50（类型 / 集数 / 线路）</li>
+          <li>右端「选集」chip → 打开既有 MorePanel 选集区，<b>不新增面板</b></li>
+        </ul>
+      </div>
+      <div class="note">
+        <h3><span class="dot"></span>进度行</h3>
+        <ul>
+          <li>轨道 4px 三层：底色 22% 白 → <b>缓冲层 38% 白</b> → 已播纯白</li>
+          <li><b>13px 常驻白色拖柄</b>（带投影），点按/拖动 seek 逻辑不变，触控热区仍 26dp</li>
+          <li>时间 12sp SemiBold 等宽数字，左已播 / 右剩余（直播态右侧仍显示「直播」）</li>
+        </ul>
+      </div>
+      <div class="note">
+        <h3><span class="dot"></span>控制行</h3>
+        <ul>
+          <li>中间主区：<b>↺15 ｜ ⏸ 58dp 白圆主钮 ｜ 15↻</b>，间距 34dp；±15s 复用既有 <code>vm.seekBy(SEEK_STEP_MS)</code></li>
+          <li>主钮：58dp 白圆 + 黑色播放/暂停字形，投影 <code>0 4px 18px rgba(0,0,0,.45)</code></li>
+          <li>左右两端 44dp 幽灵图标钮：<b>⋯ 更多</b>（左）与 <b>⛶ 全屏</b>（右），替代原三个文字按钮</li>
+          <li>底部 11sp White35 手势提示行，降低新手学习成本</li>
+        </ul>
+      </div>
+      <div class="note">
+        <h3><span class="dot"></span>不动的部分</h3>
+        <ul>
+          <li>视频区内 tvOS 浮层（标题/meta/进度行/更多钮）、手势体系、MorePanel、直播信号源条</li>
+          <li>断点续播、看门狗换线、投屏等所有播放逻辑零改动</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 2. 新旧对比 ================= -->
+<div class="sec">
+  <div class="sec-h"><span class="no">02</span><h2>操作区新旧对比</h2></div>
+  <div class="sec-desc">现状是「标题 + 细进度条 + 三个文字按钮」的功能主义排布；新设计把它收敛为<em>信息 → 进度 → 控制</em>三段式，主操作（播放/快进快退）视觉权重最大，次要操作（更多/全屏）退到两端图标位。</div>
+  <div class="compare">
+    <div class="cmp-card">
+      <div class="cap"><span class="tag old">现状</span>文字按钮版</div>
+      <div class="cmp-body">
+        <div style="font-size:15px;font-weight:700">漫长的季节 第3集</div>
+        <div style="margin-top:5px;font-size:11px;color:var(--w50)">2023 · 中国大陆 · 剧情 / 悬疑</div>
+        <div style="margin-top:14px;display:flex;align-items:center;gap:9px">
+          <span style="font-size:11px;color:var(--w70)">12:34</span>
+          <div style="flex:1;height:5px;border-radius:3px;background:rgba(255,255,255,.25);position:relative">
+            <div style="position:absolute;left:0;top:0;bottom:0;width:34%;border-radius:3px;background:#fff"></div>
+          </div>
+          <span style="font-size:11px;color:var(--w70)">-55:12</span>
+        </div>
+        <div style="margin-top:16px;display:flex;gap:10px;align-items:center">
+          <span class="old-btn n">暂停</span>
+          <span class="old-btn p">全屏播放</span>
+          <span style="flex:1"></span>
+          <span class="old-btn n">更多</span>
+        </div>
+      </div>
+    </div>
+    <div class="cmp-card">
+      <div class="cap"><span class="tag new">新设计</span>图标主钮版</div>
+      <div class="cmp-body" style="border-radius:14px;border:1px solid var(--hair)">
+        <div style="display:flex;gap:10px;align-items:center">
+          <div style="width:34px;height:48px;border-radius:6px;background:linear-gradient(150deg,#4a5a75,#232c3f 70%)"></div>
+          <div>
+            <div style="font-size:13.5px;font-weight:700">漫长的季节 第3集</div>
+            <div style="margin-top:3px;font-size:10px;color:var(--w50)">剧情 / 悬疑 · 全 12 集 · 线路 1/5</div>
+          </div>
+          <div style="flex:1"></div>
+          <div class="chip" style="font-size:10px;padding:5px 10px">选集</div>
+        </div>
+        <div style="margin-top:13px;display:flex;align-items:center;gap:8px">
+          <span style="font-size:10px;color:var(--w70)">12:34</span>
+          <div class="ptrack" style="height:16px">
+            <div class="rail" style="height:3px"></div><div class="buf" style="height:3px"></div><div class="fill" style="height:3px"></div>
+            <div class="knob" style="width:10px;height:10px"></div>
+          </div>
+          <span style="font-size:10px;color:var(--w70)">-55:12</span>
+        </div>
+        <div style="margin-top:14px;display:flex;align-items:center;justify-content:center;gap:24px;position:relative">
+          <div style="position:absolute;left:0" class="ibtn ghost">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
+          </div>
+          <svg width="26" height="26" viewBox="0 0 60 60" fill="none"><circle cx="30" cy="30" r="21" pathLength="360" stroke="#fff" stroke-width="4.2" stroke-linecap="round" stroke-dasharray="308 52" stroke-dashoffset="-296" transform="scale(-1,1) translate(-60,0)"/><path d="M15.5 9.5 L23 12 L17.5 18 Z" fill="#fff"/><text x="30" y="36.5" text-anchor="middle" font-size="17" font-weight="700" fill="#fff">15</text></svg>
+          <div class="play-main" style="width:44px;height:44px"><svg width="16" height="16" viewBox="0 0 24 24" fill="#0B0B0E"><rect x="5" y="4" width="5" height="16" rx="1.8"/><rect x="14" y="4" width="5" height="16" rx="1.8"/></svg></div>
+          <svg width="26" height="26" viewBox="0 0 60 60" fill="none"><circle cx="30" cy="30" r="21" pathLength="360" stroke="#fff" stroke-width="4.2" stroke-linecap="round" stroke-dasharray="308 52" stroke-dashoffset="-296"/><path d="M44.5 9.5 L37 12 L42.5 18 Z" fill="#fff"/><text x="30" y="36.5" text-anchor="middle" font-size="17" font-weight="700" fill="#fff">15</text></svg>
+          <div style="position:absolute;right:0" class="ibtn ghost">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></svg>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 3. 手势图标 ================= -->
+<div class="sec">
+  <div class="sec-h"><span class="no">03</span><h2>快进 / 快退手势浮层图标 · 四个方案</h2></div>
+  <div class="sec-desc">约束前提：2026-09-17 已定「Apple 极简风、<em>去掉深色底</em>」，仅靠白色描边 + 柔和投影保证可读性。方案 C 带底色，仅作对比列出；<em>推荐方案 A</em>——保留无底色极简，环内「15」让步长一目了然，是 Infuse / YouTube 验证过的成熟形态。</div>
+  <div class="gest-grid">
+
+    <div class="gest-card">
+      <div class="gest-demo">
+        <div style="text-align:center">
+          <svg width="76" height="76" viewBox="0 0 120 120" fill="none">
+            <circle cx="60" cy="60" r="46" pathLength="360" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-dasharray="308 52" stroke-dashoffset="-296"/>
+            <path d="M96 18 L82 24 L93 36 Z" fill="#fff"/>
+          </svg>
+          <div style="margin-top:10px;font-size:15px;font-weight:600;text-shadow:0 2px 10px rgba(0,0,0,.6)">25:47</div>
+        </div>
+      </div>
+      <div class="gest-cap">
+        <div class="nm">现状（基线）</div>
+        <div class="ds">SF Symbols 风描边圆环箭头 + 下方目标时间。语义只靠箭头方向，步长不可见。</div>
+      </div>
+    </div>
+
+    <div class="gest-card rec">
+      <span class="rec-badge">推荐</span>
+      <div class="gest-demo">
+        <div style="text-align:center">
+          <svg width="88" height="88" viewBox="0 0 120 120" fill="none" style="filter:drop-shadow(0 3px 10px rgba(0,0,0,.55))">
+            <circle cx="60" cy="60" r="46" pathLength="360" stroke="#fff" stroke-width="6.4" stroke-linecap="round" stroke-dasharray="308 52" stroke-dashoffset="-296"/>
+            <path d="M96 18 L82 24 L93 36 Z" fill="#fff"/>
+            <text x="60" y="71" text-anchor="middle" font-size="30" font-weight="700" fill="#fff">15</text>
+          </svg>
+          <div style="margin-top:8px;font-size:13px;font-weight:600;color:var(--w85);text-shadow:0 2px 10px rgba(0,0,0,.6)">25:47</div>
+        </div>
+      </div>
+      <div class="gest-cap">
+        <div class="nm">方案 A · 环内数字</div>
+        <div class="ds">圆环 + 环内「15」，时间缩小跟随。无底色、信息量大、改动小：现有 SeekDirectionGlyph 只加一个居中文本。</div>
+      </div>
+    </div>
+
+    <div class="gest-card">
+      <div class="gest-demo">
+        <div style="text-align:center">
+          <svg width="92" height="66" viewBox="0 0 120 86" fill="none" style="filter:drop-shadow(0 3px 10px rgba(0,0,0,.55))">
+            <path d="M52 14 L22 43 L52 72 Z" fill="#fff"/>
+            <path d="M92 14 L62 43 L92 72 Z" fill="#fff"/>
+            <path d="M104 10 A44 44 0 0 1 108 76" stroke="#fff" stroke-width="5" stroke-linecap="round" opacity=".45"/>
+          </svg>
+          <div style="margin-top:8px;font-size:13px;font-weight:600;color:var(--w85);text-shadow:0 2px 10px rgba(0,0,0,.6)">-15s · 25:47</div>
+        </div>
+      </div>
+      <div class="gest-cap">
+        <div class="nm">方案 B · 双三角</div>
+        <div class="ds">双三角方向感最强（遥控器语义），弧线点缀呼应圆环语言；但无数字时步长仍要靠下方文字。</div>
+      </div>
+    </div>
+
+    <div class="gest-card">
+      <div class="gest-demo">
+        <div class="capsule">
+          <svg width="34" height="34" viewBox="0 0 60 60" fill="none">
+            <circle cx="30" cy="30" r="21" pathLength="360" stroke="#fff" stroke-width="4.4" stroke-linecap="round" stroke-dasharray="308 52" stroke-dashoffset="-296"/>
+            <path d="M44.5 9.5 L37 12 L42.5 18 Z" fill="#fff"/>
+          </svg>
+          <span style="font-size:13.5px;font-weight:600">快进 15 秒</span>
+        </div>
+      </div>
+      <div class="gest-cap">
+        <div class="nm">方案 C · 毛玻璃胶囊（对比）</div>
+        <div class="ds">与亮度/音量浮层同语言、文字最直白；但带深色底，<b>与 9-17「去深色底」要求冲突</b>，仅备选项。</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 4. 配套微调 + token ================= -->
+<div class="sec">
+  <div class="sec-h"><span class="no">04</span><h2>配套微调与设计 Token</h2></div>
+  <div class="sec-desc">亮度/音量浮层保持毛玻璃胶囊，仅补图标（太阳 / 扬声器）并把圆角统一为 16dp；以下 token 与现有 <code>OtvColors</code> 对齐，无新增色板。</div>
+  <table>
+    <tr><th>Token</th><th>值</th><th>用途</th></tr>
+    <tr><td><code>PanelSurface</code></td><td><span class="sw" style="background:#131316"></span>#131316</td><td>竖屏操作区底色（elevated surface，比 Bg 亮半档）</td></tr>
+    <tr><td><code>Hairline</code></td><td>rgba(255,255,255,.08)</td><td>面板顶部分隔线 / chip 与幽灵钮描边</td></tr>
+    <tr><td><code>TrackRail / Buffer / Fill</code></td><td>白 22% / 38% / 100%</td><td>进度条三层（电视/网页端同口径）</td></tr>
+    <tr><td><code>KnobSize</code></td><td>13dp（触控热区 ≥26dp 不变）</td><td>进度拖柄，常驻显示</td></tr>
+    <tr><td><code>PlayMainSize</code></td><td>58dp 白圆 / 字形 22dp 黑</td><td>播放暂停主按钮</td></tr>
+    <tr><td><code>IconBtnSize</code></td><td>44dp（字形 20dp，White85）</td><td>更多 / 全屏幽灵钮；快进退钮同尺寸无底</td></tr>
+    <tr><td><code>GlyphRing</code></td><td>描边 6.4% 直径 · 圆头 · 缺口 52° 居顶</td><td>方案 A 圆环 + 环内 15（30% 直径 Bold）</td></tr>
+    <tr><td><code>Radius</code></td><td>面板顶 20dp / 海报 8dp / chip 全圆角 / 浮层 16dp</td><td>圆角体系</td></tr>
+  </table>
+</div>
+
+<div class="sec" style="margin-bottom:0">
+  <div class="sec-h"><span class="no">05</span><h2>落地影响面</h2></div>
+  <div class="sec-desc" style="margin-bottom:0">
+    只动两个文件：<code>ui/components/PortraitPlayerControls.kt</code>（操作区重写为新布局）与 <code>ui/player/PlayerScreen.kt::SeekDirectionGlyph</code>（环内加「15」文本，方案 A）。
+    快进退按钮接既有 <code>vm.seekBy(±SEEK_STEP_MS)</code>；「选集」chip 接既有 <code>vm.setPanel(Panel.MORE)</code>。
+    自动化回归用到的 <code>MobileUiTags.PlayerSeek / PlayerPlayPause / PlayerFullscreen / PlayerMore</code> 四个 testTag 全部保留原位语义，回归脚本不用改。
+  </div>
+</div>
+
+</div>
+</body>
+</html>
