@@ -2695,9 +2695,12 @@ function renderMorePanel() {
     $$("#mpEpPages .epp").forEach(b => b.addEventListener("click", () => {
       mpApplyEpisode(+b.dataset.p * pageSize); renderDetailEps(); startPlayFromCtx();
     }));
-    const pageEps = eps.slice(page * pageSize, (page + 1) * pageSize);
+    /* 2026-09-19 集数不全修复：与详情页同口径——<20 集不分页全量展示
+       （旧版 11~19 集按 10 分页落在第 2 页，但分页 chip 要 ≥20 才渲染，
+       前 10 集永远点不到；App 两端同款已同修） */
+    const pageEps = eps.length >= 20 ? eps.slice(page * pageSize, (page + 1) * pageSize) : eps;
     $("#mpEpGrid").innerHTML = pageEps.map((e, i) => {
-      const idx = page * pageSize + i;
+      const idx = eps.length >= 20 ? page * pageSize + i : i;
       return `<button class="epc ${idx === c.epIdx ? "on" : ""}" data-i="${idx}">${idx + 1}</button>`;
     }).join("");
     $$("#mpEpGrid .epc").forEach(b => b.addEventListener("click", () => {

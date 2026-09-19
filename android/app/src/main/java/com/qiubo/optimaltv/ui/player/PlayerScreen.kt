@@ -769,7 +769,7 @@ private fun MorePanel(
             }
             Spacer(Modifier.height(20.dp))
             // 选集（需求⑨修订：仅电视剧/动漫/短剧显示，电影不显示——
-            // 含 HD中字/HD国语 这类多版本电影）。分页与详情页同款（每页 20 集）
+            // 含 HD中字/HD国语 这类多版本电影）。≥20 集按 10 集/页 + 分页 chip；<20 集全量展示
             if (!ui.isMovie && ui.epCount > 1) {
                 SectionLabel("选集")
                 val pageSize = EpisodeMenuPolicy.RANGE_SIZE
@@ -798,8 +798,10 @@ private fun MorePanel(
                         }
                     }
                 }
-                val pageStart = page * pageSize
-                val pageEps = pageStart until minOf(pageStart + pageSize, ui.epCount)
+                // 2026-09-19 集数不全修复：展示范围收口到 EpisodeMenuPolicy.visibleRange
+                //（<20 集全量；旧版 11~19 集落在无 chip 的第 2 页，前 10 集够不着——
+                // 老板报障《深渊无间》16 集只见 11-16）
+                val pageEps = EpisodeMenuPolicy.visibleRange(ui.epCount, page)
                 val focusTarget = pageEps.indexOf(ui.epIndex).takeIf { it >= 0 } ?: 0
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(4),
@@ -810,7 +812,7 @@ private fun MorePanel(
                             contentAlignment = Alignment.Center,
                             modifier = Modifier
                                 .padding(4.dp)
-                                .then(if (i - pageStart == focusTarget) Modifier.focusRequester(panelFocus) else Modifier)
+                                .then(if (i - pageEps.first == focusTarget) Modifier.focusRequester(panelFocus) else Modifier)
                                 .dpadFocusable(navGroup = PANEL_NAV_GROUP) { onPickEpisode(i) }
                                 .background(
                                     if (i == ui.epIndex) AccentBlue else Color(0x24FFFFFF),

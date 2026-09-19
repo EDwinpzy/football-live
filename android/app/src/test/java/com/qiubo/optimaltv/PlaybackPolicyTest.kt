@@ -17,6 +17,18 @@ class PlaybackPolicyTest {
         assertEquals("3", EpisodeMenuPolicy.episodeLabel(2))
     }
 
+    @Test fun episodeMenuVisibleRangeShowsAllBelowTwenty() {
+        // 2026-09-19 集数不全修复（《深渊无间》16 集面板只见 11-16）：
+        // <20 集不分页——即使当前集落在"第 2 页"（page=1），也必须全量可见
+        assertEquals(0 until 16, EpisodeMenuPolicy.visibleRange(16, page = 1))
+        assertEquals(0 until 19, EpisodeMenuPolicy.visibleRange(19, page = 1))
+        assertEquals(0 until 10, EpisodeMenuPolicy.visibleRange(10, page = 0))
+        // ≥20 集按 10 集/页切片
+        assertEquals(0 until 10, EpisodeMenuPolicy.visibleRange(25, page = 0))
+        assertEquals(10 until 20, EpisodeMenuPolicy.visibleRange(25, page = 1))
+        assertEquals(20 until 25, EpisodeMenuPolicy.visibleRange(25, page = 2))
+    }
+
     @Test fun vodLinesExposeOnlyFiveAnonymousSignals() {
         val lines = (1..8).map { LineInfo("v$it", "private-$it", "u$it") }
         assertEquals(listOf("信号源1", "信号源2", "信号源3", "信号源4", "信号源5"),
