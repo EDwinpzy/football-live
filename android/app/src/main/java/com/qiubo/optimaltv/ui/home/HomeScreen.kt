@@ -152,6 +152,9 @@ fun VodScreen(nav: NavController) {
     // 150ms 内无本行新事件才认定焦点真离开本行）。
     var chipRowHasFocus by remember { mutableStateOf(false) }
     var chipRowGen by remember { mutableIntStateOf(0) }
+    // 2026-09-19 跳行修复：分类 chip DOWN 挂起落点（板块未就绪时消费下键+记账，到账定向落首卡）
+    var pendingLibDown by remember { mutableStateOf(false) }
+    var pendingLibDownAt by remember { mutableStateOf(0L) }
     val chipScope = androidx.compose.runtime.rememberCoroutineScope()
     LaunchedEffect(hint) { if (hint != null) { kotlinx.coroutines.delay(2500); hint = null } }
     val exitApp = com.qiubo.optimaltv.ui.components.rememberDoubleBackExit { hint = it }
@@ -225,6 +228,37 @@ fun VodScreen(nav: NavController) {
                         HhkanSource.LIB_BLOCK_ORDER.map { HhkanSource.ChannelSection(it, emptyList()) }
                     }
                 val showLibLoading = selCid != null && selCid !in hotSettled && sections.isEmpty()
+                // 2026-09-19 跳行修复（用户报障「电视剧→动漫后往下光标乱跑」）：
+                // 分类 chip 的 DOWN 不再交给引擎几何+滚动找回——
+                // ① 切分类后板块未就绪时 chips 下方无可聚焦目标，滚动找回会把整页下滚、
+                //    chip 离场销毁，焦点靠陈旧锚点随机自愈（跳行/光标消失的根源）；
+                // ② 已就绪时「lib-sec-板块名-rN」key 跨分类同名，卡片节点原位复用、
+                //    位置不变不重新上报 → stamp 冻结在上次切换前，scroll-reveal 的
+                //    时间戳守卫（t.stamp >= stepStamp）把活着的合法首行卡误判为尸体，
+                //    连滚 3 步超调 2~3 行才落点（实测日志：单次 DOWN 滚 ~1300px）。
+                // 改为一律显式定向：有内容 → 直接落首个非空板块首卡；无内容 → 消费
+                // 按键并挂起，板块到账后由下述 effect 定向落下。
+                val libFirstCard = sections.firstOrNull { it.items.isNotEmpty() }?.items?.firstOrNull()
+                /** chip DOWN 定向：滚到首板块标题（首行随之入视口）→ 落首卡（重试覆盖组合时延） */
+                fun dropToLibFirstCard() {
+                    val first = libFirstCard ?: return
+                    chipScope.launch {
+                        runCatching { vodListState.scrollToItem(3) }   // 0 hero / 1 history / 2 chips / 3 首板块标题
+                        repeat(20) {
+                            if (runCatching { cardReg.fr(first.id).requestFocus() }.isSuccess) return@launch
+                            delay(60)
+                        }
+                    }
+                }
+                // 板块未就绪时 chip DOWN 被消费并挂起；到账后定向落下（焦点仍在分类行 + 10s 内才落）
+                LaunchedEffect(libFirstCard, pendingLibDown) {
+                    if (!pendingLibDown) return@LaunchedEffect
+                    if (libFirstCard == null) return@LaunchedEffect
+                    pendingLibDown = false
+                    if (!chipRowHasFocus) return@LaunchedEffect
+                    if (android.os.SystemClock.uptimeMillis() - pendingLibDownAt > 10_000L) return@LaunchedEffect
+                    dropToLibFirstCard()
+                }
                 // 整页单 LazyColumn：hero 海报带（随内容滚动）→ 最近观看 → 片库。
                 // v1.13：方向导航统一 OtvNav 引擎——容器仅声明滚动挂靠（未组合行的滚动找回）
                 val vodScroll = remember(vodListState) { lazyNavContainer(vodListState) }
@@ -357,7 +391,20 @@ fun VodScreen(nav: NavController) {
                                     // 2026-09-05：无最近观看时分类行=内容顶行，UP 由 contentUpToTab
                                     // 定向回 tab（有历史时不拦截——几何搜索自然落到最近观看卡片）
                                     navOverride = { dir ->
-                                        if (dir == NAV_UP && history.isEmpty()) contentUpToTab() else false
+                                        when {
+                                            dir == NAV_UP && history.isEmpty() -> contentUpToTab()
+                                            // 2026-09-19 跳行修复：chip DOWN 一律显式定向/挂起
+                                            //（根因与判定见上方 libFirstCard 注释），不走引擎几何
+                                            dir == NAV_DOWN -> {
+                                                if (libFirstCard != null) dropToLibFirstCard()
+                                                else {
+                                                    pendingLibDownAt = android.os.SystemClock.uptimeMillis()
+                                                    pendingLibDown = true
+                                                }
+                                                true
+                                            }
+                                            else -> false
+                                        }
                                     },
                                     autoSelect = false,
                                 ) {

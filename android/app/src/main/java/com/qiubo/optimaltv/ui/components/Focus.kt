@@ -277,13 +277,23 @@ fun Modifier.dpadFocusable(
         bandNode.override = navOverride ?: regionOverride
         bandNode.autoSelectNode = autoSelect
     }
+    // 2026-09-19 光标乱跑根修：注册表必须始终指向【当前附着】的 bandNode。
+    // bandNode 由 remember(externalFocusRequester) 生成——LazyColumn item key
+    // （lib-sec-板块名-rN）跨分类同名，切分类/数据刷新后卡片组合被保留但 vod 已换，
+    // fr(新id) 变了 → remember 重跑生成新节点挂到修饰符上；注册表若不跟着换，
+    // cards[bandId] 就永远停在【从未上过屏的僵尸节点】（bounds=Zero 或冻结在
+    // 滚动前 sliver 位置），dispatch 读它做几何起点 → UP 落下一行、横向锁死、
+    // DOWN 跳行——「光标乱跑」全家族症状都从这来。
+    // SideEffect 每次重组后同步一次（registerCard 无焦点簿记副作用，重复写同一对象零成本）；
+    // 真销毁时经 rememberUpdatedState 拿最新节点注销，避免误伤重注册的新节点。
+    val latestNode = androidx.compose.runtime.rememberUpdatedState(bandNode)
+    SideEffect { OtvNav.registerCard(bandId, latestNode.value) }
     DisposableEffect(bandId) {
-        OtvNav.registerCard(bandId, bandNode)
         onDispose {
-            OtvNav.unregisterCard(bandId)
+            OtvNav.unregisterCardIf(bandId, latestNode.value)
             // 曾持焦点的节点被销毁（重组/屏过渡）：若焦点无人接管则按锚点补焦，
             // 消灭「切换标签后光标短暂隐形」与「数据加载把焦点甩给邻居」两类现象
-            if (wasFocusedOnce.get()) OtvNav.healWhenFocusVanishes(bandNode.group)
+            if (wasFocusedOnce.get()) OtvNav.healWhenFocusVanishes(latestNode.value.group)
         }
     }
 
@@ -294,9 +304,20 @@ fun Modifier.dpadFocusable(
             // 「滚动后重新上报过位置」过滤恒通过——离场冻结节点旧坐标被误判为
             // 前进候选，DOWN 从分类 chip 找回时落到已离场 hero 按钮冻结坐标上，
             // 触发其 animateScrollToItem(0) 页面弹回顶部（v1.18 用户报障根因）
-            bandNode.bounds = it.boundsInWindow(); bandNode.stamp = android.os.SystemClock.uptimeMillis()
-            // 滚动会持续位移当前焦点节点——同步刷新自愈锚点，保证漂移恢复坐标新鲜
-            if (focused) OtvNav.updateAnchor(bandId, bandNode)
+            val nb = it.boundsInWindow()
+            // 2026-09-19 光标乱跑修复：【被裁边的上报不采信】。
+            // boundsInWindow 会被 Lazy 容器视口裁边：贴边 sliver 卡（半组合行）上报的
+            // 是裁剪后的残条坐标，作为几何候选/搜索起点会算出反向落点。it.size 是
+            // 未裁剪布局尺寸——bounds 与之一致才是完整可见上报；残条上报一律丢弃
+            //（保留最后一次完整坐标）。贴边 sliver 行因此不作为几何候选，方向移动
+            // 走 scroll-reveal 先完整露出再落点，与引擎设计一致。
+            val unclipped = kotlin.math.abs(nb.width - it.size.width) <= 2f &&
+                kotlin.math.abs(nb.height - it.size.height) <= 2f
+            if (unclipped) {
+                bandNode.bounds = nb; bandNode.stamp = android.os.SystemClock.uptimeMillis()
+                // 滚动会持续位移当前焦点节点——同步刷新自愈锚点，保证漂移恢复坐标新鲜
+                if (focused) OtvNav.updateAnchor(bandId, bandNode)
+            }
         }
         .onFocusEvent {
             if (it.isFocused != focused) {
@@ -554,6 +575,15 @@ object OtvNav {
         }
     }
 
+    /** 仅当注册表里的仍是 [node] 本人才注销（防销毁旧组合时误删重注册的新节点） */
+    fun unregisterCardIf(id: Int, node: Node) {
+        if (cards.remove(id, node) && focusedCardId == id) {
+            focusedCardId = 0
+            focusEmpty = true
+            advanceFocusEpoch()
+        }
+    }
+
     /** 节点失去框架焦点（onFocusEvent LOST）：若之后没有新 GAINED，则焦点真空 */
     fun onCardUnfocused(id: Int) {
         if (focusedCardId == id) {
@@ -647,7 +677,12 @@ object OtvNav {
         }
 
         // 2) 确定性几何搜索（组内、浮窗排除、自缩放层容差）
-        val target = searchGeom(cur.bounds, dir, cur.group, exclude = cur)
+        // 2026-09-19 光标乱跑修复：搜索起点优先用【本组自愈锚点】而非 cur.bounds。
+        // 锚点只在【聚焦节点的真实上报】时刷新（onCardFocused/updateAnchor），
+        // 构造上恒等于当前焦点节点最后一次聚焦位置——即使注册 bounds 因 Lazy 容器
+        // 裁边/节点置换出现异常，锚点仍可靠（实测影视页片库首行卡 UP 反向落点根因）。
+        val origin = lastAnchorByGroup[cur.group ?: ""]?.bounds ?: cur.bounds
+        val target = searchGeom(origin, dir, cur.group, exclude = cur)
         if (target != null && focusNode(target)) {
             ensureVisible(target, dir)
             lastMoveAt = android.os.SystemClock.uptimeMillis()
@@ -698,7 +733,9 @@ object OtvNav {
                     // 只认本次滚动后【重新上报过位置】的节点：随滚动离场但尚未注销的节点
                     // 带着旧 bounds，会被几何搜索误判成前进方向候选——实测 DOWN 从分类
                     // chip 找回时落到已离场的 hero 按钮旧坐标上（v1.18 修复）
-                    val t = searchGeom(fresh.bounds, dir, fresh.group ?: cur.group, exclude = fresh)
+                    // 2026-09-19：起点同样走锚点（防幽灵上报回写，见 dispatch 注释）
+                    val retryOrigin = lastAnchorByGroup[fresh.group ?: cur.group ?: ""]?.bounds ?: fresh.bounds
+                    val t = searchGeom(retryOrigin, dir, fresh.group ?: cur.group, exclude = fresh)
                     Log.d(TAG, "scroll-reveal#${it + 1} fresh=${fresh.bounds} hit=${t?.bounds} stamp=${t?.stamp} ok=${t != null && t.stamp >= stepStamp}")
                     if (t != null && t.stamp >= stepStamp && focusNode(t)) return@launch
                 }
