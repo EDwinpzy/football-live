@@ -79,7 +79,7 @@ interface MediaEngine {
      * 但足球直播走本地中继时上游清单只有 3×2s＝6s 窗口，15s 目标根本不可达：
      * ExoPlayer 的速度控制会一直按 0.97x 追赶一个够不到的偏移，播着播着就被滑动窗口
      * 甩到最老分片之外（实测 2–5 分钟一次可感知卡顿，最后整段冻住）。
-     * 引擎据此选目标偏移与缓冲档：窗口小 → 目标 ≈ 窗口的 40%，把「延迟几秒」变成
+     * 引擎据此选目标偏移与缓冲档：窗口小 → 目标 ≈ 窗口的 60%，把「延迟几秒」变成
      * 真正可用的缓冲垫。
      */
     fun setLiveWindowHintMs(windowMs: Long) {}
@@ -132,11 +132,6 @@ object EngineRegistry {
  */
 class Media3Engine(context: Context) : MediaEngine {
 
-    private companion object {
-        /** 「小窗口直播」阈值：窗口 ≤ 该值时不按 15s 目标延迟播（见 setLiveWindowHintMs） */
-        const val SMALL_WINDOW_MAX_MS = 12_000L
-    }
-
     override val engineId = "media3"
     override val displayName = "Media3 / ExoPlayer"
 
@@ -164,12 +159,12 @@ class Media3Engine(context: Context) : MediaEngine {
     }
 
     /** 小窗口直播（足球直播中继：3×2s＝6s）：必须换掉固定的 15s 目标延迟与 6s 恢复水位 */
-    private fun smallWindowLive(): Boolean = liveWindowHintMs in 1..SMALL_WINDOW_MAX_MS
+    private fun smallWindowLive(): Boolean = LiveWindowPolicy.isSmall(liveWindowHintMs)
 
     override fun setLiveWindowHintMs(windowMs: Long) {
         val v = if (windowMs > 0) windowMs else 0L
         if (v == liveWindowHintMs) return
-        val profileChanged = smallWindowLive() != (v in 1..SMALL_WINDOW_MAX_MS)
+        val profileChanged = smallWindowLive() != LiveWindowPolicy.isSmall(v)
         com.qiubo.optimaltv.OtvLog.i(
             "engine 直播窗口提示 ${liveWindowHintMs}ms → ${v}ms" +
                 if (profileChanged) "（重建播放器换缓冲档）" else "",
@@ -445,7 +440,7 @@ class Media3Engine(context: Context) : MediaEngine {
      * 直播目标偏移（2026-09-16 长跑卡顿根治）：
      * - 窗口未知 / 大窗口（公网 IPTV 等，窗口通常 30s+）：沿用 v1.23 的「落后 15s」，
      *   抖动时自动退离边缘吸收，稳定时追近；
-     * - 小窗口（中继足球源实测 6s）：目标偏移取窗口的 40%（6s → 2.4s）。这个值必须
+     * - 小窗口（中继足球源实测 6s）：目标偏移取窗口的 60%（6s → 3.6s），多留一段抗抖缓冲。
      *   **可达**——不可达时 ExoPlayer 的速度控制会长期按 0.97x 追赶，最后被滑动窗口
      *   甩出最老分片，表现为「看十几分钟后卡死，退出重进才好」。
      */
@@ -453,9 +448,9 @@ class Media3Engine(context: Context) : MediaEngine {
         val w = liveWindowHintMs
         val cfg = MediaItem.LiveConfiguration.Builder()
         return if (smallWindowLive()) {
-            cfg.setTargetOffsetMs((w * 2 / 5).coerceIn(1_200, 4_000))
-                .setMinOffsetMs((w / 8).coerceIn(300, 1_000))
-                .setMaxOffsetMs((w * 2 / 3).coerceIn(2_500, 8_000))
+            cfg.setTargetOffsetMs(LiveWindowPolicy.targetOffsetMs(w))
+                .setMinOffsetMs(LiveWindowPolicy.minOffsetMs(w))
+                .setMaxOffsetMs(LiveWindowPolicy.maxOffsetMs(w))
                 .build()
         } else {
             cfg.setTargetOffsetMs(15_000).setMinOffsetMs(8_000).setMaxOffsetMs(30_000).build()
