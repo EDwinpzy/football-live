@@ -8,6 +8,7 @@ import json
 import pathlib
 import re
 import unittest
+from urllib.parse import unquote
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 SEEDS = (
@@ -18,7 +19,7 @@ GENERATOR = ROOT / "tools" / "build_catalog_seed.py"
 RELEASE = ROOT / "tools" / "release_all.py"
 VOD_REPO = ROOT / "android" / "app" / "src" / "main" / "java" / "com" / "qiubo" / "optimaltv" / "data" / "repo" / "VodRepository.kt"
 # 客户端 decodeSnapshot 的判据：版本号 + 只允许豆瓣卡片
-SNAPSHOT_VERSION = 2
+SNAPSHOT_VERSION = 3
 CATEGORY_KEYS = ("movie", "tv", "anime", "variety", "short")
 
 
@@ -60,6 +61,20 @@ class CatalogSeedContractTest(unittest.TestCase):
             self.assertGreaterEqual(len(relayed), len(seed["items"]) * 0.9)
             self.assertNotIn("doubanio.com", json.dumps(
                 [i["p"] for i in seed["items"] if "/hhkan/proxy?u=" not in str(i["p"])]))
+
+    def test_快照保留顶部高清海报字段(self):
+        """首屏不能从只含 240px poster 的旧快照恢复，必须持久化 hero 字段。"""
+        for seed in self.seeds:
+            hero_items = [item for item in seed["items"] if item.get("h")]
+            self.assertGreaterEqual(len(hero_items), len(seed["items"]) * 0.9)
+            self.assertTrue(all("large/public" in unquote(str(item["h"])) for item in hero_items[:10]))
+        for path in (
+            ROOT / "android" / "app" / "src" / "main" / "java" / "com" / "qiubo" / "optimaltv" / "data" / "repo" / "VodRepository.kt",
+            ROOT / "internal" / "mobile" / "app" / "src" / "main" / "java" / "com" / "qiubo" / "optimaltv" / "data" / "repo" / "VodRepository.kt",
+        ):
+            source = path.read_text(encoding="utf-8")
+            self.assertIn('.put("h", it.heroUrl)', source, path)
+            self.assertIn('heroUrl = e.optString("h")', source, path)
 
     def test_两份工程种子完全一致(self):
         self.assertEqual(SEEDS[0].read_text(encoding="utf-8"),

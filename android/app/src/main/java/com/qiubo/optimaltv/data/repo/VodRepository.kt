@@ -77,7 +77,7 @@ private class SourceResult(val source: ContentSource, val snapshot: SourceSnapsh
  * 单源，旧快照仍会先上屏。把策略集中在这里，避免恢复、写入两条路径再次漂移。
  */
 internal object CatalogOriginPolicy {
-    const val SNAPSHOT_VERSION = 2
+    const val SNAPSHOT_VERSION = 3
 
     fun allows(sourceId: String, itemId: String): Boolean =
         sourceId == "douban" && itemId.startsWith("douban:")
@@ -822,7 +822,7 @@ class VodRepository(
             VodItem(
                 id = e.optString("id"), sourceId = e.optString("s"), title = e.optString("t"),
                 categoryId = e.optString("c"), year = e.optString("y"), area = e.optString("ar"),
-                rating = e.optDouble("r", 0.0), posterUrl = e.optString("p"),
+                rating = e.optDouble("r", 0.0), posterUrl = e.optString("p"), heroUrl = e.optString("h"),
                 remark = e.optString("rm"), detailRef = e.optString("d"),
             ).takeIf { it.id.isNotBlank() && it.title.isNotBlank() }
         }
@@ -868,7 +868,7 @@ class VodRepository(
                         org.json.JSONObject()
                             .put("id", it.id).put("s", it.sourceId).put("t", it.title)
                             .put("c", it.categoryId).put("y", it.year).put("ar", it.area)
-                            .put("r", it.rating).put("p", it.posterUrl)
+                            .put("r", it.rating).put("p", it.posterUrl).put("h", it.heroUrl)
                             .put("rm", it.remark).put("d", it.detailRef),
                     )
                 }

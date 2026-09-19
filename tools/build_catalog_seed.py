@@ -8,8 +8,8 @@ VodRepository.decodeSnapshot 的豆瓣来源校验整条拒绝——首装那一
 网络目录一落地就被替换。
 
 字段口径与 App 自己写盘时逐字对齐（VodRepository.writeSnapshot）：
-  v=2（CatalogOriginPolicy.SNAPSHOT_VERSION）
-  categories=[{id:"douban:<key>",name}]，items=[{id,s,t,c,y,ar,r,p,rm,d}]
+  v=3（CatalogOriginPolicy.SNAPSHOT_VERSION）
+  categories=[{id:"douban:<key>",name}]，items=[{id,s,t,c,y,ar,r,p,h,rm,d}]
   p = 海报：豆瓣图床走内置后端中继（与 VodApiSource.parseItems/relayPoster 同一规则）
 
 快照刷新后必须重跑（release_all.py 已串进流程，避免种子再次过期）。
@@ -30,7 +30,7 @@ import douban_catalog  # noqa: E402
 
 CATEGORIES = (("movie", "电影"), ("tv", "电视剧"), ("anime", "动漫"),
               ("variety", "综艺"), ("short", "短剧"))
-SNAPSHOT_VERSION = 2                      # = VodRepository.CatalogOriginPolicy.SNAPSHOT_VERSION
+SNAPSHOT_VERSION = 3                      # = VodRepository.CatalogOriginPolicy.SNAPSHOT_VERSION
 RELAY_BASE = "http://127.0.0.1:8090"      # App 默认内置后端（海报中继）
 TARGETS = (
     ROOT / "android" / "app" / "src" / "main" / "assets" / "catalog_seed.json",
@@ -88,6 +88,11 @@ def build() -> dict:
                     "ar": " / ".join(card.get("regions") or []),
                     "r": float(card.get("rating") or 0),
                     "p": relay_poster(str(card.get("poster_url") or "")),
+                    "h": relay_poster(
+                        douban_catalog.hero_poster_url(
+                            str(card.get("hero_url") or card.get("poster_url") or "")
+                        ) or str(card.get("hero_url") or card.get("poster_url") or "")
+                    ),
                     "rm": "",
                     "d": raw_id,
                 })
