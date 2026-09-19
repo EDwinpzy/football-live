@@ -168,18 +168,45 @@ fun ActivateScreen(nav: NavController) {
         val padStart = if (portrait) 30f else 90f
         val padEnd = if (portrait) 30f else 60f
         val padTop = if (portrait) 96f else 130f
+        // 2026-09-19 需求⑥（老板第二轮）：「整体区域上移」。
+        //
+        // 实测现状（竖屏 + 键盘弹出）：可视区 = ScrollView 138..1499（高 1361px），
+        // 内容块（标题顶 → 标语底）550..1088 高 538px，上留白 412 / 下留白 411 = **1:1.00**
+        // —— 是纯 `Arrangement.Center` 的机械居中。
+        //
+        // 所以「看着偏下」**不是配平错了，是居中本身在这个场景不对**：
+        // 键盘把可视区从 2274 腰斩到 1361，内容只占 538px，机械居中让它掉在正中间、
+        // 上下各空 ~410px，视觉重心压到屏幕下半。打字时视线在键盘上沿附近，内容该往上靠。
+        //
+        // 定版改法：竖屏**不再用 `Arrangement.Center`**，改 `Arrangement.Top` +
+        // 明确的 `contentTopPad` 上距 —— 位置由常量直接决定，不依赖容器高度，
+        // 键盘起落时不会因为可视区变化而漂移。
+        //
+        // ⚠️ 走过的弯路（别再重复）：先用「Center + `padding(bottom = 260)` 上推一半」，
+        // 实测**整体确实上移了 187px（误差 0）**，但同时把 ScrollView 底沿从 1499 挤到
+        // 1125，底部凭空多出 375px 空洞 —— 因为 `padding(bottom)` 撑的是**内容总高**，
+        // 而 `verticalScroll` 又让 Column 收缩到内容高、`Arrangement.Center` 随之失效。
+        // 结论：**给 scroll 容器加不对称 padding 来配平是不可靠的**，位置就该用 top 留白直说。
+        //
+        // 标定（可视区 138..1499 高 1361px、内容块高 538px）：
+        //   cp=60  → 标题顶 224，上留白  86、下留白 737（1:8.57）**太贴顶**，页头挤到返回钮高度
+        //   cp=150 → 标题顶 354，上留白 216、下留白 607（1:2.82）✓ 采用
+        //   cp=200 → 标题顶 426，上留白 288、下留白 535（1:1.86）偏中，上移感不足
+        // 相对改前（Center，上留白 412）净上移 196px = 136 设计px，内容稳定落在上半屏。
+        val contentTopPad = if (portrait) 150f else 0f
 
         Column(
             horizontalAlignment = Alignment.Start,
-            // 竖屏：上下各留一份弹性余量（weight 1 的空 Spacer），把「页头 + 码位 + 按钮」
-            // 整块压在竖向中段——键盘收起时不会全都挤在屏幕顶 1/3、下方留一大片死白。
-            verticalArrangement = if (portrait) Arrangement.Center else Arrangement.Top,
+            // 竖屏：内容从顶部起排 + 固定上距（位置可预期、不随键盘漂移）。
+            // 横屏：`Arrangement.Top` 原样，零污染。
+            verticalArrangement = Arrangement.Top,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(start = padStart.sx(s), end = padEnd.sx(s), top = padTop.sx(s))
                 .imePadding()
                 .then(if (portrait) Modifier.verticalScroll(rememberScrollState()) else Modifier),
         ) {
+            if (portrait) Spacer(Modifier.height(contentTopPad.sx(s)))
             // ---- 页头：金属标徽章 + 标题（需求③：唯一保持左对齐的区域）----
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
