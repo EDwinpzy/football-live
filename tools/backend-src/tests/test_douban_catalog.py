@@ -505,6 +505,47 @@ class DoubanCatalogTest(unittest.TestCase):
         self.assertEqual(result["areas"][0], "全部")
         self.assertTrue(result["upstream_available"])
 
+    def test_filter_options_never_show_summary_fragments_or_latin_regions(self):
+        """2026-09-19 用户报障「地区筛选候选词有问题」：card_subtitle 为「年份 / 剧情简介」
+        形态时简介残段被按位置切进 regions 槽，地区候选词里出现「热爱音乐的米格尔（安东尼·
+        冈萨雷兹」「Anthony」「配音）不幸地出生在…」这类脏词；豆瓣偶尔还给英文国名
+        （「Austria」），countries= 参数不认、选了必空。两类脏词都不许进候选表。"""
+        snapshot = {"index": [
+            {"douban_id": "1", "title": "寻梦环游记", "category": "movie",
+             "regions": ["热爱音乐的米格尔（安东尼·冈萨雷兹", "Anthony", "Gonzalez",
+                         "配音）不幸地出生在一个视音乐为洪水猛兽的大家庭之中，好继..."],
+             "genres": []},
+            {"douban_id": "2", "title": "伊丽莎白", "category": "movie",
+             "regions": ["Austria"], "genres": ["剧情", "歌舞"]},
+            {"douban_id": "3", "title": "正常片", "category": "movie",
+             "regions": ["爱尔兰"], "genres": ["西部"]},
+        ]}
+        catalog = douban_catalog.DoubanCatalog(fetch=lambda _url: {}, snapshot=snapshot)
+        result = catalog.filters("movie")
+        for area in result["areas"]:
+            self.assertRegex(area, r"^(全部|[一-鿿]{2,12})$", area)
+        self.assertIn("爱尔兰", result["areas"])
+        self.assertNotIn("Austria", result["areas"])
+        for genre in result["types"]:
+            self.assertRegex(genre, r"^(全部|[一-鿿]{2,12})$", genre)
+        self.assertIn("西部", result["types"])
+        self.assertIn("歌舞", result["types"])
+
+    def test_card_subtitle_with_summary_only_does_not_pollute_regions(self):
+        """摘要只有「年份 / 剧情简介」两段时，简介不许落进地区/类型槽（防新增条目再脏）。"""
+        parsed = douban_catalog.parse_card_subtitle(
+            "2017 / 热爱音乐的米格尔（安东尼·冈萨雷兹 Anthony Gonzalez 配音）不幸地出生在一个大家庭")
+        self.assertEqual(parsed.get("year"), "2017")
+        self.assertEqual(parsed.get("regions"), [])
+        # 正常形态不受影响：地区段是中文词就保留
+        parsed = douban_catalog.parse_card_subtitle("2023 / Austria / 剧情 歌舞")
+        self.assertEqual(parsed.get("regions"), [])
+        self.assertEqual(parsed.get("genres"), ["剧情", "歌舞"])
+        parsed = douban_catalog.parse_card_subtitle("2024 / 中国大陆 / 悬疑 剧情 / 张某某 / 李某某")
+        self.assertEqual(parsed.get("regions"), ["中国大陆"])
+        self.assertEqual(parsed.get("genres"), ["悬疑", "剧情"])
+        self.assertEqual(parsed.get("directors"), ["张某某"])
+
     def test_movie_rule_drops_concerts_and_stage_but_keeps_musical_films(self):
         """电影栏不许出现演唱会/舞台实录：豆瓣把这些也标成 movie，只能靠标题/又名认。"""
         rows = [explore_row(111, "陈奕迅DUO演唱会"), explore_row(222, "汉密尔顿"),

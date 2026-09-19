@@ -225,6 +225,19 @@ def _apply_section_policy(category, value):
 
 _CARD_YEAR = re.compile(r"^\d{4}$")
 
+# 类型/地区候选词的合法形态：纯中文 2~12 字。豆瓣这两栏的值全是中文词
+# （「剧情」「中国大陆」「波斯尼亚和黑塞哥维那」最长也就 10 字）；凡带拉丁字母、
+# 括号、标点或过长的，都是 card_subtitle 错位混进来的剧情简介残段——2026-09-19
+# 实测「年份 / 剧情简介」形态的摘要（无地区/类型段）会把整段简介按空格切进
+# regions 槽，地区候选词里于是出现「热爱音乐的米格尔（安东尼·冈萨雷兹」「Anthony」
+# 「Austria」（豆瓣偶尔给英文国名，countries= 参数也不认）这类脏词。
+_FACET_TOKEN = re.compile(r"^[一-鿿]{2,12}$")
+
+
+def _clean_facet_tokens(values):
+    """只保留长得像类型/地区词的值；脏值丢弃（判成未知，比显示脏候选词强）。"""
+    return [v for v in values if _FACET_TOKEN.match(str(v or ""))]
+
 
 def parse_card_subtitle(value):
     """解析列表接口的 `card_subtitle`（`年份 / 地区 / 类型 / 导演 / 主演`）。
@@ -242,7 +255,12 @@ def parse_card_subtitle(value):
         result["year"] = parts[0]
         parts = parts[1:]
     for key, part in zip(("regions", "genres", "directors", "actors"), parts):
-        result[key] = [name for name in re.split(r"[\s、]+", part) if name]
+        names = [name for name in re.split(r"[\s、]+", part) if name]
+        # 地区/类型槽可能混进剧情简介（摘要只有「年份 / 简介」两段时按位置错位）：
+        # 简介残段不是合法候选词，丢弃；导演/主演槽保持原样（人名形态自由）。
+        if key in ("regions", "genres"):
+            names = _clean_facet_tokens(names)
+        result[key] = names
     return result
 
 
@@ -588,7 +606,9 @@ class DoubanCatalog:
                 continue
             genres.extend(item.get("genres") or [])
             regions.extend(item.get("regions") or [])
-        return genres, regions
+        # 老快照里可能已烙进脏词（见 [_FACET_TOKEN] 注释），候选词出口再拦一道，
+        # 不必等快照刷新（>24h 才重抓）才能让筛选面板恢复干净。
+        return _clean_facet_tokens(genres), _clean_facet_tokens(regions)
 
     @staticmethod
     def _merge_options(base, extra):
