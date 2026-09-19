@@ -18,11 +18,14 @@ BASE = "https://www.hhkan0.com"
 # 同站镜像域（2026-08-15 验证 hhkan1.com 存活，同一套 cdndefend）：主域失效自动回退
 DOMAINS = ["www.hhkan0.com", "www.hhkan1.com"]
 IMG_DOMAINS = [
-    # 2026-08-28 实测：cyscyy 主域已失联（连接失败），enbymae/zyxpedu 正常出图。
-    # 可用域放最前，失效域殿后（_hhkan_proxy 出图失败时会按此顺序轮换重试）。
-    "https://vres.enbymae.com",
-    "https://vres.zyxpedu.com",
+    # 2026-09-19 复测（每域 5 张封面取中位耗时）：cyscyy 0.1~0.4s 最快，zyxpedu 1.2~4.8s，
+    # enbymae 1.3~31.2s 最慢——旧结论「cyscyy 已失联」已过期，它已恢复且反超。
+    # 三域内容完全一致（同一份存储），首选域直接决定首屏出图速度：此前每张图都先撞
+    # 最慢的 enbymae，实测最长 31s 已越过 _IMG_FETCH_TIMEOUT=20s 被判失败 →
+    # 网页版「最近热门」间歇整片空卡。现按实测速度重排。
     "https://vres.cyscyy.com",
+    "https://vres.zyxpedu.com",
+    "https://vres.enbymae.com",
 ]
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")

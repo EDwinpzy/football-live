@@ -47,6 +47,16 @@ document.addEventListener("error", ev => {
   const el = ev.target;
   if (!el || el.tagName !== "IMG") return;
   const src = el.getAttribute("src") || "";
+  /* 好好看 vres 封面：本地走中继时若中继本身失败（罕见），回落直连原图。
+     云端本就是直连，无需再兜。data-fallback 记一次防循环。 */
+  if (el.dataset && el.dataset.fbk !== "1") {
+    const m = src.match(/\/hhkan\/proxy\?u=([^&]+)/);
+    if (m) {
+      el.dataset.fbk = "1";
+      try { el.src = decodeURIComponent(m[1]); } catch (e) { /* 保持原样 */ }
+      return;
+    }
+  }
   if (!DOUBAN_IMG_RE.test(src)) return;
   const host = (src.match(/^https?:\/\/([^/]+)/i) || [])[1] || "";
   const i = DOUBAN_IMG_HOSTS.indexOf(host);
@@ -54,14 +64,26 @@ document.addEventListener("error", ev => {
   if (next) el.src = src.replace(DOUBAN_IMG_RE, "$1" + next);
 }, true);
 
+/* 是否本地内嵌后端（App 里 Chaquopy 跑的 127.0.0.1:8090）。
+   本地出口就是用户家宽，好好看 CDN 不拒；此时图片必须走本机中继，才能吃到
+   服务端的 vres 镜像轮换（IMG_DOMAINS 三域）+ 磁盘缓存 + Referer 兜底。
+   云端（腾讯云出口）反过来——出口 IP 被 hhkan CDN 拒，只能让访客浏览器直连。 */
+const IS_LOCAL_BACKEND = (() => {
+  try {
+    const h = location.hostname;
+    return location.protocol === "file:" || h === "localhost" || h === "127.0.0.1" || h === "[::1]";
+  } catch (e) { return false; }
+})();
 function img(u) {
   u = doubanImg((u || "").trim());
   if (!u || u.startsWith("data:")) return u || "";
   /* 豆瓣非 imgN 图床的中继路径：已经是本服务地址，不能再套一层代理 */
   if (u.startsWith(DOUBAN_RELAY_PREFIX)) return BASE + u;
-  /* 浏览器直接加载 HTTPS 图片不受 CORS 限制。好好看资源 CDN 会拒绝腾讯云出口，
-     由访客网络直连既能正常出图，也省掉云函数带宽与执行时间。仅 http 图片继续中继，
-     避免 HTTPS 页面产生 mixed-content 拦截。 */
+  /* 本地内嵌后端：一律走中继（镜像轮换 + 磁盘缓存 + Referer 兜底）。
+     2026-09-19 修：vres.* 封面原先被直接放行给浏览器直连，CDN 偶发拒连/超时后
+     前端只对豆瓣图床做失败轮换，vres 死卡 → 「最近热门」间歇整片空卡。
+     云端（非本地）保持直连：腾讯云出口被 hhkan CDN 拒，直连反而正常出图。 */
+  if (IS_LOCAL_BACKEND) return BASE + "/hhkan/proxy?u=" + encodeURIComponent(u);
   if (/^https:\/\//i.test(u)) return u;
   return BASE + "/hhkan/proxy?u=" + encodeURIComponent(u);
 }
