@@ -1,7 +1,6 @@
 package com.qiubo.optimaltv.ui.favorites
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -36,13 +35,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.text.font.FontWeight
@@ -368,114 +365,46 @@ private fun MemberInlineInfo(
         )
         // 用户需求（2026-09-05）：行尾带下划线的「续费」入口；
         // 需求⑥（2026-09-11）：只有这两个字可被光标选中
-        // 2026-09-19 老板需求④：选中效果美化——旧版聚焦只是「蓝字变白 + 放大 1.1」，
-        // 无背景无描边，在深色页面上几乎看不出焦点在哪。现改为与套餐卡同语言的
-        // 「白底反色胶囊 + 微放大 + 外发光」：聚焦时文字转深色、垫白色胶囊、
-        // 外圈再叠一层由内到外衰减的白色光晕（Canvas 径向渐变），选中感明确。
+        // 2026-09-19 老板定版（第二轮）：选中效果**改为细白描边框**，去掉之前那套
+        // 「白底反色胶囊 + 放大 1.08 + 四周柔和外发光」——
+        // 老板原话「换成一个白边的框就好了，细边的框就好了，不用搞那么夸张浮夸」。
+        // 现在是：聚焦 = 1.5 设计px 白色圆角描边框 + 文字转白；未聚焦 = 半透明 hairline + 蓝字下划线。
+        // 之前那版光晕（6 圈同心描边模拟衰减）整块删除，连同它的 24 设计px 画布边距常量。
         Spacer(Modifier.width(14f.sx(s)))
         var renewFocused by remember { mutableStateOf(false) }
-        val renewScale by animateFloatAsState(
-            targetValue = if (renewFocused) 1.08f else 1f,
-            animationSpec = tween(140),
-            label = "renewScale",
-        )
-        val renewGlow by animateFloatAsState(
-            targetValue = if (renewFocused) 1f else 0f,
-            animationSpec = tween(180),
-            label = "renewGlow",
-        )
-        // 2026-09-19 定版（三次迭代 + 截图逐像素复核）：
-        // 旧版聚焦只有「蓝字变白 + 放大 1.1」，深色页面上几乎看不出焦点在哪。
-        // 现改为「白底反色胶囊 + 微放大 1.08 + 四周柔和外发光」。
-        // 发光实现踩过两个坑，都记在这里免得后人重蹈：
-        //   ① Brush.radialGradient 是正圆，胶囊是扁的（≈90×59），圆心到左右边缘 45px、
-        //      到上下边缘仅 29px，同一个半径必然一侧溢出被裁、另一侧铺不满 → 看上去"右边亮一块"。
-        //      结论：改用贴合胶囊形状的同心圆角描边。
-        //   ② Canvas 若直接 matchParentSize 挂在小胶囊 Box 上，它的绘制范围最多就是胶囊本身，
-        //      外扩的部分根本画不出来（实测胶囊外侧四向全是背景值 14，等于没发光）。
-        //      结论：外层 Box 常驻留出 24 设计px 的画布边距（GlowPad 固定，不随聚焦变化，
-        //      否则胶囊会在聚焦瞬间位移），Canvas matchParentSize 才真正有地方画光晕。
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
                 .then(if (renewFocus != null) Modifier.focusRequester(renewFocus) else Modifier)
                 .dpadFocusable(
-                    scaleFocused = 1f,   // 缩放交给 graphicsLayer，避免与 focusedBg 尺寸错位
-                    focusedBg = null,    // 背景自绘（需要渐变光晕，dpadFocusable 只支持纯色）
-                    drawRing = false,
+                    scaleFocused = 1f,     // 不做放大：老板要「不夸张」，聚焦只换描边
+                    focusedBg = null,      // 背景自绘（未聚焦态是半透明胶囊）
+                    drawRing = false,      // 焦点环也自绘，统一到同一个 border 上
                     onFocusedChange = { renewFocused = it },
                 ) { onRedeem() }
-                .graphicsLayer {
-                    val sc = renewScale
-                    scaleX = sc; scaleY = sc
-                },
-        ) {
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    // 外发光画在胶囊自身的内容下层。关键：drawWithContent 的绘制范围
-                    // 不受自身尺寸限制（Compose 只在 clip/toClip 处裁剪），所以光晕可以
-                    // 往外溢出到 Row 上，而**完全不参与布局测量** —— 这是前两版踩坑后
-                    // 唯一既能看到光晕、又不把整行顶下去的做法：
-                    //   ① 用 padding 撑大外层 Box → 行高 +48px，「我的收藏」和会员文字整行下移（实测回归）
-                    //   ② Canvas matchParentSize 挂在胶囊上 → 绘制范围就是胶囊本身，外侧画不出来
-                    .drawWithContent {
-                        val padPx = RenewGlowPad.sx(s).toPx()
-                        if (renewGlow > 0.01f) {
-                            val rings = 6
-                            val strokeW = padPx / rings
-                            repeat(rings) { i ->
-                                val inset = -padPx + padPx * i / rings + strokeW / 2f
-                                drawRoundRect(
-                                    color = Color.White.copy(
-                                        alpha = (0.05f + 0.075f * i) * renewGlow,
-                                    ),
-                                    topLeft = androidx.compose.ui.geometry.Offset(inset, inset),
-                                    size = androidx.compose.ui.geometry.Size(
-                                        size.width - inset * 2,
-                                        size.height - inset * 2,
-                                    ),
-                                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(
-                                        (size.height - inset * 2) / 2f,
-                                    ),
-                                    style = androidx.compose.ui.graphics.drawscope.Stroke(
-                                        width = strokeW,
-                                    ),
-                                )
-                            }
-                        }
-                        drawContent()
-                    }
-                    .clip(RoundedCornerShape(50))
-                    .background(
-                        if (renewFocused) OtvColors.White
-                        else Color(0x1FFFFFFF),
-                    )
-                    .then(
-                        if (renewFocused) Modifier
-                        else Modifier.border(
-                            1f.sx(s), Color(0x33FFFFFF), RoundedCornerShape(50),
-                        )
-                    )
-                    .padding(horizontal = 20f.sx(s), vertical = 9f.sx(s)),
-            ) {
-                Text(
-                    "续费",
-                    // 聚焦态是白底胶囊，此时蓝字改深色（OtvColors.Bg），下划线一并去掉
-                    // —— 白底上的蓝下划线既抢眼又和胶囊边界打架（2026-09-19 截图复核后定）。
-                    color = if (renewFocused) OtvColors.Bg else AccentBlue,
-                    fontSize = 22f.sxs(s),
-                    fontWeight = FontWeight.SemiBold,
-                    textDecoration = if (renewFocused) TextDecoration.None else TextDecoration.Underline,
+                .clip(RoundedCornerShape(50))
+                .background(
+                    if (renewFocused) OtvColors.White.copy(alpha = 0.06f)   // 极淡填充，只用于垫住白字
+                    else Color(0x1FFFFFFF),
                 )
-            }
+                .border(
+                    if (renewFocused) 1.5f.sx(s) else 1f.sx(s),
+                    if (renewFocused) OtvColors.White else Color(0x33FFFFFF),
+                    RoundedCornerShape(50),
+                )
+                .padding(horizontal = 20f.sx(s), vertical = 9f.sx(s)),
+        ) {
+            Text(
+                "续费",
+                color = if (renewFocused) OtvColors.White else AccentBlue,
+                fontSize = 22f.sxs(s),
+                fontWeight = FontWeight.SemiBold,
+                // 聚焦态去掉下划线：白字 + 白框下再压一条下划线会脏
+                textDecoration = if (renewFocused) TextDecoration.None else TextDecoration.Underline,
+            )
         }
     }
 }
-
-/** 「续费」按钮聚焦光晕向外扩展的设计 px（恒定值：不随聚焦状态变化,
- *  否则布局会在聚焦瞬间跳一下）。外层 Box 靠它撑出画光晕的空间。 */
-private const val RenewGlowPad = 24f
 
 /** 收藏+历史区块（我的页两种布局共用）：标题行 + 横滑卡行。titleTop=标题顶部留白（调用方按布局给）；
  *  memberRow 非空时与「我的收藏」标题同行右对齐（需求⑥：会员信息行并入标题行） */
