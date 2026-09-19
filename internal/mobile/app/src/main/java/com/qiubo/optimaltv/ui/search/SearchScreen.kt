@@ -49,7 +49,7 @@ import com.qiubo.optimaltv.ui.components.MainTabBar
 import com.qiubo.optimaltv.ui.components.MobileVodCard
 import com.qiubo.optimaltv.ui.components.OtvHint
 import com.qiubo.optimaltv.ui.components.PosterPlaceholder
-import com.qiubo.optimaltv.ui.components.chromeHidePx
+import com.qiubo.optimaltv.ui.components.isScrolledFromTop
 import com.qiubo.optimaltv.ui.components.navigateToTab
 import com.qiubo.optimaltv.ui.components.tapCard
 import com.qiubo.optimaltv.ui.components.MobileBackButton
@@ -167,14 +167,14 @@ fun SearchScreen(nav: NavController) {
         else results.filter { catMap[it.id] == selectedCat }
     }
 
-    // 顶栏下潜：结果区滚过 300 设计px 隐藏、回顶显示（与 TV 版 chromeHide 同阈值）
-    val ctx = androidx.compose.ui.platform.LocalContext.current
-    val hidePx = remember { chromeHidePx(ctx.resources.displayMetrics.widthPixels) }
+    // 顶栏下潜：结果区离开绝对顶部即隐藏、回顶显示
     val resultsGridState = rememberLazyGridState()
-    val chromeGone by remember(resultsGridState, hidePx) {
+    val chromeGone by remember(resultsGridState) {
         derivedStateOf {
-            resultsGridState.firstVisibleItemIndex > 0 ||
-                resultsGridState.firstVisibleItemScrollOffset > hidePx
+            isScrolledFromTop(
+                resultsGridState.firstVisibleItemIndex,
+                resultsGridState.firstVisibleItemScrollOffset,
+            )
         }
     }
 

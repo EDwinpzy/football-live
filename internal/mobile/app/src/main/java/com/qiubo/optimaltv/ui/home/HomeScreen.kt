@@ -56,7 +56,7 @@ import com.qiubo.optimaltv.ui.components.MobileVodCard
 import com.qiubo.optimaltv.ui.components.OtvHint
 import com.qiubo.optimaltv.ui.components.PosterPlaceholder
 import com.qiubo.optimaltv.ui.components.VodCategorySelector
-import com.qiubo.optimaltv.ui.components.chromeHidePx
+import com.qiubo.optimaltv.ui.components.isScrolledFromTop
 import com.qiubo.optimaltv.ui.components.navigateToTab
 import com.qiubo.optimaltv.ui.components.tapCard
 import com.qiubo.optimaltv.ui.theme.OtvColors
@@ -72,7 +72,7 @@ import java.net.URLEncoder
  * 整页单 LazyColumn——首项 = hero 海报带（VOD_BAND 高：海报顶到屏幕最顶不留白 + 半透明白雾），
  * 之后 = 最近观看 + 片库（分类 chips + 网格行，每行 7 张竖卡 232×352 设计px）。
  * 与 TV 版唯一差异：交互触控（hero 横滑/点圆点翻页、卡片/chip 点按，无 D-pad 聚焦态）；
- * 顶栏随内容滚动下潜（对应 TV 版 chromeHide 的触控口径：滚过 300 设计px 即隐藏，回顶显示）。
+ * 顶栏随内容滚动下潜：内容离开绝对顶部即隐藏，回到顶部显示。
  * 需求⑤（2026-09-04）：竖屏 hero 带缩短（700→520 设计px）让轮播+最近观看整体上移。
  * 2026-09-08 竖屏适配：核心分类 3×2 全量可见；横屏保持单行，避免把入口藏在横向手势里。
  */
@@ -126,13 +126,13 @@ fun VodScreen(nav: NavController) {
         val atTop = vodListState.firstVisibleItemIndex == 0 && vodListState.firstVisibleItemScrollOffset == 0
         if (atTop) exitApp() else backScope.launch { vodListState.scrollToItem(0) }
     }
-    // 顶栏下潜：滚过 300 设计px 隐藏、回顶显示（与 TV 版 chromeHide 同阈值）
-    val ctx = androidx.compose.ui.platform.LocalContext.current
-    val hidePx = remember { chromeHidePx(ctx.resources.displayMetrics.widthPixels) }
-    val chromeGone by remember(vodListState, hidePx) {
+    // 顶栏下潜：内容离开绝对顶部即隐藏、回顶显示
+    val chromeGone by remember(vodListState) {
         derivedStateOf {
-            vodListState.firstVisibleItemIndex > 0 ||
-                vodListState.firstVisibleItemScrollOffset > hidePx
+            isScrolledFromTop(
+                vodListState.firstVisibleItemIndex,
+                vodListState.firstVisibleItemScrollOffset,
+            )
         }
     }
 

@@ -54,7 +54,7 @@ import com.qiubo.optimaltv.Graph
 import com.qiubo.optimaltv.data.model.MatchItem
 import com.qiubo.optimaltv.ui.components.MainTabBar
 import com.qiubo.optimaltv.ui.components.OtvHint
-import com.qiubo.optimaltv.ui.components.chromeHidePx
+import com.qiubo.optimaltv.ui.components.isScrolledFromTop
 import com.qiubo.optimaltv.ui.components.navigateToTab
 import com.qiubo.optimaltv.ui.components.tapCard
 import com.qiubo.optimaltv.ui.theme.OtvColors
@@ -229,13 +229,13 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
         val atTop = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
         if (atTop) exitApp() else backScope.launch { listState.scrollToItem(0) }
     }
-    // 顶栏下潜：滚过 300 设计px 隐藏、回顶显示（与 TV 版 chromeHide 同阈值）
-    val ctx = androidx.compose.ui.platform.LocalContext.current
-    val hidePx = remember { chromeHidePx(ctx.resources.displayMetrics.widthPixels) }
-    val chromeGone by remember(listState, hidePx) {
+    // 顶栏下潜：内容离开绝对顶部即隐藏、回顶显示
+    val chromeGone by remember(listState) {
         derivedStateOf {
-            listState.firstVisibleItemIndex > 0 ||
-                listState.firstVisibleItemScrollOffset > hidePx
+            isScrolledFromTop(
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset,
+            )
         }
     }
 

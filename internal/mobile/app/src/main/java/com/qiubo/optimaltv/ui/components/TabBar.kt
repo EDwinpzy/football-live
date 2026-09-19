@@ -178,5 +178,11 @@ fun MainTabBar(
     }
 }
 
-/** 内容区滚动下潜阈值换算：设计 px（300）→ 物理 px（顶栏 hidden 传参用，各屏共享口径） */
-fun chromeHidePx(widthPx: Int): Float = 300f * widthPx / 1920f
+/**
+ * 内容区是否已经离开绝对顶部。
+ *
+ * 顶部标签栏的隐藏不再等待固定像素阈值：只要首项有任何滚动偏移，
+ * 或首个可见项已经不是第 0 项，就视为页面已离开顶部。
+ */
+fun isScrolledFromTop(firstVisibleItemIndex: Int, firstVisibleItemScrollOffset: Int): Boolean =
+    firstVisibleItemIndex > 0 || firstVisibleItemScrollOffset > 0

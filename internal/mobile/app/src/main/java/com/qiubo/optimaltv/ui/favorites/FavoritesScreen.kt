@@ -48,7 +48,7 @@ import com.qiubo.optimaltv.data.model.formatTime
 import com.qiubo.optimaltv.ui.components.MainTabBar
 import com.qiubo.optimaltv.ui.components.OtvHint
 import com.qiubo.optimaltv.ui.components.PosterPlaceholder
-import com.qiubo.optimaltv.ui.components.chromeHidePx
+import com.qiubo.optimaltv.ui.components.isScrolledFromTop
 import com.qiubo.optimaltv.ui.components.navigateToTab
 import com.qiubo.optimaltv.ui.components.tapCard
 import com.qiubo.optimaltv.ui.theme.OtvColors
@@ -85,13 +85,13 @@ fun FavoritesScreen(nav: NavController) {
         if (atTop) exitApp()
         else backScope.launch { favListState.scrollToItem(0) }
     }
-    // 顶栏下潜：滚过 300 设计px 隐藏、回顶显示（与 TV 版 chromeHide 同阈值）
-    val ctx = androidx.compose.ui.platform.LocalContext.current
-    val hidePx = remember { chromeHidePx(ctx.resources.displayMetrics.widthPixels) }
-    val chromeGone by remember(favListState, hidePx) {
+    // 顶栏下潜：内容离开绝对顶部即隐藏、回顶显示
+    val chromeGone by remember(favListState) {
         derivedStateOf {
-            favListState.firstVisibleItemIndex > 0 ||
-                favListState.firstVisibleItemScrollOffset > hidePx
+            isScrolledFromTop(
+                favListState.firstVisibleItemIndex,
+                favListState.firstVisibleItemScrollOffset,
+            )
         }
     }
     // 竖屏优化：topPad 150→126、侧距 40（对齐网页版 portrait 规则）

@@ -149,6 +149,8 @@ dependencies {
     // v1.17 公测版：会员页购买二维码生成（BitMatrix 自绘 Canvas，与 TV 版同款）
     implementation 'com.google.zxing:core:3.5.3'
 
+    testImplementation 'junit:junit:4.13.2'
+
     // 移动端 Compose 组件级自动化测试。
     androidTestImplementation composeBom
     androidTestImplementation 'androidx.compose.ui:ui-test-junit4'
