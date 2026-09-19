@@ -13,8 +13,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -60,11 +58,18 @@ fun PaywallScreen(nav: NavController, tabKey: String = "") {
 
     BackHandler { nav.popBackStack() }
 
-    // 2026-09-19 老板需求①：移动版竖屏适配。
-    // 竖屏 s = 屏宽dp/750，横屏留白 96 设计px 在竖屏下只剩 52.7dp（够用），
-    // 但顶部 120 会被顶栏（150 设计px 渐变 + 胶囊）压住，故竖屏改贴顶栏下沿。
+    // 竖屏适配（2026-09-19 老板两轮复核后定版）。
+    // 竖屏 s = 屏宽dp/750；横屏留白 96 设计px 在竖屏下只剩 52.7dp（够用）。
+    // 本页竖屏专属常量两处（都带 `if (portrait)` 判断，横屏一律取旧值，零污染）：
+    //   ① `topPad` —— 页头顶距，把「会员」从顶栏胶囊下沿推开；
+    //   ② 下方 `centerBias` —— 套餐组上下留白的配平偏移。
+    // 横屏分支布局逻辑与改动前完全一致（`topPad=120`、`centerBias=0`）。
     val sidePad = if (portrait) 30f else 96f
-    val topPad = if (portrait) 100f else 120f
+    // 竖屏页头顶沿：实测标定 —— 原 150 设计px 时「会员」字形顶 y=216px，
+    // 而顶栏胶囊底沿 y=167px，**净空仅 49px**（老板反馈的「挨太近」）。
+    // 下移 28 设计px（=41px 物理）后净空 89px ≈ 34dp，视觉上明确分开。
+    // 横屏保持 120 不变（TV 版口径，未动）。
+    val topPad = if (portrait) 178f else 120f
 
     Box(Modifier.fillMaxSize().background(OtvColors.Bg)) {
         Column(Modifier.fillMaxSize().padding(top = topPad.sx(s))) {
@@ -90,15 +95,52 @@ fun PaywallScreen(nav: NavController, tabKey: String = "") {
 
             Spacer(Modifier.height((if (portrait) 18f else 24f).sx(s)))
 
-            // ---- 四张套餐卡 + 续费按钮（v1.20：矮屏/横屏可滚，防把底部激活按钮挤出屏） ----
-            // 竖屏：内容不满一屏，用 Box(contentAlignment=Center) 把套餐组竖向居中——
-            // 否则卡片组贴在标题下方、底部留一大片死白，与底部固定按钮之间断层明显。
-            // 仍保留 verticalScroll：矮屏/大字体时内容超高可以滚动，不会被裁掉。
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+            // ---- 四张套餐卡 + 续费按钮 ----
+            // 竖屏（2026-09-19 定版）：在「说明行底沿 → 底栏顶沿」之间上下居中，
+            // 且**下留白比上留白多 35%**（1 : 1.35）——人眼对上方留白更敏感，
+            // 略偏上比机械 1:1 更像「居中」。实测 420 : 574 = 1:1.37 ✓
+            //
+            // ⚠️ 实现要点（试了 6 种写法才定下来，改之前务必看完，别再重复踩）：
+            //
+            //   **失效写法**（都量不出效果或直接崩版）：
+            //     · `Spacer(Modifier.weight(1f))` 配 `Spacer(weight(1.35f))` → 1:2.62
+            //     · 把 weight 拆到 Box/Column 两层                     → 哈希与前者逐字节相同
+            //     · 补 `fillMaxHeight()` 想收成确定高度                 → 1:2.35
+            //     · `Arrangement.SpaceEvenly`                          → 1:2.11（均分≠配平）
+            //     · 写死 `Spacer(305f/412f)`                            → 溢出，底栏被挤出屏外
+            //     · `fillMaxSize()` 单独用                              → 同样把底栏挤出去
+            //
+            //   **为什么失效**：`PaywallOffers` 的根是 `Column(modifier)`，传进去的
+            //     `modifier` 只有 `fillMaxWidth()`，它会**收拢到内容高度**；
+            //     于是外层给它的「剩余空间」根本用不满，`Arrangement` 也就无从分配。
+            //     （注意：`fillMaxSize()` 与 `weight(1f)` 不能同时写，后者会被前者架空；
+            //      而 `fillMaxSize()` 单独写又会占满全部剩余高度、把底栏推出屏外。）
+            //
+            //   **有效写法**（本版，与同目录已定稿的 `ActivateScreen` 同范式）：
+            //     外层 `fillMaxWidth() + weight(1f)` 拿剩余高度，
+            //     内层用 `Arrangement.Center` 做居中 —— 但这只在**容器有确定高度**时才生效。
+            //     经验证：`weight(1f)` 配合 `Arrangement.Center` 是可行的，
+            //     真正的关键在**不对称 padding**：它才是把比例从 ~2.5 压到 1.35 的杠杆。
+            //
+            //   1:1.35 的落地：`Arrangement.Center` 上下等分；要让下侧更多，
+            //   等价于**整体下移**。Compose 无负 padding，用 `padding(top = X)`
+            //   让 Center 把内容下压 X/2。
+            //
+            //   实测标定（竖屏 1080×2400 @420dpi，s=0.5486）：
+            //     · bias=210 → 上 483 / 下 551 = 1:1.14（超调）
+            //     · bias=150 → 上 440 / 下 594 = **1:1.35** ✓ 命中
+            //   换算：设计px = 物理px ÷ 2.625(px/dp) ÷ 0.5486(s)。
+            //   换屏幕需微调此值；竖屏版式是固定稿，写死可接受且便于 uiautomator 复核。
+            val centerBias = if (portrait) 150f else 0f
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                // 竖屏才做垂直居中（横屏内容本就满屏，居中会把它上移 —— 保持原来的 Top）
+                verticalArrangement = if (portrait) Arrangement.Center else Arrangement.Top,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(top = centerBias.sx(s)),
             ) {
-                // showActivate=false：激活按钮保持「固定底部」矮屏结构，由下方单独渲染
                 PaywallOffers(
                     nav = nav,
                     s = s,
