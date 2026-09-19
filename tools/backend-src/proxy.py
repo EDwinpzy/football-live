@@ -1575,9 +1575,32 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
                     RELAY_CACHE[u] = (time.time(), 200, ctype or "application/octet-stream", bytes(buf), False)
                     _trim_relay()
 
-    # extra（Content-Range/Accept-Ranges）已在打开上游连接时构建；
-    # 已知长度 → 补 Content-Length，keep-alive 下客户端可正常判定 body 结束
-    if known_len >= 0:
+    # extra（Content-Range/Accept-Ranges）已在打开上游连接时构建
+    upstream_te = ""
+    try:
+        upstream_te = (state["resp"].headers.get("Transfer-Encoding") or "").lower()
+    except Exception:
+        pass
+    if rng:
+        # Range/206：保留上游段长（seek 语义需要 Content-Range + Content-Length）
+        if known_len >= 0:
+            extra["Content-Length"] = str(known_len)
+    elif "chunked" in upstream_te:
+        # 上游自身 chunked（腾讯系直播 CDN 在中间盒/代理链路上的形态）：
+        # urllib3 按 chunked 解码读取、无视其同时声明的 Content-Length——该 CL
+        # 可能虚高（实测稳定短交付 ~10 字节后干净收尾）。旧版透传此 CL，客户端
+        # （OkHttp/fetch）body 结束时判缺字节硬报 unexpected end of stream →
+        # ERROR_CODE_IO_NETWORK_CONNECTION_FAILED；重试重抓同一上游必复发
+        # （同线重试×3 → 错误态 30s 自动重试 → fresh 重解析仍同一 CDN 同一形态）
+        # = 足球直播「看一会就看不了、点重试/换源都没用」根因（2026-09-19 实测）。
+        # 改以 chunked 下发行：0-chunk 收尾即「完整」，到达多少算多少——TS 尾部
+        # 残缺不足一个 188B 包，解复用器直接丢弃，无感知；上游真异常（连接重置/
+        # 超时/读错误）仍由生成器上抛 → do_GET 不写终止块 → 客户端网络错误 →
+        # 既有重试链（语义与旧短包掐断一致，但虚报 CL 形态不再误伤）。
+        extra["Transfer-Encoding"] = "chunked"
+    elif known_len >= 0:
+        # 普通 CL 上游（点播 CDN 等）：透传 Content-Length，行为与旧版一致；
+        # 真短读由 urllib3 上抛 → do_GET 短包掐断 → 客户端重试
         extra["Content-Length"] = str(known_len)
     return status, ctype, extra, gen(), False
 
@@ -3170,13 +3193,22 @@ class Handler(SimpleHTTPRequestHandler):
                     promised = int(extra.get("Content-Length") or 0)
                 except Exception:
                     promised = 0
+                # 非 Range 媒体由 relay_stream 标记 chunked 下发行（见其中注释：
+                # 上游虚报 CL 短交付时按完整 body 干净收尾，不再硬报缺字节）。
+                # HTTP/1.0 客户端不支持 chunked → 退化为「无 CL + 关闭分帧」。
+                use_chunked = (
+                    (extra.get("Transfer-Encoding") or "").lower() == "chunked"
+                    and self.request_version >= "HTTP/1.1"
+                )
                 try:
                     self.send_response(status)
                     self.send_header("Content-Type", ctype)
                     self.send_header("Cache-Control", "max-age=10")
                     for k, v in extra.items():
+                        if k.lower() == "transfer-encoding" and not use_chunked:
+                            continue   # 1.0 客户端：不发 chunked 头，走关闭分帧
                         self.send_header(k, v)
-                    if "Content-Length" not in extra:
+                    if not use_chunked and "Content-Length" not in extra:
                         # 真流式（长度未知）：HTTP/1.1 下必须显式关闭连接分帧，
                         # 否则客户端不知道 body 何时结束 → 分片请求挂起（卡顿推手）
                         self.send_header("Connection", "close")
@@ -3184,14 +3216,24 @@ class Handler(SimpleHTTPRequestHandler):
                     # 统一 end_headers()：带 CORS（Android WebView file:// 必需）
                     self.end_headers()
                     for chunk in it:
-                        self.wfile.write(chunk)
+                        if use_chunked:
+                            self.wfile.write(("%x\r\n" % len(chunk)).encode("ascii"))
+                            self.wfile.write(chunk)
+                            self.wfile.write(b"\r\n")
+                        else:
+                            self.wfile.write(chunk)
                         sent += len(chunk)
+                    if use_chunked:
+                        # 终止块 = 完整 body：上游短交付（虚报 CL 的中间盒形态）到
+                        # 此为止按完整接收（TS 尾包残缺解复用器可弃），不再硬失败
+                        self.wfile.write(b"0\r\n\r\n")
+                        _prefetch_after(u, ref)
                     # 短包防护：上游中断导致 body < 已承诺 Content-Length 时，
                     # 必须掐断连接（close FIN）——keep-alive 下干净收尾会让客户端
                     # 把截断分片当完整数据解复用 → 解码器/hls worker 卡死无报错。
                     # 掐断后 Chromium 立刻报 ERR_CONTENT_LENGTH_MISMATCH → hls.js
                     # 走网络错误重试（可命中短缓存），秒级恢复而非冻结。
-                    if promised and sent < promised:
+                    elif promised and sent < promised:
                         self.close_connection = True
                     else:
                         _prefetch_after(u, ref)  # 完整转发 → 预取后继片（多连接对抗限速）
@@ -3199,7 +3241,8 @@ class Handler(SimpleHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     return  # 客户端断开（seek/切源），停止转发
                 except Exception:
-                    # 生成器中途失败（上游超时/重置）：按短包处理掐断连接
+                    # 生成器中途失败（上游超时/重置/读错误）：不写 chunked 终止块
+                    # 直接掐断连接 → 客户端网络错误 → 既有重试链（同旧短包语义）
                     self.close_connection = True
                     return
             # ---- m3u8 播放列表：整包重写（分片/密钥指回本代理）----
