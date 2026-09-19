@@ -685,8 +685,39 @@ class MacCmsAdapter:
             raise LookupError("线路没有可播放集")
         index = max(0, min(int(episode_index), len(episodes) - 1))
         episode = episodes[index]
+        url = self._resolve_media_url(str(episode.get("url") or "").strip())
+        if not url:
+            raise LookupError("播放线路未返回媒体地址")
         return {"line_id": line.get("id"), "name": episode.get("name"),
-                "url": episode.get("url"), "headers": {}}
+                "url": url, "headers": {}}
+
+    def _resolve_media_url(self, url):
+        """把 MacCMS 的 yun 播放页解析为播放器可消费的媒体直链。
+
+        不少源同时提供 ``hnyun``（HTML 播放页）和 ``hnm3u8``（直链）。
+        详情排序可能暂时把前者放在首位；把 HTML 交给网页中继只会得到
+        DPlayer 页面，Hls.js 会反复恢复直到超时。直链保持零额外请求，
+        只有无媒体扩展名的候选才抓页并提取 m3u8/mp4/flv。
+        """
+        if not url:
+            return ""
+        if re.search(r"\.(?:m3u8|mp4|flv)(?:[?#]|$)", url, re.I):
+            return url
+        try:
+            page = self.fetch(url)
+            html = str(page.get("body") or "")
+            html = (html.replace(r"\/", "/")
+                        .replace(r"\u0026", "&")
+                        .replace(r"\u003f", "?")
+                        .replace(r"\u003d", "="))
+            media = re.search(
+                r"https?://[^\"'<>\s\\]+?\.(?:m3u8|mp4|flv)(?:\?[^\"'<>\s\\]*)?",
+                html, re.I)
+            if media:
+                return urllib.parse.unquote(media.group(0))
+        except Exception:
+            pass
+        return ""
 
 
 class HhkanAdapter:

@@ -77,6 +77,24 @@ class VodSourcesTest(unittest.TestCase):
         self.assertEqual(lines[0]["episodes"][1]["name"], "第2集")
         self.assertEqual(adapter.resolve(lines[0], 1)["url"], "https://v.example/2.m3u8")
 
+    def test_maccms_adapter_resolves_player_page_to_media_url(self):
+        source = vod_sources.VodSource("demo", "演示", "https://example.test", "https://example.test/api.php/provide/vod/", "macms_json")
+        calls = []
+
+        def fake_fetch(url):
+            calls.append(url)
+            if url.endswith("?ac=detail&wd=%E5%BA%86%E4%BD%99%E5%B9%B42"):
+                return {"body": '{"list":[{"vod_id":7,"vod_name":"庆余年2","vod_play_from":"line-a","vod_play_url":"第1集$https://player.example/play/7"}]}' }
+            if url == "https://player.example/play/7":
+                return {"final_url": url, "body": "<script>const vid = 'https://cdn.example/episode/index.m3u8';</script>"}
+            raise AssertionError(url)
+
+        adapter = vod_sources.MacCmsAdapter(source, fetch=fake_fetch)
+        candidate = adapter.search({"title": "庆余年2"})[0]
+        line = adapter.detail(candidate)[0]
+        self.assertEqual(adapter.resolve(line, 0)["url"], "https://cdn.example/episode/index.m3u8")
+        self.assertIn("https://player.example/play/7", calls)
+
     def test_hhkan_adapter_searches_and_resolves_episode(self):
         class FakeHhkan:
             @staticmethod
