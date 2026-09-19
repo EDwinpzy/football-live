@@ -397,6 +397,8 @@ class App : android.app.Application(), ImageLoaderFactory {
         // v1.18 公测版：热更新（内测版 HOTUPDATE_ENABLED=false 时为空操作）；
         // v1.20 起 check 与下载分离：check 快速结束不阻塞进 app，非强更弹窗让用户选
         com.qiubo.optimaltv.hotupdate.HotUpdateManager.init(this)
+        // APK 应用内更新：清单检查失败时静默放行，下载完成后调起系统安装器
+        com.qiubo.optimaltv.apkupdate.ApkUpdateManager.init(this)
         // v1.20 运营公告：启动拉取 + 周期轮询，顶部半透明悬浮窗展示（失败静默）
         com.qiubo.optimaltv.announcement.AnnouncementManager.init(this)
         AppStartup.begin()   // v1.17：内容预热 + 启动门闸（v1.20 重设计：≤5s 快速放行）

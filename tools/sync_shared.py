@@ -55,9 +55,11 @@ SHARED_PATHS = [
     "app/src/main/java/com/qiubo/optimaltv/playback",        # 播放引擎层（Media3/VLC/解密桥）
     "app/src/main/java/com/qiubo/optimaltv/ui/detail/DetailViewModel.kt",  # 详情 VM（双端共用）
     "app/src/main/java/com/qiubo/optimaltv/license",           # v1.17 卡密授权管理（双端字节级一致）
+    "app/src/main/java/com/qiubo/optimaltv/apkupdate",         # APK 更新协议/下载校验（双端字节级一致）
     "app/src/main/java/com/qiubo/optimaltv/ui/paywall/PaywallShared.kt",  # v1.17 会员共享层（套餐/二维码/门控；PaywallScreen/ActivateScreen 各端独立）
     "app/src/main/python",                                   # Chaquopy 后端入口（proxy_runner 等）
     "app/src/main/assets/backend",                           # 内置后端 zip（proxy.py 等）
+    "app/src/main/res/xml/file_paths.xml",                   # FileProvider 仅暴露 APK 更新目录
     # 品牌资产不共享：TV 线 2026-09-02 更名 My TV（my_tv_logo），移动版按用户要求
     # 保持交付原貌（apple_tv_logo）——两端口径分治，不进字节级同步清单
 ]

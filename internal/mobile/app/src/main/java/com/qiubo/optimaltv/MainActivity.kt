@@ -199,6 +199,8 @@ class MainActivity : ComponentActivity() {
         com.qiubo.optimaltv.OtvLog.i("activity ON_RESUME（mobile）")
         // v1.20 热更自动重启：后台完成下载的更新在回前台时立即生效
         com.qiubo.optimaltv.hotupdate.HotUpdateManager.onForegroundChanged(true)
+        // 从“允许安装未知应用”系统设置返回时，继续 APK 下载并调起安装器
+        com.qiubo.optimaltv.apkupdate.ApkUpdateManager.onForegroundChanged(true)
         com.qiubo.optimaltv.announcement.AnnouncementManager.onForegroundChanged(true)
         com.qiubo.optimaltv.license.LicenseManager.requestReverify()
     }
@@ -327,5 +329,6 @@ private fun AppRoot() {
         // 全局浮层（最顶层，非模态）；需求⑪：公告已改系统通知，AnnouncementBanner 移除
         com.qiubo.optimaltv.ui.components.HotUpdateOfferDialog()
         com.qiubo.optimaltv.ui.components.HotUpdateProgressLayer()
+        com.qiubo.optimaltv.ui.components.ApkUpdateUi()
     }
 }
