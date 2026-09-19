@@ -80,8 +80,13 @@
 <!-- ============ 我的（FavoritesScreen 复刻：topPad150 收藏 + 历史；会员卡置顶） ============ -->
 <div class="page" id="pFav" hidden>
   <div class="fav-body">
-    <div class="member-card" id="memberCard"></div>
-    <div class="fav-sec-title">我的收藏</div>
+    <div class="fav-title-row">
+      <div class="fav-sec-title">我的收藏</div>
+      <!-- 会员信息行：与 App `MemberInlineInfo` 同构——状态点 + 「状态 · 套餐/到期/剩余」，
+           无背景框；行尾「续费」胶囊开会员弹窗（App 同位置也是「续费」入口）。
+           未激活时本行整体隐藏，与 App「未激活走统一会员页」一致。 -->
+      <div class="member-inline" id="memberInline" hidden></div>
+    </div>
     <div class="fav-empty" id="favEmpty" hidden>暂无收藏</div>
     <div class="hscroll fav-row" id="favRow"></div>
     <div id="favHistSec">
@@ -243,6 +248,26 @@
     </div>
     <div class="pw-msg" id="pwMsg"></div>
     <button class="pw-close" id="pwClose">暂不开通</button>
+  </div>
+</div>
+
+<!-- 会员续费 / 兑换弹窗（2026-09-19 需求④：网页版顶部新增续费窗口） -->
+<div id="memberModal" hidden>
+  <div class="mm-card">
+    <div class="mm-head">
+      <div>
+        <div class="mm-title">会员</div>
+        <div class="mm-sub" id="mmSub"></div>
+      </div>
+      <button class="mm-close" id="mmClose" title="关闭">✕</button>
+    </div>
+    <div class="mm-plans" id="mmPlans"></div>
+    <div class="mm-redeem">
+      <input id="mmInput" placeholder="卡密 OTV-XXXXX-XXXXX" autocomplete="off" spellcheck="false">
+      <button id="mmBtn">兑换</button>
+    </div>
+    <div class="mm-msg" id="mmMsg"></div>
+    <div class="mm-tip">续费：购买新卡密后用同一入口兑换，有效期在现有到期时间上顺延。</div>
   </div>
 </div>
 

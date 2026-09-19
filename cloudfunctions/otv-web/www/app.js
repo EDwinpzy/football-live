@@ -47,6 +47,16 @@ document.addEventListener("error", ev => {
   const el = ev.target;
   if (!el || el.tagName !== "IMG") return;
   const src = el.getAttribute("src") || "";
+  /* 好好看 vres 封面：本地走中继时若中继本身失败（罕见），回落直连原图。
+     云端本就是直连，无需再兜。data-fallback 记一次防循环。 */
+  if (el.dataset && el.dataset.fbk !== "1") {
+    const m = src.match(/\/hhkan\/proxy\?u=([^&]+)/);
+    if (m) {
+      el.dataset.fbk = "1";
+      try { el.src = decodeURIComponent(m[1]); } catch (e) { /* 保持原样 */ }
+      return;
+    }
+  }
   if (!DOUBAN_IMG_RE.test(src)) return;
   const host = (src.match(/^https?:\/\/([^/]+)/i) || [])[1] || "";
   const i = DOUBAN_IMG_HOSTS.indexOf(host);
@@ -54,14 +64,26 @@ document.addEventListener("error", ev => {
   if (next) el.src = src.replace(DOUBAN_IMG_RE, "$1" + next);
 }, true);
 
+/* 是否本地内嵌后端（App 里 Chaquopy 跑的 127.0.0.1:8090）。
+   本地出口就是用户家宽，好好看 CDN 不拒；此时图片必须走本机中继，才能吃到
+   服务端的 vres 镜像轮换（IMG_DOMAINS 三域）+ 磁盘缓存 + Referer 兜底。
+   云端（腾讯云出口）反过来——出口 IP 被 hhkan CDN 拒，只能让访客浏览器直连。 */
+const IS_LOCAL_BACKEND = (() => {
+  try {
+    const h = location.hostname;
+    return location.protocol === "file:" || h === "localhost" || h === "127.0.0.1" || h === "[::1]";
+  } catch (e) { return false; }
+})();
 function img(u) {
   u = doubanImg((u || "").trim());
   if (!u || u.startsWith("data:")) return u || "";
   /* 豆瓣非 imgN 图床的中继路径：已经是本服务地址，不能再套一层代理 */
   if (u.startsWith(DOUBAN_RELAY_PREFIX)) return BASE + u;
-  /* 浏览器直接加载 HTTPS 图片不受 CORS 限制。好好看资源 CDN 会拒绝腾讯云出口，
-     由访客网络直连既能正常出图，也省掉云函数带宽与执行时间。仅 http 图片继续中继，
-     避免 HTTPS 页面产生 mixed-content 拦截。 */
+  /* 本地内嵌后端：一律走中继（镜像轮换 + 磁盘缓存 + Referer 兜底）。
+     2026-09-19 修：vres.* 封面原先被直接放行给浏览器直连，CDN 偶发拒连/超时后
+     前端只对豆瓣图床做失败轮换，vres 死卡 → 「最近热门」间歇整片空卡。
+     云端（非本地）保持直连：腾讯云出口被 hhkan CDN 拒，直连反而正常出图。 */
+  if (IS_LOCAL_BACKEND) return BASE + "/hhkan/proxy?u=" + encodeURIComponent(u);
   if (/^https:\/\//i.test(u)) return u;
   return BASE + "/hhkan/proxy?u=" + encodeURIComponent(u);
 }
@@ -138,7 +160,9 @@ function pushHistory(it) {
   const list = store.get("otvw:hist", []).filter(h => h.id !== it.id);
   list.unshift(it); store.set("otvw:hist", list.slice(0, 50));
 }
-function getHistory() { return store.get("otvw:hist", []); }
+/* 只看影视历史（与 App HistoryEntity 同构：直播不入历史）。
+   filter 兼作存量清理：旧版本把足球写成了 "live:<matchId>"，已落盘的记录不再回显。 */
+function getHistory() { return store.get("otvw:hist", []).filter(h => !String(h.id || "").startsWith("live:")); }
 function getFavs() { return store.get("otvw:favs", []); }
 function toggleFav(it) {
   const list = getFavs();
@@ -309,17 +333,6 @@ function isPremium() {
   if (d.expiry_at < 0) return true;
   return licenseNow() < d.expiry_at;
 }
-function licenseDesc() {
-  const d = license.data;
-  if (!d) return null;
-  if (!withinLicenseGrace(Date.now())) return { plan: d.plan, text: "需要联网校验会员状态", days: 0, active: false };
-  if (d.expiry_at < 0) return { plan: d.plan, text: "终身会员", days: Infinity };
-  const left = Math.max(0, Math.ceil((d.expiry_at - licenseNow()) / 86400000));
-  const dt = new Date(d.expiry_at);
-  return { plan: d.plan, days: left, active: left > 0, text: left > 0
-    ? `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")} 到期 · 剩余 ${left} 天`
-    : "会员已到期 · 续费后继续观看" };
-}
 function parseServerMs(value) {
   if (value == null || value === "") return null;
   if (typeof value === "number") return value > 1e12 ? value : value * 1000;
@@ -353,7 +366,7 @@ async function applyLicenseResponse(jo) {
   };
   store.set("otvw:ticket", license.data);
   store.set("otvw:licenseVerifyAt", localNow);
-  renderMemberCard();
+  renderMemberInline();
   return true;
 }
 async function activateCode(raw) {
@@ -398,12 +411,12 @@ async function doLicenseReverify() {
       license.data = null;
       store.set("otvw:ticket", null);
       store.set("otvw:licenseVerifyAt", 0);
-      renderMemberCard();
+      renderMemberInline();
     } else if (jo && jo.ret === 405) {
       const expiry = parseServerMs(jo.expireAt) || licenseNow();
       license.data = { ...d, expiry_at: expiry };
       store.set("otvw:ticket", license.data);
-      renderMemberCard();
+      renderMemberInline();
     } else if (jo && jo.ret === 0) {
       await applyLicenseResponse(jo);
     }
@@ -1937,50 +1950,138 @@ $("#searchClear").addEventListener("click", searchReset);
 search.cat = "全部";
 
 /* ================================================================
- * 我的（FavoritesScreen 复刻：会员卡置顶 + 收藏 + 历史，topPad 150；历史 take(10)）
+ * 我的（FavoritesScreen 复刻：会员信息并入「我的收藏」标题行 + 收藏 + 历史，topPad 150）
  * ================================================================ */
-function renderMemberCard() {
-  const el = $("#memberCard");
-  if (!el) return;
-  const d = licenseDesc();
-  if (d) {
-    const planName = { monthly: "月卡", quarterly: "季卡", yearly: "年卡", lifetime: "终身", weekly: "周卡" }[d.plan] || d.plan;
-    el.innerHTML = `
-      <div class="mc-row">
-        <div class="mc-info">
-          <div class="mc-title">会员${d.days === Infinity ? "" : "· " + planName}</div>
-          <div class="mc-sub">${esc(d.text)}</div>
-        </div>
-        <div class="mc-badge ${d.active === false ? "" : "ok"}">${d.active === false ? "待校验/续费" : "生效中"}</div>
-      </div>
-      <div class="mc-code">卡密 ${esc(license.data.code)}</div>`;
-  } else {
-    el.innerHTML = `
-      <div class="mc-row">
-        <div class="mc-info">
-          <div class="mc-title">开通会员</div>
-          <div class="mc-sub">激活卡密后解锁全部影视、足球直播与电视频道</div>
-        </div>
-      </div>
-      <div class="mc-form">
-        <input id="mcInput" placeholder="卡密 OTV-XXXXX-XXXXX" autocomplete="off" spellcheck="false">
-        <button id="mcBtn">激活</button>
-      </div>
-      <div class="mc-msg" id="mcMsg"></div>`;
-    const submit = async () => {
-      const btn = $("#mcBtn");
-      btn.disabled = true; btn.textContent = "激活中…";
-      const r = await activateCode($("#mcInput").value);
-      btn.disabled = false; btn.textContent = "激活";
-      if (r.ok) hint("激活成功，欢迎成为会员");
-      else $("#mcMsg").textContent = r.msg;
-    };
-    $("#mcBtn").addEventListener("click", submit);
-    $("#mcInput").addEventListener("keydown", e => { if (e.key === "Enter") submit(); });
-  }
+
+/* 会员信息行（2026-09-19 需求④）：与 TV 版 / 移动版 App `MemberInlineInfo` 逐分支同构。
+ *
+ * App 基准（android + internal/mobile 的 ui/favorites/FavoritesScreen.kt）：
+ *   when {
+ *     d == null                       -> "加载中…"      White50
+ *     expiryAt != null && now>=expiryAt -> "会员已过期"  #FF453A ; info = 套餐 + " · 续费可用"
+ *     !isPremium()                    -> "等待联网校验"  #FF9F0A ; info = "联网后自动恢复"
+ *     expiryAt == null                -> "终身会员"      #30D158 ; info = "终身 · 永久有效"
+ *     else                            -> "会员有效"      #30D158 ; info = 套餐+" · 到期 yyyy-MM-dd · 剩余 N 天"
+ *   }
+ *   渲染形态 = 「状态点 + 状态 · info」+ 行尾「续费」；仅已激活态渲染（未激活走整页会员页）。
+ *
+ * 旧版是带背景框的三行大卡（标题/副行/卡密/徽章）且横屏竖屏两套布局，与两端 App 都不像；
+ * 现统一为无框行内小字，横竖屏同构。 */
+function memberStatus() {
+  const d = license.data;
+  if (d == null) return { status: "加载中…", color: "#8E8E93", info: "" };
+  const exp = d.expiry_at;
+  const hasExp = exp != null && exp >= 0;
+  if (hasExp && licenseNow() >= exp)
+    return { status: "会员已过期", color: "#FF453A", info: planName(d.plan) + " · 续费可用" };
+  if (!isPremium())
+    return { status: "等待联网校验", color: "#FF9F0A", info: "联网后自动恢复" };
+  if (!hasExp)
+    return { status: "终身会员", color: "#30D158", info: "终身 · 永久有效" };
+  const dt = new Date(exp);
+  const ymd = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  const left = Math.max(0, Math.ceil((exp - licenseNow()) / 86400000));
+  return { status: "会员有效", color: "#30D158",
+    info: `${planName(d.plan)} · 到期 ${ymd} · 剩余 ${left} 天` };
 }
+function planName(plan) {
+  return { monthly: "月卡", quarterly: "季卡", yearly: "年卡", lifetime: "终身", weekly: "周卡" }[plan] || plan;
+}
+function renderMemberInline() {
+  const el = $("#memberInline");
+  if (!el) return;
+  /* 未激活/未持票 → 整行不渲染（App：未激活态走统一会员页，不带行内小字） */
+  const st = memberStatus();
+  const show = !!license.data;
+  el.hidden = !show;
+  if (!show) { el.innerHTML = ""; return; }
+  el.innerHTML = `
+    <span class="mi-dot" style="background:${st.color}"></span>
+    <span class="mi-text">${esc(st.status)}${st.info ? " · " + esc(st.info) : ""}</span>
+    <button class="mi-renew" id="miRenew">续费</button>`;
+  $("#miRenew").addEventListener("click", openMemberModal);
+}
+
+/* ---------------- 会员续费 / 兑换弹窗（需求④） ----------------
+ * App 对应物 = PaywallScreen：四张套餐卡（月/季/年/终身）+ 选中后「续费」按钮 + 底部
+ * 「输入卡密激活」。两端 App 的续费按钮当前走 RenewalGateway（handler 未注入 → 返回 false），
+ * 页面据此提示「续费通道准备中，可先用输入卡密激活」——网页版沿用同口径，避免自造一条
+ * 与 App 不一致的支付通道；真正的续费下单接口接通后只改这里一处。 */
+const MEMBER_PLANS = [
+  { plan: "monthly", name: "月卡", price: "¥9.9", sub: "30 天" },
+  { plan: "quarterly", name: "季卡", price: "¥29.9", sub: "90 天" },
+  { plan: "yearly", name: "年卡", price: "¥99.9", sub: "365 天" },
+  { plan: "lifetime", name: "终身", price: "¥128", sub: "一次买断" },
+];
+let mmSelected = "monthly";
+function openMemberModal() {
+  const st = memberStatus();
+  $("#mmSub").textContent = license.data
+    ? `${st.status}${st.info ? " · " + st.info : ""}`
+    : "尚未开通 · 购买卡密后兑换即可解锁全部内容";
+  renderMemberModal();
+  $("#mmMsg").textContent = "";
+  $("#memberModal").hidden = false;
+}
+function closeMemberModal() { $("#memberModal").hidden = true; }
+function renderMemberModal() {
+  $("#mmPlans").innerHTML = MEMBER_PLANS.map(p => `
+    <div class="mm-plan ${p.plan === mmSelected ? "on" : ""}" data-plan="${p.plan}">
+      <div class="p-name">${esc(p.name)}</div>
+      <div class="p-price">${esc(p.price)}</div>
+      <div class="p-sub">${esc(p.sub)}</div>
+    </div>`).join("");
+  $$("#mmPlans .mm-plan").forEach(c => c.addEventListener("click", () => {
+    mmSelected = c.dataset.plan;
+    renderMemberModal();
+    $("#mmMsg").textContent = "";
+  }));
+  const p = MEMBER_PLANS.find(x => x.plan === mmSelected) || MEMBER_PLANS[0];
+  const btn = $("#mmRenewBtn");
+  btn.textContent = `续费 ${p.name}`;
+  $("#mmRenewNote").textContent = `${p.name} · ${p.price}`;
+}
+/* 续费按钮：App RenewalGateway.request() 未注入 handler → false，页面给卡密兜底提示。
+   网页版无发卡平台下单通道，同样只提示；待接口接通后在此处替换为真实下单跳转。 */
+function mmRenew() {
+  const p = MEMBER_PLANS.find(x => x.plan === mmSelected) || MEMBER_PLANS[0];
+  $("#mmMsg").textContent = `续费通道准备中，可先购买${p.name}卡密后用下方输入框兑换`;
+  const inp = $("#mmInput");
+  if (inp) inp.focus();
+}
+async function mmSubmit() {
+  const btn = $("#mmBtn");
+  btn.disabled = true; btn.textContent = "兑换中…";
+  const r = await activateCode($("#mmInput").value);
+  btn.disabled = false; btn.textContent = "兑换";
+  if (r.ok) {
+    $("#mmInput").value = "";
+    $("#mmMsg").textContent = "";
+    hint("兑换成功，有效期已顺延");
+    renderMemberInline();
+    openMemberModal();   /* 状态行同步刷新 */
+  } else $("#mmMsg").textContent = r.msg;
+}
+(function bindMemberModal() {
+  const modal = $("#memberModal");
+  if (!modal) return;
+  /* 弹窗内容每次打开重建（套餐卡选中态），静态骨架在这里一次性装好 */
+  const plans = $("#mmPlans");
+  plans.insertAdjacentHTML("afterend",
+    `<div class="mm-renew-row">
+       <button class="mm-renew-btn" id="mmRenewBtn">续费月卡</button>
+       <span class="mm-renew-note" id="mmRenewNote"></span>
+     </div>`);
+  $("#mmRenewBtn").addEventListener("click", mmRenew);
+  $("#mmBtn").addEventListener("click", mmSubmit);
+  $("#mmInput").addEventListener("keydown", e => { if (e.key === "Enter") mmSubmit(); });
+  $("#mmClose").addEventListener("click", closeMemberModal);
+  /* 点暗区关闭（与 App 浮层点按关闭同语义） */
+  modal.addEventListener("click", e => { if (e.target === modal) closeMemberModal(); });
+})();
+
 function renderFav() {
-  renderMemberCard();
+  renderMemberInline();
   const favs = getFavs(), hist = getHistory().slice(0, 10);
   $("#favEmpty").hidden = favs.length > 0;
   $("#favHistSec").hidden = hist.length === 0;   /* App：历史记录标题仅历史非空时渲染 */
@@ -2359,7 +2460,10 @@ async function resolveLiveAndPlay(ctx) {
     pv.sources = [first.url]; pv.srcNames = [first.src];
     renderSrcPicker();
     attachPlayer(relay(first.url), 0);
-    pushHistory({ id: "live:" + ctx.matchId, title: ctx.title, cover: "", epIndex: 0 });
+    /* 2026-09-19 修：足球直播不再写进观看历史。App 端 history 表只由影视页写入
+       （HistoryEntity.vodId），直播从不入历史 —— 旧版这里 pushHistory("live:xxx")
+       导致网页版「最近观看」混进「热刺 对阵 埃弗顿」这类比赛卡，且封面恒为空
+       （live 无 poster）显示成空卡。去掉即与 App 同构。 */
     /* 需求②：其余源到货一个上屏一个（不等最慢源） */
     rest.forEach(ch => tryOne(ch).then(appendSource).catch(() => {}));
   } catch (e) {
@@ -2371,7 +2475,6 @@ async function resolveLiveAndPlay(ctx) {
     pv.srcNames = ok.map(s => s.src);
     renderSrcPicker();
     attachPlayer(relay(pv.sources[0]), 0);
-    pushHistory({ id: "live:" + ctx.matchId, title: ctx.title, cover: "", epIndex: 0 });
   }
 }
 

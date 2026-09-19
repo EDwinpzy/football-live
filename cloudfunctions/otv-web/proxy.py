@@ -125,6 +125,7 @@ def _get_vod_service():
                     cache=douban_catalog.JsonDiskCache(cache_root / "douban"), media_index=local_index)
                 registry = vod_sources.SourceRegistry.load_current()
                 registry.history = vod_sources.LineHistory(cache_root / "vod_line_history.json")
+                registry.stats = vod_sources.SourceStats(cache_root / "vod_source_stats.json")
                 VOD_SERVICE = vod_api.VodService(catalog, registry)
                 # 内置豆瓣快照预热搜索索引：云端出口到不了豆瓣，冷实例即便是
                 # 访客直接搜索（没打开过影视首页）也必须先有结果。
@@ -133,6 +134,7 @@ def _get_vod_service():
     current = vod_sources.SourceRegistry.load_current()
     if hasattr(VOD_SERVICE, "registry") and current.version > VOD_SERVICE.registry.version:
         current.history = VOD_SERVICE.registry.history
+        current.stats = VOD_SERVICE.registry.stats
         VOD_SERVICE.registry = current
         VOD_SERVICE._resolve_sources = current.resolve_subject
     return VOD_SERVICE
@@ -941,13 +943,15 @@ def resolve_stream(match_id, src="bb", fresh=False):
             payload["url"] = None
         # v1.22（2026-09-05 需求⑦）：qqlive 高清线是「固定频道播放器」（qqliveHD{n}.php
         # 不带比赛 id），解出的流地址常是 CDN 上已轮换/下架的旧 ls id（实测 404）。
-        # 交付前做一次清单活性探测（relay_url 自带双 Referer 策略，~0.2-1s），
-        # 死链按「未开播」语义返回（ts=0 不缓存）——前端/VM 直接换下一源，
-        # 不再把 20s 起播看门狗浪费在死地址上。bb/plu 是比赛专属频道页，不探测。
-        if payload["url"] and src.startswith("qqlive"):
+        # v1.32（2026-09-19）：交付前活性探测扩展到 bb/plu 全源——原「bb/plu 是比赛
+        # 专属频道页，不探测」在遇到「挂起型死地址」时让死链直达播放器，用户白等
+        # ~20s 起播看门狗（当日奥克兰FC 友谊赛 plu 线 lmpull.va02.com 实测，见
+        # _probe_alive 注释）。_probe_alive 短超时判死后按「未开播」语义返回
+        # （ts=0 不缓存）——前端 30s 自动重试时重新解析，站点来流后自愈；
+        # 探测自身异常 fail-open（保留地址交播放器裁决）。
+        if payload["url"]:
             try:
-                probe_st = relay_url(payload["url"], None)[0]
-                if probe_st != 200:
+                if not _probe_alive(payload["url"], None):
                     payload["url"] = None
             except Exception:
                 pass
@@ -1287,7 +1291,7 @@ _no_redirect_opener = urlreq.build_opener(_NoRedirectHandler)
 _REDIRECT_CODES = (301, 302, 303, 307, 308)
 
 
-def _open_upstream(u, headers, read_timeout, preload=True):
+def _open_upstream(u, headers, read_timeout, preload=True, connect_timeout=5):
     """打开上游 GET 连接，返回 (resp, final_url)。
 
     2026-09-04 v1.21 网页版：urllib3 2.x 自动重定向会丢 query —— IPTV 源站
@@ -1301,7 +1305,7 @@ def _open_upstream(u, headers, read_timeout, preload=True):
     while True:
         if HAS_URLLIB3:
             resp = _http.request("GET", cur, headers=headers,
-                                 timeout=urllib3.Timeout(connect=5, read=read_timeout),
+                                 timeout=urllib3.Timeout(connect=connect_timeout, read=read_timeout),
                                  preload_content=preload, redirect=False)
             if resp.status in _REDIRECT_CODES:
                 loc = resp.headers.get("Location") or ""
@@ -1324,6 +1328,45 @@ def _open_upstream(u, headers, read_timeout, preload=True):
         hops += 1
         if hops > 3 or _blocked_internal_url(cur):
             raise RuntimeError("blocked redirect chain: %s -> %s" % (u, cur))
+
+
+def _probe_alive(u, ref=None, per_try=3):
+    """流地址交付前活性探测：任一 Referer 策略在 per_try 秒内拿到 2xx/3xx + 首字节
+    → True；全部策略失败（连接/读超时、4xx/5xx、空响应）→ False。
+
+    v1.32（2026-09-19）：奥克兰FC 友谊赛 plu 线 lmpull.va02.com 是「挂起型死地址」
+    ——TCP 通、裸 GET 根路径秒回 404、一切 /sport/* 请求挂起 ~16s 后断连（本机
+    直连/Clash 代理/腾讯云 SCF 三路径一致，假签名与不存在流 id 行为相同，即边缘
+    在线、回源无推流）。relay_url 默认 12s×2 策略的探测要白等 24s+，故探测专用
+    短超时（connect/read 均 per_try，双策略最坏 6s）。只读首 4KB：「direct」型
+    大文件 URL 不会整段下载；空响应换策略再试，两策略都空也判死。"""
+    if not u or not u.startswith(("http://", "https://")):
+        return False
+    for headers in _relay_strategies(ref):
+        resp = None
+        try:
+            resp, _final = _open_upstream(u, headers, read_timeout=per_try,
+                                          preload=False, connect_timeout=per_try)
+            if not (200 <= resp.status < 400):
+                continue
+            if HAS_URLLIB3:
+                chunk = resp.read(4096, decode_content=False)
+            else:
+                chunk = resp.read(4096)
+            if chunk:
+                return True
+        except Exception:
+            continue
+        finally:
+            if resp is not None:
+                try:
+                    if HAS_URLLIB3:
+                        resp.release_conn()
+                    else:
+                        resp.close()
+                except Exception:
+                    pass
+    return False
 
 
 def relay_url(u, ref=None):
@@ -1905,7 +1948,12 @@ def save_team_icon_cache():
 def _football_logo_key(value):
     """Normalize display names so e.g. `Liverpool` matches `Liverpool FC`."""
     value = (value or "").replace("_", " ").lower()
-    value = re.sub(r"\b(football club|futbol club|fc|cf|ac|sc)\b", " ", value)
+    # v1.32（2026-09-19）：通用后缀剥离兼容「CJK+FC 连写」（奥克兰FC/FC东京/巴黎FC）。
+    # 旧 \b 词界在 CJK 与拉丁字母相邻时不生效（\w 含 CJK）：「奥克兰fc」剥不掉 fc，
+    # [^a-z0-9] 清洗后残留裸 "fc" 当查询键——前缀匹配命中一切 FC* 俱乐部，
+    # 最短键 FCV Dender EH 恒胜，5 支球队错挂比利时队徽（实测 FC东京/安道尔FC/
+    # 巴黎FC/邓迪FC/奥克兰FC 全中）。改为「前无拉丁字符、后无拉丁字符」断言。
+    value = re.sub(r"(^|[^a-z0-9])(football club|futbol club|fc|cf|ac|sc)(?![a-z0-9])", " ", value)
     return re.sub(r"[^a-z0-9]+", "", value)
 
 
@@ -2277,6 +2325,181 @@ def resolve_team_icon(team_name):
         "巴拉多利德": "https://r2.thesportsdb.com/images/media/team/badge/guqal21757526050.png",
         "深圳新鹏城": "https://r2.thesportsdb.com/images/media/team/badge/jsv5901716654183.png",
         "普埃布拉": "https://r2.thesportsdb.com/images/media/team/badge/h0jgg51593451845.png",
+
+        # 同日补 5 支「CJK+FC 后缀」队（_football_logo_key 残留 fc 曾错挂 Dender，matcher 已修）
+        "FC东京": "https://assets.football-logos.cc/logos/japan/64x64/fc-tokyo.3d5d763a.png",
+        "奥克兰FC": "https://assets.football-logos.cc/logos/new-zealand/64x64/auckland-fc.0814647e.png",
+        "安道尔FC": "https://assets.football-logos.cc/logos/spain/64x64/fc-andorra.2d86d24c.png",
+        "巴黎FC": "https://assets.football-logos.cc/logos/france/64x64/paris-fc.d3c4901c.png",
+        "邓迪FC": "https://assets.football-logos.cc/logos/scotland/64x64/dundee.83e57059.png",
+
+        # 2026-09-19 v1.32 补：站点赛事全量扫出的 163 支缺标队（football-logos.cc
+        # 64px + TDB 512px 徽章，逐队人工甄别——贪心匹配曾把 悉尼国王→Sydney FC、
+        # 墨尔本联→Melbourne City、卢加诺/阿特拉斯→阿根廷同名队，均已修正；
+        # U23 用足协徽；篮球队按 TDB sport=Basketball 校验）
+        "SBV精英队": "https://assets.football-logos.cc/logos/netherlands/64x64/excelsior-rotterdam.9bd13c24.png",
+        "不莱梅": "https://assets.football-logos.cc/logos/germany/64x64/werder-bremen.35e99fc4.png",
+        "东京绿茵": "https://assets.football-logos.cc/logos/japan/64x64/tokyo-verdy.29cfa7c6.png",
+        "东南墨尔本凤凰": "https://r2.thesportsdb.com/images/media/team/badge/73xo0d1755702709.png",
+        "中国U23": "https://assets.football-logos.cc/logos/china/64x64/china-national-team.d9b8835b.png",
+        "中国香港女篮": "https://r2.thesportsdb.com/images/media/team/badge/bxuaz71704648483.png",
+        "乌德勒支": "https://assets.football-logos.cc/logos/netherlands/64x64/fc-utrecht.e6fcb34c.png",
+        "乔治罗尼亚": "https://assets.football-logos.cc/logos/poland/64x64/jagiellonia.e3b77a0c.png",
+        "什切青": "https://assets.football-logos.cc/logos/poland/64x64/pogon.4e231a97.png",
+        "代格福什": "https://assets.football-logos.cc/logos/sweden/64x64/degerfors.6ff855a4.png",
+        "伊拉瓦拉飞鹰": "https://r2.thesportsdb.com/images/media/team/badge/juj7y91725980615.png",
+        "伊朗U23": "https://assets.football-logos.cc/logos/iran/64x64/iran-national-team.b40d4914.png",
+        "休达": "https://assets.football-logos.cc/logos/spain/64x64/ceuta.20a6c69a.png",
+        "伯恩利": "https://assets.football-logos.cc/logos/england/64x64/burnley.e3bc6326.png",
+        "佛山南狮": "https://r2.thesportsdb.com/images/media/team/badge/gxrbpw1726937225.png",
+        "克拉科维亚": "https://assets.football-logos.cc/logos/poland/64x64/cracovia.bb734224.png",
+        "克雷莫纳": "https://assets.football-logos.cc/logos/italy/64x64/cremonese.84709685.png",
+        "内卡萨": "https://assets.football-logos.cc/logos/mexico/64x64/necaxa.5ac11b37.png",
+        "冈山绿雉": "https://assets.football-logos.cc/logos/japan/64x64/fagiano-okayama.71498843.png",
+        "凯勒雷斯": "https://assets.football-logos.cc/logos/italy/64x64/carrarese.7124f579.png",
+        "利勒斯特罗姆": "https://assets.football-logos.cc/logos/norway/64x64/lillestrom.045ea2a1.png",
+        "利斯特雷": "https://assets.football-logos.cc/logos/argentina/64x64/deportivo-riestra.b1e69a93.png",
+        "加济安泰普大都会": "https://assets.football-logos.cc/logos/turkey/64x64/gaziantep.8fe98f9b.png",
+        "加的斯": "https://assets.football-logos.cc/logos/spain/64x64/cadiz.fdf257af.png",
+        "勒芒": "https://assets.football-logos.cc/logos/france/64x64/le-mans.11abbc97.png",
+        "千叶市原": "https://assets.football-logos.cc/logos/japan/64x64/jef-united-chiba.2f334567.png",
+        "华沙普洛克": "https://assets.football-logos.cc/logos/poland/64x64/wisla-plock.0a7afe9c.png",
+        "华沙莱吉亚": "https://assets.football-logos.cc/logos/poland/64x64/legia-warszawa.c29b3ec2.png",
+        "南蒂罗尔": "https://r2.thesportsdb.com/images/media/team/badge/8fico41579725098.png",
+        "博尔顿": "https://assets.football-logos.cc/logos/england/64x64/bolton.274c8db2.png",
+        "卡坦萨罗": "https://assets.football-logos.cc/logos/italy/64x64/catanzaro.1ac7deb6.png",
+        "卡尔斯鲁厄": "https://assets.football-logos.cc/logos/germany/64x64/karlsruher.06772e9f.png",
+        "卡斯特利翁": "https://assets.football-logos.cc/logos/spain/64x64/castellon.eb62f4ca.png",
+        "卢加诺": "https://assets.football-logos.cc/logos/switzerland/64x64/lugano.3d05b3b6.png",
+        "卢塞恩": "https://assets.football-logos.cc/logos/switzerland/64x64/luzern.48fd812f.png",
+        "卢宾扎格勒比": "https://assets.football-logos.cc/logos/poland/64x64/zaglebie-lubin.85bc2192.png",
+        "吉尔吉斯斯坦U23": "https://assets.football-logos.cc/logos/kyrgyzstan/64x64/kyrgyzstan-national-team.55ad948d.png",
+        "吉马良斯": "https://assets.football-logos.cc/logos/portugal/64x64/vitoria-de-guimaraes.94af668d.png",
+        "哈萨克斯坦女篮": "https://r2.thesportsdb.com/images/media/team/badge/we4msa1704648627.png",
+        "哥德堡盖斯": "https://assets.football-logos.cc/logos/sweden/64x64/gais.abe24254.png",
+        "哥罗纳": "https://assets.football-logos.cc/logos/poland/64x64/korona-kielce.7d8f2f29.png",
+        "图恩": "https://assets.football-logos.cc/logos/switzerland/64x64/thun.6356590c.png",
+        "圣加仑": "https://assets.football-logos.cc/logos/switzerland/64x64/st-gallen.deb64fa5.png",
+        "圣图尔登": "https://assets.football-logos.cc/logos/belgium/64x64/sint-truidense.a2bb0b43.png",
+        "圣埃蒂安": "https://assets.football-logos.cc/logos/france/64x64/as-saint-etienne.144deb42.png",
+        "圣塔菲联队": "https://assets.football-logos.cc/logos/argentina/64x64/union.8593d85c.png",
+        "圣米伦": "https://assets.football-logos.cc/logos/scotland/64x64/st-mirren.7dc9c309.png",
+        "圣约翰斯通": "https://assets.football-logos.cc/logos/scotland/64x64/st-johnstone.a400a34f.png",
+        "圣路易斯竞技": "https://assets.football-logos.cc/logos/mexico/64x64/atletico-de-san-luis.d57a75db.png",
+        "坎布尔": "https://assets.football-logos.cc/logos/netherlands/64x64/sc-cambuur.7f9c2f80.png",
+        "埃尔夫斯堡": "https://assets.football-logos.cc/logos/sweden/64x64/elfsborg.8683830b.png",
+        "埃尔祖鲁姆体育": "https://assets.football-logos.cc/logos/turkey/64x64/erzurumspor.837b9b69.png",
+        "埃弗斯堡": "https://assets.football-logos.cc/logos/germany/64x64/sv-elversberg.803d172e.png",
+        "埃瓦尔": "https://assets.football-logos.cc/logos/spain/64x64/eibar.334990c3.png",
+        "埃登斯": "https://assets.football-logos.cc/logos/spain/64x64/eldense.70f4e1e3.png",
+        "基斯迪辛特": "https://assets.football-logos.cc/logos/norway/64x64/kristiansund.286e3bd4.png",
+        "基马诺克": "https://assets.football-logos.cc/logos/scotland/64x64/kilmarnock.ebb7b56f.png",
+        "塞尔维特": "https://assets.football-logos.cc/logos/switzerland/64x64/servette.0be8884e.png",
+        "墨尔本联": "https://r2.thesportsdb.com/images/media/team/badge/adpuke1755702629.png",
+        "大连可为": "https://r2.thesportsdb.com/images/media/team/badge/tu9jt11773419457.png",
+        "奥尔格里特": "https://assets.football-logos.cc/logos/sweden/64x64/orgryte.aae88c18.png",
+        "奥德赫维里": "https://assets.football-logos.cc/logos/belgium/64x64/oud-heverlee-leuven.1fa58bc5.png",
+        "奥斯纳布鲁克": "https://assets.football-logos.cc/logos/germany/64x64/osnabruck.fa51589b.png",
+        "奥胡斯": "https://assets.football-logos.cc/logos/denmark/64x64/agf.dbceb779.png",
+        "威尼斯": "https://assets.football-logos.cc/logos/italy/64x64/venezia.65aa8dbe.png",
+        "威廉二世": "https://assets.football-logos.cc/logos/netherlands/64x64/willem-ii.fc83ba30.png",
+        "安特卫普": "https://assets.football-logos.cc/logos/belgium/64x64/antwerp.d58478c8.png",
+        "巴勒莫": "https://assets.football-logos.cc/logos/italy/64x64/palermo.056287c3.png",
+        "巴塞尔": "https://assets.football-logos.cc/logos/switzerland/64x64/basel.ccd56f6b.png",
+        "布伦瑞克": "https://assets.football-logos.cc/logos/germany/64x64/eintracht-braunschweig.9301aeb7.png",
+        "布洛涅": "https://assets.football-logos.cc/logos/france/64x64/boulogne.b28e2dcf.png",
+        "布雷斯特": "https://assets.football-logos.cc/logos/france/64x64/brest.0586bbdf.png",
+        "希洪竞技": "https://assets.football-logos.cc/logos/spain/64x64/sporting-gijon.23aa5612.png",
+        "帕多瓦": "https://assets.football-logos.cc/logos/italy/64x64/padova.9e965adb.png",
+        "年青人": "https://assets.football-logos.cc/logos/switzerland/64x64/young-boys.4aadc488.png",
+        "弗洛西诺尼": "https://assets.football-logos.cc/logos/italy/64x64/frosinone.2ec7ffe1.png",
+        "德累斯顿": "https://assets.football-logos.cc/logos/germany/64x64/dynamo-dresden.f936408a.png",
+        "恩特拉": "https://assets.football-logos.cc/logos/italy/64x64/virtus-entella.c0da688c.png",
+        "悉尼国王": "https://r2.thesportsdb.com/images/media/team/badge/gsfe5x1550073324.png",
+        "拉普拉塔体操": "https://assets.football-logos.cc/logos/argentina/64x64/gimnasia-lp.2aafca49.png",
+        "拉路维尔": "https://assets.football-logos.cc/logos/belgium/64x64/raal-la-louviere.d549f5c0.png",
+        "斯达": "https://assets.football-logos.cc/logos/norway/64x64/start.a8354aef.png",
+        "新西兰破坏者": "https://r2.thesportsdb.com/images/media/team/badge/83088b1725978587.png",
+        "无锡吴钩": "https://r2.thesportsdb.com/images/media/team/badge/ylvkag1726938322.png",
+        "日本U23": "https://assets.football-logos.cc/logos/japan/64x64/japan-national-team.873d5cb6.png",
+        "日本女篮": "https://r2.thesportsdb.com/images/media/team/badge/0gckkv1651190201.png",
+        "昂热": "https://assets.football-logos.cc/logos/france/64x64/angers.9aec6d75.png",
+        "曼托瓦": "https://assets.football-logos.cc/logos/italy/64x64/mantova-1911.cf180a97.png",
+        "朴茨茅斯": "https://assets.football-logos.cc/logos/england/64x64/portsmouth.7ed5c164.png",
+        "杭州临平昊越": "https://r2.thesportsdb.com/images/media/team/badge/qwvc4f1743181934.png",
+        "林肯城": "https://assets.football-logos.cc/logos/england/64x64/lincoln-city.5153edd1.png",
+        "柏太阳神": "https://assets.football-logos.cc/logos/japan/64x64/kashiwa-reysol.03ad59c5.png",
+        "查尔顿": "https://assets.football-logos.cc/logos/england/64x64/charlton.09ab0c5f.png",
+        "根克勒比利吉": "https://assets.football-logos.cc/logos/turkey/64x64/genclerbirligi.141ca9af.png",
+        "格拉斯哥流浪者": "https://assets.football-logos.cc/logos/scotland/64x64/rangers.5c081147.png",
+        "桑德捷斯基": "https://assets.football-logos.cc/logos/denmark/64x64/sonderjyske.0a90b467.png",
+        "桑德菲杰": "https://assets.football-logos.cc/logos/norway/64x64/sandefjord.b68bee9b.png",
+        "桑普多利亚": "https://assets.football-logos.cc/logos/italy/64x64/sampdoria.0420ea9a.png",
+        "梅斯": "https://assets.football-logos.cc/logos/france/64x64/fc-metz.06656ce1.png",
+        "梅赫伦": "https://assets.football-logos.cc/logos/belgium/64x64/mechelen.91c1be60.png",
+        "欧登塞": "https://assets.football-logos.cc/logos/denmark/64x64/odense-boldklub.38b78f7d.png",
+        "比勒菲尔德": "https://assets.football-logos.cc/logos/germany/64x64/arminia-bielefeld.2ae199a3.png",
+        "比萨": "https://assets.football-logos.cc/logos/italy/64x64/pisa.53a7734c.png",
+        "水户蜀葵": "https://assets.football-logos.cc/logos/japan/64x64/mito-hollyhock.ca36d9ae.png",
+        "汉坎": "https://assets.football-logos.cc/logos/norway/64x64/hamkam.27b8f3c1.png",
+        "沙勒罗瓦": "https://assets.football-logos.cc/logos/belgium/64x64/charleroi.9175aeba.png",
+        "沙巴度尔": "https://assets.football-logos.cc/logos/spain/64x64/sabadell.bf421e53.png",
+        "泰国U23": "https://assets.football-logos.cc/logos/thailand/64x64/thailand-national-team.da0c6edd.png",
+        "洛桑": "https://assets.football-logos.cc/logos/switzerland/64x64/lausanne-sport.94621913.png",
+        "洛默尔": "https://assets.football-logos.cc/logos/belgium/64x64/lommel.37a41719.png",
+        "海牙": "https://assets.football-logos.cc/logos/netherlands/64x64/ado-den-haag.6271bca9.png",
+        "特内里费": "https://assets.football-logos.cc/logos/spain/64x64/tenerife.ab50f66a.png",
+        "特尔斯达": "https://assets.football-logos.cc/logos/netherlands/64x64/telstar.7c7e5c48.png",
+        "特罗姆瑟": "https://assets.football-logos.cc/logos/norway/64x64/tromso.4c0ba4af.png",
+        "特鲁瓦": "https://assets.football-logos.cc/logos/france/64x64/troyes.9a1bf8b3.png",
+        "珀斯野猫": "https://r2.thesportsdb.com/images/media/team/badge/7gkvnd1755701286.png",
+        "班菲尔德": "https://assets.football-logos.cc/logos/argentina/64x64/banfield.f4431b3c.png",
+        "琴斯托霍瓦": "https://assets.football-logos.cc/logos/poland/64x64/rakow.ab7a1a7f.png",
+        "瓦勒海姆": "https://assets.football-logos.cc/logos/belgium/64x64/zulte-waregem.bb2b6da2.png",
+        "甘冈": "https://assets.football-logos.cc/logos/france/64x64/guingamp.aea1049a.png",
+        "皇家奥维耶多": "https://assets.football-logos.cc/logos/spain/64x64/oviedo.165a9747.png",
+        "皮亚斯特": "https://assets.football-logos.cc/logos/poland/64x64/piast.46717f60.png",
+        "石家庄功夫": "https://r2.thesportsdb.com/images/media/team/badge/a4q6fx1739511291.png",
+        "福图纳锡塔德": "https://assets.football-logos.cc/logos/netherlands/64x64/fortuna-sittard.1fb659f0.png",
+        "福尔柯克": "https://assets.football-logos.cc/logos/scotland/64x64/falkirk.129c885c.png",
+        "科特布斯": "https://assets.football-logos.cc/logos/germany/64x64/energie-cottbus.b65e177a.png",
+        "科里蒂巴": "https://assets.football-logos.cc/logos/brazil/64x64/coritiba.8eab11d7.png",
+        "科鲁姆": "https://assets.football-logos.cc/logos/turkey/64x64/corum.55157c14.png",
+        "红星": "https://assets.football-logos.cc/logos/france/64x64/red-star-fc.c11dc246.png",
+        "维京": "https://assets.football-logos.cc/logos/norway/64x64/viking.057a6e98.png",
+        "维塞乌": "https://assets.football-logos.cc/logos/portugal/64x64/academico-de-viseu.a81d9464.png",
+        "维琴察": "https://assets.football-logos.cc/logos/italy/64x64/vicenza.68adffb9.png",
+        "罗森博格": "https://assets.football-logos.cc/logos/norway/64x64/rosenborg.4096b5e6.png",
+        "腓特烈斯塔": "https://assets.football-logos.cc/logos/norway/64x64/fredrikstad.250253c1.png",
+        "色格拉布鲁日": "https://assets.football-logos.cc/logos/belgium/64x64/cercle-brugge.fa894bb6.png",
+        "艾华卡": "https://assets.football-logos.cc/logos/portugal/64x64/alverca.d0393a93.png",
+        "苏黎世": "https://assets.football-logos.cc/logos/switzerland/64x64/zurich.965ff93d.png",
+        "草蜢": "https://assets.football-logos.cc/logos/switzerland/64x64/grasshoppers.cbac245e.png",
+        "荷尔斯泰因基尔": "https://assets.football-logos.cc/logos/germany/64x64/holstein-kiel.af752e8c.png",
+        "莫托路宾": "https://assets.football-logos.cc/logos/poland/64x64/motor-lublin.fea7660a.png",
+        "菲律宾女篮": "https://r2.thesportsdb.com/images/media/team/badge/rfu7w31704638282.png",
+        "葡萄牙体育": "https://assets.football-logos.cc/logos/portugal/64x64/sporting-cp.b4809cb3.png",
+        "西悉尼流浪者": "https://assets.football-logos.cc/logos/australia/64x64/western-sydney-wanderers.6da3345f.png",
+        "贝内文托": "https://assets.football-logos.cc/logos/italy/64x64/benevento.cf40995f.png",
+        "赣州瑞狮": "https://r2.thesportsdb.com/images/media/team/badge/2b2tb11729973180.png",
+        "邓迪联队": "https://assets.football-logos.cc/logos/scotland/64x64/dundee-united.77b91f6b.png",
+        "里奥阿维": "https://assets.football-logos.cc/logos/portugal/64x64/rio-ave.7132586c.png",
+        "锡永": "https://assets.football-logos.cc/logos/switzerland/64x64/sion.941932f3.png",
+        "长崎成功丸": "https://assets.football-logos.cc/logos/japan/64x64/v-varen-nagasaki.cf3f6cc7.png",
+        "阿伯丁": "https://assets.football-logos.cc/logos/scotland/64x64/aberdeen.4cadc403.png",
+        "阿兰亚士邦": "https://assets.football-logos.cc/logos/turkey/64x64/alanyaspor.1a4bb5e8.png",
+        "阿尔克马尔": "https://assets.football-logos.cc/logos/netherlands/64x64/az-alkmaar.a2a2c71b.png",
+        "阿斯科利": "https://assets.football-logos.cc/logos/italy/64x64/ascoli.6ea376d9.png",
+        "阿特拉斯": "https://assets.football-logos.cc/logos/mexico/64x64/atlas.2a39988b.png",
+        "阿维利诺": "https://assets.football-logos.cc/logos/italy/64x64/us-avellino-1912.1c1452fc.png",
+        "阿雷佐": "https://assets.football-logos.cc/logos/italy/64x64/arezzo.64a289cd.png",
+        "阿马多拉": "https://assets.football-logos.cc/logos/portugal/64x64/estrela-da-amadora.2205119b.png",
+        "雷克瑟姆": "https://assets.football-logos.cc/logos/england/64x64/wrexham.5652ff90.png",
+        "霍森斯": "https://assets.football-logos.cc/logos/denmark/64x64/horsens.5b3eb944.png",
+        "韦斯特鲁": "https://assets.football-logos.cc/logos/belgium/64x64/westerlo.df6706b5.png",
+        "马梅洛迪日落": "https://assets.football-logos.cc/logos/south-africa/64x64/mamelodi-sundowns.435ac696.png",
+        "马瑟韦尔": "https://assets.football-logos.cc/logos/scotland/64x64/motherwell.a8fd7032.png",
+        "鹿特丹斯巴达": "https://assets.football-logos.cc/logos/netherlands/64x64/sparta-rotterdam.8f93fe3c.png",
     }
     if team_name in KNOWN_MAP:
         val = KNOWN_MAP[team_name]
@@ -2345,7 +2568,34 @@ _HHKAN_PAGE_CACHE_TTL = 90.0
 # 「全部」页每次进页/切类不必重新实时抓筛选（冷抓实测 0.7s+，弱网更久）
 _HHKAN_PAGE_CACHE_TTL_FILTERS = 3600.0
 _HHKAN_PAGE_CACHE_MAX = 80
-_HHKAN_SNAPSHOT = hhkan_snapshot.SnapshotCatalog.load_default()
+class _LazyHhkanSnapshot:
+    """22.9MB hhkan_snapshot.json 的全量 json.loads 从 import 期推迟到首个 /hhkan/* 请求。
+
+    冷启动优化（2026-09-19 方案 C1）：旧实现模块级同步 parse，卡在绑端口之前，
+    手机端 import proxy 要多等数秒、还多占几十 MB 内存（dict 膨胀）——而 hero 简介等
+    豆瓣路径根本不读这份快照。这里首次访问才真正加载（锁防并发重复 parse），
+    所有 `_HHKAN_SNAPSHOT.xxx` 调用点零改动；绑端口后由 _startup_warm 后台预载。
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._real = None
+
+    def load(self):
+        if self._real is None:
+            with self._lock:
+                if self._real is None:
+                    self._real = hhkan_snapshot.SnapshotCatalog.load_default()
+        return self._real
+
+    def preload(self):
+        threading.Thread(target=self.load, daemon=True).start()
+
+    def __getattr__(self, name):
+        return getattr(self.load(), name)
+
+
+_HHKAN_SNAPSHOT = _LazyHhkanSnapshot()
 # 好好看主站在数据中心出口上被风控时，避免每个接口都重复等待多轮超时。
 # unknown/probing 只允许一个请求探测；失败后 open 5 分钟，期间直接读好好看快照；
 # 到期自动进入 half-open（由下一个请求单次探测），成功后恢复 healthy。
@@ -2357,12 +2607,25 @@ _HHKAN_PROBE_TIMEOUT = 12.0
 _HHKAN_PROBE_EXEC = concurrent.futures.ThreadPoolExecutor(
     max_workers=4, thread_name_prefix="hhkan-probe")
 _HHKAN_SNAPSHOT_FIRST = os.environ.get("OTV_HHKAN_SNAPSHOT_FIRST") == "1"
-_HHKAN_ORIGIN_STATE = {
-    "status": "open" if _HHKAN_SNAPSHOT_FIRST and _HHKAN_SNAPSHOT.available else "unknown",
-    "until": time.time() + _HHKAN_ORIGIN_CIRCUIT_TTL
-    if _HHKAN_SNAPSHOT_FIRST and _HHKAN_SNAPSHOT.available else 0.0,
-}
+# 快照改懒加载后，import 期不再读 _HHKAN_SNAPSHOT.available（会触发 22MB parse）；
+# SNAPSHOT_FIRST 的「开局即熔断走快照」语义推迟到首个实时调用时引导。
+_HHKAN_ORIGIN_STATE = {"status": "unknown", "until": 0.0}
+_HHKAN_ORIGIN_BOOTSTRAPPED = False
 _HHKAN_ORIGIN_COND = threading.Condition()
+
+
+def _hhkan_origin_bootstrap():
+    global _HHKAN_ORIGIN_BOOTSTRAPPED
+    if _HHKAN_ORIGIN_BOOTSTRAPPED:
+        return
+    with _HHKAN_ORIGIN_COND:
+        if not _HHKAN_ORIGIN_BOOTSTRAPPED:
+            if _HHKAN_SNAPSHOT_FIRST and _HHKAN_SNAPSHOT.available:
+                _HHKAN_ORIGIN_STATE.update({
+                    "status": "open",
+                    "until": time.time() + _HHKAN_ORIGIN_CIRCUIT_TTL,
+                })
+            _HHKAN_ORIGIN_BOOTSTRAPPED = True
 
 
 class _HhkanOriginCircuitOpen(RuntimeError):
@@ -2371,6 +2634,7 @@ class _HhkanOriginCircuitOpen(RuntimeError):
 
 def _hhkan_origin_call(fn):
     """执行一次好好看实时调用；首探针单飞，失败后快速熔断到静态快照。"""
+    _hhkan_origin_bootstrap()
     if not _HHKAN_SNAPSHOT.available:
         return fn()
     wait_deadline = time.time() + 8.0
@@ -3993,9 +4257,13 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _send_pixel_png(self):
         # 1x1 透明 PNG：队徽/海报找不到时兜底，避免 img onerror 触发。
+        # ⚠️ v1.32 根修：旧 base64 实为 RGBA(255,255,0,127) 半透明黄色——App 端
+        # coil 加载成功即认为「图标就绪」并隐藏首字兜底，1px 黄点被 Fit 拉伸成
+        # 整格「黄色方块」（老板报障）。现已替换为真 RGBA(0,0,0,0)，并由
+        # tests/test_placeholder_pixel_contract.py 锁死透明性。
         # no-store：不让浏览器缓存兜底图——否则 TDB 后续查到真实队标后，
         # 浏览器仍显示旧的透明像素（缓存 1 天）。每次都重新请求即可拿到新队标。
-        pixel = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==")
+        pixel = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=")
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
         self.send_header("Cache-Control", "no-store")
@@ -5064,6 +5332,8 @@ def _startup_warm():
         print("影视服务预热完成")
     except Exception as e:
         print("影视服务预热失败（请求时再试）: %r" % (e,))
+    # 懒加载快照的后台预载：首个 /hhkan/* 请求到来时大概率已就绪（2026-09-19 C1）
+    _HHKAN_SNAPSHOT.preload()
     try:
         dom = hhkan.probe_img_domain()
         print("图片资源域首选: %s" % dom)
