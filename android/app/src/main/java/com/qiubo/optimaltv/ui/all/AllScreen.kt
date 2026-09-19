@@ -236,7 +236,7 @@ fun AllScreen(nav: NavController) {
                 verticalArrangement = Arrangement.spacedBy(0f.sx(s)),
                 modifier = Modifier
                     .background(Color(0x0DFFFFFF), RoundedCornerShape(18f.sx(s)))
-                    .padding(horizontal = 20f.sx(s), vertical = 8f.sx(s))
+                    .padding(horizontal = 16f.sx(s), vertical = 6f.sx(s))
                     .fillMaxWidth(),
             ) {
                     // 「轨」行分隔：1px 白 5% 发丝线（首行不画）
@@ -353,13 +353,13 @@ private fun FilterRow(
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.padding(vertical = 6f.sx(s)),
+        modifier = Modifier.padding(vertical = 4f.sx(s)),
     ) {
         Text(
-            label, color = OtvColors.White.copy(alpha = 0.35f), fontSize = 18f.sxs(s), fontWeight = FontWeight.Medium,
-            modifier = Modifier.width(56f.sx(s)),
+            label, color = OtvColors.White.copy(alpha = 0.35f), fontSize = 17f.sxs(s), fontWeight = FontWeight.Medium,
+            modifier = Modifier.width(52f.sx(s)),
         )
-        Spacer(Modifier.width(12f.sx(s)))
+        Spacer(Modifier.width(8f.sx(s)))
         Row(
             horizontalArrangement = Arrangement.spacedBy(2f.sx(s)),
             modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -391,12 +391,12 @@ private fun FilterRow(
                             },
                         ) { onSelect(value) }
                         .background(chipBg, RoundedCornerShape(percent = 50))
-                        .padding(horizontal = 16f.sx(s), vertical = 6f.sx(s)),
+                        .padding(horizontal = 12f.sx(s), vertical = 4f.sx(s)),
                 ) {
                     Text(
                         name,
                         color = chipFg,
-                        fontSize = 17f.sxs(s),
+                        fontSize = 16f.sxs(s),
                         fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                         maxLines = 1,
                     )

@@ -252,12 +252,12 @@ fun VodFilterRow(
                 .semantics { this.selected = active; role = Role.Tab }
                 .tapCard { onSelect(value) }
                 .background(chipBg, RoundedCornerShape(percent = 50))
-                .padding(horizontal = 16f.sx(s), vertical = 6f.sx(s)),
+                .padding(horizontal = 12f.sx(s), vertical = 4f.sx(s)),
         ) {
             Text(
                 name,
                 color = chipFg,
-                fontSize = 17f.sxs(s),
+                fontSize = 16f.sxs(s),
                 fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                 maxLines = 1,
             )
@@ -265,32 +265,32 @@ fun VodFilterRow(
     }
 
     if (portrait) {
-        Column(Modifier.padding(vertical = 8f.sx(s))) {
+        Column(Modifier.padding(vertical = 6f.sx(s))) {
             Text(
                 label,
                 color = OtvColors.White.copy(alpha = 0.35f),
                 fontSize = 16f.sxs(s),
                 fontWeight = FontWeight.Medium,
-                modifier = Modifier.padding(bottom = 4f.sx(s)),
+                modifier = Modifier.padding(bottom = 2f.sx(s)),
             )
             FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6f.sx(s)),
-                verticalArrangement = Arrangement.spacedBy(8f.sx(s)),
+                horizontalArrangement = Arrangement.spacedBy(4f.sx(s)),
+                verticalArrangement = Arrangement.spacedBy(6f.sx(s)),
             ) { chips.forEach { (value, name) -> FilterChip(value, name) } }
         }
     } else {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(vertical = 6f.sx(s)),
+            modifier = Modifier.padding(vertical = 4f.sx(s)),
         ) {
             Text(
                 label,
                 color = OtvColors.White.copy(alpha = 0.35f),
-                fontSize = 18f.sxs(s),
+                fontSize = 17f.sxs(s),
                 fontWeight = FontWeight.Medium,
-                modifier = Modifier.width(56f.sx(s)),
+                modifier = Modifier.width(52f.sx(s)),
             )
-            Spacer(Modifier.width(12f.sx(s)))
+            Spacer(Modifier.width(8f.sx(s)))
             Row(
                 horizontalArrangement = Arrangement.spacedBy(2f.sx(s)),
                 modifier = Modifier.horizontalScroll(rememberScrollState()),

@@ -144,6 +144,20 @@ class MobileVodComponentsTest {
     }
 
     @Test
+    fun filterChipUsesCompactPillHeight() {
+        MobileUiHarness.scene = {
+            Box(Modifier.width(250.dp)) {
+                VodFilterRow("类型", listOf("" to "全部"), "", 0.8f, true) {}
+            }
+        }
+        rule.waitForIdle()
+
+        val pill = bounds(MobileUiTags.filter("类型", ""))
+        val density = rule.activity.resources.displayMetrics.density
+        assertTrue("筛选胶囊应保持紧凑高度", pill.height / density <= 23f)
+    }
+
+    @Test
     fun compactPosterCardHidesRatingAndHandlesTap() {
         var clicks = 0
         MobileUiHarness.scene = {
