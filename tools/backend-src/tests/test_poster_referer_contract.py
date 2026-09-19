@@ -58,6 +58,14 @@ class WebPosterRelayTest(unittest.TestCase):
         self.assertIn("DOUBAN_ANY_RE.test(u)", block)
         self.assertIn('"&ref=douban"', block)
 
+    def test_img_hosts_also_go_through_relay_with_douban_referer(self):
+        """img1..img9 与 asset 一样受 Referer 防盗链，不能再让浏览器直连。"""
+        start = self.source.index("function doubanImg(u) {")
+        block = self.source[start:self.source.index("\n}", start)]
+        self.assertNotIn("DOUBAN_IMG_HOSTS[0]", block)
+        self.assertIn("DOUBAN_ANY_RE.test(u)", block)
+        self.assertIn('"&ref=douban"', block)
+
     def test_relay_path_is_not_wrapped_twice(self):
         start = self.source.index("function img(u) {")
         block = self.source[start:self.source.index("\n}", start)]

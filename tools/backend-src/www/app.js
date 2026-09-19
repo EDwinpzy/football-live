@@ -38,7 +38,9 @@ const DOUBAN_IMG_RE = /^(https?:\/\/)img\d+\.doubanio\.com/i;
 const DOUBAN_ANY_RE = /^(https?:\/\/)([a-z0-9-]+\.)*douban(io)?\.com/i;
 const DOUBAN_RELAY_PREFIX = "/api/relay?u=";
 function doubanImg(u) {
-  if (DOUBAN_IMG_RE.test(u)) return u.replace(DOUBAN_IMG_RE, "$1" + DOUBAN_IMG_HOSTS[0]);
+  /* 豆瓣 imgN 与 asset 图床都要求豆瓣 Referer；浏览器从网页版直连时会拿到
+     418/HTML（甚至被 ORB 拦截），所以统一走同源中继，由服务端补 Referer、轮换
+     镜像并校验 Content-Type。不要只改 imgN 主机：同一主机对不同访问来源仍会拒绝。 */
   if (DOUBAN_ANY_RE.test(u))
     return DOUBAN_RELAY_PREFIX + encodeURIComponent(u) + "&ref=douban";
   return u;
