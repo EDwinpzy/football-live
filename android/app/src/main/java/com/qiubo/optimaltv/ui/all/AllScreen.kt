@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -390,6 +391,7 @@ private fun FilterRow(
                                 if (it) onFocusIn() else onFocusOut()
                             },
                         ) { onSelect(value) }
+                        .then(if (active) Modifier.widthIn(min = 88f.sx(s)) else Modifier)
                         .background(chipBg, RoundedCornerShape(percent = 50))
                         .padding(horizontal = 12f.sx(s), vertical = 4f.sx(s)),
                 ) {

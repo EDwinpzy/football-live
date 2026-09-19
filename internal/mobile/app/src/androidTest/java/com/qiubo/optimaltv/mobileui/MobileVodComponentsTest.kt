@@ -155,6 +155,7 @@ class MobileVodComponentsTest {
         val pill = bounds(MobileUiTags.filter("类型", ""))
         val density = rule.activity.resources.displayMetrics.density
         assertTrue("筛选胶囊应保持紧凑高度", pill.height / density <= 23f)
+        assertTrue("选中筛选项应呈扁圆形", pill.width > pill.height * 1.2f)
     }
 
     @Test

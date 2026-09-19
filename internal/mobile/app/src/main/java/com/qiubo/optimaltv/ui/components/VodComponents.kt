@@ -38,6 +38,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.qiubo.optimaltv.data.model.VodItem
 import com.qiubo.optimaltv.ui.theme.OtvColors
@@ -233,6 +234,8 @@ fun VodFilterRow(
     portrait: Boolean,
     onSelect: (String) -> Unit,
 ) {
+    val selectedPillMinWidth = if (portrait) 48.dp else 72f.sx(s)
+
     @Composable
     fun FilterChip(value: String, name: String) {
         val active = selected == value
@@ -251,6 +254,7 @@ fun VodFilterRow(
                 .testTag(MobileUiTags.filter(label, value))
                 .semantics { this.selected = active; role = Role.Tab }
                 .tapCard { onSelect(value) }
+                .then(if (active) Modifier.widthIn(min = selectedPillMinWidth) else Modifier)
                 .background(chipBg, RoundedCornerShape(percent = 50))
                 .padding(horizontal = 12f.sx(s), vertical = 4f.sx(s)),
         ) {
