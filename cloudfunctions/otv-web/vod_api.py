@@ -10,6 +10,7 @@ class VodService:
         self.catalog = catalog
         self.registry = registry
         self._resolve_sources = resolve_sources or registry.resolve_subject
+        self._resolve_sources_waits_for_all = resolve_sources is None
         self._resolve_play = resolve_play
         self._resolved_lines = {}
 
@@ -37,7 +38,10 @@ class VodService:
             subject["source_state"] = "matching"
             subject["sources"] = []
             return subject
-        sources = self._resolve_sources(subject) or []
+        if self._resolve_sources_waits_for_all:
+            sources = self._resolve_sources(subject, wait_for_all=True) or []
+        else:
+            sources = self._resolve_sources(subject) or []
         self._resolved_lines[str(douban_id)] = {str(line.get("id")): copy.deepcopy(line) for line in sources}
         subject["sources"] = sources
         subject["source_state"] = "ready" if sources else "unavailable"

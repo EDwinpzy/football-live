@@ -8,6 +8,7 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -30,12 +31,29 @@ PROXY_FAKE_IP_RANGES = (ipaddress.ip_network("198.18.0.0/15"),)
 RESOLVE_ATTEMPTS = 2
 RESOLVE_RETRY_DELAY = 0.6
 RESOLVE_MAX_WORKERS = 12
+"""竞速早返回（2026-09-19 起）：批次不再被最慢源拖到其超时（MacCMS 8s / hhkan 12s）。
+搜索随到随判：≥RESOLVE_EARLY_SOURCES 台源出有效线路即进探测，剩余源后台补完；
+探测同理：首个可播线路出现后再宽限 PROBE_EARLY_GRACE 秒收束排名质量，
+或凑够 PROBE_EARLY_EXIT_ALIVE 条可播即返回。RESOLVE_TOTAL_BUDGET 是总预算硬顶，
+到点拿已有最优结果返回，永不比旧「全等」实现更慢。后台补完的结果进短 TTL 缓存
+（RESOLVE_CACHE_TTL），同片再查直接给全量。"""
+RESOLVE_TOTAL_BUDGET = 10.0
+RESOLVE_EARLY_SOURCES = 2
+RESOLVE_CACHE_TTL = 1800
 """探测预算：9 个源全通时线路能到 40+ 条，逐条探测会把详情拖到 15~40 秒（实测），
 而播放器只展示综合排名前 5。这里按源轮转取前 N 条探测，其余保留「未探测」状态
 （alive=None，排序垫后但不判死），既保住排序质量又压住耗时。"""
 PROBE_MAX_LINES = 18
 PROBE_MAX_WORKERS = 18
 PROBE_TIMEOUT_SECONDS = 4
+PROBE_EARLY_EXIT_ALIVE = 3
+PROBE_EARLY_GRACE = 0.8
+"""源质量画像 + 熔断：连续 BREAKER_CONSEC_FAILS 次搜索失败 → 冷却
+BREAKER_COOLDOWN_SECONDS 秒内跳过该源（冷却到期自动放行试探，成功即复位）；
+延迟用半衰期 STATS_EMA_HALFLIFE_SECONDS 的 EMA，老数据自动失权。"""
+BREAKER_CONSEC_FAILS = 3
+BREAKER_COOLDOWN_SECONDS = 1800
+STATS_EMA_HALFLIFE_SECONDS = 7 * 86400
 
 
 class UnsafeSourceUrl(ValueError):
@@ -54,11 +72,14 @@ class VodSource:
 
 
 class SourceRegistry:
-    def __init__(self, sources=(), version=1, history=None, probe=None):
+    def __init__(self, sources=(), version=1, history=None, probe=None, stats=None):
         self.sources = tuple(sources)
         self.version = int(version)
         self.history = history
         self.probe = probe or probe_stream
+        self.stats = stats
+        self._resolve_cache = {}
+        self._cache_lock = threading.Lock()
 
     @classmethod
     def from_dict(cls, payload):
@@ -98,6 +119,11 @@ class SourceRegistry:
     def resolve_subject(self, subject):
         """Search enabled adapters and return only confident, normalized lines.
 
+        竞速契约（2026-09-19）：源按画像得分排序发车、熔断源跳过；≥EARLY_SOURCES 台
+        出有效线路即进探测，首个可播线路 + 短宽限即返回；总预算硬顶 RESOLVE_TOTAL_BUDGET。
+        早返回时被甩下的源/线路在后台线程补完，结果进 RESOLVE_CACHE_TTL 短缓存，
+        并喂给 SourceStats 画像——弱源不再挡路，但每次失败都会变成熔断的证据。
+
         重试契约：只有当**确有源抛异常**（弱网/代理抖动导致整批失联）时才补一次，
         避免用户看到「没有信号源 / 无法播放」；源都正常应答、只是标题匹配不上时
         立刻返回空，不做无谓的二次等待。
@@ -105,47 +131,167 @@ class SourceRegistry:
         enabled = [source for source in self.sources if source.enabled]
         if not enabled:
             return []
-        workers = min(RESOLVE_MAX_WORKERS, len(enabled))
+        stats = self.stats
+        if stats:
+            active = [source for source in enabled if not stats.is_circuit_open(source.id)]
+            # 全部被熔断时忽略熔断器照常发车：宁可慢，不能没片看。
+            enabled = stats.sort_sources(active or enabled)
+        cache_key = _subject_cache_key(subject)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        deadline = time.monotonic() + max(1.0, float(RESOLVE_TOTAL_BUDGET))
+        lines, pending_searches = [], []
         for attempt in range(max(1, RESOLVE_ATTEMPTS)):
-            failures = []
-
-            def resolve_one(source):
-                try:
-                    adapter = HhkanAdapter(source) if source.adapter_type == "hhkan" else MacCmsAdapter(source)
-                    candidates = adapter.search(subject)
-                    best = max(candidates, key=lambda item: match_score(subject, item), default=None)
-                    if not best or match_score(subject, best) < AUTO_MATCH_THRESHOLD:
-                        return []
-                    return adapter.detail(best)
-                except Exception as exc:  # noqa: BLE001 - 单源失败不拖累整批，但要记下来
-                    failures.append(str(exc)[:120])
-                    return []
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-                groups = list(pool.map(resolve_one, enabled))
-            lines = [line for group in groups for line in group]
+            lines, failures, pending_searches = self._race_search(enabled, subject, deadline, stats)
             if lines or not failures or attempt + 1 >= max(1, RESOLVE_ATTEMPTS):
                 break
             time.sleep(RESOLVE_RETRY_DELAY)
 
-        def inspect(line):
-            try:
-                source = next(item for item in enabled if item.id == line.get("source_id"))
-                adapter = HhkanAdapter(source) if source.adapter_type == "hhkan" else MacCmsAdapter(source)
-                resolved = adapter.resolve(line, 0)
-                line.update(self.probe(resolved.get("url")))
-            except Exception:
-                line.update({"alive": False, "latency_ms": None, "height": 0})
-            return line
-
         picked = _pick_probe_lines(lines, PROBE_MAX_LINES)
-        if picked:
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(PROBE_MAX_WORKERS, len(picked))) as pool:
-                list(pool.map(inspect, picked))
+        pending_probes = self._race_probe(picked, deadline)
+
+        if pending_searches or pending_probes:
+            # 早返回：剩余搜索/探测后台补完（自带着各自的网络超时兜底），
+            # 合并全量进缓存；响应先行，不等。
+            threading.Thread(
+                target=self._complete_in_background,
+                args=(cache_key, list(lines), pending_searches, pending_probes, stats),
+                daemon=True,
+            ).start()
+        elif lines:
+            self._cache_put(cache_key, lines)
+            if stats:
+                stats.flush()
+
         history = ({line["id"]: self.history.success_rate(line["id"]) for line in lines}
                    if self.history else None)
         return rank_lines(lines, history)
+
+    def _search_one(self, source, subject):
+        started = time.monotonic()
+        try:
+            adapter = HhkanAdapter(source) if source.adapter_type == "hhkan" else MacCmsAdapter(source)
+            candidates = adapter.search(subject)
+            best = max(candidates, key=lambda item: match_score(subject, item), default=None)
+            if not best or match_score(subject, best) < AUTO_MATCH_THRESHOLD:
+                return source, [], None, _elapsed_ms(started)
+            return source, adapter.detail(best), None, _elapsed_ms(started)
+        except Exception as exc:  # noqa: BLE001 - 单源失败不拖累整批，但要记下来
+            return source, [], str(exc)[:120], _elapsed_ms(started)
+
+    def _race_search(self, enabled, subject, deadline, stats):
+        """并行搜索，as_completed 随到随判；≥EARLY_SOURCES 台出线或到点即收队。
+        返回 (lines, failures, pending_futures)：pending 是未等到的 future，由后台补完。"""
+        workers = min(RESOLVE_MAX_WORKERS, len(enabled))
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        futures = [pool.submit(self._search_one, source, subject) for source in enabled]
+        pending = list(futures)
+        lines, failures = [], []
+        sources_with_lines = 0
+        try:
+            for future in concurrent.futures.as_completed(
+                    futures, timeout=max(0.1, deadline - time.monotonic())):
+                pending.remove(future)
+                _source, group, error, elapsed = future.result()
+                if error is not None:
+                    failures.append(error)
+                if stats:
+                    stats.record_search(_source.id, error is None, elapsed)
+                if group:
+                    sources_with_lines += 1
+                    lines.extend(group)
+                if sources_with_lines >= max(1, RESOLVE_EARLY_SOURCES):
+                    break
+        except concurrent.futures.TimeoutError:
+            pass
+        pool.shutdown(wait=False)
+        return lines, failures, pending
+
+    def _inspect_line(self, line):
+        try:
+            source = next(item for item in self.sources if item.id == line.get("source_id"))
+            adapter = HhkanAdapter(source) if source.adapter_type == "hhkan" else MacCmsAdapter(source)
+            resolved = adapter.resolve(line, 0)
+            line.update(self.probe(resolved.get("url")))
+        except Exception:
+            line.update({"alive": False, "latency_ms": None, "height": 0})
+        return line
+
+    def _race_probe(self, picked, deadline):
+        """并行探测；凑够 EARLY_EXIT_ALIVE 条可播、或首个可播后宽限期满、或到点即收队。
+        返回未等到的 future 列表（后台补完用）。"""
+        if not picked:
+            return []
+        pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(PROBE_MAX_WORKERS, len(picked)))
+        futures = [pool.submit(self._inspect_line, line) for line in picked]
+        pending = list(futures)
+        alive = 0
+        first_alive_at = None
+        try:
+            for future in concurrent.futures.as_completed(
+                    futures, timeout=max(0.1, deadline - time.monotonic())):
+                pending.remove(future)
+                line = future.result()
+                if line.get("alive"):
+                    alive += 1
+                    if first_alive_at is None:
+                        first_alive_at = time.monotonic()
+                if alive >= max(1, PROBE_EARLY_EXIT_ALIVE):
+                    break
+                if (first_alive_at is not None
+                        and time.monotonic() - first_alive_at >= max(0.0, PROBE_EARLY_GRACE)):
+                    break
+        except concurrent.futures.TimeoutError:
+            pass
+        pool.shutdown(wait=False)
+        return pending
+
+    def _complete_in_background(self, cache_key, lines, pending_searches, pending_probes, stats):
+        """早返回后的补完线程：等齐迟到源 + 迟到探测，探测新到的线路，
+        合并全量进短缓存并落画像。任何异常都不允许回传到请求线程。"""
+        try:
+            late_lines = []
+            for future in concurrent.futures.as_completed(pending_searches):
+                source, group, error, elapsed = future.result()
+                if stats:
+                    stats.record_search(source.id, error is None, elapsed)
+                if group:
+                    late_lines.extend(group)
+            for future in concurrent.futures.as_completed(pending_probes):
+                future.result()
+            lines.extend(late_lines)
+            late_picked = _pick_probe_lines(late_lines, PROBE_MAX_LINES)
+            if late_picked:
+                pool = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(PROBE_MAX_WORKERS, len(late_picked)))
+                try:
+                    list(pool.map(self._inspect_line, late_picked))
+                finally:
+                    pool.shutdown(wait=False)
+            if lines:
+                self._cache_put(cache_key, lines)
+            if stats:
+                stats.flush()
+        except Exception:  # noqa: BLE001 - 后台补完是锦上添花，挂了只丢缓存不丢响应
+            pass
+
+    def _cache_get(self, key):
+        if not key:
+            return None
+        with self._cache_lock:
+            item = self._resolve_cache.get(key)
+        if not item or time.time() - item[0] > max(60, RESOLVE_CACHE_TTL):
+            return None
+        return copy.deepcopy(item[1])
+
+    def _cache_put(self, key, lines):
+        if not key or not lines:
+            return
+        with self._cache_lock:
+            self._resolve_cache[key] = (time.time(), copy.deepcopy(lines))
 
     def resolve_line(self, line, episode_index):
         source = next((item for item in self.sources if item.id == line.get("source_id")), None)
@@ -243,6 +389,105 @@ class LineHistory:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, self.path)
+
+
+class SourceStats:
+    """源质量画像：搜索成功率 + EMA 延迟 + 连续失败熔断，JSON 原子落盘。
+
+    只统计「搜索通道」（源能否正常应答 + 多快）：熔断解决的是「弱源把并行批次
+    拖到超时」；单条线路死活由 LineHistory（播放时记账）和探测排名负责，不混在这里。
+    熔断到期自动放行试探，成功即 consec_fail 复位；再失败重新冷却。
+    """
+
+    def __init__(self, path=None):
+        self.path = Path(path) if path else None
+        self._lock = threading.Lock()
+        self._dirty = False
+        self.data = {}
+        if self.path:
+            try:
+                value = json.loads(self.path.read_text(encoding="utf-8"))
+                self.data = value if isinstance(value, dict) else {}
+            except (OSError, ValueError):
+                self.data = {}
+
+    def record_search(self, source_id, ok, latency_ms=None):
+        now = time.time()
+        with self._lock:
+            entry = self.data.setdefault(str(source_id), {})
+            entry["ok"] = int(entry.get("ok") or 0) + (1 if ok else 0)
+            entry["fail"] = int(entry.get("fail") or 0) + (0 if ok else 1)
+            entry["consec_fail"] = 0 if ok else int(entry.get("consec_fail") or 0) + 1
+            if ok:
+                entry.pop("cooldown_until", None)  # 试探成功即闭合熔断器
+            elif entry["consec_fail"] >= max(1, BREAKER_CONSEC_FAILS):
+                entry["cooldown_until"] = now + max(60, BREAKER_COOLDOWN_SECONDS)
+            if ok and latency_ms is not None:
+                ema = entry.get("ema_ms")
+                if ema is None:
+                    entry["ema_ms"] = float(latency_ms)
+                else:
+                    elapsed = max(0.0, now - float(entry.get("updated") or now))
+                    alpha = max(0.2, 1.0 - 0.5 ** (elapsed / STATS_EMA_HALFLIFE_SECONDS))
+                    entry["ema_ms"] = float(ema) + alpha * (float(latency_ms) - float(ema))
+            entry["updated"] = now
+            self._dirty = True
+
+    def is_circuit_open(self, source_id, now=None):
+        with self._lock:
+            entry = self.data.get(str(source_id)) or {}
+            until = float(entry.get("cooldown_until") or 0)
+        return bool(until and (now if now is not None else time.time()) < until)
+
+    def score(self, source_id):
+        """排序分（越高越先发车）：成功率 0.6 + 延迟 0.4。新源两项都取中性 0.5。"""
+        with self._lock:
+            entry = self.data.get(str(source_id)) or {}
+        ok = int(entry.get("ok") or 0)
+        fail = int(entry.get("fail") or 0)
+        success = (ok + 2) / (ok + fail + 4)  # 先验平滑：无数据 = 0.5，不被一两次失败打死
+        ema = entry.get("ema_ms")
+        if ema is None:
+            speed = 0.5
+        elif ema <= 1000:
+            speed = 1.0
+        elif ema <= 3000:
+            speed = 0.8
+        elif ema <= 6000:
+            speed = 0.5
+        else:
+            speed = 0.2
+        return 0.6 * success + 0.4 * speed
+
+    def sort_sources(self, sources):
+        # sorted 稳定：同分保持配置文件里的先后顺序
+        return sorted(sources, key=lambda source: self.score(source.id), reverse=True)
+
+    def flush(self):
+        if not self.path:
+            return
+        with self._lock:
+            if not self._dirty:
+                return
+            payload = json.dumps(self.data, ensure_ascii=False, separators=(",", ":"))
+            self._dirty = False
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, self.path)
+
+
+def _elapsed_ms(started):
+    return int((time.monotonic() - started) * 1000)
+
+
+def _subject_cache_key(subject):
+    return "%s|%s|%s|%s" % (
+        normalize_title(subject.get("title")), subject.get("year") or "",
+        subject.get("category") or "", int(subject.get("season") or 0))
 
 
 def _pick_probe_lines(lines, limit):
