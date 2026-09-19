@@ -205,6 +205,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 冷启动时 Android 可能因后台启动限制拒绝一次 startService；前台恢复后重试，
+        // 避免内嵌后端未监听 8090 导致足球列表/直播一起不可用。
+        BackendService.ensure(this)
         com.qiubo.optimaltv.lifecycle.AppLifecycleManager.onForeground()
         com.qiubo.optimaltv.OtvLog.i("activity ON_RESUME（窗口可见）")
         // v1.20 热更自动重启：后台完成下载的更新在回前台时立即生效

@@ -28,6 +28,13 @@ class AndroidLifecycleContractTest(unittest.TestCase):
             self.assertIn("AppLifecycleManager.onBackground", activity)
             self.assertIn("refreshEpoch", live)
 
+    def test_both_apps_retry_backend_when_activity_returns_foreground(self):
+        for app in APPS:
+            main = app / "src" / "main" / "java" / "com" / "qiubo" / "optimaltv"
+            activity = (main / "MainActivity.kt").read_text(encoding="utf-8")
+            resume = activity[activity.index("override fun onResume()"):activity.index("override fun onPause()")]
+            self.assertIn("BackendService.ensure(this)", resume)
+
     def test_both_players_renew_live_after_long_background(self):
         for app in APPS:
             player = app / "src" / "main" / "java" / "com" / "qiubo" / "optimaltv" / "ui" / "player" / "PlayerViewModel.kt"
