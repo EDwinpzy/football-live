@@ -333,17 +333,6 @@ function isPremium() {
   if (d.expiry_at < 0) return true;
   return licenseNow() < d.expiry_at;
 }
-function licenseDesc() {
-  const d = license.data;
-  if (!d) return null;
-  if (!withinLicenseGrace(Date.now())) return { plan: d.plan, text: "需要联网校验会员状态", days: 0, active: false };
-  if (d.expiry_at < 0) return { plan: d.plan, text: "终身会员", days: Infinity };
-  const left = Math.max(0, Math.ceil((d.expiry_at - licenseNow()) / 86400000));
-  const dt = new Date(d.expiry_at);
-  return { plan: d.plan, days: left, active: left > 0, text: left > 0
-    ? `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")} 到期 · 剩余 ${left} 天`
-    : "会员已到期 · 续费后继续观看" };
-}
 function parseServerMs(value) {
   if (value == null || value === "") return null;
   if (typeof value === "number") return value > 1e12 ? value : value * 1000;
@@ -377,7 +366,7 @@ async function applyLicenseResponse(jo) {
   };
   store.set("otvw:ticket", license.data);
   store.set("otvw:licenseVerifyAt", localNow);
-  renderMemberCard();
+  renderMemberInline();
   return true;
 }
 async function activateCode(raw) {
@@ -422,12 +411,12 @@ async function doLicenseReverify() {
       license.data = null;
       store.set("otvw:ticket", null);
       store.set("otvw:licenseVerifyAt", 0);
-      renderMemberCard();
+      renderMemberInline();
     } else if (jo && jo.ret === 405) {
       const expiry = parseServerMs(jo.expireAt) || licenseNow();
       license.data = { ...d, expiry_at: expiry };
       store.set("otvw:ticket", license.data);
-      renderMemberCard();
+      renderMemberInline();
     } else if (jo && jo.ret === 0) {
       await applyLicenseResponse(jo);
     }
@@ -1961,50 +1950,138 @@ $("#searchClear").addEventListener("click", searchReset);
 search.cat = "全部";
 
 /* ================================================================
- * 我的（FavoritesScreen 复刻：会员卡置顶 + 收藏 + 历史，topPad 150；历史 take(10)）
+ * 我的（FavoritesScreen 复刻：会员信息并入「我的收藏」标题行 + 收藏 + 历史，topPad 150）
  * ================================================================ */
-function renderMemberCard() {
-  const el = $("#memberCard");
-  if (!el) return;
-  const d = licenseDesc();
-  if (d) {
-    const planName = { monthly: "月卡", quarterly: "季卡", yearly: "年卡", lifetime: "终身", weekly: "周卡" }[d.plan] || d.plan;
-    el.innerHTML = `
-      <div class="mc-row">
-        <div class="mc-info">
-          <div class="mc-title">会员${d.days === Infinity ? "" : "· " + planName}</div>
-          <div class="mc-sub">${esc(d.text)}</div>
-        </div>
-        <div class="mc-badge ${d.active === false ? "" : "ok"}">${d.active === false ? "待校验/续费" : "生效中"}</div>
-      </div>
-      <div class="mc-code">卡密 ${esc(license.data.code)}</div>`;
-  } else {
-    el.innerHTML = `
-      <div class="mc-row">
-        <div class="mc-info">
-          <div class="mc-title">开通会员</div>
-          <div class="mc-sub">激活卡密后解锁全部影视、足球直播与电视频道</div>
-        </div>
-      </div>
-      <div class="mc-form">
-        <input id="mcInput" placeholder="卡密 OTV-XXXXX-XXXXX" autocomplete="off" spellcheck="false">
-        <button id="mcBtn">激活</button>
-      </div>
-      <div class="mc-msg" id="mcMsg"></div>`;
-    const submit = async () => {
-      const btn = $("#mcBtn");
-      btn.disabled = true; btn.textContent = "激活中…";
-      const r = await activateCode($("#mcInput").value);
-      btn.disabled = false; btn.textContent = "激活";
-      if (r.ok) hint("激活成功，欢迎成为会员");
-      else $("#mcMsg").textContent = r.msg;
-    };
-    $("#mcBtn").addEventListener("click", submit);
-    $("#mcInput").addEventListener("keydown", e => { if (e.key === "Enter") submit(); });
-  }
+
+/* 会员信息行（2026-09-19 需求④）：与 TV 版 / 移动版 App `MemberInlineInfo` 逐分支同构。
+ *
+ * App 基准（android + internal/mobile 的 ui/favorites/FavoritesScreen.kt）：
+ *   when {
+ *     d == null                       -> "加载中…"      White50
+ *     expiryAt != null && now>=expiryAt -> "会员已过期"  #FF453A ; info = 套餐 + " · 续费可用"
+ *     !isPremium()                    -> "等待联网校验"  #FF9F0A ; info = "联网后自动恢复"
+ *     expiryAt == null                -> "终身会员"      #30D158 ; info = "终身 · 永久有效"
+ *     else                            -> "会员有效"      #30D158 ; info = 套餐+" · 到期 yyyy-MM-dd · 剩余 N 天"
+ *   }
+ *   渲染形态 = 「状态点 + 状态 · info」+ 行尾「续费」；仅已激活态渲染（未激活走整页会员页）。
+ *
+ * 旧版是带背景框的三行大卡（标题/副行/卡密/徽章）且横屏竖屏两套布局，与两端 App 都不像；
+ * 现统一为无框行内小字，横竖屏同构。 */
+function memberStatus() {
+  const d = license.data;
+  if (d == null) return { status: "加载中…", color: "#8E8E93", info: "" };
+  const exp = d.expiry_at;
+  const hasExp = exp != null && exp >= 0;
+  if (hasExp && licenseNow() >= exp)
+    return { status: "会员已过期", color: "#FF453A", info: planName(d.plan) + " · 续费可用" };
+  if (!isPremium())
+    return { status: "等待联网校验", color: "#FF9F0A", info: "联网后自动恢复" };
+  if (!hasExp)
+    return { status: "终身会员", color: "#30D158", info: "终身 · 永久有效" };
+  const dt = new Date(exp);
+  const ymd = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  const left = Math.max(0, Math.ceil((exp - licenseNow()) / 86400000));
+  return { status: "会员有效", color: "#30D158",
+    info: `${planName(d.plan)} · 到期 ${ymd} · 剩余 ${left} 天` };
 }
+function planName(plan) {
+  return { monthly: "月卡", quarterly: "季卡", yearly: "年卡", lifetime: "终身", weekly: "周卡" }[plan] || plan;
+}
+function renderMemberInline() {
+  const el = $("#memberInline");
+  if (!el) return;
+  /* 未激活/未持票 → 整行不渲染（App：未激活态走统一会员页，不带行内小字） */
+  const st = memberStatus();
+  const show = !!license.data;
+  el.hidden = !show;
+  if (!show) { el.innerHTML = ""; return; }
+  el.innerHTML = `
+    <span class="mi-dot" style="background:${st.color}"></span>
+    <span class="mi-text">${esc(st.status)}${st.info ? " · " + esc(st.info) : ""}</span>
+    <button class="mi-renew" id="miRenew">续费</button>`;
+  $("#miRenew").addEventListener("click", openMemberModal);
+}
+
+/* ---------------- 会员续费 / 兑换弹窗（需求④） ----------------
+ * App 对应物 = PaywallScreen：四张套餐卡（月/季/年/终身）+ 选中后「续费」按钮 + 底部
+ * 「输入卡密激活」。两端 App 的续费按钮当前走 RenewalGateway（handler 未注入 → 返回 false），
+ * 页面据此提示「续费通道准备中，可先用输入卡密激活」——网页版沿用同口径，避免自造一条
+ * 与 App 不一致的支付通道；真正的续费下单接口接通后只改这里一处。 */
+const MEMBER_PLANS = [
+  { plan: "monthly", name: "月卡", price: "¥9.9", sub: "30 天" },
+  { plan: "quarterly", name: "季卡", price: "¥29.9", sub: "90 天" },
+  { plan: "yearly", name: "年卡", price: "¥99.9", sub: "365 天" },
+  { plan: "lifetime", name: "终身", price: "¥128", sub: "一次买断" },
+];
+let mmSelected = "monthly";
+function openMemberModal() {
+  const st = memberStatus();
+  $("#mmSub").textContent = license.data
+    ? `${st.status}${st.info ? " · " + st.info : ""}`
+    : "尚未开通 · 购买卡密后兑换即可解锁全部内容";
+  renderMemberModal();
+  $("#mmMsg").textContent = "";
+  $("#memberModal").hidden = false;
+}
+function closeMemberModal() { $("#memberModal").hidden = true; }
+function renderMemberModal() {
+  $("#mmPlans").innerHTML = MEMBER_PLANS.map(p => `
+    <div class="mm-plan ${p.plan === mmSelected ? "on" : ""}" data-plan="${p.plan}">
+      <div class="p-name">${esc(p.name)}</div>
+      <div class="p-price">${esc(p.price)}</div>
+      <div class="p-sub">${esc(p.sub)}</div>
+    </div>`).join("");
+  $$("#mmPlans .mm-plan").forEach(c => c.addEventListener("click", () => {
+    mmSelected = c.dataset.plan;
+    renderMemberModal();
+    $("#mmMsg").textContent = "";
+  }));
+  const p = MEMBER_PLANS.find(x => x.plan === mmSelected) || MEMBER_PLANS[0];
+  const btn = $("#mmRenewBtn");
+  btn.textContent = `续费 ${p.name}`;
+  $("#mmRenewNote").textContent = `${p.name} · ${p.price}`;
+}
+/* 续费按钮：App RenewalGateway.request() 未注入 handler → false，页面给卡密兜底提示。
+   网页版无发卡平台下单通道，同样只提示；待接口接通后在此处替换为真实下单跳转。 */
+function mmRenew() {
+  const p = MEMBER_PLANS.find(x => x.plan === mmSelected) || MEMBER_PLANS[0];
+  $("#mmMsg").textContent = `续费通道准备中，可先购买${p.name}卡密后用下方输入框兑换`;
+  const inp = $("#mmInput");
+  if (inp) inp.focus();
+}
+async function mmSubmit() {
+  const btn = $("#mmBtn");
+  btn.disabled = true; btn.textContent = "兑换中…";
+  const r = await activateCode($("#mmInput").value);
+  btn.disabled = false; btn.textContent = "兑换";
+  if (r.ok) {
+    $("#mmInput").value = "";
+    $("#mmMsg").textContent = "";
+    hint("兑换成功，有效期已顺延");
+    renderMemberInline();
+    openMemberModal();   /* 状态行同步刷新 */
+  } else $("#mmMsg").textContent = r.msg;
+}
+(function bindMemberModal() {
+  const modal = $("#memberModal");
+  if (!modal) return;
+  /* 弹窗内容每次打开重建（套餐卡选中态），静态骨架在这里一次性装好 */
+  const plans = $("#mmPlans");
+  plans.insertAdjacentHTML("afterend",
+    `<div class="mm-renew-row">
+       <button class="mm-renew-btn" id="mmRenewBtn">续费月卡</button>
+       <span class="mm-renew-note" id="mmRenewNote"></span>
+     </div>`);
+  $("#mmRenewBtn").addEventListener("click", mmRenew);
+  $("#mmBtn").addEventListener("click", mmSubmit);
+  $("#mmInput").addEventListener("keydown", e => { if (e.key === "Enter") mmSubmit(); });
+  $("#mmClose").addEventListener("click", closeMemberModal);
+  /* 点暗区关闭（与 App 浮层点按关闭同语义） */
+  modal.addEventListener("click", e => { if (e.target === modal) closeMemberModal(); });
+})();
+
 function renderFav() {
-  renderMemberCard();
+  renderMemberInline();
   const favs = getFavs(), hist = getHistory().slice(0, 10);
   $("#favEmpty").hidden = favs.length > 0;
   $("#favHistSec").hidden = hist.length === 0;   /* App：历史记录标题仅历史非空时渲染 */
