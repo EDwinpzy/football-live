@@ -94,13 +94,13 @@ function relay(u, ref) {
 }
 
 /* 影视页顶部 hero 是全宽铺图：豆瓣列表接口只给 ~240 宽的 s_ratio_poster，拉到 1920
-   糊成一片。同一张图有 /view/photo/l/public/（1142×1600）这个最大尺寸，这里统一升级。
+   糊成一片。同一张图有 /view/photo/large/public/（1142×1600）这个最大尺寸，这里统一升级。
    后端 /vod/home 已下发 hero_url 时优先用它，取不到再就地换算。 */
 const DOUBAN_PHOTO_RE = /^(https?:\/\/[^/]*doubanio\.com)\/view\/photo\/[^/]+\/(?:public\/)?(p\d+\.[A-Za-z]+)$/;
 function heroImg(u) {
   const s = String(u || "").trim();
   const m = s.match(DOUBAN_PHOTO_RE);
-  return m ? m[1] + "/view/photo/l/public/" + m[2] : s;
+  return m ? m[1] + "/view/photo/large/public/" + m[2] : s;
 }
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({

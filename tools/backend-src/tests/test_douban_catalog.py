@@ -709,11 +709,11 @@ class DoubanCatalogTest(unittest.TestCase):
         self.assertEqual(
             douban_catalog.hero_poster_url(
                 "https://img3.doubanio.com/view/photo/s_ratio_poster/public/p2935109312.jpg"),
-            "https://img3.doubanio.com/view/photo/l/public/p2935109312.jpg")
+            "https://img3.doubanio.com/view/photo/large/public/p2935109312.jpg")
         self.assertEqual(
             douban_catalog.hero_poster_url(
                 "https://img9.doubanio.com/view/photo/m_ratio_poster/public/p457760035.jpg"),
-            "https://img9.doubanio.com/view/photo/l/public/p457760035.jpg")
+            "https://img9.doubanio.com/view/photo/large/public/p457760035.jpg")
         # 非豆瓣图床原样不认（返回空串，由调用方回落到原字段）
         self.assertEqual(douban_catalog.hero_poster_url("https://img.example/1292052.webp"), "")
         self.assertEqual(douban_catalog.hero_poster_url(""), "")
@@ -724,7 +724,7 @@ class DoubanCatalogTest(unittest.TestCase):
             "pic": {"large": "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p480747492.jpg"},
         })
         self.assertEqual(item["hero_url"],
-                         "https://img3.doubanio.com/view/photo/l/public/p480747492.jpg")
+                         "https://img3.doubanio.com/view/photo/large/public/p480747492.jpg")
         # 拿不到大图时退回原海报，hero 不能因此变空
         plain = douban_catalog.normalize_subject({"id": "1", "title": "片", "poster_url": "https://img.example/a.jpg"})
         self.assertEqual(plain["hero_url"], "https://img.example/a.jpg")

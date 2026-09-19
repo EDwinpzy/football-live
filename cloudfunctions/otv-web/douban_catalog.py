@@ -275,18 +275,18 @@ def _merge_card_subtitle(raw):
 
 
 # 豆瓣同一张剧照有多个尺寸前缀，列表接口只给最小号：
-#   s_ratio_poster ≈ 240×360（卡片够用）… l/public = 1142×1600（同一张，实测 261KB）
+#   s_ratio_poster ≈ 240×360（卡片够用）… large/public = 1142×1600（同一张，实测 667KB）
 # 影视页顶部 hero 是全宽铺图，240 宽拉到 1920 会糊成一片，所以额外给一条 hero_url。
 _DOUBAN_PHOTO_RE = re.compile(
     r"^(https?://[^/]*doubanio\.com)/view/photo/[^/]+/(?:public/)?(p\d+\.[A-Za-z]+)$")
 
 
 def hero_poster_url(url):
-    """同一张豆瓣剧照换最大尺寸（`/view/photo/l/public/`）；非豆瓣图返回空串。"""
+    """同一张豆瓣剧照换最大尺寸（`/view/photo/large/public/`）；非豆瓣图返回空串。"""
     match = _DOUBAN_PHOTO_RE.match(_text(url))
     if not match:
         return ""
-    return "%s/view/photo/l/public/%s" % (match.group(1), match.group(2))
+    return "%s/view/photo/large/public/%s" % (match.group(1), match.group(2))
 
 
 def normalize_subject(raw, requested_category="movie"):

@@ -83,14 +83,14 @@ class VodApiSource(
 
         /** 豆瓣同一张剧照有多个尺寸前缀，列表接口只给最小号（s_ratio_poster ≈ 240×360）。
          *  影视页 hero 是全宽铺图，240 宽拉到 1920 会糊；后端 `/vod/home` 已下发 hero_url
-         *  （/view/photo/l/public/，1142×1600），拿不到就在这里就地换算。 */
+         *  （/view/photo/large/public/，1142×1600），拿不到就在这里就地换算。 */
         private val DOUBAN_PHOTO_RE =
             Regex("""^(https?://[^/]*doubanio\.com)/view/photo/[^/]+/(?:public/)?(p\d+\.[A-Za-z]+)$""")
 
         fun heroPoster(raw: String): String {
             val u = raw.trim()
             val m = DOUBAN_PHOTO_RE.find(u) ?: return u
-            return "${m.groupValues[1]}/view/photo/l/public/${m.groupValues[2]}"
+            return "${m.groupValues[1]}/view/photo/large/public/${m.groupValues[2]}"
         }
 
         fun parseItems(array: JSONArray?, category: String, base: String = ""): List<VodItem> =
