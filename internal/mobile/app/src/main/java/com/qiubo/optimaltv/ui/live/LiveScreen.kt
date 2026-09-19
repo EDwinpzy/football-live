@@ -646,7 +646,13 @@ private fun ScoreRow(team: String, pts: String, s: Float) {
                 model = Graph.live.teamIconUrl(team),
                 contentDescription = team,
                 contentScale = ContentScale.Fit,
-                onSuccess = { iconReady = true },
+                onSuccess = { state ->
+                    // v1.32：后端 1×1 占位像素不算就绪（保持首字兜底）——旧版占位像素实为
+                    // 半透明黄色且此处无条件置 ready，1px 被 Fit 拉伸成整格「黄色方块」。
+                    // intrinsicWidth=-1（SVG 无固有尺寸）按就绪处理，仅 1..2px 判占位。
+                    val w = state.result.drawable.intrinsicWidth
+                    iconReady = w !in 1..2
+                },
                 onError = { iconReady = false },
                 modifier = Modifier.fillMaxSize().padding(6f.sx(s)),
             )
@@ -808,7 +814,13 @@ private fun TeamBlock(team: String, s: Float) {
                 model = Graph.live.teamIconUrl(team),
                 contentDescription = team,
                 contentScale = ContentScale.Fit,
-                onSuccess = { iconReady = true },
+                onSuccess = { state ->
+                    // v1.32：后端 1×1 占位像素不算就绪（保持首字兜底）——旧版占位像素实为
+                    // 半透明黄色且此处无条件置 ready，1px 被 Fit 拉伸成整格「黄色方块」。
+                    // intrinsicWidth=-1（SVG 无固有尺寸）按就绪处理，仅 1..2px 判占位。
+                    val w = state.result.drawable.intrinsicWidth
+                    iconReady = w !in 1..2
+                },
                 onError = { iconReady = false },
                 modifier = Modifier.fillMaxSize().padding(6f.sx(s)),
             )
