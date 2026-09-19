@@ -684,15 +684,19 @@ private fun VodHeroBand(
                                 // 分类记忆（实测根因）；定向到选中项后 hover-select 无害。
                                 // 光标导航#3（2026-09-03）：有最近观看时 DOWN 先落最近观看
                                 // 首卡（用户报障：hero 跳过最近观看直达 chips）；无历史再落 chip。
-                                // 目标行未组合（requestFocus 必败）：滚一步露出再试（对齐引擎
-                                // scroll-reveal 手感）
+                                // 目标行可能尚未组合：先滚一步露出，再请求焦点。不能先 requestFocus——
+                                // LazyColumn 预组合的零尺寸节点也可能让 requestFocus「成功」，随后
+                                // 焦点稳定器会把无效焦点恢复回 hero，用户就必须再按一次 DOWN。
                                 NAV_DOWN -> {
                                     val downTarget = if (hasHistory) firstHistoryFocus else selectedCatChipFocus
                                     heroScope.launch {
+                                        // 480px 让 352px 设计高的首卡完整进入视口；只滚 300px
+                                        // 在较矮的电视窗口仍会留下裁边，焦点节点会被过滤为无效。
+                                        runCatching { listState.scrollBy(480f) }
                                         repeat(8) {
+                                            delay(60)
                                             if (runCatching { downTarget.requestFocus() }.isSuccess) return@launch
                                             runCatching { listState.scrollBy(300f) }
-                                            delay(60)
                                         }
                                     }
                                     true

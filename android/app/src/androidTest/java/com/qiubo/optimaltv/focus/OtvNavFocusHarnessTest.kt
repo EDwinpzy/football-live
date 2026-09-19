@@ -1,8 +1,10 @@
 package com.qiubo.optimaltv.focus
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
@@ -36,6 +38,7 @@ import com.qiubo.optimaltv.ui.components.lazyNavContainer
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import kotlinx.coroutines.launch
 
 /**
  * OtvNav 焦点引擎仪器测试（三层测试体系第二层，2026-09-06）。
@@ -323,6 +326,64 @@ class OtvNavFocusHarnessTest {
         awaitFocused("item_3")
         key(KeyEvent.KEYCODE_DPAD_DOWN) // item_4 未组合 → scroll-reveal
         awaitFocused("item_4")
+    }
+
+    @Test
+    fun `hero播放钮DOWN首按直接落最近观看首卡_不会被滚动中的焦点恢复抢回`() {
+        scene {
+            val listState = rememberLazyListState()
+            val heroFr = remember { FocusRequester() }
+            val historyFr = remember { FocusRequester() }
+            val scope = androidx.compose.runtime.rememberCoroutineScope()
+            ProvideNavScrolls(vertical = lazyNavContainer(listState)) {
+                LazyColumn(state = listState, modifier = Modifier.height(360.dp)) {
+                    item(key = "hero") {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(280.dp)
+                                .testTag("hero")
+                                .dpadFocusable(
+                                    scaleFocused = 1f,
+                                    externalFocusRequester = heroFr,
+                                    navOverride = { dir ->
+                                        if (dir == NAV_DOWN) {
+                                            scope.launch {
+                                                runCatching { listState.scrollBy(480f) }
+                                                repeat(8) {
+                                                    kotlinx.coroutines.delay(60)
+                                                    if (runCatching { historyFr.requestFocus() }.isSuccess) return@launch
+                                                    runCatching { listState.scrollBy(300f) }
+                                                }
+                                            }
+                                            true
+                                        } else false
+                                    },
+                                    onClick = {},
+                                ),
+                        )
+                    }
+                    item(key = "history") {
+                        Box(Modifier.height(200.dp)) {
+                            Box(
+                                Modifier
+                                    .size(120.dp, 180.dp)
+                                    .testTag("history")
+                                    .dpadFocusable(
+                                        scaleFocused = 1f,
+                                        externalFocusRequester = historyFr,
+                                        onClick = {},
+                                    ),
+                            )
+                        }
+                    }
+                }
+            }
+            InitialFocusEffect(heroFr, "hero")
+        }
+        awaitFocused("hero")
+        key(KeyEvent.KEYCODE_DPAD_DOWN)
+        awaitFocused("history", timeout = 2500)
     }
 
     @Test
