@@ -144,6 +144,22 @@ class MobileVodComponentsTest {
     }
 
     @Test
+    fun portraitFilterRowsKeepReadableLineSpacing() {
+        val chips = listOf("" to "全部") + (1..5).map { "$it" to "选项$it" }
+        MobileUiHarness.scene = {
+            Box(Modifier.width(180.dp)) {
+                VodFilterRow("类型", chips, "", 0.8f, true) {}
+            }
+        }
+        rule.waitForIdle()
+
+        val first = bounds(MobileUiTags.filter("类型", ""))
+        val wrapped = bounds(MobileUiTags.filter("类型", "3"))
+        val density = rule.activity.resources.displayMetrics.density
+        assertTrue("竖屏换行文字行距应保持清晰", (wrapped.top - first.top) / density >= 28f)
+    }
+
+    @Test
     fun filterChipUsesCompactPillHeight() {
         MobileUiHarness.scene = {
             Box(Modifier.width(250.dp)) {

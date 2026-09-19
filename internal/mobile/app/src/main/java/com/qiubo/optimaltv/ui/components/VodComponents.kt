@@ -38,7 +38,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.qiubo.optimaltv.data.model.VodItem
 import com.qiubo.optimaltv.ui.theme.OtvColors
@@ -234,7 +233,7 @@ fun VodFilterRow(
     portrait: Boolean,
     onSelect: (String) -> Unit,
 ) {
-    val selectedPillMinWidth = if (portrait) 48.dp else 72f.sx(s)
+    val selectedPillMinWidth = 72f.sx(s)
 
     @Composable
     fun FilterChip(value: String, name: String) {
@@ -269,17 +268,26 @@ fun VodFilterRow(
     }
 
     if (portrait) {
-        Column(Modifier.padding(vertical = 6f.sx(s))) {
+        Row(
+            verticalAlignment = Alignment.Top,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 6f.sx(s)),
+        ) {
             Text(
                 label,
                 color = OtvColors.White.copy(alpha = 0.35f),
                 fontSize = 16f.sxs(s),
                 fontWeight = FontWeight.Medium,
-                modifier = Modifier.padding(bottom = 2f.sx(s)),
+                modifier = Modifier
+                    .width(52f.sx(s))
+                    .padding(top = 4f.sx(s)),
             )
+            Spacer(Modifier.width(8f.sx(s)))
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(4f.sx(s)),
-                verticalArrangement = Arrangement.spacedBy(6f.sx(s)),
+                verticalArrangement = Arrangement.spacedBy(14f.sx(s)),
+                modifier = Modifier.weight(1f),
             ) { chips.forEach { (value, name) -> FilterChip(value, name) } }
         }
     } else {

@@ -391,7 +391,7 @@ private fun FilterRow(
                                 if (it) onFocusIn() else onFocusOut()
                             },
                         ) { onSelect(value) }
-                        .then(if (active) Modifier.widthIn(min = 88f.sx(s)) else Modifier)
+                        .then(if (active) Modifier.widthIn(min = 96f.sx(s)) else Modifier)
                         .background(chipBg, RoundedCornerShape(percent = 50))
                         .padding(horizontal = 12f.sx(s), vertical = 4f.sx(s)),
                 ) {

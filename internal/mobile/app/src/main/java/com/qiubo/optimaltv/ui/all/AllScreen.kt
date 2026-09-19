@@ -236,7 +236,11 @@ fun AllScreen(nav: NavController) {
                         // 「轨」行分隔：1px 白 5% 发丝线（首行不画）
                         @Composable
                         fun RowDivider() = Box(
-                            Modifier.fillMaxWidth().height(1f.sx(s)).background(Color(0x0DFFFFFF)),
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = if (portrait) 24f.sx(s) else 0f.sx(s))
+                                .height(1f.sx(s))
+                                .background(Color(0x0DFFFFFF)),
                         )
                         val catChips = listOf("" to "全部", "1" to "电影", "2" to "电视剧", "3" to "动漫", "4" to "综艺", "6" to "短剧")
                         VodFilterRow("类别", catChips, cat, s, portrait) { value ->
