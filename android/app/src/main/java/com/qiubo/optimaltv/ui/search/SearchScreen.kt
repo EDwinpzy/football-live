@@ -358,10 +358,10 @@ fun SearchScreen(nav: NavController) {
             interactive = true,
             contentDownFocus = keyboardFocus,
             searchChipFocus = tabFocus,
-            autoHide = true,   // v1.16：光标下移进键盘/内容区隐藏顶栏，回顶部显示
+            autoHide = false,  // tvOS 参考态始终保留顶部胶囊导航，搜索焦点仍可落到键盘
         )
 
-        Column(Modifier.fillMaxSize().padding(horizontal = 70f.sx(s))) {
+        Column(Modifier.fillMaxSize().padding(horizontal = SearchLayoutSpec.pageSidePadding.sx(s))) {
             // ---- tvOS 18 键盘条（2026-09-11 一比一复刻 Figma「tvOS 18 UI Kit」node 5-11799）----
             // v1.13 语义沿用：UP 定向回顶部标签栏搜索 chip，DOWN 定向到候选词/分类 tab
             //（声明式 LocalNavOverride，区域内所有键共享；失败也消费封锁）
@@ -517,11 +517,18 @@ fun SearchScreen(nav: NavController) {
             } else {
                 val resultScroll = remember(resultsGridState) { lazyGridNavContainer(resultsGridState) }
                 ProvideNavScrolls(vertical = resultScroll) {
+                    Text(
+                        "Top Results",
+                        color = OtvColors.White.copy(alpha = 0.5f),
+                        fontSize = SearchLayoutSpec.topResultsTitleSize.sxs(s),
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 30f.sx(s), start = 10f.sx(s)),
+                    )
                     LazyVerticalGrid(
                         state = resultsGridState,
-                        columns = GridCells.Fixed(7),
-                        contentPadding = PaddingValues(top = 24f.sx(s), bottom = 60f.sx(s)),
-                        horizontalArrangement = Arrangement.spacedBy(20f.sx(s)),
+                        columns = GridCells.Fixed(SearchLayoutSpec.resultColumns),
+                        contentPadding = PaddingValues(start = 10f.sx(s), end = 10f.sx(s), top = 24f.sx(s), bottom = 60f.sx(s)),
+                        horizontalArrangement = Arrangement.spacedBy(SearchLayoutSpec.resultColumnGap.sx(s)),
                         verticalArrangement = Arrangement.spacedBy(36f.sx(s)),
                         modifier = Modifier
                             .weight(1f)
@@ -552,7 +559,7 @@ private fun ResultCard(
     cardReg: FocusRegistry? = null,
     externalFocus: FocusRequester? = null,
 ) {
-    Column(Modifier.width(232f.sx(s))) {
+    Column(Modifier.width(SearchLayoutSpec.resultCardWidth.sx(s))) {
         Box(
             Modifier
                 .dpadFocusable(
@@ -563,8 +570,8 @@ private fun ResultCard(
                     nav.navigate("detail/" + URLEncoder.encode(item.id, "UTF-8"))
                 }
                 .fillMaxWidth()
-                .aspectRatio(232f / 352f)
-                .clip(RoundedCornerShape(12f.sx(s))),
+                .aspectRatio(SearchLayoutSpec.resultCardWidth / SearchLayoutSpec.resultCardHeight)
+                .clip(RoundedCornerShape(SearchLayoutSpec.resultCardCornerRadius.sx(s))),
         ) {
             PosterPlaceholder(seed = item.id.hashCode(), modifier = Modifier.fillMaxSize())
             if (item.posterUrl.isNotBlank()) {
@@ -589,7 +596,7 @@ private fun ResultCard(
         }
         Spacer(Modifier.height(10f.sx(s)))
         Text(
-            item.title, color = OtvColors.White, fontSize = 24f.sxs(s), fontWeight = FontWeight.Medium,
+            item.title, color = OtvColors.White.copy(alpha = 0.5f), fontSize = SearchLayoutSpec.resultTitleSize.sxs(s), fontWeight = FontWeight.Medium,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
     }
@@ -614,7 +621,7 @@ private fun TvosSearchKeyboard(
     onDelete: () -> Unit,
     onToggleNumeric: () -> Unit,
 ) {
-    Box(Modifier.fillMaxWidth().height(295f.sx(s))) {
+        Box(Modifier.fillMaxWidth().height(SearchLayoutSpec.keyboardHeight.sx(s))) {
         // ---- 标题行（放大镜盒 y=55 / 标题 y=49 / Hold 行 y=77）----
         Row(Modifier.offset(x = 0f.sx(s), y = 49f.sx(s)).fillMaxWidth()) {
             Box(
@@ -662,7 +669,7 @@ private fun TvosSearchKeyboard(
             Modifier
                 .offset(x = 10f.sx(s), y = 294f.sx(s))
                 .size(1760f.sx(s), 1f.sx(s))
-                .background(OtvColors.White30),
+                .background(Color.White.copy(alpha = SearchLayoutSpec.dividerOpacity)),
         )
         // ---- 键行：字母行 y=185 高 64；功能键 y=203 高 38（中线与字母行对齐，间隙 30）----
         TvActionKey(
