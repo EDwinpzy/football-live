@@ -125,6 +125,7 @@ def _get_vod_service():
                     cache=douban_catalog.JsonDiskCache(cache_root / "douban"), media_index=local_index)
                 registry = vod_sources.SourceRegistry.load_current()
                 registry.history = vod_sources.LineHistory(cache_root / "vod_line_history.json")
+                registry.stats = vod_sources.SourceStats(cache_root / "vod_source_stats.json")
                 VOD_SERVICE = vod_api.VodService(catalog, registry)
                 # 内置豆瓣快照预热搜索索引：云端出口到不了豆瓣，冷实例即便是
                 # 访客直接搜索（没打开过影视首页）也必须先有结果。
@@ -133,6 +134,7 @@ def _get_vod_service():
     current = vod_sources.SourceRegistry.load_current()
     if hasattr(VOD_SERVICE, "registry") and current.version > VOD_SERVICE.registry.version:
         current.history = VOD_SERVICE.registry.history
+        current.stats = VOD_SERVICE.registry.stats
         VOD_SERVICE.registry = current
         VOD_SERVICE._resolve_sources = current.resolve_subject
     return VOD_SERVICE
@@ -2566,7 +2568,34 @@ _HHKAN_PAGE_CACHE_TTL = 90.0
 # 「全部」页每次进页/切类不必重新实时抓筛选（冷抓实测 0.7s+，弱网更久）
 _HHKAN_PAGE_CACHE_TTL_FILTERS = 3600.0
 _HHKAN_PAGE_CACHE_MAX = 80
-_HHKAN_SNAPSHOT = hhkan_snapshot.SnapshotCatalog.load_default()
+class _LazyHhkanSnapshot:
+    """22.9MB hhkan_snapshot.json 的全量 json.loads 从 import 期推迟到首个 /hhkan/* 请求。
+
+    冷启动优化（2026-09-19 方案 C1）：旧实现模块级同步 parse，卡在绑端口之前，
+    手机端 import proxy 要多等数秒、还多占几十 MB 内存（dict 膨胀）——而 hero 简介等
+    豆瓣路径根本不读这份快照。这里首次访问才真正加载（锁防并发重复 parse），
+    所有 `_HHKAN_SNAPSHOT.xxx` 调用点零改动；绑端口后由 _startup_warm 后台预载。
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._real = None
+
+    def load(self):
+        if self._real is None:
+            with self._lock:
+                if self._real is None:
+                    self._real = hhkan_snapshot.SnapshotCatalog.load_default()
+        return self._real
+
+    def preload(self):
+        threading.Thread(target=self.load, daemon=True).start()
+
+    def __getattr__(self, name):
+        return getattr(self.load(), name)
+
+
+_HHKAN_SNAPSHOT = _LazyHhkanSnapshot()
 # 好好看主站在数据中心出口上被风控时，避免每个接口都重复等待多轮超时。
 # unknown/probing 只允许一个请求探测；失败后 open 5 分钟，期间直接读好好看快照；
 # 到期自动进入 half-open（由下一个请求单次探测），成功后恢复 healthy。
@@ -2578,12 +2607,25 @@ _HHKAN_PROBE_TIMEOUT = 12.0
 _HHKAN_PROBE_EXEC = concurrent.futures.ThreadPoolExecutor(
     max_workers=4, thread_name_prefix="hhkan-probe")
 _HHKAN_SNAPSHOT_FIRST = os.environ.get("OTV_HHKAN_SNAPSHOT_FIRST") == "1"
-_HHKAN_ORIGIN_STATE = {
-    "status": "open" if _HHKAN_SNAPSHOT_FIRST and _HHKAN_SNAPSHOT.available else "unknown",
-    "until": time.time() + _HHKAN_ORIGIN_CIRCUIT_TTL
-    if _HHKAN_SNAPSHOT_FIRST and _HHKAN_SNAPSHOT.available else 0.0,
-}
+# 快照改懒加载后，import 期不再读 _HHKAN_SNAPSHOT.available（会触发 22MB parse）；
+# SNAPSHOT_FIRST 的「开局即熔断走快照」语义推迟到首个实时调用时引导。
+_HHKAN_ORIGIN_STATE = {"status": "unknown", "until": 0.0}
+_HHKAN_ORIGIN_BOOTSTRAPPED = False
 _HHKAN_ORIGIN_COND = threading.Condition()
+
+
+def _hhkan_origin_bootstrap():
+    global _HHKAN_ORIGIN_BOOTSTRAPPED
+    if _HHKAN_ORIGIN_BOOTSTRAPPED:
+        return
+    with _HHKAN_ORIGIN_COND:
+        if not _HHKAN_ORIGIN_BOOTSTRAPPED:
+            if _HHKAN_SNAPSHOT_FIRST and _HHKAN_SNAPSHOT.available:
+                _HHKAN_ORIGIN_STATE.update({
+                    "status": "open",
+                    "until": time.time() + _HHKAN_ORIGIN_CIRCUIT_TTL,
+                })
+            _HHKAN_ORIGIN_BOOTSTRAPPED = True
 
 
 class _HhkanOriginCircuitOpen(RuntimeError):
@@ -2592,6 +2634,7 @@ class _HhkanOriginCircuitOpen(RuntimeError):
 
 def _hhkan_origin_call(fn):
     """执行一次好好看实时调用；首探针单飞，失败后快速熔断到静态快照。"""
+    _hhkan_origin_bootstrap()
     if not _HHKAN_SNAPSHOT.available:
         return fn()
     wait_deadline = time.time() + 8.0
@@ -5289,6 +5332,8 @@ def _startup_warm():
         print("影视服务预热完成")
     except Exception as e:
         print("影视服务预热失败（请求时再试）: %r" % (e,))
+    # 懒加载快照的后台预载：首个 /hhkan/* 请求到来时大概率已就绪（2026-09-19 C1）
+    _HHKAN_SNAPSHOT.preload()
     try:
         dom = hhkan.probe_img_domain()
         print("图片资源域首选: %s" % dom)

@@ -190,17 +190,12 @@ object EmbeddedBackend {
     /** 解压 assets zip 到应用目录（zip 内容变化时自动重新解压），返回目录 */
     private fun extractZipIfNeeded(ctx: Context): File {
         val assetPath = "backend/python-backend.zip"
-        val digest = ctx.assets.open(assetPath).use { input ->
-            val md = java.security.MessageDigest.getInstance("SHA-256")
-            val buffer = ByteArray(64 * 1024)
-            while (true) {
-                val read = input.read(buffer)
-                if (read < 0) break
-                md.update(buffer, 0, read)
-            }
-            md.digest().joinToString("") { "%02x".format(it) }
-        }
-        return extractZipTo(ctx, ctx.assets.open(assetPath).buffered(), "assets|$digest")
+        // 2026-09-19 冷启动优化（方案 C2）：旧实现每次启动全量流式读 36MB zip 算 SHA-256
+        // 当签名（秒级纯 IO）；发布流水线保证 versionCode 单调递增，「版本号 + zip 长度」
+        // 即可识别换包，available() 读资产长度是 O(1)，不再碰 zip 内容。
+        val zipLength = ctx.assets.open(assetPath).use { it.available() }
+        return extractZipTo(ctx, ctx.assets.open(assetPath).buffered(),
+            "assets|${BuildConfig.VERSION_CODE}|$zipLength")
     }
 
     /** 通用解压：.extracted 标记记录「源签名」，不一致（换源/升级）就清目录重解压 */
@@ -208,7 +203,7 @@ object EmbeddedBackend {
         val dir = backendDir(ctx)
         val flag = File(dir, ".extracted")
         // 旧版仅凭 .extracted 标记跳过解压：后端 zip 升级后设备仍跑旧 proxy。
-        // 现在标记里记录源签名（assets 大小 / hot 版本号+大小），不一致就重解压。
+        // 现在标记里记录源签名（assets 版本号+大小 / hot 版本号+大小），不一致就重解压。
         if (flag.exists() && flag.readText() == signature) return dir
         dir.deleteRecursively()
         dir.mkdirs()

@@ -10,6 +10,7 @@
 import pathlib
 import socket
 import sys
+import time
 import unittest
 
 
@@ -125,9 +126,21 @@ class ResolveRetryTest(unittest.TestCase):
 
         vod_sources.HhkanAdapter = RecoveringAdapter
         subject = {"title": "肖申克的救赎", "year": "1994", "category": "movie", "season": 0}
-        lines = self._registry().resolve_subject(subject)
-        self.assertEqual(len(lines), 3)
+        registry = self._registry()
+        lines = registry.resolve_subject(subject)
+        # 竞速契约（2026-09-19）：≥2 台源出线即早返回，第三台由后台补完进缓存，
+        # 不再整批等齐。恢复语义不变：重试确实发生、且最终全量可达。
+        self.assertGreaterEqual(len(lines), 2)
         self.assertGreater(state["round"], 3)          # 确实发生了第二轮
+        deadline = time.time() + 5
+        cached = None
+        while time.time() < deadline:
+            cached = registry._cache_get(vod_sources._subject_cache_key(subject))
+            if cached and len(cached) == 3:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(cached)
+        self.assertEqual(len(cached), 3)
 
     def test_no_match_without_failures_is_not_retried(self):
         calls = {"n": 0}

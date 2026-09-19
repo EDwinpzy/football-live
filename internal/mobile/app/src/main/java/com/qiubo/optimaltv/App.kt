@@ -91,19 +91,19 @@ object Graph {
 }
 
 /**
- * 启动门闸（v1.32 起按用户要求回到「全量预热后再放行」）：
+ * 启动门闸（2026-09-19 用户拍板「方案 A+B」：首屏快优先，推翻 v1.32 全量预热门闸）：
  *
- * - 旧版（v1.17~1.19）：等全部网络预热完成（TV 90s / 移动 30s）→ 进 app 动辄半分钟，
- *   是「进入 app 很卡很慢」的主根因，故 v1.20 改成只等本地秒出资源（5s 硬预算）。
- * - v1.32（2026-09-16 用户需求）：「要等所有界面的信息加载好之后再进入 APP，否则就在
- *   加载界面那里等待」——进主界面后各页数据迟迟不上屏（影视页 hero 简介 15s+、
- *   片库三栏更晚）比多等几秒启动屏更难忍，于是把足球赛程 / 电视源拉新 / 目录刷新 /
- *   影视各分类三栏 + hero 简介 + 封面预热全部纳入门闸等待，预算上限取
- *   [BuildConfig.STARTUP_GATE_MS]（TV 90s / 移动 30s）；到上限仍放行，剩余转后台继续，
- *   避免弱网/断网时把用户永久扣在启动屏。
- * - 2026-09-18（用户需求「片源加载好后才能进入 app」）：hero 前几条的**片源匹配**
- *   （多源搜索 + 线路探测，单条冷路径实测 12~30s）也纳入门闸——否则进 app 点开影片
- *   只能看「正在查找片源」。到 [SOURCE_WAIT_MS] 预算放行，剩余候选转后台继续预热。
+ * - v1.32~2026-09-18：「全量预热后再放行」——足球/IPTV/目录/影视三栏/封面，直至
+ *   hero 前 6 条的片源匹配（单条 12~30s、预算 60s）全塞进启动门闸，进 app 30~90s，
+ *   是「进入 app 的加载界面很慢」的主根因。
+ * - 现行口径（方案 A+B，用户确认接受「秒点 hero 第一条可能等片源」的取舍）：
+ *   门闸只等「决定落点 + 首屏可见内容」——授权状态（决定落激活页还是主页）、
+ *   IPTV 磁盘快照、目录快照、后端就绪 + home + hero 简介（0.4s 快路径）+ hero 海报；
+ *   足球赛程/IPTV 拉新/目录刷新/影视三栏/全量封面/首屏片源匹配全部转后台补，
+ *   片源预热结果仍落 detailCache/detailInfoCache，用户浏览几秒后点开大概率已命中，
+ *   未命中也有详情页「正在查找片源」等待态兜底。
+ * - [FULL_GATE_MS]（TV 90s / 移动 30s）降级为兜底上限：正常路径几秒内放行，
+ *   只有弱网/异常才走到上限；主线程看门狗（上限 + 2s 强制放行）保留。
  */
 object AppStartup {
     private val _ready = kotlinx.coroutines.flow.MutableStateFlow(false)
@@ -120,27 +120,19 @@ object AppStartup {
     /** 本地三件套（授权/IPTV 快照/目录快照）预算：本地资源秒出，5s 是弱机/首装硬上限 */
     private const val FAST_GATE_MS = 5_000L
 
-    /** 全量门闸预算（用户要求等所有界面信息就绪）：TV 90s / 移动 30s，见 app/build.gradle */
+    /** 门闸兜底上限（方案 A+B 后正常路径几秒即放行，这只是弱网/异常的保险丝） */
     private val FULL_GATE_MS = com.qiubo.optimaltv.BuildConfig.STARTUP_GATE_MS
 
-    /** 封面等待预算：门闸要「有图才放行」，但弱网不能让启动屏无限等；超时剩余转后台。 */
+    /** hero 海报等待预算：门闸要「首屏有图才放行」，但弱网不能让启动屏无限等。 */
     private const val COVER_WAIT_MS = 20_000L
 
-    /**
-     * 首屏片源等待预算（2026-09-18 用户需求「片源加载好后才能进入 app」）：
-     * 门闸要等 hero 前几条的线路匹配真的跑完（进详情页即「立即播放」），但单条冷匹配
-     * 12~30s、还要留出封面与其他预热的余量，故取总预算的 2/3（TV 60s / 移动 20s）；
-     * 到点仍放行，剩余匹配在独立 scope 里继续跑完。
-     */
-    private val SOURCE_WAIT_MS = FULL_GATE_MS * 2 / 3
-
-    /** 门闸必等的 hero 条数：与 hero 简介预载同批（首屏最大、最可能被点到的候选） */
+    /** 后台片源预热的 hero 条数：与 hero 简介预载同批（首屏最大、最可能被点到的候选） */
     private const val SOURCE_HERO_MAX = 6
 
-    /** 放行后继续后台预热的候选条数（首屏卡片行：最近观看 / 电影三栏首条） */
+    /** 后台片源预热的额外候选条数（首屏卡片行：最近观看 / 电影三栏首条） */
     private const val SOURCE_EXTRA_MAX = 6
 
-    /** hero 片源匹配并发；额外候选在放行后跑，再压低一档避免与用户的点击抢上游 */
+    /** 后台片源预热并发；额外候选再压低一档避免与用户的点击抢上游 */
     private const val SOURCE_CONCURRENCY = 3
     private const val SOURCE_EXTRA_CONCURRENCY = 2
 
@@ -148,6 +140,26 @@ object AppStartup {
         val scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val t0 = System.currentTimeMillis()
         _status.value = "正在准备…"
+        // 后台全量预热（方案 A：不挡门闸）：足球赛程 / IPTV 拉新 / 目录刷新 /
+        // 影视三栏+全量封面 / 首屏片源匹配。各自失败记日志，进页后按需兜底。
+        scope.launch {
+            launch {
+                runCatching { Graph.live.matches() }
+                    .onFailure { OtvLog.w("后台预热：比赛列表失败（后台重试）: ${it.message}") }
+            }
+            launch {
+                runCatching { Graph.iptv.refreshIfStale() }
+                    .onFailure { OtvLog.w("后台预热：电视源拉新失败（后台重试）: ${it.message}") }
+            }
+            launch {
+                runCatching { Graph.repo.refresh() }
+                    .onFailure { OtvLog.w("后台预热：目录刷新失败（后台重试）: ${it.message}") }
+            }
+            launch {
+                runCatching { preloadDeep() }
+                    .onFailure { OtvLog.w("后台深预热失败（进页后按需拉取）: ${it.message}") }
+            }
+        }
         scope.launch {
             try {
                 val settled = kotlinx.coroutines.withTimeoutOrNull(FULL_GATE_MS) {
@@ -171,30 +183,18 @@ object AppStartup {
                             Graph.repo.awaitCatalogAvailable()
                         }
                     }
-                    // 全量预热（用户要求：所有界面信息加载完再进主界面）——失败不阻塞放行
-                    val matches = launch {
-                        runCatching { Graph.live.matches() }
-                            .onFailure { OtvLog.w("启动预热：比赛列表失败（后台重试）: ${it.message}") }
+                    // 首屏链：后端就绪 → home → hero 简介 + hero 海报（方案 B 分档：只等这一档）
+                    val firstScreen = launch {
+                        runCatching { preloadFirstScreen() }
+                            .onFailure { OtvLog.w("首屏预载失败（进页后按需拉取）: ${it.message}") }
                     }
-                    val iptvRefresh = launch {
-                        runCatching { Graph.iptv.refreshIfStale() }
-                            .onFailure { OtvLog.w("启动预热：电视源拉新失败（后台重试）: ${it.message}") }
-                    }
-                    val catalogRefresh = launch {
-                        runCatching { Graph.repo.refresh() }
-                            .onFailure { OtvLog.w("启动预热：目录刷新失败（后台重试）: ${it.message}") }
-                    }
-                    val vodPreload = launch {
-                        runCatching { preloadVodTabPages() }
-                            .onFailure { OtvLog.w("影视 tab 页预载失败（后台继续）: ${it.message}") }
-                    }
-                    _status.value = "正在加载影视片库…"
-                    listOfNotNull(lic, iptv, cat, matches, iptvRefresh, catalogRefresh, vodPreload).joinAll()
+                    _status.value = "正在加载首屏…"
+                    listOfNotNull(lic, iptv, cat, firstScreen).joinAll()
                     _status.value = "即将进入…"
                     true
                 }
                 if (settled == null) {
-                    OtvLog.w("startup gate 到预算上限（${FULL_GATE_MS}ms）仍未全部就绪 → 放行，剩余转后台")
+                    OtvLog.w("startup gate 到底保上限（${FULL_GATE_MS}ms）仍未就绪 → 放行，剩余转后台")
                 }
             } catch (e: Exception) {
                 OtvLog.e("startup gate 异常（兜底放行）: ${e.message}")
@@ -217,44 +217,52 @@ object AppStartup {
     }
 
     /**
-     * 影视分类 tab 页深预载（需求③）：home 首页抓取最先触发（hero/三块「最近热门」
-     * 共同依赖，与目录 refresh 并行）→ 目录快照/新数据任一就绪 → 全部分类并行拉三块
-     * （最近热门/最新上线/最近更新，内部自带 awaitHome 排队）→ 收集全部卡片封面
-     * 交 Coil 预热（内存+磁盘双缓存，进页即秒出）。各环节都受门闸总预算约束，
-     * 超时放行后剩余预载转后台继续（Coil enqueue 不随本协程取消）。
+     * 首屏预载（方案 B 分档：门闸只等这一档）：后端就绪 → home 首抓 →
+     * hero 简介（豆瓣快路径，实测 0.4s）并行预取 → hero 海报真实加载。
+     * 三栏/全量封面/片源匹配在 [preloadDeep] 后台跑，不在这里等。
      */
-    private suspend fun preloadVodTabPages() {
+    private suspend fun preloadFirstScreen() {
         val t0 = System.currentTimeMillis()
-        // 内置后端（127.0.0.1:8090）冷启动需数秒：先等就绪再开抓，否则 home/三块
-        // 全部 ConnectException 秒挂、预载退化成纯快照封面（首启实测踩过）
+        // 内置后端（127.0.0.1:8090）冷启动需数秒：先等就绪再开抓，否则 home/hero 简介
+        // 全部 ConnectException 秒挂（首启实测踩过）
         Graph.repo.awaitBackendReady()
         Graph.repo.refreshHome()
+        Graph.repo.awaitHome()
+        val heroIds = heroIds()
+        // hero 简介（豆瓣 defer 快路径）按 UI 同一套 hero 口径（heroRefs）预取前 6 条，
+        // 结果落 VodRepository.briefCache，进页同步命中直接出简介。
+        kotlinx.coroutines.coroutineScope {
+            heroIds.map { id -> launch { runCatching { Graph.repo.vodBrief(id) } } }.joinAll()
+        }
+        // hero 海报（carousel backdrop）真实加载并等待——「首屏有图才放行」；
+        // 卡片封面量大，放 preloadDeep 后台补。heroCount=全部 → 保持整屏尺寸解码。
+        val backdrops = Graph.repo.homeFlow.value.carousel
+            .map { it.backdrop }.filter { it.isNotBlank() }
+        val n = preloadCovers(backdrops, heroCount = backdrops.size)
+        OtvLog.i("首屏预载完成：hero ${heroIds.size} 条简介 / $n 张海报（${System.currentTimeMillis() - t0}ms）")
+    }
+
+    /** 门闸与后台片源预热共用同一批 hero id（与 UI 同一套 heroRefs 口径） */
+    private fun heroIds(): List<String> = runCatching {
+        heroRefs(Graph.repo.state.value.catalog, Graph.repo.homeFlow.value).map { it.id }.distinct()
+    }.getOrDefault(emptyList()).take(SOURCE_HERO_MAX)
+
+    /**
+     * 后台深预热（方案 A：不挡门闸）：全部分类三栏 + 全量封面 + 首屏片源匹配。
+     * 片源预热结果落 detailCache/detailInfoCache：用户浏览几秒后点开详情页大概率
+     * 已命中「立即播放」，未命中也有「正在查找片源」等待态兜底。
+     */
+    private suspend fun preloadDeep() {
+        val t0 = System.currentTimeMillis()
+        Graph.repo.awaitBackendReady()
         Graph.repo.awaitCatalogAvailable()
         val cats = Graph.repo.state.value.catalog?.categories ?: return
         cats.forEach { Graph.repo.libBlocks(it.id) }       // 全部分类三块并行拉取（幂等）
-        // hero 口径上提到这里：简介预载与首屏片源预热必须取同一批 id（与 UI 同一套 heroRefs）
-        Graph.repo.awaitHome()
-        val heroIds = runCatching {
-            heroRefs(Graph.repo.state.value.catalog, Graph.repo.homeFlow.value).map { it.id }.distinct()
-        }.getOrDefault(emptyList()).take(SOURCE_HERO_MAX)
-        // 两件事并行：等各分类三块拉完（下面还要收封面 URL）+ 预取 hero 简介。
-        // hero 简介（豆瓣详情）以前要等页面组合时才发请求，实测进页后 15s+ 才到货
-        // （用户反馈「影视信息加载太慢」）；这里按 UI 同一套 hero 口径（heroRefs）
-        // 预取前 6 条，结果落 VodRepository.briefCache，进页同步命中直接出简介。
+        val heroIds = heroIds()
         kotlinx.coroutines.coroutineScope {
-            launch {
-                runCatching {
-                    heroIds.map { id -> launch { runCatching { Graph.repo.vodBrief(id) } } }
-                        .joinAll()
-                }.onFailure { OtvLog.w("hero 简介预载失败（进页后按需拉取）: ${it.message}") }
-            }
-            /* 2026-09-18（用户报障「为什么不等界面有数据再进 APP，每次进来啥也没有」）：
-               旧实现只等三栏 Job 结束——热更重启内嵌后端时首轮 5 路整批连接拒绝，Job 也算
-               「结束」，门闸于是在空数据上放行。改成等「真的有内容」，预算内的空结果会
-               绕过 60s 退避重抓（预算用尽才放行，剩余交给后台补抓阶梯）。 */
             val blocksReady = cats.map { async { Graph.repo.awaitLibBlocksContent(it.id) } }.awaitAll()
             if (blocksReady.any { !it }) {
-                OtvLog.w("启动预热：${blocksReady.count { !it }}/${blocksReady.size} 个分类三栏预算内仍为空（按预算放行，后台阶梯补抓）")
+                OtvLog.w("后台深预热：${blocksReady.count { !it }}/${blocksReady.size} 个分类三栏仍为空（后台阶梯补抓）")
             }
         }
         val blocks = Graph.repo.libBlocksFlow.value
@@ -280,51 +288,32 @@ object AppStartup {
         runCatching {
             Graph.db.vodDao().historyFlow(12).first().forEach { if (it.posterUrl.isNotBlank()) urls += it.posterUrl }
         }
-        // 封面预载与首屏片源预热并行：前者打图床、后者打影视源，互不抢上游；
-        // 片源预热自带预算（到点放行，剩余转后台），所以两边一起 join 也不会超门闸预算。
+        // 封面预载与首屏片源预热并行：前者打图床、后者打影视源，互不抢上游
         kotlinx.coroutines.coroutineScope {
             val srcJob = launch { preloadFirstScreenSources(heroIds) }
             val n = preloadCovers(urls.distinct(), heroCount = home.carousel.size)
-            OtvLog.i("影视 tab 页预载完成：${catsForUrls.size} 分类 / $n 张封面（${System.currentTimeMillis() - t0}ms）")
+            OtvLog.i("后台深预热完成：${catsForUrls.size} 分类 / $n 张封面（${System.currentTimeMillis() - t0}ms）")
             srcJob.join()
         }
     }
 
     /**
-     * 首屏片源预热（2026-09-18 用户需求「片源加载好后才能进入 app」）：
-     *
-     * 用户报障：进 app 后点开影片，详情页只有「正在查找片源」，十几秒后才变「立即播放」。
-     * 片源匹配（多源搜索 + 线路探测）单条冷路径实测 12~30s，等点开再跑就一定会看到等待态，
-     * 所以在门闸里先跑：结果落 VodRepository 的 detailCache/detailInfoCache，详情页进页即命中。
-     *
-     * 门闸只等 hero 前 [SOURCE_HERO_MAX] 条（首屏最大点击目标），到 [SOURCE_WAIT_MS] 放行；
-     * 预热整体跑在独立 scope，放行后剩余 hero 与首屏卡片行候选继续在后台匹配完成。
+     * 首屏片源预热（方案 A 后全程后台，不再进启动门闸）：
+     * hero 前 [SOURCE_HERO_MAX] 条 + 首屏卡片行候选（最近观看 / 电影三栏首条），
+     * 多源搜索 + 线路探测结果落 VodRepository 的 detailCache/detailInfoCache。
      */
     private suspend fun preloadFirstScreenSources(heroIds: List<String>) {
         if (heroIds.isEmpty()) return
-        val scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val heroDone = kotlinx.coroutines.CompletableDeferred<Unit>()
-        val heroReady = java.util.concurrent.atomic.AtomicInteger(0)
         val t0 = System.currentTimeMillis()
-        scope.launch {
-            // 异常也必须 complete：门闸只认 heroDone，不能因为一次意外异常白等到预算上限
-            runCatching { Graph.repo.preloadDetailSources(heroIds, batch = SOURCE_CONCURRENCY) }
-                .onSuccess { heroReady.set(it) }
-                .onFailure { OtvLog.w("首屏片源预热失败（放行后按需拉取）: ${it.message}") }
-            heroDone.complete(Unit)
-            // 放行后继续（不拖门闸）：首屏卡片行——最近观看 + 电影三栏每栏首条
-            val extras = runCatching { firstScreenExtraIds() }.getOrDefault(emptyList())
-                .filterNot { it in heroIds }.take(SOURCE_EXTRA_MAX)
-            if (extras.isNotEmpty()) {
-                val n = Graph.repo.preloadDetailSources(extras, batch = SOURCE_EXTRA_CONCURRENCY)
-                OtvLog.i("首屏片源预热（后台续跑）：卡片行 ${n}/${extras.size} 条线路就绪")
-            }
-        }
-        if (kotlinx.coroutines.withTimeoutOrNull(SOURCE_WAIT_MS) { heroDone.await() } == null) {
-            OtvLog.i("首屏片源预热到预算上限（${SOURCE_WAIT_MS}ms）：hero 未全部就绪，剩余转后台继续")
-        } else {
-            OtvLog.i("首屏片源预热完成：hero ${heroReady.get()}/${heroIds.size} 条线路就绪" +
-                "（${System.currentTimeMillis() - t0}ms）")
+        runCatching { Graph.repo.preloadDetailSources(heroIds, batch = SOURCE_CONCURRENCY) }
+            .onSuccess { OtvLog.i("首屏片源预热（后台）：hero $it/${heroIds.size} 条线路就绪（${System.currentTimeMillis() - t0}ms）") }
+            .onFailure { OtvLog.w("首屏片源预热失败（点开时按需拉取）: ${it.message}") }
+        // 首屏卡片行：最近观看 + 电影三栏每栏首条
+        val extras = runCatching { firstScreenExtraIds() }.getOrDefault(emptyList())
+            .filterNot { it in heroIds }.take(SOURCE_EXTRA_MAX)
+        if (extras.isNotEmpty()) {
+            val n = runCatching { Graph.repo.preloadDetailSources(extras, batch = SOURCE_EXTRA_CONCURRENCY) }.getOrDefault(0)
+            OtvLog.i("首屏片源预热（后台）：卡片行 $n/${extras.size} 条线路就绪")
         }
     }
 
