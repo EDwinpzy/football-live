@@ -96,12 +96,26 @@ fun ActivateScreen(nav: NavController) {
     // 2026-09-19 需求②：竖屏码位格必须收窄才放得下 10 位一行。
     // 竖屏 s = 屏宽dp/750，104 设计px 的格子在此尺度下有 ~57dp 宽，10 格 + 前缀
     // = 703dp 对 329dp 可用宽（2.1 倍溢出）。这里给竖屏单独一档「码位缩放系数」，
-    // 与页面其它尺寸解耦；56 宽实测占可用宽 94%（378.5dp 容器放 354.4dp），
-    // 再宽就顶到边（60 已 99%，字体计量差一点就溢出）。
-    val slotW = if (portrait) 56f else 104f
+    // 与页面其它尺寸解耦。
+    //
+    // 2026-09-19 需求⑤（老板第二轮）：「OTV- 要和下面剩下的密钥放一行，不要分两行」。
+    // 原先竖屏把「OTV-」降为码位**上方**的小字标签（独占一行），现改为与横屏同款、
+    // 回到码位行**行内**（见下方码位 Row 里的前缀块）。等价于行宽新增
+    // 「OTV- 字宽 + 前缀间距」≈ 62.7 设计px：
+    //   · 旧行宽 650.0（10 格 56 + 组内 8×6 + 横杠两侧 2×10 + 横杠 18）；
+    //   · 新需求 712.7 对可用宽 690.3 ⟹ **溢出 22.4 设计px**。
+    // 因此竖屏档整体收一档（实测标定，非拍脑袋）：
+    //   格宽 56 → 54、组内间距 6 → 4、前缀/横杠间距 10 → 8、横杠宽 18 → 16、
+    //   OTV- 字号 20 → 26（太小读不清，26 是行内可辨下限）、前缀与首格间距 12 → 10。
+    // 实测落地：整行 56..1025px = **672.9 设计px**，对 690.3 余 **17.4 设计px**（2.5%）。
+    //   ⚠️ 余量偏紧：OTV- 实测占 55.6 设计px（比估值宽 20），换字体/换 ROM 有顶边风险。
+    //   再收只能在**字号**上动（格宽 54 已接近码位可辨认下限），非必要不要再挤。
+    val slotW = if (portrait) 54f else 104f
     val slotH = if (portrait) 72f else 134f
-    val slotGap = if (portrait) 6f else 10f
+    val slotGap = if (portrait) 4f else 10f
     val slotFont = if (portrait) 34f else 46f
+    // 行内「OTV-」字号：竖屏 26（与副标题 20 拉开，但不抢码位 34 的视觉），横屏保持 46。
+    val prefixFont = if (portrait) 26f else 46f
 
     BackHandler { nav.popBackStack() }
 
@@ -206,19 +220,10 @@ fun ActivateScreen(nav: NavController) {
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 // ---- 分段码位：OTV- 前缀 + 5+5，中横杠 ----
-                // 竖屏把「OTV-」由大号前缀降为码位上方小字标签——10 格一行已占满可用宽，
-                // 前缀再占 3 个字符位就放不下了。
-                if (portrait) {
-                    Text(
-                        "OTV-",
-                        color = OtvColors.White50,
-                        fontSize = 20f.sxs(s),
-                        fontWeight = FontWeight.SemiBold,
-                        letterSpacing = 2f.sxs(s),
-                    )
-                    Spacer(Modifier.height(8f.sx(s)))
-                }
-
+                // 2026-09-19 需求⑤：**竖屏也把「OTV-」放在行内**，与十位码位同一行
+                // （老板原话「OTV- 要和下面剩下的密钥放一行，不要分两行」）。
+                // 旧版竖屏把前缀降为码位上方小字标签独占一行，现已移除；
+                // 前缀块在下面的码位 Row 里改为无条件渲染。
                 BasicTextField(
                     value = input,
                     onValueChange = { raw ->
@@ -263,13 +268,16 @@ fun ActivateScreen(nav: NavController) {
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.tapCard { runCatching { fieldFocus.requestFocus(); ime?.show() } },
                 ) {
-                    if (!portrait) {
-                        Text(
-                            "OTV-",
-                            color = OtvColors.White50, fontSize = 46f.sxs(s), fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(end = 18f.sx(s)),
-                        )
-                    }
+                    // 2026-09-19 需求⑤：前缀改为**两端同款、无条件行内渲染**。
+                    // 竖屏用收窄档（字号 26 / 尾距 10），横屏沿用旧档（46 / 18）——
+                    // 改前这段被 `if (!portrait)` 包着，竖屏根本走不到。
+                    Text(
+                        "OTV-",
+                        color = OtvColors.White50,
+                        fontSize = prefixFont.sxs(s),
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(end = (if (portrait) 10f else 18f).sx(s)),
+                    )
                     repeat(5) { i ->
                         CodeSlot(
                             ch = input.getOrNull(i), active = input.length == i, s = s,
@@ -277,15 +285,15 @@ fun ActivateScreen(nav: NavController) {
                         )
                         if (i < 4) Spacer(Modifier.width(slotGap.sx(s)))
                     }
-                    Spacer(Modifier.width((if (portrait) 10f else 16f).sx(s)))
+                    Spacer(Modifier.width((if (portrait) 8f else 16f).sx(s)))
                     Box(
                         Modifier
-                            .width((if (portrait) 18f else 26f).sx(s))
+                            .width((if (portrait) 16f else 26f).sx(s))
                             .height((if (portrait) 4f else 6f).sx(s))
                             .alpha(0.8f)
                             .background(Color(0x38FFFFFF), RoundedCornerShape(3f.sx(s))),
                     )
-                    Spacer(Modifier.width((if (portrait) 10f else 16f).sx(s)))
+                    Spacer(Modifier.width((if (portrait) 8f else 16f).sx(s)))
                     repeat(5) { i ->
                         CodeSlot(
                             ch = input.getOrNull(5 + i), active = input.length == 5 + i, s = s,
