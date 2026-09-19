@@ -2442,7 +2442,7 @@ function prefetchPlay(vid, pid, evid) {
 async function resolveVodAndPlay(ctx) {
   try {
     const d = await resolvePlayCached(ctx.vid, ctx.playRef.pid, ctx.playRef.vid);
-    pv.sources = (d.sources || []).filter(x => x && x.url && x.alive !== false).slice(0, 5).map(x => x.url);
+    pv.sources = (d.sources || []).filter(x => x && x.url && x.alive !== false).map(x => x.url);
     if (!pv.sources.length) throw new Error("未解析到播放地址");
     attachPlayer(relay(pv.sources[0], "none"), ctx.resume || 0);
     pushHistory({ id: ctx.vid, title: ctx.title, cover: ctx.cover || "", epIndex: ctx.epIdx || 0 });
@@ -2608,7 +2608,7 @@ async function recoverPlayback(reason, expectedGen) {
     if (attempt === 0 || attempt === 1) {
       bustResolvedPlay(ctx);
       const d = await resolvePlayCached(ctx.vid, ctx.playRef.pid, ctx.playRef.vid);
-      const fresh = (d.sources || []).filter(x => x && x.url && x.alive !== false).slice(0, 5).map(x => x.url);
+      const fresh = (d.sources || []).filter(x => x && x.url && x.alive !== false).map(x => x.url);
       if (!fresh.length) throw new Error("未解析到播放地址");
       pv.sources = fresh;
       if (attempt === 1 && fresh.length > 1) pv.srcIdx = (pv.srcIdx + 1) % fresh.length;
@@ -2839,10 +2839,10 @@ function renderMorePanel() {
       mpApplyEpisode(+b.dataset.i); renderDetailEps(); startPlayFromCtx();
     }));
   }
-  /* 换源线路（仅多线路；v1.31 后端统一清晰度排名，面板只展示前 5） */
+  /* 换源线路（仅多线路；v1.31 后端统一清晰度排名，面板展示全部可用线路） */
   if (c.kind === "vod" && detail && detail.sources.length > 1) {
     $("#mpLinesSec").hidden = false;
-    $("#mpLines").innerHTML = detail.sources.slice(0, 5).map((s, i) =>
+    $("#mpLines").innerHTML = detail.sources.map((s, i) =>
       `<button class="lchip ${i === dLineIdx ? "on" : ""}" data-i="${i}">${esc("信号源" + (i + 1))}</button>`).join("");
     $$("#mpLines .lchip").forEach(ch => ch.addEventListener("click", () => {
       dLineIdx = +ch.dataset.i;

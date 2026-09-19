@@ -20,5 +20,5 @@ object EpisodeMenuPolicy {
         }
 }
 object VisibleVodLinePolicy {
-    fun apply(lines: List<LineInfo>) = lines.take(5).mapIndexed { i, line -> line.copy(label = "信号源${i + 1}") }
+    fun apply(lines: List<LineInfo>) = lines.mapIndexed { i, line -> line.copy(label = "信号源${i + 1}") }
 }

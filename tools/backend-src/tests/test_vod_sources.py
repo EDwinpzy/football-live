@@ -115,6 +115,35 @@ class VodSourcesTest(unittest.TestCase):
         self.assertEqual(result["height"], 1080)
         self.assertEqual(result["latency_ms"], 420)
 
+    def test_probe_rejects_successful_html_error_page(self):
+        result = vod_sources.probe_stream("https://v.example/master.m3u8", fetch=lambda _url: {
+            "elapsed_ms": 80,
+            "body": "<!doctype html><html><body>Access denied</body></html>",
+        })
+        self.assertFalse(result["alive"])
+
+    def test_detail_can_wait_for_all_matching_sources(self):
+        class FakeAdapter:
+            def __init__(self, source): self.source = source
+            def search(self, _subject):
+                return [{"title": "兰香如故", "year": "2026", "category": "tv", "season": 0}]
+            def detail(self, _candidate):
+                return [{"id": self.source.id + ":1", "source_id": self.source.id,
+                         "name": self.source.name, "alive": True,
+                         "episodes": [{"index": 0, "name": "第1集", "url": "https://v.example/1.m3u8"}]}]
+
+        old = vod_sources.MacCmsAdapter
+        vod_sources.MacCmsAdapter = FakeAdapter
+        try:
+            registry = vod_sources.SourceRegistry([
+                vod_sources.VodSource("first", "首源", "https://first.example", "https://first.example/api", "macms_json"),
+                vod_sources.VodSource("second", "360", "https://360.example", "https://360.example/api", "macms_json"),
+            ], probe=lambda _url: {"alive": True, "height": 1080, "latency_ms": 1})
+            lines = registry.resolve_subject({"title": "兰香如故", "year": "2026", "category": "tv"}, wait_for_all=True)
+            self.assertEqual({line["source_id"] for line in lines}, {"first", "second"})
+        finally:
+            vod_sources.MacCmsAdapter = old
+
 
 if __name__ == "__main__":
     unittest.main()

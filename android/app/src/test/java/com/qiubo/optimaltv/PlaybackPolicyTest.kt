@@ -29,9 +29,9 @@ class PlaybackPolicyTest {
         assertEquals(20 until 25, EpisodeMenuPolicy.visibleRange(25, page = 2))
     }
 
-    @Test fun vodLinesExposeOnlyFiveAnonymousSignals() {
+    @Test fun vodLinesExposeEveryAnonymousSignal() {
         val lines = (1..8).map { LineInfo("v$it", "private-$it", "u$it") }
-        assertEquals(listOf("信号源1", "信号源2", "信号源3", "信号源4", "信号源5"),
+        assertEquals(listOf("信号源1", "信号源2", "信号源3", "信号源4", "信号源5", "信号源6", "信号源7", "信号源8"),
             VisibleVodLinePolicy.apply(lines).map { it.label })
     }
 
