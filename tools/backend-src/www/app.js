@@ -254,7 +254,7 @@ function uiBack() {
     return;
   }
   if (!$("#pDetail").hidden || !$("#pAll").hidden) { closePush(); return; }
-  if (!$("#morePanel").hidden) { $("#morePanel").hidden = true; $("#moreDim").hidden = true; return; }
+  if (!$("#morePanel").hidden) { $("#morePanel").hidden = true; return; }
   if (state.tab === "search") { switchTab(store.get("otvw:lastTab", "live")); return; }
   scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -2382,19 +2382,18 @@ function openPlayer(ctx) {
   pv.controls = false; pv.picker = false;
   $("#pPlayer").hidden = false; document.body.style.overflow = "hidden";
   $("#pError").hidden = true; $("#bufSpin").hidden = false;
-  $("#morePanel").hidden = true; $("#moreDim").hidden = true; $("#srcPickerWrap").hidden = true;
-  $("#controls").hidden = true; $("#ctlBack").hidden = true; $("#moreBtn").hidden = true;
+  $("#morePanel").hidden = true; $("#srcPickerWrap").hidden = true;
+  $("#controls").hidden = true; $("#ctlBack").hidden = true;
   $("#cTitle").textContent = ctx.title;
   $("#cMeta").textContent = "";
   setPlayIcon(false);
   const v = $("#video"); pv.video = v;
   applyAspect();
-  /* 竖屏播放器（2026-09-19 v2 定稿）：视频下方 =「更多」区段平铺常驻；
-     播放控制回归视频浮层（点按唤出）+ 手势，不再放常驻控制条与 ⋯ 钮 */
+  /* 竖屏播放器（2026-09-20 v3）：控制条覆盖视频底部；播放信息与更多选项下沉 */
   if (state.portrait) {
     renderMorePanel();
     $("#morePanel").hidden = false;
-    $("#ctlBack").hidden = false;
+    showControls();
   }
   try {
     if (ctx.kind === "vod") resolveVodAndPlay(ctx);
@@ -2648,8 +2647,8 @@ function playerFatal(msg) {
   $("#bufSpin").hidden = true;
   $("#peMsg").textContent = msg || "播放失败";
   $("#pError").hidden = false;
-  $("#controls").hidden = true; $("#morePanel").hidden = true; $("#moreDim").hidden = true;
-  $("#ctlBack").hidden = true; $("#moreBtn").hidden = true; $("#srcPickerWrap").hidden = true;
+  $("#controls").hidden = true; $("#morePanel").hidden = true;
+  $("#ctlBack").hidden = true; $("#srcPickerWrap").hidden = true;
 }
 $("#peRetry").addEventListener("click", () => { const c = pv.ctx; openPlayer(c); });
 $("#peBack").addEventListener("click", closePlayer);
@@ -2691,11 +2690,12 @@ function armHide() {
   }, 5000);
 }
 function showControls() {
-  if (pv.ctx.kind === "live") { pv.picker = true; renderSrcPicker(); armHide(); return; }
+  if (!pv.ctx) return;
+  if (pv.ctx.kind === "live" && !state.portrait) { pv.picker = true; renderSrcPicker(); armHide(); return; }
   pv.controls = true;
   $("#controls").hidden = false;
-  /* 竖屏（v2）：morePanel 平铺常驻、⋯ 钮不渲染，显隐控制条都不碰它们 */
-  if (!state.portrait) { $("#morePanel").hidden = true; $("#moreDim").hidden = true; $("#moreBtn").hidden = false; }
+  /* 竖屏：信息面板常驻于视频下方，控制浮层只覆盖视频区域 */
+  if (!state.portrait) $("#morePanel").hidden = true;
   $("#ctlBack").hidden = false;
   armHide();
 }
@@ -2703,16 +2703,13 @@ function hideControls() {
   pv.controls = false;
   $("#controls").hidden = true;
   $("#ctlBack").hidden = true;
-  if (!state.portrait) { $("#moreBtn").hidden = true; $("#morePanel").hidden = true; $("#moreDim").hidden = true; }
+  if (!state.portrait) $("#morePanel").hidden = true;
 }
 $("#cPlayBtn").addEventListener("click", () => {
   const v = pv.video; if (!v) return;
   v.paused ? v.play().catch(() => {}) : v.pause();
   if (pv.ctx && pv.ctx.kind === "vod") showControls(); else armHide();
 });
-$("#moreBtn").addEventListener("click", () => { renderMorePanel(); $("#morePanel").hidden = false; $("#moreDim").hidden = false; pv.controls = false; $("#controls").hidden = true; $("#ctlBack").hidden = false; });
-$("#moreDim").addEventListener("click", () => { $("#morePanel").hidden = true; $("#moreDim").hidden = true; $("#ctlBack").hidden = true; });
-
 function updatePb() {
   const v = pv.video; if (!v || pv.seeking) return;
   const isLive = pv.ctx && pv.ctx.kind === "live";
@@ -2763,8 +2760,8 @@ function closePlayer() {
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   if (pv.hls) { pv.hls.destroy(); pv.hls = null; }
   if (pv.video) { pv.video.pause(); pv.video.removeAttribute("src"); pv.video.load(); pv.video.controls = false; }
-  $("#pPlayer").hidden = true; $("#morePanel").hidden = true; $("#moreDim").hidden = true;
-  $("#ctlBack").hidden = true; $("#moreBtn").hidden = true;
+  $("#pPlayer").hidden = true; $("#morePanel").hidden = true;
+  $("#ctlBack").hidden = true;
   document.body.style.overflow = "";
   pv.recoveryGen++; pv.ctx = null; pv.controls = false; pv.picker = false; pv.recovering = false;
 }
@@ -2868,7 +2865,7 @@ function renderMorePanel() {
   }));
   /* 直播不可变速：不渲染倍速区（App PlayerMoreSections 同口径） */
   $("#mpSpeedSec").hidden = c.kind === "live";
-  /* 竖屏（v2 定稿）：面板平铺常驻，任何状态重渲后保持可见 */
+  /* 竖屏（v3）：面板平铺常驻，任何状态重渲后保持可见 */
   if (state.portrait) $("#morePanel").hidden = false;
 }
 if ("mediaSession" in navigator) {
@@ -2954,7 +2951,7 @@ if ("mediaSession" in navigator) {
         tapPending = setTimeout(() => {
           if (!pv.ctx) return;
           if (pv.ctx.kind === "live") { pv.picker = !pv.picker; renderSrcPicker(); if (pv.picker) armHide(); }
-          /* 竖屏（v2）：更多面板已平铺常驻，点视频统一开/关控制浮层 */
+          /* 竖屏（v3）：更多面板平铺常驻，点视频统一开/关控制浮层 */
           else { pv.controls ? hideControls() : showControls(); }
         }, 280);
       }

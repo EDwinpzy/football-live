@@ -448,11 +448,6 @@ body.portrait .pw-close{font-size:22px;padding:8px 20px}
     radial-gradient(ellipse 120% 90% at 50% 35%,rgba(0,0,0,.2),transparent 70%),
     linear-gradient(to bottom,transparent 55%,rgba(0,0,0,.4) 78%,rgba(0,0,0,.8))}
 #controls button,#controls .ctl-track{pointer-events:auto}
-/* 更多钮（App CircleButton 52dp 物理，位置 end80/top90 设计） */
-#moreBtn{position:absolute;right:80px;top:90px;width:calc(52px/var(--z,1));height:calc(52px/var(--z,1));
-  display:flex;align-items:center;justify-content:center;border-radius:50%;
-  background:rgba(20,20,20,.4);border:calc(1px/var(--z,1)) solid rgba(255,255,255,.12)}
-#moreBtn svg{width:calc(30px/var(--z,1));height:calc(30px/var(--z,1));fill:#fff}
 /* 返回钮（控制条可见时左上角，44dp 物理） */
 #ctlBack{position:absolute;left:calc(12px/var(--z,1) + env(safe-area-inset-left));
   top:calc(12px/var(--z,1) + env(safe-area-inset-top));
@@ -480,8 +475,7 @@ body.portrait .ctl-full{display:flex}
 .ctl-fill .ctl-thumb{position:absolute;right:calc(-7px/var(--z,1));top:50%;transform:translateY(-50%);
   width:calc(14px/var(--z,1));height:calc(14px/var(--z,1));border-radius:50%;background:#fff}
 
-/* 更多面板（App：右侧 560dp / 竖屏 92vw，物理 dp；全屏暗区 0x66000000） */
-#moreDim{position:absolute;inset:0;background:rgba(0,0,0,.4)}
+/* 播放信息与更多选项（横屏右侧面板 / 竖屏视频下方） */
 #morePanel{position:absolute;top:0;right:0;bottom:0;width:min(560px,92vw);
   background:rgba(18,18,22,.914);border-radius:24px 0 0 24px;overflow-y:auto;z-index:10;
   zoom:calc(1/var(--z,1))}
@@ -603,7 +597,6 @@ body.portrait .fav-body{padding:0 40px 80px}
 body.portrait .fav-title-row{padding-top:52px}
 body.portrait .ctl-bottom{padding:0 40px 30px}
 body.portrait .ctl-title{font-size:40px}
-body.portrait #moreBtn{right:40px;top:60px}
 
 /* --- 竖屏补齐（2026-09-07 竖屏优化，与移动版 App 同步） --- */
 /* 足球 hero：内容列 760 宽 + 左距 80 在 750 基准下溢出（840>750）→ 40/640 同影视 hero */
@@ -653,14 +646,15 @@ body.portrait .fp-caret{font-size:16px}
 body.portrait .all-body{padding-top:0}
 body.portrait .detail-body{padding-top:110px}
 
-/* 需求12⑥：竖屏播放器重构——顶部 16:9 视频 + 下方常驻控制区（常规竖屏播放器形态） */
+/* 需求12⑥：竖屏播放器重构——视频区内浮层控制 + 下方常驻播放信息 */
 body.portrait #pPlayer{display:flex;flex-direction:column;background:#0E0E0F}
 body.portrait #pPlayer video{width:100%;height:auto;aspect-ratio:16/9;flex-shrink:0;background:#000}
 body.portrait #pPlayer video.asp-169,body.portrait #pPlayer video.asp-43{width:100%;height:auto;max-width:100%}
-/* 2026-09-19 v2 定稿：竖屏不再放常驻控制条/⋯ 钮——播放控制回归视频浮层（CSS 隐藏，
-   进度仍随 timeupdate 更新）+ 手势；下方整块 =「更多」区段平铺常驻 */
-body.portrait #controls{display:none}
-body.portrait #moreBtn{display:none}
+/* 2026-09-20 v3：暂停/进度/全屏覆盖视频底部；标题与更多选项下沉至视频下方 */
+body.portrait #controls{display:flex;top:0;left:0;right:0;height:calc(100vw * 9 / 16);bottom:auto}
+body.portrait #controls .ctl-bottom{padding:0 26px calc(18px + env(safe-area-inset-bottom))}
+body.portrait .ctl-title,body.portrait .ctl-meta,body.portrait .sp26{display:none}
+body.portrait .ctl-progress-row{gap:calc(14px/var(--z,1))}
 body.portrait #morePanel{position:static;width:100%;height:auto;flex:1 1 auto;min-height:0;
   border-radius:0;background:#0E0E0F;backdrop-filter:none;-webkit-backdrop-filter:none;
   padding-bottom:env(safe-area-inset-bottom);zoom:calc(1/var(--z,1))}

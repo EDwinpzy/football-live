@@ -24,7 +24,7 @@ class WebPortraitPlayerContractTest(unittest.TestCase):
 
     def test_fullscreen_button_stays_in_video_control_row(self):
         row_start = self.html.index('<div class="ctl-progress-row">')
-        row_end = self.html.index("</div>", row_start)
+        row_end = self.html.index("\n      </div>\n    </div>", row_start)
         self.assertIn('id="ctlFull"', self.html[row_start:row_end])
 
     def test_portrait_open_shows_the_video_controls(self):

@@ -167,13 +167,7 @@
   <div id="gestInd" hidden></div>
   <!-- 返回钮（控制条/信号源条可见时左上角；App MobileBackButton 44dp） -->
   <button id="ctlBack" hidden>‹</button>
-  <!-- 更多钮（右上角，App CircleButton 52dp） -->
-  <button id="moreBtn" hidden>
-    <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.6"/><circle cx="12" cy="12" r="2.6"/><circle cx="12" cy="19" r="2.6"/></svg>
-  </button>
-  <!-- 更多面板全屏暗区（App 0x66000000 点按关闭） -->
-  <div id="moreDim" hidden></div>
-  <!-- 控制层（影视：点按呼出；直播不出） -->
+  <!-- 控制层：暂停/进度/全屏均位于视频画面底部浮层 -->
   <div id="controls" hidden>
     <div class="ctl-bottom">
       <div class="ctl-title" id="cTitle"></div>
@@ -192,7 +186,7 @@
       </div>
     </div>
   </div>
-  <!-- 更多面板（MorePanel 复刻：右侧 560dp 悬浮栏 / 竖屏 92vw） -->
+  <!-- 播放信息与更多选项：竖屏位于视频下方，横屏作为详情面板 -->
   <div id="morePanel" hidden>
     <div class="mp-inner">
       <div class="mp-info-row">
