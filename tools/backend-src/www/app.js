@@ -257,21 +257,46 @@ function uiBack() {
   scrollTo({ top: 0, behavior: "smooth" });
 }
 (function () {
-  let sx = 0, sy = 0, live = false;
-  addEventListener("touchstart", e => {
-    const t = e.touches[0];
-    /* #video（影视播放器）不参与左缘返回：它与横滑快进/竖滑亮度手势同区，容易误触退播；
-       电视播放器 #tvVideo 上没有滑动手势，左缘右滑必须可用——横屏时视频铺满整屏，
-       否则电视播放态在横屏没有可见退出入口（FAB/侧栏都不常驻）。 */
-    live = t.clientX < 36 && !e.target.closest("#video, #cTrack, .ctl-track, input, textarea");
-    sx = t.clientX; sy = t.clientY;
-  }, { passive: true });
-  addEventListener("touchend", e => {
-    if (!live) return;
-    live = false;
-    const t = e.changedTouches[0];
-    if (sx < 36 && t.clientX - sx > 64 && Math.abs(t.clientY - sy) < 90) uiBack();
-  }, { passive: true });
+  /* 设计像素阈值：与 App 的左缘返回意图一致，但不依赖 body.zoom，避免横竖屏切换时
+     触控命中区随页面缩放失真。播放器横滑快进/亮度手势继续由 #video 自己处理。 */
+  const EDGE_BACK_ZONE = 44;
+  const EDGE_BACK_DISTANCE = 64;
+  const EDGE_BACK_VERTICAL_TOLERANCE = 90;
+  let pointer = null;
+  const blocked = target => target && target.closest("#video, #cTrack, .ctl-track, input, textarea");
+  const beginPointer = e => {
+    /* 只接管主指针的触控/手写笔；鼠标拖动不应触发页面返回。 */
+    if (!e.isPrimary || e.pointerType === "mouse") return;
+    if (e.clientX > EDGE_BACK_ZONE || blocked(e.target)) return;
+    pointer = { id: e.pointerId, startX: e.clientX, startY: e.clientY };
+  };
+  const endPointer = e => {
+    if (!pointer || e.pointerId !== pointer.id) return;
+    const { startX, startY } = pointer;
+    pointer = null;
+    const endX = e.clientX, endY = e.clientY;
+    if (endX - startX > EDGE_BACK_DISTANCE && Math.abs(endY - startY) < EDGE_BACK_VERTICAL_TOLERANCE) uiBack();
+  };
+  const cancelPointer = () => { pointer = null; };
+  if ("PointerEvent" in window) {
+    addEventListener("pointerdown", beginPointer, { passive: true });
+    addEventListener("pointerup", endPointer, { passive: true });
+    addEventListener("pointercancel", cancelPointer, { passive: true });
+  } else {
+    /* 老 WebView 兜底：没有 Pointer Events 时沿用 Touch Events，且多指直接放弃。 */
+    addEventListener("touchstart", e => {
+      if (e.touches.length !== 1 || blocked(e.target)) return;
+      const t = e.touches[0];
+      if (t.clientX > EDGE_BACK_ZONE) return;
+      pointer = { id: "touch", startX: t.clientX, startY: t.clientY };
+    }, { passive: true });
+    addEventListener("touchend", e => {
+      if (!pointer || pointer.id !== "touch" || e.changedTouches.length !== 1) return;
+      const t = e.changedTouches[0];
+      endPointer({ pointerId: "touch", clientX: t.clientX, clientY: t.clientY });
+    }, { passive: true });
+    addEventListener("touchcancel", cancelPointer, { passive: true });
+  }
 })();
 
 function hideBoot() { /* v1.25：启动过渡屏已按需求移除，保留空函数兼容旧调用点 */ }
