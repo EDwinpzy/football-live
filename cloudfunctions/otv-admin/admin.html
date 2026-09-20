@@ -348,6 +348,48 @@ button.act{background:var(--grad);border:0;border-radius:10px;color:#070810;font
 @media (max-width:1120px){.stage{grid-template-columns:204px minmax(0,1fr)}.board{display:none}}
 @media (max-width:920px){.stage{display:block;min-height:0}.rail{position:static;height:auto;max-height:none;flex-direction:row;flex-wrap:wrap;align-items:center;gap:5px;border-right:0;border-bottom:1px solid var(--line);padding:10px 14px}.rail-grp,.rail-foot{display:none}.verbs button svg{display:none}.verbs button,.plaque{width:auto;padding:7px 14px}.window{padding:18px 14px 88px}.window section{padding:0 6px 22px}.kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.marquee{height:auto;flex-wrap:wrap;padding:9px 14px;gap:9px 14px}.mq-right{display:none}.hide-narrow{display:none}.gridwrap{overflow-x:auto}table.grid{min-width:680px}.echo{padding:0 14px}.echo .tail{display:none}}
 @media (max-width:520px){.kpis{grid-template-columns:1fr 1fr}.kpis .cell{padding:13px}.kpis .cell b{font-size:20px}.w-head h1{font-size:20px}}
+
+/* ==== 2026-09-20 运维控制台精修：保留霓光识别，收敛装饰并提高扫描效率 ==== */
+:root{
+  --bg:#080b10; --bg2:#101620; --bg3:#17202c;
+  --line:rgba(164,177,201,.16); --line2:rgba(164,177,201,.09);
+  --accent:#8ea8ff; --accent-hi:#c4d1ff; --accent-dim:#53658f; --accent-strong:#607fe3;
+  --c1:#69d2e7; --c2:#9eb2ff; --c3:#bca4dc;
+  --grad:linear-gradient(105deg,var(--c1),var(--c2));
+  --txt:#eef2f8; --dim:#aeb8c8; --faint:#7d899d;
+  --ok:#42d6a0; --bad:#f07b82; --warn:#e8b85c;
+  --r:12px; --r-lg:14px;
+}
+body{background:var(--bg);font-size:13px;line-height:1.55}
+body::before,body::after{width:560px;height:560px;filter:blur(110px);opacity:.18;animation:none}
+body::before{left:-220px;top:-260px;background:radial-gradient(circle,rgba(76,141,255,.42),transparent 68%)}
+body::after{right:-250px;top:24%;background:radial-gradient(circle,rgba(122,105,210,.28),transparent 68%)}
+.aurora{display:none}
+.marquee{height:54px;padding:0 22px;background:rgba(8,11,16,.94);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.brand{gap:10px;font-size:14.5px;font-weight:700}.brand img{width:26px;height:26px;padding:4px;border-radius:8px;background:#1a2740;box-shadow:none}
+.mq-cell{padding:4px 10px;border-radius:8px;background:rgba(255,255,255,.035);border:1px solid var(--line);font-size:11.5px}
+.lamp{width:7px;height:7px;box-shadow:none;animation:none}.mq-right{font-size:11px}
+.stage{grid-template-columns:214px minmax(0,1fr) 264px;min-height:calc(100vh - 94px);max-width:1520px}
+.rail{top:54px;height:calc(100vh - 54px);padding:18px 13px;background:rgba(11,15,22,.82);border-right:1px solid var(--line)}
+.rail-grp{margin:16px 0 6px 11px;font-size:10px;letter-spacing:.16em}.rail-grp:first-child{margin-top:0}
+.verbs button,.plaque{padding:8px 12px;border-radius:9px;font-weight:550}.verbs button:hover,.plaque:hover{background:rgba(255,255,255,.055);transform:none}
+.verbs button.on,.plaque.on{color:#f4f7ff;background:rgba(105,210,231,.11);box-shadow:inset 0 0 0 1px rgba(142,168,255,.32);font-weight:700}
+.verbs button.on::before,.plaque.on::before{width:2px;top:24%;bottom:24%;background:var(--c1);box-shadow:none}
+.window{padding:28px 28px 76px}.w-head{margin:0 0 20px;gap:11px}.w-head h1{font-size:22px;font-weight:750;letter-spacing:-.02em;color:var(--txt);background:none;-webkit-text-fill-color:initial}.w-head .sub{font-size:12px}
+.release-tabs{margin-bottom:20px}.release-tab{padding:7px 14px;border-radius:8px;background:rgba(255,255,255,.03)}.release-tab.on{border-color:rgba(142,168,255,.58);background:rgba(105,210,231,.11);box-shadow:none}
+.kpis{gap:10px;margin-bottom:20px}.kpis .cell{padding:14px 15px 13px;border-radius:12px;background:rgba(16,22,32,.84);backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:0 8px 22px rgba(0,0,0,.14)}
+.kpis .cell::before{display:none}.kpis .cell:hover{transform:translateY(-2px);border-color:rgba(142,168,255,.4);box-shadow:0 10px 24px rgba(0,0,0,.22)}.kpis .cell b{font-size:22px}.kpis .cell b.amber{background:none;color:var(--accent-hi);filter:none}
+.panel,#ov-ledger{border-radius:14px;background:rgba(16,22,32,.9);backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:0 12px 30px rgba(0,0,0,.18)}
+.secthead{padding:15px 18px 13px}.secthead h2{font-size:14px}table.grid th{padding:9px 18px;background:rgba(255,255,255,.025);font-size:10.5px}table.grid td{padding:10px 18px;font-size:12.5px}table.grid tr:hover td{background:rgba(105,210,231,.055);box-shadow:inset 2px 0 0 rgba(105,210,231,.75)}
+.toolbar{gap:8px;margin-bottom:11px}.formgrid{gap:12px 16px;padding:15px 16px;border-radius:14px;background:rgba(16,22,32,.9)}.formfoot{padding:11px 15px;border-radius:12px;background:rgba(16,22,32,.9)}
+input,select,textarea{background:#0b1017;border-radius:9px;padding:7px 10px}input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(142,168,255,.18)}
+button.act{background:var(--accent-strong);border-color:var(--accent-strong);border-radius:9px;padding:8px 18px;box-shadow:0 5px 16px rgba(96,127,227,.22)}button.act:hover{background:#7090ed;border-color:#7090ed;filter:none;transform:translateY(-1px)}button.ghost{border-radius:9px;background:rgba(255,255,255,.025)}button.ghost:hover{background:rgba(255,255,255,.07);border-color:rgba(196,209,255,.4)}
+.tag,.pill,.chip{background:rgba(255,255,255,.035)}.pill{padding:2px 10px}.empty{background:rgba(16,22,32,.72)}
+.board{top:54px;height:calc(100vh - 54px);padding:20px 17px 14px;background:rgba(11,15,22,.82);border-left:1px solid var(--line)}.board .big .v{font-size:28px;color:var(--accent-hi);text-shadow:none}
+.echo{height:40px;padding:0 22px;background:rgba(8,11,16,.96);border-top:1px solid var(--line)}
+.veil{background:rgba(5,7,10,.78);backdrop-filter:blur(5px)}.veil-panel{border-radius:14px;background:#111822;box-shadow:0 20px 52px rgba(0,0,0,.5)}
+@media (max-width:1280px){.stage{grid-template-columns:204px minmax(0,1fr) 250px}.window{padding-left:24px;padding-right:24px}}
+@media (max-width:920px){.rail{padding:10px 14px}.window{padding:18px 14px 88px}.window section{padding:0 6px 22px}.marquee{padding:8px 14px;gap:8px 12px}.panel,#ov-ledger{border-radius:12px}.formgrid{padding:13px 14px}.echo{padding:0 14px}}
 </style>
 </head>
 <body>
