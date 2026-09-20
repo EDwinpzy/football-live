@@ -120,7 +120,7 @@ chaquopy {
 
 // 统一产物到项目目录（v1.19 版本重规划定稿）：apk/TV版/ 固定名 MyTV-TV版.apk，
 // 由 assembleRelease 复制（对外分发=签名+卡密+热更新正式链路）。
-// debug 测试包不进 apk/——直接用 zcode-build 构建输出目录。
+// debug 测试包不进 apk/——直接用项目根 build 构建输出目录。
 tasks.register("copyTvApk", Copy) {
     from(layout.buildDirectory.file("outputs/apk/release/app-release.apk"))
     into(file("D:/MyProjects/My TV/apk/TV版"))

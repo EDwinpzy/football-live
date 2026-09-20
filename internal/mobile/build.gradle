@@ -7,10 +7,10 @@ plugins {
     id 'com.chaquo.python' version '16.1.0' apply false
 }
 
-// OneDrive 会锁 build 缓存：构建目录整体移出（与原版同策略），源码仍在 OneDrive。
-// 注意：目录必须与 TV 工程（android/ → zcode-build/optimal-tv）分开——两工程同名
+// 构建缓存移到项目根目录，源码与构建产物分开。
+// 注意：目录必须与 TV 工程（build/optimal-tv）分开——两工程同名
 // rootProject（optimal-tv），共用目录会在并行构建时互相清空对方的中间产物
 // （2026-09-02 实测：双工程同时 assembleRelease → R 资源假性 Unresolved / KSP 缓存损坏）
 allprojects {
-    buildDir = "D:/zcode-build/optimal-tv-mobile/${project.name}"
+    buildDir = "D:/MyProjects/My TV/build/optimal-tv-mobile/${project.name}"
 }

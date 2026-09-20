@@ -7,7 +7,7 @@ plugins {
     id 'com.chaquo.python' version '16.1.0' apply false
 }
 
-// OneDrive 会锁 build 缓存：构建目录整体移出（与原版同策略），源码仍在 OneDrive
+// 构建缓存移到项目根目录，源码与构建产物分开；TV 与移动版使用独立目录
 allprojects {
-    buildDir = "D:/zcode-build/optimal-tv/${project.name}"
+    buildDir = "D:/MyProjects/My TV/build/optimal-tv/${project.name}"
 }
