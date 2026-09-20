@@ -58,6 +58,44 @@ begin
 end;
 $$;
 
+create or replace function vod_source_admin_set_enabled(p_id uuid, p_enabled boolean)
+returns jsonb language plpgsql security definer set search_path=public as $$
+begin
+  if not exists(select 1 from vod_source_drafts where id=p_id) then
+    raise exception '影视源不存在';
+  end if;
+  if not coalesce(p_enabled,false)
+     and (select count(*) from vod_source_drafts where enabled) <= 1 then
+    raise exception '至少需要一个启用中的影视源';
+  end if;
+  update vod_source_drafts
+     set enabled=coalesce(p_enabled,false), revision=revision+1, updated_at=now()
+   where id=p_id;
+  return jsonb_build_object('ok',true,'id',p_id,'enabled',coalesce(p_enabled,false));
+end;
+$$;
+
+create or replace function vod_source_admin_set_priority(p_id uuid)
+returns jsonb language plpgsql security definer set search_path=public as $$
+begin
+  if not exists(select 1 from vod_source_drafts where id=p_id) then
+    raise exception '影视源不存在';
+  end if;
+  if not exists(select 1 from vod_source_drafts where id=p_id and enabled) then
+    raise exception '停用中的影视源不能设为默认优先';
+  end if;
+  with ordered as (
+    select id, (row_number() over(order by (id=p_id) desc, sort_order, id)-1)::integer as next_sort
+      from vod_source_drafts
+  )
+  update vod_source_drafts d
+     set sort_order=o.next_sort, revision=d.revision+1, updated_at=now()
+    from ordered o
+   where d.id=o.id and d.sort_order is distinct from o.next_sort;
+  return jsonb_build_object('ok',true,'id',p_id);
+end;
+$$;
+
 create or replace function vod_source_admin_delete(p_id uuid)
 returns jsonb language plpgsql security definer set search_path=public as $$
 begin
@@ -100,6 +138,8 @@ $$;
 revoke all on vod_source_drafts, vod_source_versions from anon, authenticated;
 revoke all on function vod_source_admin_list() from public;
 revoke all on function vod_source_admin_save(uuid,text,text,text,text,boolean,integer) from public;
+revoke all on function vod_source_admin_set_enabled(uuid,boolean) from public;
+revoke all on function vod_source_admin_set_priority(uuid) from public;
 revoke all on function vod_source_admin_delete(uuid) from public;
 revoke all on function vod_source_admin_publish() from public;
 grant execute on function vod_source_public_check(bigint) to anon, authenticated;

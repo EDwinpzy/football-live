@@ -1692,6 +1692,25 @@ def h_vod_source_save(d: dict) -> dict:
     })
 
 
+def h_vod_source_set_enabled(d: dict) -> dict:
+    source_id = str(d.get("id") or "").strip()
+    if not source_id:
+        return {"error": "缺少影视源 ID"}
+    enabled = d.get("enabled")
+    if not isinstance(enabled, bool):
+        return {"error": "启用状态不合法"}
+    return rpc("vod_source_admin_set_enabled", {
+        "p_id": source_id, "p_enabled": enabled,
+    })
+
+
+def h_vod_source_set_priority(d: dict) -> dict:
+    source_id = str(d.get("id") or "").strip()
+    if not source_id:
+        return {"error": "缺少影视源 ID"}
+    return rpc("vod_source_admin_set_priority", {"p_id": source_id})
+
+
 def h_vod_source_delete(d: dict) -> dict:
     return rpc("vod_source_admin_delete", {"p_id": d.get("id")}) if d.get("id") else {"error": "缺少影视源 ID"}
 
@@ -1845,6 +1864,8 @@ ROUTES = {
     # 影视源草稿、测试与显式发布（均位于统一会话门禁之后）
     "/api/vod_source_list": h_vod_source_list,
     "/api/vod_source_save": h_vod_source_save,
+    "/api/vod_source_set_enabled": h_vod_source_set_enabled,
+    "/api/vod_source_set_priority": h_vod_source_set_priority,
     "/api/vod_source_delete": h_vod_source_delete,
     "/api/vod_source_discover": h_vod_source_discover,
     "/api/vod_source_test": h_vod_source_test,

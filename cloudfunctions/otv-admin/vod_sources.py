@@ -21,6 +21,11 @@ DEFAULT_PATH = Path(__file__).with_name("vod_sources.default.json")
 RUNTIME_PATH = Path(__file__).with_name("vod_sources.runtime.json")
 AUTO_MATCH_THRESHOLD = 80
 TITLE_SEPARATORS = re.compile(r"[^\w\u4e00-\u9fff]+", re.UNICODE)
+TITLE_VARIANT_SUFFIX = re.compile(
+    r"(?:第\s*\d+\s*季|第\s*\d+\s*部|season\s*\d+|s\s*\d+|年番\s*\d*)\s*$",
+    re.IGNORECASE,
+)
+MAX_SEARCH_TERMS = 4
 PRIVATE_HOSTS = {"localhost", "localhost.localdomain"}
 """代理 fake-IP 承载段：Clash / Surge / sing-box 默认把域名映射到 198.18.0.0/15，
 真实连接由本机代理完成。国内用户装这类代理是常态，若把这段当「内网」拦掉，
@@ -325,6 +330,34 @@ class SourceRegistry:
 
 def normalize_title(value):
     return TITLE_SEPARATORS.sub("", str(value or "")).casefold()
+
+
+def _base_search_title(value):
+    """Remove only a trailing season/年番 marker for a safe source fallback."""
+    title = str(value or "").strip()
+    base = TITLE_VARIANT_SUFFIX.sub("", title).strip(" -:：")
+    return base if base and normalize_title(base) != normalize_title(title) else ""
+
+
+def _search_terms(subject):
+    """Return bounded, high-value source queries without multiplying source traffic."""
+    aliases = sorted(
+        (str(value or "").strip() for value in (subject.get("aliases") or [])),
+        key=lambda value: (bool(re.search(r"\d", value)), len(normalize_title(value))),
+    )
+    values = [subject.get("title") or "", _base_search_title(subject.get("title"))]
+    values.extend(aliases)
+    terms = []
+    seen = set()
+    for value in values:
+        term = str(value or "").strip()
+        key = normalize_title(term)
+        if term and key and key not in seen:
+            seen.add(key)
+            terms.append(term)
+        if len(terms) >= MAX_SEARCH_TERMS:
+            break
+    return terms
 
 
 def _titles(item):
@@ -638,16 +671,24 @@ class MacCmsAdapter:
 
     def search(self, subject):
         # ac=detail 才稳定返回 vod_play_from/vod_play_url；videolist 在不少站点只给摘要。
-        query = urllib.parse.urlencode({"ac": "detail", "wd": subject.get("title") or ""})
-        result = self.fetch(self.source.api_url + "?" + query)
-        payload = json.loads(result.get("body") or "{}")
         candidates = []
-        for item in payload.get("list") or []:
-            type_name = str(item.get("type_name") or "")
-            category = ("anime" if any(x in type_name for x in ("动漫", "动画")) else
-                        "variety" if any(x in type_name for x in ("综艺", "真人秀")) else
-                        "tv" if any(x in type_name for x in ("剧", "连续")) else "movie")
-            candidates.append({"id": str(item.get("vod_id") or ""), "title": item.get("vod_name") or "", "year": item.get("vod_year") or "", "category": category, "season": 0, "raw": item})
+        seen = set()
+        for term in _search_terms(subject):
+            query = urllib.parse.urlencode({"ac": "detail", "wd": term})
+            result = self.fetch(self.source.api_url + "?" + query)
+            payload = json.loads(result.get("body") or "{}")
+            for item in payload.get("list") or []:
+                type_name = str(item.get("type_name") or "")
+                category = ("anime" if any(x in type_name for x in ("动漫", "动画")) else
+                            "variety" if any(x in type_name for x in ("综艺", "真人秀")) else
+                            "tv" if any(x in type_name for x in ("剧", "连续")) else "movie")
+                candidate = {"id": str(item.get("vod_id") or ""), "title": item.get("vod_name") or "", "year": item.get("vod_year") or "", "category": category, "season": 0, "raw": item}
+                key = candidate["id"] or "%s|%s" % (normalize_title(candidate["title"]), candidate["year"])
+                if key and key not in seen:
+                    seen.add(key)
+                    candidates.append(candidate)
+            if any(match_score(subject, candidate) >= AUTO_MATCH_THRESHOLD for candidate in candidates):
+                break
         return candidates
 
     def detail(self, candidate):

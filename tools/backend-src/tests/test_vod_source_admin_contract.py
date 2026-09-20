@@ -7,6 +7,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 ADMIN_SERVER = ROOT / "tools" / "admin_server.py"
 ADMIN_HTML = ROOT / "tools" / "admin.html"
+VOD_MIGRATION = ROOT / "tools" / "vod_sources_migration.sql"
 
 spec = importlib.util.spec_from_file_location("admin_server", ADMIN_SERVER)
 admin_server = importlib.util.module_from_spec(spec)
@@ -19,6 +20,33 @@ class VodSourceAdminContractTest(unittest.TestCase):
         for route in ("vod_source_list", "vod_source_save", "vod_source_delete",
                       "vod_source_discover", "vod_source_test", "vod_source_publish"):
             self.assertIn('"/api/' + route + '"', source)
+
+    def test_source_toggle_and_priority_mutations_are_registered(self):
+        source = ADMIN_SERVER.read_text(encoding="utf-8")
+        for route in ("vod_source_set_enabled", "vod_source_set_priority"):
+            self.assertIn('"/api/' + route + '"', source)
+
+    def test_source_toggle_forwards_id_and_enabled_without_edit_payload(self):
+        with mock.patch.object(admin_server, "rpc", return_value={"ok": True}) as call:
+            result = admin_server.h_vod_source_set_enabled({"id": "source-1", "enabled": False})
+        self.assertEqual(result, {"ok": True})
+        call.assert_called_once_with("vod_source_admin_set_enabled", {
+            "p_id": "source-1", "p_enabled": False,
+        })
+
+    def test_source_priority_forwards_source_id(self):
+        with mock.patch.object(admin_server, "rpc", return_value={"ok": True}) as call:
+            result = admin_server.h_vod_source_set_priority({"id": "source-1"})
+        self.assertEqual(result, {"ok": True})
+        call.assert_called_once_with("vod_source_admin_set_priority", {"p_id": "source-1"})
+
+    def test_source_sql_mutations_keep_one_enabled_and_reorder_priority(self):
+        sql = VOD_MIGRATION.read_text(encoding="utf-8")
+        self.assertIn("create or replace function vod_source_admin_set_enabled", sql)
+        self.assertIn("至少需要一个启用中的影视源", sql)
+        self.assertIn("create or replace function vod_source_admin_set_priority", sql)
+        self.assertIn("停用中的影视源不能设为默认优先", sql)
+        self.assertIn("row_number() over(order by (id=p_id) desc, sort_order, id)", sql)
 
     def test_test_grade_boundaries(self):
         self.assertEqual(admin_server.vod_test_grade(80), "优秀")
@@ -34,6 +62,9 @@ class VodSourceAdminContractTest(unittest.TestCase):
         self.assertIn('id="vod-source-preview"', html)
         self.assertIn("未发布变更", html)
         self.assertIn("立即推送", html)
+        self.assertIn("vodSourceToggle", html)
+        self.assertIn("vodSourcePrioritize", html)
+        self.assertIn("设为默认优先", html)
 
     def test_admin_reads_drafts_payload_returned_by_rpc(self):
         html = ADMIN_HTML.read_text(encoding="utf-8")

@@ -2260,6 +2260,17 @@ function vodRows(payload) {
   if (Array.isArray(payload.sources)) return payload.sources;
   return [];
 }
+function vodDefaultSourceId() {
+  let best = null, bestOrder = Infinity;
+  vodSourceRows.forEach((s, i) => {
+    if (s.enabled === false) return;
+    const order = Number.isFinite(+s.sort_order) ? +s.sort_order : i;
+    if (best == null || order < bestOrder || (order === bestOrder && String(s.id || "") < String(best.id || ""))) {
+      best = s; bestOrder = order;
+    }
+  });
+  return best ? String(best.id || "") : "";
+}
 async function loadVodSources() {
   const table = document.getElementById("vod-source-table");
   table.innerHTML = skel(5);
@@ -2292,14 +2303,16 @@ function vodRenderRows() {
       return a - b;
     });
   }
+  const defaultId = vodDefaultSourceId();
   const arrow = vodLatSortDir === "asc" ? " ▲" : vodLatSortDir === "desc" ? " ▼" : "";
-  table.innerHTML = `<table class="grid"><tr><th>顺序</th><th>名称</th><th>网站 / 接口</th><th>适配器</th><th>状态</th><th class="s" title="点击按延时排序" onclick="vodFlipLatSort()">延时${arrow}</th><th>操作</th></tr>` +
+  table.innerHTML = `<table class="grid"><tr><th>顺序</th><th>名称</th><th>网站 / 接口</th><th>适配器</th><th>状态</th><th>默认优先</th><th class="s" title="点击按延时排序" onclick="vodFlipLatSort()">延时${arrow}</th><th>操作</th></tr>` +
     order.map((i) => {
       const s = vodSourceRows[i];
       return `<tr>
       <td class="dim">${s.sort_order ?? i}</td><td><b>${esc(s.name)}</b></td>
       <td class="mono" style="font-size:11px;max-width:380px;word-break:break-all">${esc(s.site_url || "—")}<br><span class="dim">${esc(s.api_url || "—")}</span></td>
-      <td><span class="tag">${esc(s.adapter_type)}</span></td><td>${s.enabled ? '<span class="st ok">启用</span>' : '<span class="dim">停用</span>'}</td>
+      <td><span class="tag">${esc(s.adapter_type)}</span></td><td>${s.enabled ? '<span class="st ok">启用</span>' : '<span class="dim">停用</span>'} <button class="ghost mini" title="切换该源是否进入下一次发布" onclick="vodSourceToggle(${i})">${s.enabled ? "停用" : "启用"}</button></td>
+      <td>${s.enabled && String(s.id || "") === defaultId ? '<span class="tag ok">当前优先</span>' : s.enabled ? `<button class="ghost mini" onclick="vodSourcePrioritize(${i})">设为默认优先</button>` : '<span class="dim">—</span>'}</td>
       <td id="vod-lat-${i}">${vodLatCell(s)}</td>
       <td><button class="ghost mini" onclick="vodSourceSpeedOne(${i})">测速</button> <button class="ghost mini" onclick="vodSourceTest(${i})">测试</button> <button class="ghost mini" onclick="vodSourceEdit(${i})">编辑</button> <button class="ghost mini" style="color:var(--bad)" onclick="vodSourceDelete(${i})">删除</button></td>
     </tr>`;
@@ -2355,6 +2368,23 @@ async function vodSourceSave() {
   const d = await api("vod_source_save", payload);
   if (d.error || (d.ret != null && d.ret !== 0)) { document.getElementById("vod-source-edit-error").textContent = d.error || d.msg || "保存失败"; return; }
   vodSourceEditClose(); toast("影视源草稿已保存，尚未推送"); loadVodSources();
+}
+async function vodSourceToggle(index) {
+  const row = vodSourceRows[index];
+  if (!row) return;
+  const next = row.enabled === false;
+  const d = await api("vod_source_set_enabled", {id: row.id, enabled: next});
+  if (d.error || (d.ret != null && d.ret !== 0)) { toast("切换失败：" + (d.error || d.msg || "未知错误"), true); return; }
+  toast(`${next ? "已启用" : "已停用"}“${row.name}”，尚未推送`);
+  loadVodSources();
+}
+async function vodSourcePrioritize(index) {
+  const row = vodSourceRows[index];
+  if (!row || row.enabled === false) return;
+  const d = await api("vod_source_set_priority", {id: row.id});
+  if (d.error || (d.ret != null && d.ret !== 0)) { toast("设置默认优先失败：" + (d.error || d.msg || "未知错误"), true); return; }
+  toast(`“${row.name}”已设为默认优先，尚未推送`);
+  loadVodSources();
 }
 async function vodSourceDiscover() {
   const input = document.getElementById("vod-source-site-input"), site = input.value.trim();
