@@ -160,6 +160,16 @@ class VodSourcesTest(unittest.TestCase):
         self.assertEqual(adapter.resolve(line, 0)["url"], "https://cdn.example/episode/index.m3u8")
         self.assertIn("https://player.example/play/7", calls)
 
+    def test_maccms_adapter_unwraps_jisu_player_query_to_m3u8(self):
+        source = vod_sources.VodSource(
+            "demo", "演示", "https://example.test",
+            "https://example.test/api.php/provide/vod/", "macms_json")
+        media = "https://cdn.example/episode/index.m3u8?token=a%2Bb"
+        wrapper = "https://jisuzyjx.com/play/?url=" + urllib.parse.quote(media, safe="")
+        adapter = vod_sources.MacCmsAdapter(source, fetch=lambda _url: self.fail("不应抓取播放器包装页"))
+        line = {"id": "demo:7:0", "episodes": [{"index": 0, "name": "第1集", "url": wrapper}]}
+        self.assertEqual(adapter.resolve(line, 0)["url"], media)
+
     def test_hhkan_adapter_searches_and_resolves_episode(self):
         class FakeHhkan:
             @staticmethod

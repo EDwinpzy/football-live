@@ -742,6 +742,12 @@ class MacCmsAdapter:
         """
         if not url:
             return ""
+        parsed = urllib.parse.urlsplit(url)
+        if (parsed.hostname or "").lower() in {"jisuzyjx.com", "www.jisuzyjx.com"} \
+                and parsed.path.rstrip("/").lower() == "/play":
+            wrapped = str(urllib.parse.parse_qs(parsed.query).get("url", [""])[0] or "").strip()
+            if re.search(r"\.(?:m3u8|mp4|flv)(?:[?#]|$)", wrapped, re.I):
+                return wrapped
         if re.search(r"\.(?:m3u8|mp4|flv)(?:[?#]|$)", url, re.I):
             return url
         try:
