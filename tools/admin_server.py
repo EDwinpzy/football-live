@@ -1753,10 +1753,13 @@ def h_vod_source_test(d: dict) -> dict:
                 preview = ((play.get("sources") or [{}])[0].get("url") or "")
         elapsed = int((time.monotonic() - started) * 1000)
         speed = 100 if elapsed <= 1000 else 80 if elapsed <= 3000 else 55 if elapsed <= 6000 else 30
-        score = int(match * 0.6 + speed * 0.4) if preview else min(39, int(match * 0.4))
+        matched = match >= vod_sources.AUTO_MATCH_THRESHOLD
+        score = int(match * 0.6 + speed * 0.4) if preview and matched else min(39, int(match * 0.4))
+        summary_state = "可试看" if preview and matched else (
+            "找到候选但未通过自动匹配" if preview else "未取得可播放地址")
         return {"grade": vod_test_grade(score), "score": score,
-                "summary": "%s，匹配度 %d，响应 %dms" % ("可试看" if preview else "未取得可播放地址", match, elapsed),
-                "matched": match >= vod_sources.AUTO_MATCH_THRESHOLD, "preview_url": preview}
+                "summary": "%s，匹配度 %d，响应 %dms" % (summary_state, match, elapsed),
+                "matched": matched, "preview_url": preview}
     except Exception as exc:  # noqa: BLE001
         return {"grade": "不可用", "score": 0, "summary": str(exc)[:160], "matched": False, "preview_url": ""}
 

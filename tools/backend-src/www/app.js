@@ -1060,6 +1060,7 @@ function categoryHomeHot(cid, homeSections) {
 
 async function fetchLibBlocks(cid, homeSections) {
   const doubanHome = await fetchJSONCached(BASE + "/vod/home?category=" + cid, 60000, 30000);
+  if (doubanHome.stale) refreshStaleVodHome(cid);
   return (doubanHome.sections || []).map(s => ({ name: s.title || s.name, items: (s.items || []).map(it => normalizeDoubanItem(it, cid)) }));
   /* Legacy compatibility code below remains for old cached hhkan payloads. */
   let primary = null;
@@ -1098,6 +1099,24 @@ async function fetchLibBlocks(cid, homeSections) {
   return completeLibBlocks(blocks);
 }
 
+/* 后端冷缓存先回快照并在后台抓当天数据；网页不能把 stale 响应当成最终结果。 */
+const _staleVodRefreshes = new Map();
+function refreshStaleVodHome(cid) {
+  if (_staleVodRefreshes.has(cid)) return _staleVodRefreshes.get(cid);
+  const request = (async () => {
+    try {
+      for (let i = 0; i < 30; i++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const fresh = await fetchJSON(BASE + "/vod/home?category=" + encodeURIComponent(cid) + "&_refresh=" + Date.now(), { timeout: 30000 });
+        if (!fresh.stale) return fresh;
+      }
+    } catch (e) {}
+    return null;
+  })().finally(() => _staleVodRefreshes.delete(cid));
+  _staleVodRefreshes.set(cid, request);
+  return request;
+}
+
 /* v1.25 需求①：板块 SWR 持久缓存（localStorage，10min 新鲜阈值）——
    旧值先上屏秒渲染；足够新鲜（≤10min 且含最近热门）不再回源，否则后台刷新覆盖 */
 function libCacheKey(cid) { return "otvw:lib:v4:" + cid; }
@@ -1113,6 +1132,19 @@ async function fetchLibBlocksSWR(cid, homeSections, cb) {
   if (sections.length) {
     try { store.set(libCacheKey(cid), { ts: Date.now(), sections }); } catch (e) {}
     cb(sections);
+  }
+  const fresh = _staleVodRefreshes.get(cid);
+  if (fresh) {
+    fresh.then(home => {
+      if (!home || home.stale) return;
+      const next = (home.sections || []).map(s => ({
+        name: s.title || s.name,
+        items: (s.items || []).map(it => normalizeDoubanItem(it, cid)),
+      }));
+      if (!next.length) return;
+      try { store.set(libCacheKey(cid), { ts: Date.now(), sections: next }); } catch (e) {}
+      cb(next);
+    }).catch(() => {});
   }
 }
 

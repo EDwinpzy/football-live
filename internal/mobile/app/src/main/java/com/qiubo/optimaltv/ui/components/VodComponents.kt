@@ -6,7 +6,6 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -17,11 +16,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -32,10 +31,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import coil.compose.AsyncImage
@@ -222,8 +223,12 @@ fun VodCategorySelector(
     }
 }
 
-/** 全部页筛选行：竖屏使用可换行 FlowRow，横屏维持单行横向滚动。 */
-@OptIn(ExperimentalLayoutApi::class)
+/**
+ * 全部页筛选行：参考图的轻量横向筛选条。
+ *
+ * 标签不再占用左侧固定列，避免窄屏把选项挤成不均匀的多行；标签保留在语义树和
+ * testTag 中，选项从同一左边界开始横向滚动。颜色沿用现有深色主题，只收紧节奏。
+ */
 @Composable
 fun VodFilterRow(
     label: String,
@@ -231,9 +236,13 @@ fun VodFilterRow(
     selected: String,
     s: Float,
     portrait: Boolean,
+    rowHeight: Float = if (portrait) 42f else 48f,
+    chipHeight: Float = if (portrait) 40f else 32f,
+    textLineHeight: Float = if (portrait) 26f else 16f,
+    includeFontPadding: Boolean = false,
     onSelect: (String) -> Unit,
 ) {
-    val selectedPillMinWidth = 72f.sx(s)
+    val selectedPillMinWidth = 64f.sx(s)
 
     @Composable
     fun FilterChip(value: String, name: String) {
@@ -254,59 +263,38 @@ fun VodFilterRow(
                 .semantics { this.selected = active; role = Role.Tab }
                 .tapCard { onSelect(value) }
                 .then(if (active) Modifier.widthIn(min = selectedPillMinWidth) else Modifier)
+                // Portrait text is intentionally larger than the TV token. Match the chip
+                // height to that text so the glyphs are not clipped vertically.
+                .height(chipHeight.sx(s))
                 .background(chipBg, RoundedCornerShape(percent = 50))
-                .padding(horizontal = 12f.sx(s), vertical = 4f.sx(s)),
+                .padding(horizontal = 10f.sx(s)),
         ) {
             Text(
                 name,
                 color = chipFg,
-                fontSize = 16f.sxs(s),
+                // Portrait uses the phone text scale; applying the TV design px directly
+                // would reduce Chinese labels to roughly 8sp on a 390dp device.
+                fontSize = (if (portrait) 26f else 16f).sxs(s),
+                lineHeight = textLineHeight.sxs(s),
                 fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                 maxLines = 1,
+                style = LocalTextStyle.current.copy(
+                    platformStyle = PlatformTextStyle(includeFontPadding = includeFontPadding),
+                ),
             )
         }
     }
 
-    if (portrait) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(rowHeight.sx(s))
+            .semantics { contentDescription = label },
+    ) {
         Row(
-            verticalAlignment = Alignment.Top,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 6f.sx(s)),
-        ) {
-            Text(
-                label,
-                color = OtvColors.White.copy(alpha = 0.35f),
-                fontSize = 16f.sxs(s),
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier
-                    .width(52f.sx(s))
-                    .padding(top = 4f.sx(s)),
-            )
-            Spacer(Modifier.width(8f.sx(s)))
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(4f.sx(s)),
-                verticalArrangement = Arrangement.spacedBy(14f.sx(s)),
-                modifier = Modifier.weight(1f),
-            ) { chips.forEach { (value, name) -> FilterChip(value, name) } }
-        }
-    } else {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(vertical = 4f.sx(s)),
-        ) {
-            Text(
-                label,
-                color = OtvColors.White.copy(alpha = 0.35f),
-                fontSize = 17f.sxs(s),
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.width(52f.sx(s)),
-            )
-            Spacer(Modifier.width(8f.sx(s)))
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(2f.sx(s)),
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
-            ) { chips.forEach { (value, name) -> FilterChip(value, name) } }
-        }
+            horizontalArrangement = Arrangement.spacedBy(14f.sx(s)),
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+        ) { chips.forEach { (value, name) -> FilterChip(value, name) } }
     }
 }

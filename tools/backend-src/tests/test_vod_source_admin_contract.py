@@ -1,6 +1,7 @@
 import importlib.util
 import pathlib
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -38,6 +39,37 @@ class VodSourceAdminContractTest(unittest.TestCase):
         html = ADMIN_HTML.read_text(encoding="utf-8")
         self.assertIn("payload.drafts", html)
         self.assertIn("publishedVersion", html)
+
+    def test_admin_only_shows_preview_for_automatically_matched_candidate(self):
+        html = ADMIN_HTML.read_text(encoding="utf-8")
+        self.assertIn("d.matched && d.preview_url", html)
+
+    def test_source_test_does_not_call_zero_match_preview_playable(self):
+        class FakeAdapter:
+            def __init__(self, _source):
+                pass
+
+            def search(self, _subject):
+                return [{
+                    "id": "99260", "title": "凡人修仙传 慕兰之战", "year": "2026",
+                    "category": "anime", "season": 0,
+                    "raw": {"vod_play_url": "第1集$https://v.example/1.m3u8"},
+                }]
+
+        payload = {
+            "source": {
+                "id": "360zy", "name": "360", "api_url": "https://example.test/api",
+                "adapter_type": "macms_json",
+            },
+            "title": "凡人修仙传",
+            "year": "2026",
+            "episode": 1,
+        }
+        with mock.patch.object(admin_server.vod_sources, "MacCmsAdapter", FakeAdapter):
+            result = admin_server.h_vod_source_test(payload)
+        self.assertFalse(result["matched"])
+        self.assertEqual(result["grade"], "不可用")
+        self.assertIn("匹配度 0", result["summary"])
 
     def test_admin_bundle_build_includes_vod_source_ui_and_runtime_modules(self):
         builder = (ROOT / "tools" / "build_admin_function.py").read_text(encoding="utf-8")

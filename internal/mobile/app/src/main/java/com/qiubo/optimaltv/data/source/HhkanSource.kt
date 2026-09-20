@@ -59,7 +59,13 @@ class HhkanSource(
     data class CarouselItem(val vid: String, val title: String, val backdrop: String, val tags: List<String>)
 
     /** GET /hhkan/home → 源站首页精选板块（~9 个）+ 轮播焦点图 */
-    data class HomeData(val sections: List<ChannelSection>, val carousel: List<CarouselItem>)
+    data class HomeData(
+        val sections: List<ChannelSection>,
+        val carousel: List<CarouselItem>,
+        /** 豆瓣首页缓存过期时先返回快照；客户端据此等待后台刷新后的新结果。 */
+        val stale: Boolean = false,
+        val source: String = "",
+    )
 
     /** GET /hhkan/filters/1 → 全站通用筛选项（类型/地区/语言/年份，全部影视页用） */
     data class FilterOptions(

@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -42,6 +43,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.navigation.NavController
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -76,12 +78,12 @@ import java.net.URLEncoder
 
 /**
  * 搜索页（2026-09-11 键盘条一比一复刻 Figma「tvOS 18 UI Kit」node 5-11799 Search Keyboard）：
- * 顶部标签栏（不变）→ tvOS 18 键盘条（放大镜 + Search/输入 76px Bold 白30 占位 + 右侧 Hold to
- * dictate；底部白30 分割线；键行 123 | SPACE | a-z | ⌫）→
+ * 顶部标签栏（不变）→ tvOS 18 键盘条（放大镜 + Search/输入 76px Bold 白30 占位；底部白30
+ * 分割线；键行 123 | SPACE | a-z | ⌫）→
  * 拼音候选词一行（LazyRow 可左右滚动）→ 结果分类 tab（全部/电影/电视剧/动漫/短剧）→ 结果网格。
  *
- * 键行规格（1920 设计系，Figma 实测）：123 键 59×38 / SPACE 键 89×38（白50% 胶囊 r7 黑字 20px，
- * 与字母行中线对齐）；字母键 54×64 无缝 54px 键距（48px Medium 白50%）；⌫ 54×64（SF Symbols
+ * 键行规格（1920 设计系，Figma 实测）：123 键 59×64 / SPACE 键 89×64（白50% 胶囊 r7 黑字 20px，
+ * 与字母键同高）；字母键 54×64 无缝 54px 键距（48px Medium 白50%）；⌫ 54×64（SF Symbols
  * delete.left 矢量）。图标 3 枚由 Figma 导出路径转 VectorDrawable（ic_tvos_kbd_*）。
  * 123 键复用同规格切换数字行（设计稿仅含字母版式）；原「搜索/清空」键随旧键盘移除——
  * 搜索仍由候选词上屏后自动触发，清空用 ⌫ 逐字回删。
@@ -482,7 +484,10 @@ fun SearchScreen(nav: NavController) {
                                     if (tabFocused) OtvColors.White else if (active) OtvColors.White.copy(alpha = 0.22f) else Color(0x24FFFFFF),
                                     RoundedCornerShape(26f.sx(s)),
                                 )
-                                .padding(horizontal = 24f.sx(s), vertical = 10f.sx(s)),
+                                .padding(
+                                    horizontal = 24f.sx(s),
+                                    vertical = SearchKeyboardLayout.resultTabVerticalPadding.sx(s),
+                                ),
                         ) {
                             Text(
                                 catName,
@@ -597,7 +602,7 @@ private fun ResultCard(
 
 /**
  * tvOS 18 搜索键盘条（一比一复刻 Figma「tvOS 18 UI Kit」node 5-11799，1920×295 设计系）：
- * 标题行（放大镜 87×86 + Search/输入 76px Bold 白30% + 右侧 Hold to dictate 38px）→
+ * 标题行（放大镜 87×86 + Search/输入 76px Bold 白30%）→
  * 白30% 分割线（条内 y=294，x=10..1770）→ 键行（123 | SPACE | a-z | ⌫）。
  * 外层 Column 已含 70px 页边距，以下 x 坐标均为设计稿减 70 后的条内实测值。
  */
@@ -615,7 +620,7 @@ private fun TvosSearchKeyboard(
     onToggleNumeric: () -> Unit,
 ) {
     Box(Modifier.fillMaxWidth().height(295f.sx(s))) {
-        // ---- 标题行（放大镜盒 y=55 / 标题 y=49 / Hold 行 y=77）----
+        // ---- 标题行（放大镜盒 y=55 / 标题 y=49）----
         Row(Modifier.offset(x = 0f.sx(s), y = 49f.sx(s)).fillMaxWidth()) {
             Box(
                 contentAlignment = Alignment.Center,
@@ -634,7 +639,7 @@ private fun TvosSearchKeyboard(
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            // 输入中显示引擎切分的拼音（App 专属提示，沿用旧输入行右侧位置；与 Hold 行留距）
+            // 输入中显示引擎切分的拼音（App 专属提示，沿用旧输入行右侧位置）
             if (pinyinHint != null) {
                 Spacer(Modifier.width(18f.sx(s)))
                 Text(
@@ -642,19 +647,6 @@ private fun TvosSearchKeyboard(
                     color = OtvColors.White50, fontSize = 26f.sxs(s), maxLines = 1,
                     modifier = Modifier.align(Alignment.CenterVertically).padding(end = 24f.sx(s)),
                 )
-            }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.offset(y = 28f.sx(s)).padding(end = 15f.sx(s)),
-            ) {
-                Text("Hold", color = OtvColors.White30, fontSize = 38f.sxs(s), fontWeight = FontWeight.Medium)
-                Spacer(Modifier.width(8f.sx(s)))
-                Icon(
-                    painterResource(R.drawable.ic_tvos_kbd_mic), contentDescription = null,
-                    tint = OtvColors.White30, modifier = Modifier.size(38f.sx(s)),
-                )
-                Spacer(Modifier.width(8f.sx(s)))
-                Text("to dictate", color = OtvColors.White30, fontSize = 38f.sxs(s), fontWeight = FontWeight.Medium)
             }
         }
         // ---- 分割线（白30%，高 1）----
@@ -664,13 +656,15 @@ private fun TvosSearchKeyboard(
                 .size(1760f.sx(s), 1f.sx(s))
                 .background(OtvColors.White30),
         )
-        // ---- 键行：字母行 y=185 高 64；功能键 y=203 高 38（中线与字母行对齐，间隙 30）----
+        // ---- 键行：字母行与功能键均 y=185、高 64 ----
         TvActionKey(
-            if (numeric) "ABC" else "123", x = 78f, y = 203f, w = 59f, h = 38f, s = s,
+            if (numeric) "ABC" else "123", x = 78f, y = SearchKeyboardLayout.actionKeyY,
+            w = 59f, h = SearchKeyboardLayout.actionKeyHeight, s = s,
             onFocusChange = { if (it) noteKeyGained() else noteKeyLost(null) },
         ) { onToggleNumeric() }
         TvActionKey(
-            "SPACE", x = 167f, y = 203f, w = 89f, h = 38f, s = s,
+            "SPACE", x = 167f, y = SearchKeyboardLayout.actionKeyY,
+            w = 89f, h = SearchKeyboardLayout.actionKeyHeight, s = s,
             onFocusChange = { if (it) noteKeyGained() else noteKeyLost(null) },
         ) { onChar(' ') }
         val rowChars: List<Char> = if (numeric) ('0'..'9').toList() else ('a'..'z').toList()
@@ -723,7 +717,7 @@ private fun TvKey(
     }
 }
 
-/** tvOS 功能键（123/ABC 59×38、SPACE 89×38，白50% 胶囊 r7 黑字 20px 设计实测）；聚焦白底变实 */
+/** tvOS 功能键（123/ABC 59×64、SPACE 89×64，白50% 胶囊 r7 黑字 20px）；聚焦白底变实 */
 @Composable
 private fun TvActionKey(
     label: String,
@@ -743,18 +737,31 @@ private fun TvActionKey(
             .offset(x = x.sx(s), y = y.sx(s))
             .dpadFocusable(
                 scaleFocused = 1.1f, focusedBg = OtvColors.White,
-                focusedBgRadius = 7f.sx(s),
+                focusedBgRadius = SearchKeyboardLayout.actionKeyRadius.sx(s),
                 externalFocusRequester = focus,
                 onFocusedChange = { f = it; onFocusChange?.invoke(it) },
             ) { onTap() }
-            .background(OtvColors.White50, RoundedCornerShape(7f.sx(s)))
+            .background(OtvColors.White50, RoundedCornerShape(SearchKeyboardLayout.actionKeyRadius.sx(s)))
             .size(w.sx(s), h.sx(s)),
     ) {
-        Text(
-            label,
-            color = OtvColors.Bg,
-            fontSize = 20f.sxs(s), fontWeight = FontWeight.Medium, maxLines = 1,
-        )
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(vertical = SearchKeyboardLayout.actionKeyVerticalInset.sx(s)),
+        ) {
+            Text(
+                label,
+                color = OtvColors.Bg,
+                fontSize = 20f.sxs(s),
+                fontWeight = FontWeight.Medium,
+                lineHeight = SearchKeyboardLayout.actionKeyLineHeight.sxs(s),
+                maxLines = 1,
+                style = LocalTextStyle.current.copy(
+                    platformStyle = PlatformTextStyle(includeFontPadding = false),
+                ),
+            )
+        }
     }
 }
 

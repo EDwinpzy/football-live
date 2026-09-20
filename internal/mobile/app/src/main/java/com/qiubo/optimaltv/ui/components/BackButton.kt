@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import com.qiubo.optimaltv.R
 
 /**
@@ -41,6 +42,7 @@ val MobileBackButtonTouchTarget = 44.dp
 fun MobileBackButton(
     modifier: Modifier = Modifier,
     tint: Color = Color.White,
+    iconSize: Dp = 26.dp,
     onBack: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -56,7 +58,7 @@ fun MobileBackButton(
             painter = painterResource(R.drawable.ic_back_chevron),
             contentDescription = "返回",
             tint = tint,
-            modifier = Modifier.size(26.dp),
+            modifier = Modifier.size(iconSize),
         )
     }
 }

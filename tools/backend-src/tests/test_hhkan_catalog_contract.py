@@ -319,6 +319,16 @@ class HhkanCatalogContractTest(unittest.TestCase):
         self.assertIn("d.lines.mapNotNull", repo)
         self.assertIn("PlaybackLineSelector", repo)
 
+    def test_empty_detail_matches_are_not_cached_as_permanent_no_source(self):
+        repos = [
+            ROOT / "android/app/src/main/java/com/qiubo/optimaltv/data/repo/VodRepository.kt",
+            ROOT / "internal/mobile/app/src/main/java/com/qiubo/optimaltv/data/repo/VodRepository.kt",
+        ]
+        for path in repos:
+            source = path.read_text(encoding="utf-8")
+            self.assertIn("if (d.lines.isNotEmpty()) detailInfoCache[ref] = d", source, path)
+            self.assertIn("if (eps.isNotEmpty()) detailCache[vodId] = it", source, path)
+
 
 if __name__ == "__main__":
     unittest.main()

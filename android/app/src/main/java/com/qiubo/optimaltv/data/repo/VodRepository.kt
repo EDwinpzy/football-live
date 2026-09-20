@@ -345,6 +345,8 @@ class VodRepository(
     private val LIB_RETRY_DELAYS = longArrayOf(2_000L, 4_000L, 8_000L, 15_000L, 25_000L, 40_000L)
     private val libRetries = java.util.concurrent.ConcurrentHashMap<Int, Int>()
     private val libRetryJobs = java.util.concurrent.ConcurrentHashMap<Int, kotlinx.coroutines.Job>()
+    /** 后端先回过期快照时，等待同一请求的后台 SWR 完成，再把三栏替换成当天数据。 */
+    private val staleLibRefreshJobs = java.util.concurrent.ConcurrentHashMap<Int, kotlinx.coroutines.Job>()
 
     /** 门闸等「三栏真的有内容」的轮询步长：判据读内存，2s 足够且不空转 CPU */
     private val LIB_CONTENT_POLL_MS = 2_000L
@@ -429,11 +431,16 @@ class VodRepository(
             fun store(sections: List<HSec>) {
                 _libBlocks.value = _libBlocks.value + (cid to completeBlocks(sections))
             }
-            val doubanSections = runCatching { VodApiSource.fetchHome(base, okHttp, category).sections }
+            val home = runCatching { VodApiSource.fetchHome(base, okHttp, category) }
                 .onFailure { android.util.Log.w("OTV", "豆瓣分类三栏失败: ${it.message}") }
-                .getOrDefault(emptyList())
+                .getOrNull()
+            val doubanSections = home?.sections.orEmpty()
             store(doubanSections)
-            if (doubanSections.any { it.items.isNotEmpty() }) {
+            if (home?.stale == true) {
+                refreshStaleHome(cid, category)
+                libFailAt.remove(cid)
+                libRetries.remove(cid)
+            } else if (doubanSections.any { it.items.isNotEmpty() }) {
                 libDone += cid
                 libFailAt.remove(cid)
                 libRetries.remove(cid)
@@ -447,6 +454,34 @@ class VodRepository(
         repoScope.launch {
             kotlinx.coroutines.delay(8_000L)
             markHotSettled(cid)
+        }
+    }
+
+    /**
+     * /vod/home 的 stale-while-revalidate 首次会先给随包快照。
+     * 快照不能算作当天刷新完成：后台抓取结束后再次取同一接口，收到 fresh 数据就替换三栏。
+     */
+    private fun refreshStaleHome(cid: Int, category: String) {
+        if (staleLibRefreshJobs[cid]?.isActive == true) return
+        staleLibRefreshJobs[cid] = repoScope.launch {
+            try {
+                repeat(30) {
+                    kotlinx.coroutines.delay(1_000L)
+                    val home = runCatching {
+                        VodApiSource.fetchHome(settings.current().hhkanBaseUrl, okHttp, category)
+                    }.getOrNull() ?: return@repeat
+                    if (home.stale) return@repeat
+                    if (home.sections.any { it.items.isNotEmpty() }) {
+                        _libBlocks.value = _libBlocks.value + (cid to completeBlocks(home.sections))
+                        libDone += cid
+                        libFailAt.remove(cid)
+                        libRetries.remove(cid)
+                    }
+                    return@launch
+                }
+            } finally {
+                staleLibRefreshJobs.remove(cid)
+            }
         }
     }
 
@@ -641,7 +676,7 @@ class VodRepository(
             .onFailure { android.util.Log.w("OTV", "fetchDetail 失败 ref=$ref : ${it.message}") }
             .getOrNull()
             ?: return null
-        detailInfoCache[ref] = d
+        if (d.lines.isNotEmpty()) detailInfoCache[ref] = d
         return d
     }
 
@@ -672,7 +707,7 @@ class VodRepository(
             rating = if (item.rating > 0) item.rating else d.rating,
             meta = item.meta.ifBlank { d.meta },
             actors = item.actors.ifBlank { d.actors },
-        ).also { detailCache[vodId] = it }
+        ).also { if (eps.isNotEmpty()) detailCache[vodId] = it }
     }
 
     /**

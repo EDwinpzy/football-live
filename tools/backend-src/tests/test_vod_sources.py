@@ -2,6 +2,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import urllib.parse
 
 
 BACKEND = pathlib.Path(__file__).resolve().parents[1]
@@ -76,6 +77,70 @@ class VodSourcesTest(unittest.TestCase):
         self.assertEqual(lines[0]["id"], "demo:7:0")
         self.assertEqual(lines[0]["episodes"][1]["name"], "第2集")
         self.assertEqual(adapter.resolve(lines[0], 1)["url"], "https://v.example/2.m3u8")
+
+    def test_maccms_search_falls_back_to_base_title_when_primary_has_no_result(self):
+        source = vod_sources.VodSource(
+            "demo", "演示", "https://example.test",
+            "https://example.test/api.php/provide/vod/", "macms_json")
+        calls = []
+
+        def fake_fetch(url):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("wd", [""])[0]
+            calls.append(query)
+            if query == "凡人修仙传":
+                return {"body": '{"list":[{"vod_id":99260,"vod_name":"凡人修仙传 慕兰之战",'
+                                 '"vod_year":"2026","type_name":"动漫",'
+                                 '"vod_play_from":"360zy",'
+                                 '"vod_play_url":"第1集$https://v.example/1.m3u8"}]}' }
+            return {"body": '{"list":[]}' }
+
+        adapter = vod_sources.MacCmsAdapter(source, fetch=fake_fetch)
+        candidates = adapter.search({"title": "凡人修仙传 年番4", "year": "2026", "category": "anime"})
+        self.assertEqual([candidate["title"] for candidate in candidates], ["凡人修仙传 慕兰之战"])
+        self.assertEqual(calls, ["凡人修仙传 年番4", "凡人修仙传"])
+
+    def test_maccms_search_stops_after_confident_primary_match(self):
+        source = vod_sources.VodSource(
+            "demo", "演示", "https://example.test",
+            "https://example.test/api.php/provide/vod/", "macms_json")
+        calls = []
+
+        def fake_fetch(url):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("wd", [""])[0]
+            calls.append(query)
+            return {"body": '{"list":[{"vod_id":7,"vod_name":"庆余年2",'
+                             '"vod_year":"2024","type_name":"国产剧",'
+                             '"vod_play_from":"line-a",'
+                             '"vod_play_url":"第1集$https://v.example/1.m3u8"}]}' }
+
+        adapter = vod_sources.MacCmsAdapter(source, fetch=fake_fetch)
+        candidates = adapter.search({"title": "庆余年2", "year": "2024", "category": "tv", "season": 2})
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(calls, ["庆余年2"])
+
+    def test_maccms_search_prioritizes_specific_alias_over_episode_alias(self):
+        source = vod_sources.VodSource(
+            "demo", "演示", "https://example.test",
+            "https://example.test/api.php/provide/vod/", "macms_json")
+        calls = []
+
+        def fake_fetch(url):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("wd", [""])[0]
+            calls.append(query)
+            if query == "凡人修仙传：慕兰之战":
+                return {"body": '{"list":[{"vod_id":99260,"vod_name":"凡人修仙传 慕兰之战",'
+                                 '"vod_year":"2026","type_name":"动漫",'
+                                 '"vod_play_from":"360zy",'
+                                 '"vod_play_url":"第1集$https://v.example/1.m3u8"}]}' }
+            return {"body": '{"list":[]}' }
+
+        adapter = vod_sources.MacCmsAdapter(source, fetch=fake_fetch)
+        candidates = adapter.search({
+            "title": "凡人修仙传 年番4", "year": "2026", "category": "anime",
+            "aliases": ["凡人修仙传 第177-228集", "凡人修仙传 年番4之慕兰之战", "凡人修仙传：慕兰之战"],
+        })
+        self.assertEqual([candidate["title"] for candidate in candidates], ["凡人修仙传 慕兰之战"])
+        self.assertEqual(calls, ["凡人修仙传 年番4", "凡人修仙传", "凡人修仙传：慕兰之战"])
 
     def test_maccms_adapter_resolves_player_page_to_media_url(self):
         source = vod_sources.VodSource("demo", "演示", "https://example.test", "https://example.test/api.php/provide/vod/", "macms_json")

@@ -272,7 +272,7 @@ fun SearchScreen(nav: NavController) {
                                             if (active) OtvColors.White.copy(alpha = 0.22f) else Color(0x24FFFFFF),
                                             RoundedCornerShape(26f.sx(s)),
                                         )
-                                        .padding(horizontal = if (portrait) 10f.sx(s) else 24f.sx(s), vertical = 10f.sx(s)),
+                                        .padding(horizontal = if (portrait) 10f.sx(s) else 24f.sx(s), vertical = 6f.sx(s)),
                                 ) {
                                     Text(
                                         catName,

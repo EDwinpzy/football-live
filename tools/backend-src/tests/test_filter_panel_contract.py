@@ -91,11 +91,13 @@ class MobileFilterPanelContractTest(unittest.TestCase):
     def test_filter_rows_are_gated_by_the_open_state(self):
         self.assertIn("var filterOpen by rememberSaveable { mutableStateOf(true) }", self.all_screen)
         self.assertIn("if (filterOpen) {", self.all_screen)
-        # 六行筛选必须都在收起闸门之后
+        # 六行筛选必须都在收起闸门之后；移动端按设计规格逐行映射，
+        # 不再为每一行重复写 VodFilterRow("标签", ...) 调用。
         gate = self.all_screen.index("if (filterOpen) {")
-        for row in ("类别", "类型", "地区", "年份", "评分", "排序"):
-            at = self.all_screen.index('VodFilterRow("%s"' % row)
-            self.assertGreater(at, gate, row)
+        self.assertGreater(self.all_screen.index("designRows.forEach { row ->"), gate)
+        for key in ("category", "genre", "region", "year", "rating", "sort"):
+            at = self.all_screen.index('"%s"' % key, gate)
+            self.assertGreater(at, gate, key)
 
     def test_toggle_has_a_test_tag_and_active_hint(self):
         self.assertIn('const val FilterToggle = "mobile-vod-filter-toggle"', self.comp)
@@ -115,7 +117,7 @@ class RailStyleContractTest(unittest.TestCase):
 
     钉死三端同源的关键样式锚点，防止后续美化改回「满屏小灰丸」：
     1. 未选 chip 无底色（白 55% 文字），选中 = 白底黑字 + 字重 700 + 全圆角；
-    2. 行间 1px 白 5% 发丝分隔（首行不画）；
+    2. Web 端保留 1px 白 5% 发丝分隔；移动端/TV 端不绘制细横线；
     3. TV 端焦点 = 白环不落底（focusedBg 仅当选中时才给白胶囊）。
     """
 
@@ -153,9 +155,9 @@ class RailStyleContractTest(unittest.TestCase):
         self.assertIn("focusedBg = if (active) OtvColors.White else null,", tv)
         self.assertIn("RoundedCornerShape(percent = 50)", tv)
         self.assertIn("if (active) FontWeight.Bold else FontWeight.Medium", tv)
-        # 两端面板都用白 5% 底 + 发丝分隔
-        self.assertIn("Color(0x0DFFFFFF)", tv)
-        self.assertIn("Color(0x0DFFFFFF)", ALL_SCREEN.read_text(encoding="utf-8"))
+        # 原生两端都不再绘制细横线，避免竖版筛选行出现发丝分隔。
+        self.assertNotIn("Color(0x0DFFFFFF)", tv)
+        self.assertNotIn("Color(0x0DFFFFFF)", ALL_SCREEN.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -120,6 +120,8 @@ class VodApiSource(
                     val section = sections?.optJSONObject(index) ?: return@mapNotNull null
                     HhkanSource.ChannelSection(section.optString("title"), parseItems(section.optJSONArray("items"), category, base))
                 }, carousel = emptyList(),
+                stale = json.optBoolean("stale", false),
+                source = json.optString("source"),
             )
         }
 
