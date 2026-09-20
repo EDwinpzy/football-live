@@ -30,6 +30,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusEvent
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -71,7 +72,7 @@ import kotlinx.coroutines.launch
  *    （层容差 = 0.5×两者较小高度，不再需要每屏调 60/100px 魔法数）；
  *  - 滚动找回：按挂靠的 Lazy 容器【瞬时】滚动一个行距（从 layoutInfo 推导，
  *    不再动画轮询），随后重试一次几何搜索；
- *  - 长按节流（110ms/步）+ 滚动进行中防重入——按住方向键即连续平滑移动；
+ *  - 长按节流（65ms/步）+ 滚动进行中防重入——按住方向键即连续平滑移动；
  *  - 特殊语义（tab DOWN 进内容、hero 左右翻页、播放器 seek、浮窗组封锁）
  *    全部改为节点级 navOverride 声明式回调，由引擎统一调用。
  * ===========================================================================
@@ -259,6 +260,7 @@ fun Modifier.dpadFocusable(
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val scaleAnim by animateFloatAsState(
         targetValue = if (focused) scaleFocused else 1f,
+        animationSpec = TvInteractionMotion.focusScaleSpec,
         label = "focusScale",
     )
     val bandId = remember { OtvNav.newId() }
@@ -305,19 +307,30 @@ fun Modifier.dpadFocusable(
             // 前进候选，DOWN 从分类 chip 找回时落到已离场 hero 按钮冻结坐标上，
             // 触发其 animateScrollToItem(0) 页面弹回顶部（v1.18 用户报障根因）
             val nb = it.boundsInWindow()
+            val position = it.positionInWindow()
+            val layoutSize = Size(it.size.width.toFloat(), it.size.height.toFloat())
+            val fullBounds = Rect(
+                left = position.x,
+                top = position.y,
+                right = position.x + layoutSize.width,
+                bottom = position.y + layoutSize.height,
+            )
             // 2026-09-19 光标乱跑修复：【被裁边的上报不采信】。
             // boundsInWindow 会被 Lazy 容器视口裁边：贴边 sliver 卡（半组合行）上报的
             // 是裁剪后的残条坐标，作为几何候选/搜索起点会算出反向落点。it.size 是
             // 未裁剪布局尺寸——bounds 与之一致才是完整可见上报；残条上报一律丢弃
             //（保留最后一次完整坐标）。贴边 sliver 行因此不作为几何候选，方向移动
             // 走 scroll-reveal 先完整露出再落点，与引擎设计一致。
-            val unclipped = kotlin.math.abs(nb.width - it.size.width) <= 2f &&
-                kotlin.math.abs(nb.height - it.size.height) <= 2f
-            if (unclipped) {
-                bandNode.bounds = nb; bandNode.stamp = android.os.SystemClock.uptimeMillis()
-                // 滚动会持续位移当前焦点节点——同步刷新自愈锚点，保证漂移恢复坐标新鲜
-                if (focused) OtvNav.updateAnchor(bandId, bandNode)
-            }
+            OtvNav.reportNodeLayout(
+                node = bandNode,
+                clippedBounds = nb,
+                fullBounds = fullBounds,
+                layoutSize = layoutSize,
+                stamp = android.os.SystemClock.uptimeMillis(),
+            )
+            // 滚动会持续位移当前焦点节点——同步刷新自愈锚点，保证漂移恢复坐标新鲜。
+            // 当前焦点用未裁剪 fullBounds；候选资格仍由完整可见状态独立控制。
+            if (focused) OtvNav.updateAnchor(bandId, bandNode)
         }
         .onFocusEvent {
             if (it.isFocused != focused) {
@@ -334,11 +347,11 @@ fun Modifier.dpadFocusable(
                 if (it.isFocused) {
                     // 零尺寸节点稳定器：滚动+重组竞态下 Compose 默认焦点恢复会把焦点落到
                     // 尚未布局的零尺寸节点；120ms 后仍无效则按分组锚点就近自愈。
-                    if (!OtvNav.isNodeValid(bandNode)) {
+                    if (!OtvNav.isFocusedNodeUsable(bandNode)) {
                         scope.launch {
                             delay(120)
                             if (focused && OtvNav.isFocusCurrent(bandId, focusEpoch) &&
-                                !OtvNav.isNodeValid(bandNode)
+                                !OtvNav.isFocusedNodeUsable(bandNode)
                             ) {
                                 Log.w(TAG, "focus on invalid node — stabilize to nearest")
                                 OtvNav.healNearest(bandNode.group)
@@ -472,8 +485,14 @@ object OtvNav {
         /** 隐藏键宿（播放器无菜单态）：可持焦+响应覆盖，但绝不作为几何候选 */
         val hidden: Boolean = false,
     ) {
+        /** 最近一次完整可见的几何候选坐标。 */
         @Volatile var bounds: Rect = Rect.Zero
         @Volatile var stamp: Long = 0
+        /** 最近一次布局的未裁剪坐标，只供当前焦点作导航起点/自愈锚点。 */
+        @Volatile var focusBounds: Rect = Rect.Zero
+        @Volatile var focusStamp: Long = 0
+        /** 当前布局是否完整可见；false 时即使保留旧 bounds 也不得进入候选池。 */
+        @Volatile var candidateVisible: Boolean = false
         @Volatile var vertScroll: NavScrollContainer? = null
         @Volatile var horzScroll: NavScrollContainer? = null
         @Volatile var override: ((Int) -> Boolean)? = null
@@ -529,9 +548,6 @@ object OtvNav {
     /** 窗口可视高度（px，ROTATION 感知；MainActivity 从 WindowMetrics 注入，ensureVisible 用） */
     @Volatile var viewportHeightPx: Float = 0f
 
-    /** 长按节流间隔：repeat 到达间隔小于此值直接吞掉（连续移动 ~9 步/秒） */
-    private const val REPEAT_MIN_INTERVAL_MS = 110L
-
     @Volatile private var lastMoveAt = 0L
     private val revealSequence = java.util.concurrent.atomic.AtomicLong(0)
     @Volatile private var pendingRevealToken = 0L
@@ -565,6 +581,38 @@ object OtvNav {
     }
 
     fun registerCard(id: Int, node: Node) { cards[id] = node }
+
+    /**
+     * 同一次布局上报同时维护两条互不污染的状态：
+     * - [fullBounds] 是当前节点的未裁剪矩形，可在节点已经持焦时作为方向搜索起点；
+     * - [clippedBounds] 只有与布局尺寸一致时，才允许该节点进入几何候选池。
+     */
+    internal fun reportNodeLayout(
+        node: Node,
+        clippedBounds: Rect,
+        fullBounds: Rect,
+        layoutSize: Size,
+        stamp: Long,
+    ) {
+        val focusUsable = stamp > 0L && layoutSize.width >= 2f && layoutSize.height >= 2f &&
+            rectUsable(fullBounds) && rectUsable(clippedBounds)
+        if (focusUsable) {
+            node.focusBounds = fullBounds
+            node.focusStamp = stamp
+        } else {
+            node.focusBounds = Rect.Zero
+            node.focusStamp = 0L
+        }
+
+        val unclipped = focusUsable &&
+            kotlin.math.abs(clippedBounds.width - layoutSize.width) <= 2f &&
+            kotlin.math.abs(clippedBounds.height - layoutSize.height) <= 2f
+        node.candidateVisible = unclipped
+        if (unclipped) {
+            node.bounds = fullBounds
+            node.stamp = stamp
+        }
+    }
 
     fun unregisterCard(id: Int) {
         cards.remove(id)
@@ -617,12 +665,13 @@ object OtvNav {
         val epoch = advanceFocusEpoch()
         val n = cards[id] ?: return epoch
         lastGroup = n.group
-        if (valid(n)) lastAnchorByGroup[n.group ?: ""] = Anchor(n.bounds)
+        val origin = currentNodeOrigin(n)
+        if (origin != Rect.Zero) lastAnchorByGroup[n.group ?: ""] = Anchor(origin)
         // v1.16 顶部标签栏自动隐藏联动（阈值 0 = 本屏未启用）
-        if (chromeHideThresholdPx > 0f && valid(n)) {
-            val hide = n.bounds.top > chromeHideThresholdPx
+        if (chromeHideThresholdPx > 0f && origin != Rect.Zero) {
+            val hide = origin.top > chromeHideThresholdPx
             if (hide != _chromeHidden.value) {
-                Log.i(TAG, "chrome hide=$hide (top=${n.bounds.top} > $chromeHideThresholdPx)")
+                Log.i(TAG, "chrome hide=$hide (top=${origin.top} > $chromeHideThresholdPx)")
                 _chromeHidden.value = hide
             }
         }
@@ -635,15 +684,28 @@ object OtvNav {
 
     /** 焦点节点布局/滚动位移时刷新自愈锚点（仅当前聚焦节点调用） */
     fun updateAnchor(id: Int, n: Node) {
-        if (id == focusedCardId && valid(n)) lastAnchorByGroup[n.group ?: ""] = Anchor(n.bounds)
+        val origin = currentNodeOrigin(n)
+        if (id == focusedCardId && origin != Rect.Zero) {
+            lastAnchorByGroup[n.group ?: ""] = Anchor(origin)
+        }
     }
 
-    private fun valid(n: Node): Boolean =
-        n.stamp > 0 && n.bounds != Rect.Zero &&
-            n.bounds.width >= 2f && n.bounds.height >= 2f
+    private fun rectUsable(rect: Rect): Boolean =
+        rect != Rect.Zero && rect.left.isFinite() && rect.top.isFinite() &&
+            rect.right.isFinite() && rect.bottom.isFinite() &&
+            rect.width >= 2f && rect.height >= 2f
 
-    /** 节点是否可用于导航/落焦（dpadFocusable 稳定器用：零尺寸/残尺寸节点不可落焦） */
-    fun isNodeValid(n: Node): Boolean = valid(n)
+    internal fun isNavigationCandidate(n: Node): Boolean =
+        n.candidateVisible && n.stamp > 0L && rectUsable(n.bounds)
+
+    internal fun currentNodeOrigin(n: Node): Rect = when {
+        n.focusStamp > 0L && rectUsable(n.focusBounds) -> n.focusBounds
+        isNavigationCandidate(n) -> n.bounds
+        else -> Rect.Zero
+    }
+
+    /** 当前已持焦节点是否有可用起点；不代表它能作为其他节点的搜索候选。 */
+    internal fun isFocusedNodeUsable(n: Node): Boolean = currentNodeOrigin(n) != Rect.Zero
 
     /**
      * 统一入口（MainActivity.dispatchKeyEvent 调用）。
@@ -651,13 +713,15 @@ object OtvNav {
      */
     fun dispatch(dir: Int, repeatCount: Int): Boolean {
         if (pendingRevealToken != 0L) return true
-        if (repeatCount > 0 &&
-            android.os.SystemClock.uptimeMillis() - lastMoveAt < REPEAT_MIN_INTERVAL_MS
+        if (!TvInteractionMotion.shouldProcessDirection(
+                repeatCount = repeatCount,
+                elapsedMs = android.os.SystemClock.uptimeMillis() - lastMoveAt,
+            )
         ) return true
 
         val curPre = cards[focusedCardId]
         var cur = curPre
-        if (cur == null || (!valid(cur) && !cur.hidden)) {
+        if (cur == null || (!isFocusedNodeUsable(cur) && !cur.hidden)) {
             // 焦点漂移自愈（页面切换/重组竞态）：恢复后【继续走 override 检查】——
             // 搜索 chip 的 DOWN=定向进内容等语义在过渡期同样必须生效。
             // 隐藏键宿（播放器 1dp sink）不参与几何、不受尺寸校验，直接可用。
@@ -681,7 +745,7 @@ object OtvNav {
         // 锚点只在【聚焦节点的真实上报】时刷新（onCardFocused/updateAnchor），
         // 构造上恒等于当前焦点节点最后一次聚焦位置——即使注册 bounds 因 Lazy 容器
         // 裁边/节点置换出现异常，锚点仍可靠（实测影视页片库首行卡 UP 反向落点根因）。
-        val origin = lastAnchorByGroup[cur.group ?: ""]?.bounds ?: cur.bounds
+        val origin = lastAnchorByGroup[cur.group ?: ""]?.bounds ?: currentNodeOrigin(cur)
         val target = searchGeom(origin, dir, cur.group, exclude = cur)
         if (target != null && focusNode(target)) {
             ensureVisible(target, dir)
@@ -725,11 +789,11 @@ object OtvNav {
                     val stepped = if (dir == NAV_DOWN || dir == NAV_RIGHT) cont.stepForward() else cont.stepBackward()
                     Log.d(TAG, "scroll-reveal#${it + 1} dir=$dir stepped=$stepped stepStamp=$stepStamp")
                     if (!stepped) return@launch
-                    // 等布局组合出滚入视口的行（本协程无 Compose MonotonicFrameClock，
-                    // 不能用 withFrameNanos——用固定两帧延时，滚动本身是瞬时 scrollBy）
-                    delay(50)
+                    // 预留约两帧让滚入视口的节点完成 measure/layout；较旧 50ms 等待
+                    // 缩短 36%，同时保留异步窗口，允许页面/浮层的新焦点事务接管。
+                    delay(TvInteractionMotion.SCROLL_REVEAL_LAYOUT_WAIT_MS)
                     if (!isRevealCurrent(token, sourceId, expectedEpoch)) return@launch
-                    val fresh = cards[sourceId]?.takeIf { valid(it) } ?: cur
+                    val fresh = cards[sourceId]?.takeIf { isNavigationCandidate(it) } ?: cur
                     // 只认本次滚动后【重新上报过位置】的节点：随滚动离场但尚未注销的节点
                     // 带着旧 bounds，会被几何搜索误判成前进方向候选——实测 DOWN 从分类
                     // chip 找回时落到已离场的 hero 按钮旧坐标上（v1.18 修复）
@@ -807,7 +871,7 @@ object OtvNav {
 
     private fun nearestValid(group: String?, anchor: Rect): Node? =
         cards.entries.asSequence()
-            .filter { (_, n) -> valid(n) && !n.hidden && !n.autoSelectNode && (group == null || n.group == group) }
+            .filter { (_, n) -> isNavigationCandidate(n) && !n.hidden && !n.autoSelectNode && (group == null || n.group == group) }
             .map { entry ->
                 val dx = entry.value.bounds.center.x - anchor.center.x
                 val dy = entry.value.bounds.center.y - anchor.center.y
@@ -834,7 +898,7 @@ object OtvNav {
         // ConcurrentHashMap 的迭代是弱一致的；先取一次快照再按 id 排序，并把 id 传到
         // NavGeom 做评分平局决胜，确保每一次按键的目标与枚举顺序无关。
         val pool = cards.entries.asSequence()
-            .filter { (_, n) -> n !== exclude && valid(n) && !n.hidden }
+            .filter { (_, n) -> n !== exclude && isNavigationCandidate(n) && !n.hidden }
             .filter { (_, n) -> !excludeAutoSelect || !n.autoSelectNode }
             .filter { (_, n) -> n.group == group }
             .map { entry -> entry.key to entry.value }

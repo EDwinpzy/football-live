@@ -417,6 +417,50 @@ class OtvNavFocusHarnessTest {
     }
 
     @Test
+    fun `贴屏裁边节点主动聚焦可稳定持焦_失焦后不得再成为UP候选`() {
+        val edgeFr = FocusRequester()
+        val centerFr = FocusRequester()
+        scene {
+            Box(Modifier.fillMaxSize()) {
+                // 上方仅剩 16dp 在窗口内：可被页面主动聚焦，但不得成为后续几何候选。
+                Cell("edge", x = 0, y = -84, w = 120, h = 100, fr = edgeFr)
+                Cell("center", x = 0, y = 100, w = 120, h = 100, fr = centerFr, initial = false)
+            }
+        }
+        awaitFocused("edge")
+        waitAtLeast(180) // 覆盖无效节点稳定器的 120ms 窗口
+        assertFocused("edge")
+
+        androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            centerFr.requestFocus()
+        }
+        awaitFocused("center")
+        key(KeyEvent.KEYCODE_DPAD_UP)
+        assertFocused("center")
+        assertNotFocusedNode("edge")
+    }
+
+    @Test
+    fun `完全离屏节点被主动聚焦后_120毫秒内自愈到可见节点`() {
+        val hiddenFr = FocusRequester()
+        val visibleFr = FocusRequester()
+        scene {
+            Box(Modifier.fillMaxSize()) {
+                Cell("offscreen", x = 0, y = -120, w = 120, h = 100, fr = hiddenFr, initial = false)
+                Cell("visible", x = 0, y = 100, w = 120, h = 100, fr = visibleFr)
+            }
+        }
+
+        awaitFocused("visible") // 先建立可见的分组锚点
+        androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            hiddenFr.requestFocus()
+        }
+        rule.onNodeWithTag("offscreen").assertIsFocused()
+        awaitFocused("visible", timeout = 2500)
+        assertNotFocusedNode("offscreen")
+    }
+
+    @Test
     fun `失焦后的延迟自动选择不得点击旧卡`() {
         scene {
             var staleClick by remember { mutableStateOf(false) }
