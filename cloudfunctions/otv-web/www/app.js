@@ -3007,15 +3007,37 @@ if ("mediaSession" in navigator) {
   function flashInd(html) { showInd(html, true); clearTimeout(indTimer); indTimer = setTimeout(hideInd, 700); }
   function fmtT(s) { return fmtTime(s); }
   const seekInd = (fwd, sec) => (fwd ? TRI_F : TRI_B) + `<span class="gi-time">${fmtT(sec)}</span>`;
+  /* 长按倍速（2026-09-21）：按住画面左/右任一侧 ~0.45s → 3.0x 快进播放，松手回用户倍速。
+     只认触屏/手写笔（桌面鼠标按住不该改倍速）；直播不可变速（App PlaybackPolicy.LONG_PRESS_SPEED 同口径）。 */
+  const LP_SPEED = 3.0, LP_DELAY = 450;
+  let lpTimer = 0, lpActive = false;
+  function lpStart() {
+    lpTimer = 0;
+    if (lpActive || !pv.video || !pv.ctx || pv.ctx.kind !== "vod") return;
+    lpActive = true;
+    pv.video.playbackRate = LP_SPEED;
+    showInd(`<div class="gi-speed">${LP_SPEED.toFixed(1)}x</div><div class="gi-sub">倍速播放中</div>`, true);
+  }
+  function lpStop() {
+    if (lpTimer) { clearTimeout(lpTimer); lpTimer = 0; }
+    if (!lpActive) return;
+    lpActive = false;
+    if (pv.video) pv.video.playbackRate = SPEEDS[pv.speedIdx];
+    hideInd();
+  }
   layer.addEventListener("pointerdown", e => {
     if (!pv.ctx || pv.ctx.kind !== "vod" && pv.ctx.kind !== "live") return;
     down = { x: e.clientX, y: e.clientY, t: Date.now() };
     mode = null;
+    /* 长按计时只给触屏/手写笔起；一动就撤（见 pointermove） */
+    if (pv.ctx.kind === "vod" && e.pointerType !== "mouse") lpTimer = setTimeout(lpStart, LP_DELAY);
   });
   layer.addEventListener("pointermove", e => {
     if (!down) return;
     const dx = e.clientX - down.x, dy = e.clientY - down.y;
     const v = pv.video;
+    /* 长按中途滑动 = 用户要的是拖动，撤掉计时（已生效的长按保持到松手） */
+    if (!lpActive && lpTimer && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) { clearTimeout(lpTimer); lpTimer = 0; }
     if (!mode) {
       if (Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy) && pv.ctx.kind === "vod" && v && v.duration) {
         mode = "seek"; seekStart = v.currentTime; seekCur = seekStart;
@@ -3042,6 +3064,10 @@ if ("mediaSession" in navigator) {
   const end = e => {
     if (!down) return;
     const dx = e.clientX - down.x, dy = e.clientY - down.y;
+    /* 长按倍速已接管本次手势：还原倍速后直接收尾，不再落进单击/双击判定 */
+    const wasLongPress = lpActive;
+    lpStop();
+    if (wasLongPress) { down = null; mode = null; return; }
     if (mode === "seek" && pv.video) { pv.video.currentTime = seekCur; hideInd(); }
     else if (mode === "vb") hideInd();
     else if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
@@ -3074,7 +3100,7 @@ if ("mediaSession" in navigator) {
     down = null; mode = null;
   };
   layer.addEventListener("pointerup", end);
-  layer.addEventListener("pointercancel", () => { down = null; mode = null; hideInd(); });
+  layer.addEventListener("pointercancel", () => { lpStop(); down = null; mode = null; hideInd(); });
 })();
 $("#ctlBack").addEventListener("click", closePlayer);
 
