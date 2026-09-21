@@ -39,6 +39,17 @@ tools/backend-src/.cache/
 # 本机 adb 调试导出（ui dump / 截图清单）
 out-*.xml
 
+# 本机工具状态与会话产物：只在本机留证，不入库
+#   .superpowers/  superpowers 头脑风暴的本地服务状态（端口 / pid / 本机会话 key）
+#   artifacts/     测试截图与实机证据（docs 里按本机路径引用，体积大且会随磁盘清理淘汰）
+#   work/          会话临时输出（logcat、uiautomator dump、流探针、预览草稿）
+.superpowers/
+artifacts/
+work/
+# 2026-09-20 搜索页会话遗留的一次性 adb 导出（与上面的 out-*.xml 同类）
+search-screen-*.png
+search-ui-*.xml
+
 # Python caches and virtual environments
 __pycache__/
 *.py[cod]
