@@ -32,8 +32,10 @@ android {
         // 「测试版：false —— 默认视为已激活」的构建，已归档到 apk/归档-测试版-门禁关/。
     // v1.34（2026-09-21）：APK 应用内更新支持分片下载——对象桶单对象硬上限 100 MiB，
     // 大包按 < 100 MiB 拆段，客户端按序下载拼成整包后仍校验 SHA-256 与签名证书。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 36)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.34")
+    // v1.35（2026-09-21）：长按画面左右两侧 = 3.0x 倍速播放；并含播放器渲染层 key
+    // 失配修复（黑屏只剩声音 / 错误卡弹窗后音频仍响 / 切信号源无效）。
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 37)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.35")
         // 与 TV 版一致的三 ABI（Chaquopy/libVLC so 需要）；移动版无 cpp 拼音解码器
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
 
