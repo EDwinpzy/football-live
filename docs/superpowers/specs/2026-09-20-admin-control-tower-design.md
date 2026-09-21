@@ -71,3 +71,7 @@ text-overflow: ellipsis;
 - 两份 HTML 内联脚本可解析，现有测试保持通过。
 - 真实浏览器验证总览、卡密、激活日志至少三条 Tab 切换和表格渲染。
 - 视觉验证记录截图路径；未完成发布前不宣称 APK、热更或线上部署已验证。
+
+## 7. 构图选择
+
+已确认以 `.impeccable/mocks/control-tower-03-inspector.png` 作为主构图：操作页围绕当前任务展开，右侧检视抽屉提供单条记录上下文和安全动作；总览页借用 `.impeccable/mocks/control-tower-01-timeline.png` 的顶部事件时间线，回答“刚刚发生了什么”。构图图片只作为空间和层级参考，真实页面继续使用现有接口、字段和状态。
