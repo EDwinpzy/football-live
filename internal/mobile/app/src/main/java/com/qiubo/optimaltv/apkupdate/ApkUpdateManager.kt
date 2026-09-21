@@ -178,8 +178,16 @@ object ApkUpdateManager {
         val apk = root.optJSONObject("apk") ?: root
         val url = apk.optString("url").trim()
         val sha256 = apk.optString("sha256").trim().lowercase(Locale.US)
-        require(url.isNotBlank() && Uri.parse(url).scheme == "https") { "APK 地址必须使用 HTTPS" }
+        val sizeBytes = apk.optLong("size", 0)
         require(sha256.matches(Regex("[0-9a-f]{64}"))) { "APK SHA-256 无效" }
+        val parts = parseParts(apk.optJSONArray("parts"))
+        if (parts.isEmpty()) {
+            require(url.isNotBlank() && Uri.parse(url).scheme == "https") { "APK 地址必须使用 HTTPS" }
+        } else {
+            // 分片清单 apk.url 可为空；地址与长度约束由 ApkPartPolicy 与 parseParts 兜住。
+            require(url.isBlank() || Uri.parse(url).scheme == "https") { "APK 地址必须使用 HTTPS" }
+            ApkPartPolicy.problem(parts, sizeBytes)?.let { error(it) }
+        }
         return ApkUpdateManifest(
             packageName = root.optString("packageName"),
             channel = root.optString("channel", "stable"),
@@ -193,10 +201,11 @@ object ApkUpdateManager {
             apk = ApkArtifact(
                 fileName = apk.optString("fileName", "update.apk"),
                 url = url,
-                sizeBytes = apk.optLong("size", 0),
+                sizeBytes = sizeBytes,
                 sha256 = sha256,
                 certificateSha256 = apk.optJSONArray("certificateSha256").toStringList()
                     .map { it.uppercase(Locale.US) },
+                parts = parts,
             ),
         ).also {
             require(it.versionCode > 0) { "APK versionCode 无效" }
@@ -228,29 +237,69 @@ object ApkUpdateManager {
     }
 
     private fun downloadOnce(artifact: ApkArtifact, part: File) {
-        val request = Request.Builder().url(artifact.url).build()
-        http.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "下载 HTTP ${response.code}" }
-            val body = requireNotNull(response.body) { "下载响应为空" }
-            val total = if (artifact.sizeBytes > 0) artifact.sizeBytes else body.contentLength()
-            var done = 0L
-            body.byteStream().use { input ->
-                part.outputStream().use { output ->
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                    while (true) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        output.write(buffer, 0, count)
-                        done += count
-                        _state.value = ApkUpdateState.Downloading(
-                            progress = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f,
-                            downloadedBytes = done,
-                            totalBytes = total,
-                        )
+        // 分片清单按顺序下载并连续写入同一个 .part 文件；单对象清单退化成一段（不校验段摘要）。
+        val sources = artifact.parts.ifEmpty { listOf(ApkPart(artifact.url, artifact.sizeBytes, "")) }
+        val total = if (artifact.sizeBytes > 0) artifact.sizeBytes else sources.sumOf { it.sizeBytes }
+        var done = 0L
+        part.outputStream().use { output ->
+            for ((index, source) in sources.withIndex()) {
+                val request = Request.Builder().url(source.url).build()
+                http.newCall(request).execute().use { response ->
+                    check(response.isSuccessful) { "第 ${index + 1}/${sources.size} 段 HTTP ${response.code}" }
+                    val body = requireNotNull(response.body) { "下载响应为空" }
+                    val digest = source.sha256.takeIf { it.isNotBlank() }
+                        ?.let { MessageDigest.getInstance("SHA-256") }
+                    var segment = 0L
+                    body.byteStream().use { input ->
+                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            output.write(buffer, 0, count)
+                            digest?.update(buffer, 0, count)
+                            segment += count
+                            done += count
+                            _state.value = ApkUpdateState.Downloading(
+                                progress = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f,
+                                downloadedBytes = done,
+                                totalBytes = total,
+                            )
+                        }
+                    }
+                    if (source.sizeBytes > 0) {
+                        check(segment == source.sizeBytes) { "第 ${index + 1} 段大小不匹配" }
+                    }
+                    if (digest != null) {
+                        check(digest.digest().toHex().equals(source.sha256, ignoreCase = true)) {
+                            "第 ${index + 1} 段 SHA-256 校验失败"
+                        }
                     }
                 }
             }
-            if (artifact.sizeBytes > 0) check(done == artifact.sizeBytes) { "文件大小不匹配" }
+        }
+        if (artifact.sizeBytes > 0) check(done == artifact.sizeBytes) { "文件大小不匹配" }
+    }
+
+    /** 解析 `apk.parts`；任一段地址或摘要不合法即拒绝整份清单（不回退到单对象）。 */
+    private fun parseParts(array: JSONArray?): List<ApkPart> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val partUrl = item.optString("url").trim()
+                val partSha256 = item.optString("sha256").trim().lowercase(Locale.US)
+                require(partUrl.isNotBlank() && Uri.parse(partUrl).scheme == "https") {
+                    "APK 分片地址必须使用 HTTPS"
+                }
+                require(partSha256.matches(Regex("[0-9a-f]{64}"))) { "APK 分片 SHA-256 无效" }
+                add(
+                    ApkPart(
+                        url = partUrl,
+                        sizeBytes = item.optLong("size", 0),
+                        sha256 = partSha256,
+                    ),
+                )
+            }
         }
     }
 

@@ -737,7 +737,7 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
 <section id="tab-apk" style="display:none">
   <div class="w-head"><h1>发布 APK 更新</h1><span class="sub">上传后自动计算 SHA-256，并生成客户端读取的 update.json</span><span class="spring"></span></div>
   <div class="formgrid" style="max-width:1100px">
-    <label class="f">APK 文件（≤300MB）<input type="file" id="apk-file" accept=".apk" style="padding:5px">
+    <label class="f">APK 文件（≤100MB）<input type="file" id="apk-file" accept=".apk" style="padding:5px">
       <span id="apk-fileinfo" style="letter-spacing:0;font-family:var(--mono);color:var(--faint)"></span></label>
     <label class="f">渠道
       <select id="apk-channel"><option value="tv">TV 版</option><option value="mobile">移动版</option></select></label>
@@ -1651,6 +1651,8 @@ document.getElementById("btn-hu-upload").onclick = function () {
 /* ---- APK 应用内更新 ---- */
 const APK_CHUNK = 4 * 1024 * 1024;
 const APK_DIRECT = 5 * 1024 * 1024;
+/* 对象桶单对象硬上限 100 MiB（平台级，随套餐固定）：超过只能走本地分片发布脚本。 */
+const APK_OBJECT_MAX = 100 * 1024 * 1024;
 let apkCurrent = {tv: null, mobile: null};
 function apkMb(n) { return (n / 1048576).toFixed(1) + " MB"; }
 async function loadApkUpdates() {
@@ -1664,7 +1666,7 @@ async function loadApkUpdates() {
   }
   if (!rows.length) { el.innerHTML = `<div class="empty">还没有公开清单。上传 APK 后选择「立即发布」。</div>`; return; }
   el.innerHTML = `<table class="grid"><tr><th>渠道</th><th>版本</th><th>最低支持</th><th>大小</th><th>SHA-256</th><th>强制</th><th>清单地址</th></tr>` +
-    rows.map(({channel, m}) => `<tr><td>${channel === "tv" ? "TV 版" : "移动版"}</td><td><b>v${m.versionCode}</b> · ${esc(m.versionName)}</td><td>${m.minSupportedVersionCode || 0}</td><td>${apkMb(m.apk?.size || 0)}</td><td class="mono" title="${esc(m.apk?.sha256 || "")}">${esc((m.apk?.sha256 || "").slice(0, 12))}…</td><td>${m.forceUpdate ? '<span class="tag bad">强制</span>' : '<span class="tag ok">可选</span>'}</td><td class="mono" style="font-size:10px">/web/apk-update/${channel}.json</td></tr>`).join("") + `</table>`;
+    rows.map(({channel, m}) => `<tr><td>${channel === "tv" ? "TV 版" : "移动版"}</td><td><b>v${m.versionCode}</b> · ${esc(m.versionName)}</td><td>${m.minSupportedVersionCode || 0}</td><td>${apkMb(m.apk?.size || 0)}${(m.apk?.parts?.length || 0) > 1 ? ` <span class="tag" title="单对象上限 100 MiB，已分片下发">${m.apk.parts.length} 片</span>` : ""}</td><td class="mono" title="${esc(m.apk?.sha256 || "")}">${esc((m.apk?.sha256 || "").slice(0, 12))}…</td><td>${m.forceUpdate ? '<span class="tag bad">强制</span>' : '<span class="tag ok">可选</span>'}</td><td class="mono" style="font-size:10px">/web/apk-update/${channel}.json</td></tr>`).join("") + `</table>`;
   apkFillDefaults();
 }
 function apkFillDefaults() {
@@ -1703,6 +1705,11 @@ async function apkDoUpload(f, btn) {
   err.style.display = ok.style.display = "none";
   if (!f) { err.textContent = "请先选择 APK 文件"; err.style.display = "block"; return; }
   if (!/\.apk$/i.test(f.name)) { err.textContent = "请选择 .apk 文件"; err.style.display = "block"; return; }
+  if (f.size > APK_OBJECT_MAX) {
+    err.innerHTML = `${apkMb(f.size)} 超过对象桶单对象上限 100 MB；请在项目根执行 <code>python tools/publish_apk_update.py --channel ${document.getElementById("apk-channel").value} --apk "&lt;路径&gt;" …</code> 分片发布（客户端按序下载后仍校验整包）`;
+    err.style.display = "block";
+    return;
+  }
   const oldTxt = btn.textContent;
   btn.disabled = true;
   try {

@@ -245,6 +245,11 @@ HU_MAX_VERSION = 10_000_000
 # 与 python-backend.zip 热更对象混淆。清单由网页函数 /web/apk-update/*.json
 # 代理读取，APK 本体直接使用下方对象 URL 下载。
 APK_MAX_BYTES = 300 * 1024 * 1024
+# CloudBase 对象存储的**平台级**单对象硬上限（100 MiB，随套餐固定，改桶配置无法抬高）。
+# 大于该值的包不能落在单个对象里：走 tools/publish_apk_update.py 分片发布。
+APK_OBJECT_MAX_BYTES = 100 * 1024 * 1024
+APK_OBJECT_HINT = ("对象桶单对象上限 100 MiB：请改用 python tools/publish_apk_update.py "
+                   "分片发布（客户端按序下载各分片后仍校验整包 SHA-256 与签名）")
 APK_UPLOAD_CHUNK_MAX = 4 * 1024 * 1024
 APK_UPLOAD_DIRECT_MAX = 5 * 1024 * 1024
 APK_UPLOAD_UID_RE = re.compile(r"^[0-9a-f]{8,32}$")
@@ -349,6 +354,8 @@ def _apk_publish(raw: bytes, meta: dict) -> dict:
     """校验 APK、写入对象，并在 published 状态原子覆盖渠道清单。"""
     if not 1 <= len(raw) <= APK_MAX_BYTES:
         return {"error": f"APK 大小不合法（1B–{APK_MAX_BYTES // 1048576}MB）"}
+    if len(raw) > APK_OBJECT_MAX_BYTES:
+        return {"error": APK_OBJECT_HINT}
     try:
         validate_apk_bytes(raw)
         current = _apk_read_manifest(meta["channel"])
@@ -450,6 +457,9 @@ def h_apk_update_commit(qs: dict) -> dict:
         return {"error": "bad_uid"}
     if not 1 <= total <= 2048 or not 1 <= size <= APK_MAX_BYTES:
         return {"error": "bad_total_or_size"}
+    # 提交要在一次请求里把整包回传成单个对象，平台单对象上限先拦下，别白读一遍分片。
+    if size > APK_OBJECT_MAX_BYTES:
+        return {"error": APK_OBJECT_HINT}
     keys = [f"{APK_MANIFEST_PREFIX}/uploads/{uid}/part-{i:04d}" for i in range(total)]
     buf = bytearray()
     for key in keys:

@@ -38,7 +38,15 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "backend-src"))
 
 import db_import  # noqa: E402
-from apk_update import build_manifest, normalize_certificates, safe_apk_filename  # noqa: E402
+from apk_update import (  # noqa: E402
+    PART_MAX_BYTES,
+    build_manifest,
+    normalize_certificates,
+    plan_parts,
+    safe_apk_filename,
+    split_apk_parts,
+    validate_apk_bytes,
+)
 
 BUCKET = "hotupdate"
 PREFIX = "apk-update"
@@ -88,6 +96,8 @@ def main() -> None:
     ap.add_argument("--offline", action="store_true", help="只上传 APK，不写公开清单")
     ap.add_argument("--file-name", default="", help="对象里的文件名，默认取 APK 原名")
     ap.add_argument("--manifest-name", default="", help="清单对象名（默认取渠道名）；联调可用 test-tv 走独立路径")
+    ap.add_argument("--part-size-mb", type=int, default=96,
+                    help=f"单分片大小（MiB，1–{PART_MAX_BYTES // 1048576}）；APK 超过该值即分片发布")
     ap.add_argument("--dry-run", action="store_true", help="只校验并打印，不写桶")
     args = ap.parse_args()
 
@@ -95,11 +105,26 @@ def main() -> None:
     if not apk_path.is_file():
         sys.exit(f"找不到 APK：{apk_path}")
     raw = apk_path.read_bytes()
+    validate_apk_bytes(raw)
     sha256 = hashlib.sha256(raw).hexdigest()
     file_name = safe_apk_filename(args.file_name or apk_path.name)
     certs = normalize_certificates(args.cert)
 
+    # 对象桶单对象上限 100 MiB：包体超过分片阈值就拆成多段，客户端按序拼接后校验整包。
+    try:
+        plan = plan_parts(len(raw), args.part_size_mb * 1048576)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    part_blobs = split_apk_parts(raw, args.part_size_mb * 1048576) if len(plan) > 1 else []
     key_apk = f"{PREFIX}/{args.channel}/v{args.version_code}/{file_name}"
+    part_keys = [
+        f"{PREFIX}/{args.channel}/v{args.version_code}/parts/part-{i + 1:02d}-of-{len(plan):02d}"
+        for i in range(len(plan))
+    ]
+    parts_desc = [
+        {"url": obj_url(key), "size": len(blob), "sha256": hashlib.sha256(blob).hexdigest()}
+        for key, blob in zip(part_keys, part_blobs)
+    ]
     manifest = build_manifest(
         channel=args.channel,
         version_code=args.version_code,
@@ -109,10 +134,11 @@ def main() -> None:
         title=args.title,
         changelog=args.note,
         file_name=file_name,
-        apk_url=obj_url(key_apk),
+        apk_url="" if parts_desc else obj_url(key_apk),
         size_bytes=len(raw),
         sha256=sha256,
         certificate_sha256=certs,
+        parts=parts_desc,
     )
 
     manifest_name = args.manifest_name or args.channel
@@ -129,15 +155,25 @@ def main() -> None:
 
     print(f"APK {file_name} · {len(raw) / 1048576:.1f} MB · sha256 {sha256}")
     print(f"签名证书 {certs[0]}")
-    print(f"对象 {key_apk}")
+    if parts_desc:
+        print(f"分片 {len(parts_desc)} 段（单段 {args.part_size_mb} MiB 上限）")
+        for desc in parts_desc:
+            print(f"  {desc['size'] / 1048576:7.1f} MB  {desc['url']}")
+    else:
+        print(f"对象 {key_apk}")
     print(f"清单 {key_manifest} -> {obj_url(key_manifest)}")
     if args.dry_run:
         print("[dry-run] 未写入任何对象")
         return
 
     token = db_import.signin()
-    print("上传 APK 对象…")
-    put_object(key_apk, raw, "application/vnd.android.package-archive", token)
+    if parts_desc:
+        for index, (key, blob) in enumerate(zip(part_keys, part_blobs), start=1):
+            print(f"上传分片 {index}/{len(part_blobs)}…")
+            put_object(key, blob, "application/octet-stream", token)
+    else:
+        print("上传 APK 对象…")
+        put_object(key_apk, raw, "application/vnd.android.package-archive", token)
 
     if args.offline:
         print("已上传（下线态，未写公开清单）")
@@ -152,7 +188,8 @@ def main() -> None:
         "versionName": args.version_name,
         "size": len(raw),
         "sha256": sha256,
-        "apkUrl": obj_url(key_apk),
+        "parts": len(parts_desc),
+        "apkUrl": obj_url(key_apk) if not parts_desc else "",
         "manifestUrl": (f"{MANIFEST_HOST}/web/apk-update/{manifest_name}.json"
                         if manifest_name == args.channel else obj_url(key_manifest)),
         "status": "offline" if args.offline else "published",
