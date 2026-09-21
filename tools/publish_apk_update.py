@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""发布 APK 应用内更新清单（本机直传对象桶，不经云函数）。
+
+为什么不能走后台接口：后台的 apk_update_commit 要在**一次请求**里把全部分片读回内存、
+再整体回传对象桶。云函数 60s 超时下这个动作对 >100MB 的 APK 必然失败——2026-09-21
+实测 165MB 的 TV 包：40 个分片全部上传成功，commit 被杀，APK 对象与清单都没落地，
+分片残留在 apk-update/uploads/ 下。这也解释了为什么「APK 应用内更新」功能做完之后
+线上 apk-update/*.json 一直是 404：清单从来没成功发布过。
+
+本脚本用与 release_all.py / db_import.py 相同的 svc_import 凭据直传同一个桶，
+客户端下载地址与清单结构完全不变。
+
+用法：
+  python tools/publish_apk_update.py --channel tv \
+    --apk "apk/TV版/MyTV-TV版.apk" \
+    --version-code 35 --version-name 1.33 \
+    --cert 601F0D63...BA43 \
+    --title "发现新版本" --note "..." --note "..." \
+    [--offline] [--force] [--min-supported 0] [--dry-run]
+
+签名证书摘要必须与被发布 APK 的真实签名一致，否则客户端下载后校验失败、或系统拒绝覆盖：
+  apksigner verify --print-certs <apk>
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import pathlib
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ROOT = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "backend-src"))
+
+import db_import  # noqa: E402
+from apk_update import build_manifest, normalize_certificates, safe_apk_filename  # noqa: E402
+
+BUCKET = "hotupdate"
+PREFIX = "apk-update"
+MANIFEST_HOST = "https://appletv-d5ge1bth794873f76.service.tcloudbase.com"
+
+
+def obj_url(key: str) -> str:
+    return f"{db_import.BASE}/v1/storages/object/{BUCKET}/{urllib.parse.quote(key, safe='/')}"
+
+
+def put_object(key: str, raw: bytes, ctype: str, token: str) -> None:
+    url = obj_url(key) + "?x-upsert=true"
+    db_import.check_url(url)
+    req = urllib.request.Request(url, data=raw, method="POST", headers={
+        "Content-Type": ctype,
+        "Authorization": "Bearer " + token,
+        "x-upsert": "true",
+    })
+    with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=900) as r:
+        r.read()
+
+
+def get_object(key: str) -> bytes | None:
+    url = obj_url(key)
+    db_import.check_url(url)
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=120) as r:
+            return r.read(1024 * 1024)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="发布 APK 应用内更新清单（直传对象桶）")
+    ap.add_argument("--channel", required=True, choices=["tv", "mobile"])
+    ap.add_argument("--apk", required=True, help="APK 文件路径")
+    ap.add_argument("--version-code", required=True, type=int)
+    ap.add_argument("--version-name", required=True)
+    ap.add_argument("--cert", required=True, help="签名证书 SHA-256（可逗号分隔多条）")
+    ap.add_argument("--min-supported", type=int, default=0)
+    ap.add_argument("--title", default="发现新版本")
+    ap.add_argument("--note", action="append", default=[], help="更新说明，可重复")
+    ap.add_argument("--force", action="store_true", help="强制更新")
+    ap.add_argument("--offline", action="store_true", help="只上传 APK，不写公开清单")
+    ap.add_argument("--file-name", default="", help="对象里的文件名，默认取 APK 原名")
+    ap.add_argument("--dry-run", action="store_true", help="只校验并打印，不写桶")
+    args = ap.parse_args()
+
+    apk_path = pathlib.Path(args.apk)
+    if not apk_path.is_file():
+        sys.exit(f"找不到 APK：{apk_path}")
+    raw = apk_path.read_bytes()
+    sha256 = hashlib.sha256(raw).hexdigest()
+    file_name = safe_apk_filename(args.file_name or apk_path.name)
+    certs = normalize_certificates(args.cert)
+
+    key_apk = f"{PREFIX}/{args.channel}/v{args.version_code}/{file_name}"
+    manifest = build_manifest(
+        channel=args.channel,
+        version_code=args.version_code,
+        version_name=args.version_name,
+        min_supported_version_code=args.min_supported,
+        force_update=args.force,
+        title=args.title,
+        changelog=args.note,
+        file_name=file_name,
+        apk_url=obj_url(key_apk),
+        size_bytes=len(raw),
+        sha256=sha256,
+        certificate_sha256=certs,
+    )
+
+    key_manifest = f"{PREFIX}/{args.channel}.json"
+    current_raw = get_object(key_manifest)
+    if current_raw:
+        current = json.loads(current_raw.decode("utf-8"))
+        current_code = int(current.get("versionCode") or 0)
+        if not args.offline and args.version_code <= current_code:
+            sys.exit(f"versionCode 必须大于当前已发布版本 v{current_code}（当前清单仍生效）")
+        print(f"当前公开版本 v{current_code}，本次 v{args.version_code}")
+
+    print(f"APK {file_name} · {len(raw) / 1048576:.1f} MB · sha256 {sha256}")
+    print(f"签名证书 {certs[0]}")
+    print(f"对象 {key_apk}")
+    if args.dry_run:
+        print("[dry-run] 未写入任何对象")
+        return
+
+    token = db_import.signin()
+    print("上传 APK 对象…")
+    put_object(key_apk, raw, "application/vnd.android.package-archive", token)
+
+    if args.offline:
+        print("已上传（下线态，未写公开清单）")
+    else:
+        manifest_raw = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), indent=2).encode("utf-8")
+        put_object(key_manifest, manifest_raw, "application/json; charset=utf-8", token)
+        print("已写入公开清单")
+
+    print(json.dumps({
+        "channel": args.channel,
+        "versionCode": args.version_code,
+        "versionName": args.version_name,
+        "size": len(raw),
+        "sha256": sha256,
+        "apkUrl": obj_url(key_apk),
+        "manifestUrl": f"{MANIFEST_HOST}/web/apk-update/{args.channel}.json",
+        "status": "offline" if args.offline else "published",
+    }, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()
