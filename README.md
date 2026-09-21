@@ -97,5 +97,5 @@ My TV/
 
 ## 当前版本
 
-TV / 移动 APK **v1.25**（versionCode 27）· 网页版 **v1.25** · 热更 **v16**（已发布）。逐版本变更与实测证据见
+TV / 移动 APK **v1.34**（versionCode 36）· 网页版 **v1.34** · 热更 **v20**（已发布）。逐版本变更与实测证据见
 `docs/04-records/版本史.md` 与 `docs/04-records/测试记录.md`。
