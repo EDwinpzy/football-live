@@ -97,7 +97,7 @@ section{padding:0 0 26px}
 .secthead .spring{flex:1}
 
 /* 数据表 */
-.gridwrap{min-width:0}
+.gridwrap{min-width:0;overflow-x:auto}
 table.grid{width:100%;border-collapse:collapse}
 table.grid th{font-size:11px;letter-spacing:.05em;color:var(--dim);font-weight:500;text-align:left;white-space:nowrap;
   padding:7px 12px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.02)}
@@ -369,6 +369,9 @@ section{padding:0 0 26px}
 .kpis .cell b.green{color:var(--ok)}
 
 /* ==== 面板与小节头 ==== */
+/* 版本发布里的两个子页各自带标题带，降一级避免和顶级「版本发布」重复抢层级 */
+#tab-hu .w-head h1,#tab-apk .w-head h1{font-size:15px;font-weight:650}
+#tab-hu .w-head,#tab-apk .w-head{margin-bottom:14px}
 .panel{margin-top:18px;padding:0;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--bg2);overflow:hidden}
 .secthead{display:flex;align-items:baseline;gap:12px;padding:13px 16px 11px;margin:0;flex-wrap:wrap;border-bottom:1px solid var(--line2)}
 .secthead h2{font-size:13.5px;font-weight:650;color:var(--txt);margin:0}
@@ -388,7 +391,12 @@ tr.grp td{background:var(--bg3);color:var(--dim);font-size:11.5px;letter-spacing
 /* 所有数据表统一单行显示；窄屏仍由 .gridwrap 横向滚动承载完整内容。 */
 table.grid th,table.grid td{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 table.grid td>.lbl,table.grid td>.dim{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
-#ov-ledger{border:1px solid var(--line);border-radius:var(--r-lg);background:var(--bg2);overflow:hidden}
+/* 长 URL 一类字段在单元格内限宽省略，完整值走 title；避免整表被单个地址撑宽 */
+table.grid td>.u{display:inline-block;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
+/* 操作列常驻：卡密表横宽时「复制 / 封禁 / 出售」不用拖到最右才点得到 */
+table.grid th.ops,table.grid td.ops{position:sticky;right:0;z-index:1;background:var(--bg2);box-shadow:inset 1px 0 0 var(--line),-12px 0 12px -12px rgba(0,0,0,.6)}
+table.grid tr:hover td.ops{background:#151f2b}
+#ov-ledger{border:1px solid var(--line);border-radius:var(--r-lg);background:var(--bg2);overflow-x:auto}
 #tab-hu.hu-dragging{outline:2px dashed var(--accent);outline-offset:8px;border-radius:var(--r-lg)}
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:0}
 .dim{color:var(--dim)}
@@ -974,8 +982,8 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
         <datalist id="iptv-groups"></datalist></label>
       <div class="f" style="grid-column:1/-1">台标（可选；客户端内置台标优先，此处为兜底显示）
         <div style="display:flex;gap:14px;align-items:flex-start;margin-top:6px">
-          <img id="ie-logo-prev" alt="" style="width:56px;height:56px;object-fit:contain;background:#0a0c10;
-            border:1px solid var(--line);border-radius:8px;padding:4px;flex-shrink:0">
+          <img id="ie-logo-prev" alt="" title="台标预览（未选择时为空槽）" style="width:56px;height:56px;object-fit:contain;background:#0b1017;
+            border:1px dashed var(--line);border-radius:8px;padding:4px;flex-shrink:0">
           <div style="flex:1;min-width:0">
             <input id="ie-logo" class="mono" style="width:100%" placeholder="https://…（可留空）" oninput="iptvLogoPreview()">
             <div style="display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap">
@@ -1303,7 +1311,7 @@ async function loadOvTimeline() {
 function ledgerTable(rows, withOps, fixed, stateId) {
   const cols = fixed ? '<colgroup><col style="width:17%"><col style="width:6%"><col style="width:9%"><col style="width:10%"><col style="width:10%"><col style="width:11%"><col style="width:11%"><col style="width:12%"><col></colgroup>' : '';
   return `<table class="grid"${fixed ? ' style="table-layout:fixed"' : ''}>` + cols +
-    `<tr>${thSort(stateId, "code", "卡密")}${thSort(stateId, "plan", "套餐")}${thSort(stateId, "status", "状态")}${thSort(stateId, "activated_at", "首次激活")}${thSort(stateId, "expire_at", "统一到期")}${thSort(stateId, "", "续费去向")}${thSort(stateId, "devices", "已绑设备")}${thSort(stateId, "", "备注")}${thSort(stateId, "updated_at", "最近操作")}${withOps ? "<th></th>" : ""}</tr>` +
+    `<tr>${thSort(stateId, "code", "卡密")}${thSort(stateId, "plan", "套餐")}${thSort(stateId, "status", "状态")}${thSort(stateId, "activated_at", "首次激活")}${thSort(stateId, "expire_at", "统一到期")}${thSort(stateId, "", "续费去向")}${thSort(stateId, "devices", "已绑设备")}${thSort(stateId, "", "备注")}${thSort(stateId, "updated_at", "最近操作")}${withOps ? '<th class="ops"></th>' : ""}</tr>` +
     rows.map(r => {
       const redeemed = !!r.redeemed_at;
       const status = r.status === "banned" ? '<span class="st bad">✕ 封禁</span>'
@@ -1323,7 +1331,7 @@ function ledgerTable(rows, withOps, fixed, stateId) {
         : '<span class="dim">未绑定</span>'}</td>
       <td class="note-cell" data-note="${esc(r.note || "")}">${noteView(r.code, r.note, withOps)}</td>
       <td title="创建 ${fmtT(r.created_at)}${r.note ? ` · ${esc(r.note)}` : ''}">${fmtT(r.updated_at)}</td>
-      ${withOps ? `<td style="white-space:nowrap">
+      ${withOps ? `<td class="ops" style="white-space:nowrap">
         <button class="ghost mini" onclick="copyCode('${esc(r.code)}')">复制</button>
         ${redeemed ? "" : `${r.status === "banned"
           ? ` <button class="ghost mini" style="color:var(--ok)" onclick="setStatus('${esc(r.code)}','active')">解封</button>`
@@ -1485,19 +1493,19 @@ function renderHuList() {
   const el = document.getElementById("hu-table");
   if (!huRows.length) return;
   const rows = [...huRows].sort(cmpBy(sortState.hu.key, sortState.hu.dir));
-  el.innerHTML = `<table class="grid"><tr>${thSort("hu", "hot_version_code", "版本")}${thSort("hu", "hot_version_name", "展示名")}${thSort("hu", "file_size", "大小")}${thSort("hu", "sha256", "SHA-256")}${thSort("hu", "status", "状态")}${thSort("hu", "", "说明")}${thSort("hu", "created_at", "时间")}${thSort("hu", "", "")}</tr>` +
+  el.innerHTML = `<table class="grid"><tr>${thSort("hu", "hot_version_code", "版本")}${thSort("hu", "hot_version_name", "展示名")}${thSort("hu", "file_size", "大小")}${thSort("hu", "sha256", "SHA-256")}${thSort("hu", "status", "状态")}${thSort("hu", "", "说明")}${thSort("hu", "created_at", "时间")}<th class="ops"></th></tr>` +
     rows.map(r => `<tr data-key="hu${r.hot_version_code}">
       <td><b>v${r.hot_version_code}</b></td>
-      <td class="lbl">${esc(r.hot_version_name || "-")}</td>
+      <td class="lbl" title="${esc(r.hot_version_name || "-")}"><span class="u">${esc(r.hot_version_name || "-")}</span></td>
       <td>${huMb(r.file_size)}</td>
       <td title="${esc(r.sha256)}">${esc(r.sha256.slice(0, 12))}…</td>
       <td>${r.status === "published" ? '<span class="st ok">● 已发布</span>'
         : r.status === "scheduled" ? `<span class="st warn">◌ 定时</span> <span class="dim mono">${esc(fmtT(r.publish_at))}</span>`
         : '<span class="st warn">○ 下线</span>'}
           ${r.force_apply ? '<span class="tag bad">强制</span>' : ""}</td>
-      <td class="dim lbl">${esc(r.notes || "")}</td>
+      <td class="dim lbl" title="${esc(r.notes || "")}"><span class="u">${esc(r.notes || "—")}</span></td>
       <td class="dim">${fmtT(r.created_at)}</td>
-      <td style="white-space:nowrap">
+      <td class="ops" style="white-space:nowrap">
         ${r.status === "offline"
           ? `<button class="ghost mini" style="color:var(--ok)" onclick="huStatus(${r.hot_version_code},'published','上线')">上线</button>`
           : r.status === "scheduled"
@@ -2014,7 +2022,7 @@ function renderIptv() {
   const el = document.getElementById("iptv-table");
   if (!iptvRows.length) { el.innerHTML = `<div class="empty">频道表为空——用「导入 / API 同步」拉入上游，或「＋ 新增频道」手工添加。</div>`; return; }
   /* 检索聚焦：全表保留，未命中行退暗纹（签名交互），批量操作仍只作用于命中行 */
-  let lastGroup = null, groupHit = 0, html = `<table class="grid pool"><tr><th style="width:34px"><input type="checkbox" id="iptv-selall" title="全选 / 清选当前筛选结果" onchange="iptvSelAll(this.checked)"></th><th style="width:64px">台标</th><th>频道</th><th>分组</th><th>线路</th><th style="width:56px">排序</th><th style="width:84px">状态</th><th></th></tr>`;
+  let lastGroup = null, groupHit = 0, html = `<table class="grid pool"><tr><th style="width:34px"><input type="checkbox" id="iptv-selall" title="全选 / 清选当前筛选结果" onchange="iptvSelAll(this.checked)"></th><th style="width:64px">台标</th><th>频道</th><th>分组</th><th>线路</th><th style="width:56px">排序</th><th style="width:84px">状态</th><th class="ops"></th></tr>`;
   const rows = iptvRows;
   for (const r of rows) {
     if (r.group !== lastGroup) {
@@ -2035,7 +2043,7 @@ function renderIptv() {
       <td>${r.lines.length ? `<b>${r.lines.filter(l => l.enabled !== false).length}</b> 线` : '<span class="st bad">无线路</span>'}</td>
       <td class="dim">${r.sort}</td>
       <td>${r.enabled ? '<span class="st ok">● 启用</span>' : '<span class="st bad">○ 停用</span>'}</td>
-      <td style="white-space:nowrap">
+      <td class="ops" style="white-space:nowrap">
         ${r.lines.length ? `<button class="ghost mini" style="color:var(--amber)" onclick="iptvPlay(${r.id})">▶ 试播</button>` : ""}
         <button class="ghost mini" onclick="iptvEditOpen(${r.id})">编辑</button>
         <button class="ghost mini" onclick="iptvMove(${r.id},-1)">↑</button>
@@ -2329,7 +2337,7 @@ async function loadIptvVersions() {
   if (d.error) { el.innerHTML = `<div class="empty">加载失败：${esc(d.error)}</div>`; return; }
   iptvVerRows = d.rows || [];
   if (!iptvVerRows.length) { el.innerHTML = `<div class="empty">尚未发布过版本——导入频道后点「发布并生效」。</div>`; return; }
-  el.innerHTML = `<table class="grid"><tr><th>版本</th><th>频道</th><th>线路</th><th>大小</th><th>SHA-256</th><th>状态</th><th>说明</th><th>时间</th><th></th></tr>` +
+  el.innerHTML = `<table class="grid"><tr><th>版本</th><th>频道</th><th>线路</th><th>大小</th><th>SHA-256</th><th>状态</th><th>说明</th><th>时间</th><th class="ops"></th></tr>` +
     iptvVerRows.map(r => `<tr data-key="v${r.version}">
       <td><b>v${r.version}</b></td>
       <td>${r.channels}</td><td>${r.lines}</td>
@@ -2338,7 +2346,7 @@ async function loadIptvVersions() {
       <td>${r.status === "published" ? '<span class="st ok">● 生效中</span>' : r.status === "pending" ? '<span class="st warn">◌ 进行中</span>' : r.status === "failed" ? '<span class="st bad">✕ 失败</span>' : '<span class="dim">○ 历史</span>'}</td>
       <td class="dim lbl">${esc(r.notes || "")}</td>
       <td class="dim">${fmtT(r.created_at)}</td>
-      <td>${r.status !== "published" ? `<button class="ghost mini" style="color:var(--amber)" onclick="iptvRollback(${r.version})">回滚到此</button>` : ""}</td></tr>`).join("") + "</table>";
+      <td class="ops">${r.status !== "published" ? `<button class="ghost mini" style="color:var(--amber)" onclick="iptvRollback(${r.version})">回滚到此</button>` : ""}</td></tr>`).join("") + "</table>";
 }
 async function iptvRollback(v) {
   if (!confirm(`回滚到 v${v}？（归档对象复制到 latest，生成新版本号；已切托管模式）`)) return;
@@ -2408,12 +2416,12 @@ async function iptvGroupLoad(soft) {
 function iptvGroupRender() {
   const t = document.getElementById("iptv-group-table");
   if (!iptvGroups.length) { t.innerHTML = `<div class="empty">暂无分组（导入频道后自动出现）</div>`; return; }
-  t.innerHTML = `<table class="grid"><tr><th style="width:52px">顺序</th><th>分组</th><th style="width:120px">频道 / 启用</th><th style="width:320px">操作</th></tr>` +
+  t.innerHTML = `<table class="grid"><tr><th style="width:52px">顺序</th><th>分组</th><th style="width:120px">频道 / 启用</th><th class="ops" style="width:320px">操作</th></tr>` +
     iptvGroups.map((g, i) => `<tr>
       <td class="dim">${i + 1}</td>
       <td><b>${esc(g.name)}</b></td>
       <td class="dim">${g.channels} / ${g.enabled}</td>
-      <td>
+      <td class="ops">
         <button class="ghost mini" onclick="iptvGroupMove(${g.id},-1)"${i === 0 ? " disabled" : ""}>↑</button>
         <button class="ghost mini" onclick="iptvGroupMove(${g.id},1)"${i === iptvGroups.length - 1 ? " disabled" : ""}>↓</button>
         <button class="ghost mini" onclick="iptvGroupRename(${g.id})">重命名</button>
@@ -2552,16 +2560,16 @@ function vodRenderRows() {
   }
   const defaultId = vodDefaultSourceId();
   const arrow = vodLatSortDir === "asc" ? " ▲" : vodLatSortDir === "desc" ? " ▼" : "";
-  table.innerHTML = `<table class="grid"><tr><th>顺序</th><th>名称</th><th>网站 / 接口</th><th>适配器</th><th>状态</th><th>默认优先</th><th class="s" title="点击按延时排序" onclick="vodFlipLatSort()">延时${arrow}</th><th>操作</th></tr>` +
+  table.innerHTML = `<table class="grid"><tr><th>顺序</th><th>名称</th><th>网站 / 接口</th><th>适配器</th><th>状态</th><th>默认优先</th><th class="s" title="点击按延时排序" onclick="vodFlipLatSort()">延时${arrow}</th><th class="ops">操作</th></tr>` +
     order.map((i) => {
       const s = vodSourceRows[i];
       return `<tr>
       <td class="dim">${s.sort_order ?? i}</td><td><b>${esc(s.name)}</b></td>
-      <td class="mono" style="font-size:11px;max-width:380px;word-break:break-all">${esc(s.site_url || "—")}<br><span class="dim">${esc(s.api_url || "—")}</span></td>
+      <td class="mono" style="font-size:11px" title="网站 ${esc(s.site_url || "—")} · 接口 ${esc(s.api_url || "—")}"><span class="u">${esc(s.api_url || s.site_url || "—")}</span></td>
       <td><span class="tag">${esc(s.adapter_type)}</span></td><td>${s.enabled ? '<span class="st ok">启用</span>' : '<span class="dim">停用</span>'} <button class="ghost mini" title="切换该源是否进入下一次发布" onclick="vodSourceToggle(${i})">${s.enabled ? "停用" : "启用"}</button></td>
       <td>${s.enabled && String(s.id || "") === defaultId ? '<span class="tag ok">当前优先</span>' : s.enabled ? `<button class="ghost mini" onclick="vodSourcePrioritize(${i})">设为默认优先</button>` : '<span class="dim">—</span>'}</td>
       <td id="vod-lat-${i}">${vodLatCell(s)}</td>
-      <td><button class="ghost mini" onclick="vodSourceSpeedOne(${i})">测速</button> <button class="ghost mini" onclick="vodSourceTest(${i})">测试</button> <button class="ghost mini" onclick="vodSourceEdit(${i})">编辑</button> <button class="ghost mini" style="color:var(--bad)" onclick="vodSourceDelete(${i})">删除</button></td>
+      <td class="ops"><button class="ghost mini" onclick="vodSourceSpeedOne(${i})">测速</button> <button class="ghost mini" onclick="vodSourceTest(${i})">测试</button> <button class="ghost mini" onclick="vodSourceEdit(${i})">编辑</button> <button class="ghost mini" style="color:var(--bad)" onclick="vodSourceDelete(${i})">删除</button></td>
     </tr>`;
     }).join("") + "</table>";
 }
