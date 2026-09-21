@@ -477,6 +477,24 @@ button.ghost.mini{padding:2.5px 10px}
 .veil-head .ops{margin-left:auto;display:flex;gap:8px;white-space:nowrap}
 
 /* ==== 行状态与数据刷新 ==== */
+/* ==== 总览：最近事件时间线（数据来自现有激活流水接口） ==== */
+.timeline{margin:0 0 18px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--bg2);overflow:hidden}
+.tl-head{display:flex;align-items:baseline;gap:12px;padding:12px 16px 11px;border-bottom:1px solid var(--line2);flex-wrap:wrap}
+.tl-head h2{font-size:13.5px;font-weight:650;color:var(--txt);margin:0}
+.tl-head .sub{color:var(--faint);font-size:11.5px}
+.tl-head .spring{flex:1}
+.tl-acts{display:flex;gap:6px;flex-wrap:wrap}
+.tl-track{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);list-style:none;margin:0;padding:18px 16px 16px;overflow-x:auto}
+.tl-item{position:relative;min-width:0;padding:14px 14px 0 2px;border-top:1px solid var(--line)}
+.tl-dot{position:absolute;top:-4px;left:2px;width:7px;height:7px;border-radius:2px;background:var(--faint)}
+.tl-item[data-tone="ok"] .tl-dot{background:var(--ok)}
+.tl-item[data-tone="warn"] .tl-dot{background:var(--warn)}
+.tl-item[data-tone="bad"] .tl-dot{background:var(--bad)}
+.tl-item time{display:block;font-size:11.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+.tl-item b{display:block;margin-top:1px;font-size:12.5px;font-weight:600;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tl-meta{display:block;font-size:11px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tl-meta.dim{color:var(--faint)}
+
 table.grid td{transition:background .15s}
 tr.pulse td{animation:rowpulse .28s ease-out}
 @keyframes rowpulse{0%{background:rgba(79,209,224,.16);box-shadow:inset 2px 0 0 var(--accent)}100%{background:transparent}}
@@ -513,6 +531,10 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
   .hide-narrow{display:none}
   .gridwrap{overflow-x:auto}
   table.grid{min-width:680px}
+  .tl-track{grid-auto-flow:row;grid-auto-columns:auto;padding:10px 16px 12px;overflow-x:visible}
+  .tl-item{padding:9px 0 9px 16px;border-top:none;border-left:1px solid var(--line)}
+  .tl-dot{top:13px;left:-4px}
+  .tl-item time,.tl-item b{display:inline-block;margin-right:8px}
   .formgrid{grid-template-columns:1fr}
   .echo{padding:0 14px}
   .echo .tail{display:none}
@@ -545,15 +567,16 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
 
 <div class="stage">
 <nav class="rail verbs">
-  <div class="rail-grp">营业</div>
+  <div class="rail-grp">Observe</div>
   <button data-tab="overview" class="on"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>总览</button>
-  <button data-tab="licenses"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.25" cy="5.25" r="3.25"/><path d="M7.6 7.6 13.75 13.75M11 11l1.6-1.6"/></svg>卡密<span class="n" id="pn-licenses"></span></button>
   <button data-tab="logs"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="1.75" width="10" height="12.5" rx="1.5"/><path d="M5.75 5h4.5M5.75 8h4.5M5.75 11h2.5"/></svg>激活日志</button>
+  <div class="rail-grp">Control</div>
+  <button data-tab="licenses"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.25" cy="5.25" r="3.25"/><path d="M7.6 7.6 13.75 13.75M11 11l1.6-1.6"/></svg>卡密<span class="n" id="pn-licenses"></span></button>
   <button data-tab="gen"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M8 5.5v5M5.5 8h5"/></svg>补货</button>
-  <div class="rail-grp">发布</div>
+  <div class="rail-grp">Publish</div>
   <button data-tab="release"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13.75V2.25M4.75 5.5 8 2.25l3.25 3.25M3 13.75h10"/></svg>版本发布</button>
   <button data-tab="ann"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.75 6.25v3.5h2.4l4.1 3.1V3.15l-4.1 3.1z"/><path d="M11.75 5.75a3.6 3.6 0 0 1 0 4.5"/></svg>公告</button>
-  <div class="rail-grp">渠道</div>
+  <div class="rail-grp">Sources</div>
   <button data-tab="iptv"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.75" y="2.75" width="12.5" height="8.5" rx="1.5"/><path d="M8 11.25V13.5M5.5 13.5h5"/></svg>电视源</button>
   <button data-tab="vod-sources"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5h12v8H2z"/><path d="m6.5 7 3 1.5-3 1.5zM5 2.5l3 2 3-2"/></svg>影视源</button>
   <div class="rail-foot" id="verbs-note">私钥签发 · 白名单 RPC<br>登录会话 12h</div>
@@ -564,6 +587,7 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
 <!-- ============ 总览 ============ -->
 <section id="tab-overview">
   <div class="w-head"><h1>数据概览</h1><span class="sub">库存与端点总览 · 最近操作过的卡密在上</span><span class="spring"></span><button class="ghost mini" onclick="resetOpen('overview')" title="清空卡密 / 流水 / 热更 / 公告（电视源、影视源不动）">还原</button></div>
+  <div class="timeline" id="ov-timeline" aria-label="最近激活事件"></div>
   <div class="kpis" id="plans-cards">
     <div class="cell"><b id="k-total">—</b><span>卡密总数</span></div>
     <div class="cell"><b id="k-unsold">—</b><span>未售库存</span></div>
@@ -1034,10 +1058,27 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
 <script>
 /* ---- 登录门禁（v1.20）：whoami 探测 → 未登录弹浮层；api 统一 Cookie 会话 ---- */
 const PLAN = {monthly:"月卡", quarterly:"季卡", yearly:"年卡", lifetime:"终身", weekly:"周卡"};
-const RESULT = {ok:"激活成功", rebind:"重复激活", bound_full:"设备数已满", not_found:"码不存在",
-                banned:"已封禁", unbind:"后台解绑", admin_active:"后台解封", admin_banned:"后台封禁",
-                admin_note:"后台备注",
+/* result 取值来自 license_v2_migration.sql 写入 activate_log 的码，以及后台卡密操作码 */
+const RESULT = {ok:"激活成功", activate_ok:"激活成功", verify_ok:"复验通过",
+                rebind:"重复激活", bound_full:"设备数已满", device_full:"设备数已满",
+                not_found:"码不存在", banned:"已封禁", unbind:"后台解绑",
+                device_unbound:"设备未绑定", expired:"已过期", not_activated:"尚未激活",
+                already_redeemed:"已用于续费", bad_renew_request:"续费请求异常",
+                admin_active:"后台解封", admin_banned:"后台封禁", admin_note:"后台备注",
                 admin_sold:"后台标记出售", admin_unsold:"后台取消出售", bad_param:"参数错误"};
+const RESULT_TONE = {ok:"ok", activate_ok:"ok", verify_ok:"ok", rebind:"ok", admin_active:"ok",
+                     banned:"bad", admin_banned:"bad", expired:"bad", bad_param:"bad",
+                     bad_renew_request:"bad",
+                     not_found:"warn", device_full:"warn", bound_full:"warn", device_unbound:"warn",
+                     unbind:"warn", already_redeemed:"warn", not_activated:"warn"};
+function resultLabel(r) {
+  if (!r) return "事件";
+  return r.startsWith("renew_ok:") ? "续费成功 " + r.slice(9) : (RESULT[r] || r);
+}
+function resultTone(r) {
+  if (!r) return "";
+  return r.startsWith("renew_ok:") ? "ok" : (RESULT_TONE[r] || "");
+}
 const HU_RESULT = {downloaded:"已下载", applied:"已生效", failed:"失败", apply_failed:"启动失败隔离", probe:"探测"};
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmtT = s => s ? new Date(s).toLocaleString("sv-SE").slice(5,16) : "";
@@ -1163,11 +1204,7 @@ fetch(API_BASE + "api/whoami", {credentials:"same-origin"}).then(r => {
   if (r.status !== 200) showLogin();
 });
 function resultTag(r) {
-  const map = {ok:["ok","ok"], rebind:["","ok"], bound_full:["warn","warn"], not_found:["","warn"],
-               banned:["bad","bad"], unbind:["warn","warn"], admin_active:["ok","ok"], admin_banned:["bad","bad"], admin_note:["warn","warn"],
-               admin_sold:["warn","warn"], admin_unsold:["",""]};
-  const [cls] = map[r] || [""];
-  return `<span class="tag ${cls}">${esc(RESULT[r] || r)}</span>`;
+  return `<span class="tag ${resultTone(r)}">${esc(resultLabel(r))}</span>`;
 }
 
 /* ---- 总览 ---- */
@@ -1234,6 +1271,34 @@ async function loadOvLedger() {
   if (!d.rows.length) { el.innerHTML = `<div class="empty">还没有卡密——去「补货」页生成第一批。</div>`; return; }
   el.innerHTML = ledgerTable(d.rows, false, true, "ov");
   pulseDiff("ov-ledger", "ov", Object.fromEntries(d.rows.map(r => [r.code, r.status + r.devices.length + (r.note || "") + (r.sold_at || "")])));
+}
+/* ---- 总览：最近事件时间线（复用激活流水接口，不新造数据源） ---- */
+function verbClick(tab) {
+  const b = document.querySelector(`nav.verbs button[data-tab="${tab}"]`);
+  if (b) b.click();
+}
+async function loadOvTimeline() {
+  const el = document.getElementById("ov-timeline");
+  el.innerHTML = skel(2);
+  const d = await api("logs", {limit: 6});
+  const rows = d.rows || [];
+  const head = `<div class="tl-head"><h2>最近事件</h2>`
+    + `<span class="sub">${d.error ? "读取失败" : (rows.length ? `最新 ${rows.length} 条激活流水` : "暂无激活流水")}</span>`
+    + `<span class="spring"></span><div class="tl-acts">`
+    + `<button class="ghost mini" data-quick="licenses">卡密</button>`
+    + `<button class="ghost mini" data-quick="gen">补货</button>`
+    + `<button class="ghost mini" data-quick="release">热更</button>`
+    + `<button class="ghost mini" data-quick="ann">公告</button>`
+    + `<button class="ghost mini" data-quick="logs">查看全部</button>`
+    + `</div></div>`;
+  if (d.error) el.innerHTML = head + `<div class="empty">加载失败：${esc(d.error)}</div>`;
+  else if (!rows.length) el.innerHTML = head + `<div class="empty">暂无激活事件——客户端激活或后台改卡密后会出现在这里。</div>`;
+  else el.innerHTML = head + `<ol class="tl-track">` + rows.map(r =>
+      `<li class="tl-item" data-tone="${resultTone(r.result)}"><span class="tl-dot"></span>`
+      + `<time class="mono">${fmtT(r.at)}</time><b>${esc(resultLabel(r.result))}</b>`
+      + `<span class="tl-meta mono">${esc(r.code || "—")}</span>`
+      + `<span class="tl-meta dim">${esc(r.ip || r.device_id || "—")}</span></li>`).join("") + `</ol>`;
+  el.querySelectorAll("[data-quick]").forEach(b => b.onclick = () => verbClick(b.dataset.quick));
 }
 function ledgerTable(rows, withOps, fixed, stateId) {
   const cols = fixed ? '<colgroup><col style="width:17%"><col style="width:6%"><col style="width:9%"><col style="width:10%"><col style="width:10%"><col style="width:11%"><col style="width:11%"><col style="width:12%"><col></colgroup>' : '';
@@ -2652,7 +2717,7 @@ document.querySelectorAll("nav.verbs button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav.verbs button").forEach(x => x.classList.toggle("on", x === b));
   ["overview","licenses","logs","gen","release","ann","iptv","vod-sources"].forEach(t =>
     document.getElementById("tab-" + t).style.display = t === b.dataset.tab ? "" : "none");
-  if (b.dataset.tab === "overview") { loadStats(); loadHealth(); loadOvLedger(); }
+  if (b.dataset.tab === "overview") { loadStats(); loadHealth(); loadOvLedger(); loadOvTimeline(); }
   if (b.dataset.tab === "licenses") loadList();
   if (b.dataset.tab === "logs") loadLogs();
   if (b.dataset.tab === "release") switchReleaseTab("hu");
@@ -2673,7 +2738,7 @@ document.getElementById("btn-rehealth").onclick = loadHealth;
 const RESET_SCOPE = {overview:"overview", licenses:"licenses", logs:"logs", hu:"hu",
                      ann:"ann", iptv:"iptv", "vod-sources":"vod"};
 const RESET_REFRESH = {
-  overview: () => { loadStats(); loadHuKpi(); loadOvLedger(); loadHealth(); },
+  overview: () => { loadStats(); loadHuKpi(); loadOvLedger(); loadHealth(); loadOvTimeline(); },
   licenses: () => { loadStats(); loadList(); },
   logs: () => loadLogs(),
   hu: () => { loadHu(); loadHuKpi(); loadStats(); },
@@ -2800,6 +2865,7 @@ async function resetSubmit() {
 loadStats();
 loadHealth();
 loadOvLedger();
+loadOvTimeline();
 vodLatLoad();
 /* hash 深链：旧的 #hu / #apk 仍然兼容，并统一落到版本发布菜单 */
 const h = location.hash.slice(1);
