@@ -2,6 +2,7 @@ package com.qiubo.optimaltv.ui.favorites
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -521,6 +522,73 @@ private fun androidx.compose.foundation.lazy.LazyListScope.favHisItems(
             }
         }
     }
+    // 2026-09-22：手动「检查更新」入口——触屏点按即查 APK 清单，结果行内回显
+    //（用户报「收不到更新提示」后加的手动通道；忽略「稍后更新」记忆）。
+    item(key = "update-row") { UpdateCheckRow(s, sidePad) }
+}
+
+/**
+ * 应用更新行：左侧标题 + 当前版本/检查结果，右侧「检查更新」按钮。
+ * 手动检查忽略「稍后更新」记忆，点过稍后的版本也能重新拉起更新弹窗。
+ */
+@Composable
+private fun UpdateCheckRow(s: Float, sidePad: Float) {
+    val check by com.qiubo.optimaltv.apkupdate.ApkUpdateManager.checkState.collectAsStateWithLifecycle()
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = sidePad.sx(s), end = sidePad.sx(s), top = 44f.sx(s), bottom = 16f.sx(s)),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                "应用更新", color = OtvColors.White.copy(alpha = 0.92f),
+                fontSize = 30f.sxs(s), fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(12f.sx(s)))
+            Text(
+                updateCheckStatusText(check),
+                color = updateCheckStatusColor(check),
+                fontSize = 22f.sxs(s),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .tapCard { com.qiubo.optimaltv.apkupdate.ApkUpdateManager.checkForUpdatesManually() }
+                .clip(RoundedCornerShape(50))
+                .background(Color(0x1FFFFFFF))
+                .border(1f.sx(s), Color(0x33FFFFFF), RoundedCornerShape(50))
+                .padding(horizontal = 28f.sx(s), vertical = 14f.sx(s)),
+        ) {
+            Text(
+                if (check is com.qiubo.optimaltv.apkupdate.ApkCheckState.Checking) "正在检查…" else "检查更新",
+                color = OtvColors.AccentBlue,
+                fontSize = 24f.sxs(s),
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+private fun updateCheckStatusText(state: com.qiubo.optimaltv.apkupdate.ApkCheckState?): String = when (state) {
+    null -> "当前版本 ${com.qiubo.optimaltv.BuildConfig.VERSION_NAME}" +
+        "（${com.qiubo.optimaltv.BuildConfig.VERSION_CODE}）"
+    com.qiubo.optimaltv.apkupdate.ApkCheckState.Checking -> "正在检查更新…"
+    is com.qiubo.optimaltv.apkupdate.ApkCheckState.UpToDate ->
+        "已是最新版本 ${state.localVersionName}（${state.localVersionCode}）"
+    is com.qiubo.optimaltv.apkupdate.ApkCheckState.UpdateFound ->
+        "发现新版本 ${state.versionName}，请按弹窗提示更新"
+    is com.qiubo.optimaltv.apkupdate.ApkCheckState.Failed -> "检查失败：${state.message}"
+}
+
+private fun updateCheckStatusColor(state: com.qiubo.optimaltv.apkupdate.ApkCheckState?): Color = when (state) {
+    is com.qiubo.optimaltv.apkupdate.ApkCheckState.UpToDate -> Color(0xFF30D158)
+    is com.qiubo.optimaltv.apkupdate.ApkCheckState.UpdateFound -> OtvColors.AccentBlue
+    is com.qiubo.optimaltv.apkupdate.ApkCheckState.Failed -> Color(0xFFFF9F0A)
+    else -> OtvColors.White50
 }
 
 private fun fmtDate(ms: Long): String =

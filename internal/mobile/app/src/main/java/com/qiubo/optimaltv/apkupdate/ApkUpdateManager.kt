@@ -39,6 +39,19 @@ sealed interface ApkUpdateState {
     data class Error(val message: String) : ApkUpdateState
 }
 
+/** 手动「检查更新」（我的页按钮）的结果，供页面行内展示。 */
+sealed interface ApkCheckState {
+    data object Checking : ApkCheckState
+
+    /** 已是最新：local 为当前安装版本。 */
+    data class UpToDate(val localVersionName: String, val localVersionCode: Long) : ApkCheckState
+
+    /** 发现新版本：更新弹窗由 [ApkUpdateManager.offer] 驱动。 */
+    data class UpdateFound(val versionName: String, val versionCode: Long) : ApkCheckState
+
+    data class Failed(val message: String) : ApkCheckState
+}
+
 data class ApkUpdateOffer(
     val manifest: ApkUpdateManifest,
     val decision: ApkUpdateDecision,
@@ -72,13 +85,33 @@ object ApkUpdateManager {
     private val _state = MutableStateFlow<ApkUpdateState?>(null)
     val state: StateFlow<ApkUpdateState?> = _state.asStateFlow()
 
+    private val _checkState = MutableStateFlow<ApkCheckState?>(null)
+    val checkState: StateFlow<ApkCheckState?> = _checkState.asStateFlow()
+
     fun init(context: Context) {
-        if (initialized || !BuildConfig.APK_UPDATE_ENABLED) return
+        if (initialized) return
         initialized = true
         appContext = context.applicationContext
+        if (!BuildConfig.APK_UPDATE_ENABLED) return
         scope.launch {
-            runCatching { checkLatest() }
+            runCatching { checkLatest(manual = false) }
                 .onFailure { OtvLog.w("apk update: 检查失败（静默跳过）: ${it.message}") }
+        }
+    }
+
+    /**
+     * 我的页「检查更新」：用户主动触发，结果写进 [checkState]；
+     * 与启动时的静默检查不同，这里忽略「稍后更新」记忆并回报失败原因。
+     */
+    fun checkForUpdatesManually() {
+        if (!initialized || _checkState.value is ApkCheckState.Checking) return
+        _checkState.value = ApkCheckState.Checking
+        scope.launch {
+            runCatching { checkLatest(manual = true) }
+                .onFailure {
+                    OtvLog.w("apk update: 手动检查失败: ${it.message}")
+                    _checkState.value = ApkCheckState.Failed(it.message ?: "检查失败，请稍后重试")
+                }
         }
     }
 
@@ -149,9 +182,16 @@ object ApkUpdateManager {
         }
     }
 
-    private suspend fun checkLatest() {
+    private suspend fun checkLatest(manual: Boolean) {
+        if (!BuildConfig.APK_UPDATE_ENABLED) {
+            if (manual) _checkState.value = ApkCheckState.Failed("当前安装包未启用应用内更新")
+            return
+        }
         val endpoint = BuildConfig.APK_UPDATE_URL.trim()
-        if (endpoint.isBlank()) return
+        if (endpoint.isBlank()) {
+            if (manual) _checkState.value = ApkCheckState.Failed("未配置应用内更新地址")
+            return
+        }
         val uri = Uri.parse(endpoint)
         if (uri.scheme != "https") throw IllegalArgumentException("APK 更新地址必须使用 HTTPS")
 
@@ -164,15 +204,36 @@ object ApkUpdateManager {
             if (!response.isSuccessful) throw IllegalStateException("HTTP ${response.code}")
             val body = response.body?.string().orEmpty()
             val manifest = parseManifest(JSONObject(body))
-            if (manifest.packageName != appContext.packageName) return
+            if (manifest.packageName != appContext.packageName) {
+                if (manual) _checkState.value = ApkCheckState.Failed("更新清单与当前安装包渠道不匹配")
+                return
+            }
             val localVersion = appContext.packageManager
                 .getPackageInfo(appContext.packageName, 0).longVersionCode
             val decision = ApkUpdatePolicy.decide(localVersion, manifest)
-            if (decision == ApkUpdateDecision.NONE) return
-            if (decision == ApkUpdateDecision.OPTIONAL && isDismissed(manifest.versionCode)) return
+            if (!ApkUpdatePolicy.shouldPrompt(decision, isDismissed(manifest.versionCode), manual)) {
+                if (manual && decision == ApkUpdateDecision.NONE) {
+                    _checkState.value = ApkCheckState.UpToDate(
+                        localVersionName = installedVersionName(),
+                        localVersionCode = localVersion,
+                    )
+                }
+                return
+            }
             _offer.value = ApkUpdateOffer(manifest, decision)
+            if (manual) {
+                _checkState.value = ApkCheckState.UpdateFound(
+                    versionName = manifest.versionName,
+                    versionCode = manifest.versionCode,
+                )
+            }
         }
     }
+
+    /** 当前安装包的 versionName（展示用；读取失败时退化为版本号字符串）。 */
+    private fun installedVersionName(): String = runCatching {
+        appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName
+    }.getOrNull().orEmpty().ifBlank { BuildConfig.VERSION_NAME }
 
     private fun parseManifest(root: JSONObject): ApkUpdateManifest {
         val apk = root.optJSONObject("apk") ?: root

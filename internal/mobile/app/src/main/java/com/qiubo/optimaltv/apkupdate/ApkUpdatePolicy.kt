@@ -62,4 +62,18 @@ object ApkUpdatePolicy {
             ApkUpdateDecision.OPTIONAL
         }
     }
+
+    /**
+     * 是否应当弹更新弹窗（2026-09-22）：手动「检查更新」是用户明确意图，
+     * 忽略「稍后更新」记忆，否则点过稍后的版本永远等不到第二次提示。
+     */
+    fun shouldPrompt(
+        decision: ApkUpdateDecision,
+        dismissed: Boolean,
+        manual: Boolean,
+    ): Boolean = when (decision) {
+        ApkUpdateDecision.NONE -> false
+        ApkUpdateDecision.REQUIRED -> true
+        ApkUpdateDecision.OPTIONAL -> manual || !dismissed
+    }
 }

@@ -1,7 +1,9 @@
 package com.qiubo.optimaltv.apkupdate
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ApkUpdatePolicyTest {
@@ -93,6 +95,38 @@ class ApkUpdatePolicyTest {
 
         assertEquals(2, manifest.apk.parts.size)
         assertEquals(ApkUpdateDecision.OPTIONAL, ApkUpdatePolicy.decide(localVersionCode = 35, manifest = manifest))
+    }
+
+    @Test
+    fun dismissedOptionalUpdateOnlyPromptedAgainManually() {
+        assertFalse(
+            ApkUpdatePolicy.shouldPrompt(
+                ApkUpdateDecision.OPTIONAL, dismissed = true, manual = false,
+            ),
+        )
+        assertTrue(
+            ApkUpdatePolicy.shouldPrompt(
+                ApkUpdateDecision.OPTIONAL, dismissed = true, manual = true,
+            ),
+        )
+    }
+
+    @Test
+    fun requiredUpdateIgnoresDismissedVersion() {
+        assertTrue(
+            ApkUpdatePolicy.shouldPrompt(
+                ApkUpdateDecision.REQUIRED, dismissed = true, manual = false,
+            ),
+        )
+    }
+
+    @Test
+    fun sameVersionNeverPromptsEvenManually() {
+        assertFalse(
+            ApkUpdatePolicy.shouldPrompt(
+                ApkUpdateDecision.NONE, dismissed = false, manual = true,
+            ),
+        )
     }
 
     private fun manifest(
