@@ -532,6 +532,10 @@ body.portrait .src-picker .sp-chips{flex-wrap:wrap;justify-content:center}
   fill:#fff;filter:drop-shadow(0 3px 10px rgba(0,0,0,.6))}
 #gestInd .gi-time{display:block;margin-top:calc(8px/var(--z,1));font-size:calc(14px/var(--z,1));
   font-weight:600;font-variant-numeric:tabular-nums}
+/* 长按倍速（2026-09-21）：与双击快进同款「无底色 + 投影」字形（App GestureIndicator 同口径） */
+#gestInd .gi-speed{font-size:calc(34px/var(--z,1));font-weight:700;line-height:1}
+#gestInd .gi-sub{display:block;margin-top:calc(8px/var(--z,1));font-size:calc(13px/var(--z,1));
+  font-weight:500;opacity:.9}
 #gestInd .gi-ico{display:inline-block;width:calc(18px/var(--z,1));height:calc(18px/var(--z,1));
   vertical-align:calc(-4px/var(--z,1));margin-right:calc(8px/var(--z,1));
   fill:none;stroke:#fff;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}

@@ -9,6 +9,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -54,6 +56,7 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -213,7 +216,8 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
         }
 
         // 手势层（影视#1 v1.19 常规移动端手势）：单击=浮层开关；双击左右 1/3 = ±15s、
-        // 双击中央=播放/暂停；水平拖动=滑动快进（带预览浮层）；竖直拖动=左半亮度/右半音量。
+        // 双击中央=播放/暂停；水平拖动=滑动快进（带预览浮层）；竖直拖动=左半亮度/右半音量；
+        // 长按左/右任一侧=3.0x 快进播放（2026-09-21，松手回用户倍速）。
         // 必须是视频层的【兄弟节点且靠后组合】——Compose 命中测试取最前的手势分支，
         // AndroidView（Media3 PlayerView）会拦截祖先链路上的事件，兄弟置顶才收得到
         if (ui.fatalMsg == null) {
@@ -232,6 +236,13 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                             onTap = {
                                 if (ui.isLive) vm.toggleSrcPicker() else vm.toggleControls()
                                 tick++
+                            },
+                            // 长按左右两侧：按住期间临时 3.0x（直播不可变速；松手由下方抬手观察器还原）
+                            onLongPress = {
+                                if (!ui.isLive && ui.durationMs > 0) {
+                                    vm.beginSpeedBoost()
+                                    tick++
+                                }
                             },
                             onDoubleTap = { off ->
                                 if (!ui.isLive) {
@@ -315,6 +326,17 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                             onDragEnd = { vbKind = null },
                             onDragCancel = { vbKind = null },
                         )
+                    }
+                    // 长按倍速的抬手复位：只旁观原始事件流（Final 通道，不消费），
+                    // 与点按/拖动检测互不干扰——手指抬起即回用户倍速。
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            while (true) {
+                                if (awaitPointerEvent(PointerEventPass.Final).changes.none { it.pressed }) break
+                            }
+                            vm.endSpeedBoost()
+                        }
                     },
             )
 
@@ -324,6 +346,7 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                 seekDir = seekDir,
                 vbKind = vbKind,
                 vbValue = vbValue,
+                speedBoost = ui.speedBoost,
             )
         }
 
@@ -462,6 +485,7 @@ private fun PortraitPlayerPanel(ui: PlayerUiState, vm: PlayerViewModel) {
  *
  * 2026-09-17 用户要求：快进/快退那个图标改 Apple 极简风、去掉深色底——现在是
  * SF Symbols `goforward`/`gobackward` 同款白描边圆箭头，只有一层柔和文字投影。
+ * 2026-09-21 追加长按倍速提示：同款「无底色 + 投影」，大字号档位 + 一行说明。
  */
 @Composable
 private fun GestureIndicator(
@@ -469,8 +493,9 @@ private fun GestureIndicator(
     seekDir: Int,
     vbKind: String?,
     vbValue: Float,
+    speedBoost: Float?,
 ) {
-    if (seekPreviewMs == null && vbKind == null) return
+    if (seekPreviewMs == null && vbKind == null && speedBoost == null) return
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         if (seekPreviewMs != null) {
             /* 简 4 定稿（2026-09-19 v3 评审）：无底色双三角纯字形 + 下方时间，仅靠投影保证可读性 */
@@ -480,6 +505,29 @@ private fun GestureIndicator(
                 Text(
                     formatTime(seekPreviewMs),
                     color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                    style = with(LocalDensity.current) {
+                        LocalTextStyle.current.copy(
+                            shadow = Shadow(color = Color(0x99000000), blurRadius = 20f, offset = Offset(0f, 3f)),
+                        )
+                    },
+                )
+            }
+        } else if (speedBoost != null) {
+            /* 长按倍速（2026-09-21）：档位大字 + 说明小字，沿用双击快进的投影口径 */
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    "${(speedBoost * 10f).roundToInt() / 10f}x",
+                    color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Bold,
+                    style = with(LocalDensity.current) {
+                        LocalTextStyle.current.copy(
+                            shadow = Shadow(color = Color(0x99000000), blurRadius = 20f, offset = Offset(0f, 3f)),
+                        )
+                    },
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "倍速播放中",
+                    color = Color(0xE6FFFFFF), fontSize = 13.sp, fontWeight = FontWeight.Medium,
                     style = with(LocalDensity.current) {
                         LocalTextStyle.current.copy(
                             shadow = Shadow(color = Color(0x99000000), blurRadius = 20f, offset = Offset(0f, 3f)),

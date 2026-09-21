@@ -251,11 +251,20 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
             contentAlignment = Alignment.Center,
         ) {
             if (vm.hasEngine()) {
-                // key=engineId：直播解码失败切 libVLC 兜底引擎时重建渲染视图
-                // （AndroidView factory 只跑一次，不换 key 会继续显示旧引擎的 PlayerView）
-                key(ui.engineId) {
+                // key=engineEpoch（引擎实例代数，2026-09-21 黑屏只剩声音修复）：
+                // AndroidView factory 只跑一次，任何「换引擎实例」都必须换 key。旧版按
+                // engineId 取 key，同类型重建（卡顿阶梯 RECREATE_ENGINE、直播 30s 自动
+                // 重试、错误态手动重试）时 key 不变 → 视图树继续挂着已 release 的旧
+                // PlayerView，新引擎的渲染面从未挂进窗口 ⇒ 整屏全黑、声音照常。
+                // 口径与 TvScreen 视频层、移动版 PlayerScreen 统一。
+                key(ui.engineEpoch) {
                     AndroidView(
-                        factory = { vm.engine.renderView },
+                        factory = {
+                            val v = vm.engine.renderView
+                            // 同一渲染面若仍挂在旧容器上，先摘下来再交给新的 AndroidView
+                            (v.parent as? android.view.ViewGroup)?.removeView(v)
+                            v
+                        },
                         modifier = Modifier.fillMaxSize(),
                     )
                 }

@@ -78,6 +78,9 @@ data class PlayerUiState(
     val positionMs: Long = 0,
     val durationMs: Long = 0,
     val speed: Float = 1f,
+    /** 长按倍速镜像（2026-09-21 移动端手势）：非 null = 画面左右侧被按住，值 = 临时档位；
+     *  松手回落到 [speed]，浮层提示与倍速胶囊都以它为准。 */
+    val speedBoost: Float? = null,
     val aspectOrdinal: Int = 0,
     // UI 层状态
     val controlsVisible: Boolean = false,
@@ -239,6 +242,34 @@ class PlayerViewModel(
     private var lastRecoveryPosMs = 0L
     /** v1.16 引擎实例代数（PlayerUiState.engineEpoch 的来源计数） */
     private var engineEpochCounter = 0
+
+    /**
+     * 引擎实例装配（2026-09-21「播放中突然黑屏只剩声音」修复）。
+     *
+     * 任何「新建并替换 engine 实例」的路径都必须走这里：实例代数 +1 写回 UI，播放页
+     * 渲染层按 [PlayerUiState.engineEpoch] 换 Compose key 重建 AndroidView。
+     * 旧版只在三段回退/卡顿阶梯里 +1，普通重试路径（boot/bootLive/bootReplay/
+     * bootHhkanVid）重建实例却不 +1 → key 不变，视图树继续挂着**已 release** 的旧
+     * PlayerView，新引擎的渲染面从未挂进窗口 ⇒ 整屏全黑、声音照常。
+     */
+    private fun installEngine(newEngine: MediaEngine) {
+        engine = newEngine
+        engineEpochCounter++
+        _ui.value = _ui.value.copy(
+            engineId = newEngine.engineId,
+            engineName = newEngine.displayName,
+            engineEpoch = engineEpochCounter,
+        )
+    }
+
+    /**
+     * 进错误兜底态前先停播（2026-09-21）：错误卡是「无法播放」语义，旧版只把画面遮住、
+     * 不停引擎，实测「卡片已弹出、背景音照常响」。重试会重新 prepare，不需要保留播放态。
+     */
+    private fun stopForFatal() {
+        runCatching { if (hasEngine()) engine.pause() }
+    }
+
     /** v1.16 IPTV 多源备份队列：当前频道的备用线路（switchIptv 传入，主线路失败时逐条热切换） */
     private val iptvBackups = ArrayDeque<String>()
     /** v1.16 当前频道的主线路与备用清单（30s 自动重试/手动重试从主线路整队重启） */
@@ -296,10 +327,12 @@ class PlayerViewModel(
         _ui.value = _ui.value.copy(title = title)
         val r = runCatching { Graph.live.replayLines(home, away) }.getOrNull()
         if (r == null || r.second.isEmpty()) {
+            stopForFatal()
             _ui.value = _ui.value.copy(fatalMsg = "暂无该场比赛回放视频", title = title)
             return
         }
-        engine = EngineRegistry.create(settings.current().engineId, Graph.appContext)
+        if (this::engine.isInitialized) runCatching { engine.release() }
+        installEngine(EngineRegistry.create(settings.current().engineId, Graph.appContext))
         _ui.value = _ui.value.copy(
             title = r.first, epCount = 1, lines = r.second,
             engineId = engine.engineId, engineName = engine.displayName,
@@ -314,10 +347,12 @@ class PlayerViewModel(
         val vid = vodId.removePrefix("hhkanplay:")
         val lines = runCatching { Graph.live.hhkanVidLines(vid) }.getOrDefault(emptyList())
         if (lines.isEmpty()) {
+            stopForFatal()
             _ui.value = _ui.value.copy(fatalMsg = "该内容暂无可用线路")
             return
         }
-        engine = EngineRegistry.create(settings.current().engineId, Graph.appContext)
+        if (this::engine.isInitialized) runCatching { engine.release() }
+        installEngine(EngineRegistry.create(settings.current().engineId, Graph.appContext))
         _ui.value = _ui.value.copy(
             lines = lines, engineId = engine.engineId, engineName = engine.displayName,
             aspectOrdinal = settings.current().aspectOrdinal,
@@ -374,7 +409,7 @@ class PlayerViewModel(
         if (!prefUrl.isNullOrBlank()) {
             OtvLog.i("bootLive fast-path：$preferred（$prefLabel）单源解析成功 → 立即起播，其余源后台补齐")
             if (this::engine.isInitialized) runCatching { engine.release() }
-            engine = EngineRegistry.create(settings.current().engineId, Graph.appContext)
+            installEngine(EngineRegistry.create(settings.current().engineId, Graph.appContext))
             liveSrcs = listOf(preferred)
             _ui.value = _ui.value.copy(
                 title = "足球直播", epCount = 1,
@@ -393,6 +428,7 @@ class PlayerViewModel(
         OtvLog.i("bootLive match=$matchId fresh=$fresh 信号源=${pairs.size} 个")
         if (pairs.isEmpty()) {
             OtvLog.w("bootLive 无可用信号 → fatalMsg")
+            stopForFatal()
             _ui.value = _ui.value.copy(fatalMsg = "直播信号暂不可用", title = "足球直播", isLive = true)
             scheduleLiveAutoRetry()
             return
@@ -407,7 +443,7 @@ class PlayerViewModel(
         val engineOverride = com.qiubo.optimaltv.DebugNavBus.pendingEngine?.also {
             com.qiubo.optimaltv.DebugNavBus.pendingEngine = null
         }
-        engine = EngineRegistry.create(engineOverride ?: settings.current().engineId, Graph.appContext)
+        installEngine(EngineRegistry.create(engineOverride ?: settings.current().engineId, Graph.appContext))
         _ui.value = _ui.value.copy(
             title = "足球直播", epCount = 1, lines = lines, isLive = true,
             engineId = engine.engineId, engineName = engine.displayName,
@@ -442,6 +478,7 @@ class PlayerViewModel(
         OtvLog.i("bootIptv 入口: $chName url=${url.take(90)}")
         _ui.value = _ui.value.copy(title = chName, isLive = true)
         if (url.isBlank()) {
+            stopForFatal()
             _ui.value = _ui.value.copy(fatalMsg = "播放地址缺失")
             return
         }
@@ -449,6 +486,7 @@ class PlayerViewModel(
         val base = com.qiubo.optimaltv.data.source.UrlGuard.check(url)
         if (base.blocked) {
             OtvLog.w("iptv UrlGuard 拒绝起播（字符串级）：${base.reason} url=${url.take(80)}")
+            stopForFatal()
             _ui.value = _ui.value.copy(fatalMsg = "该源地址被安全策略拒绝（${base.reason}）")
             return
         }
@@ -458,6 +496,7 @@ class PlayerViewModel(
         }
         if (resolved.blocked) {
             OtvLog.w("iptv UrlGuard 拒绝起播（解析级）：${resolved.reason} url=${url.take(80)}")
+            stopForFatal()
             _ui.value = _ui.value.copy(fatalMsg = "该源域名解析异常，已拒绝播放")
             return
         }
@@ -473,8 +512,7 @@ class PlayerViewModel(
         }
         if (engineOverrideIptv != null || !this::engine.isInitialized) {
             if (this::engine.isInitialized) runCatching { engine.release() }
-            engine = EngineRegistry.create(engineOverrideIptv ?: settings.current().engineId, Graph.appContext)
-            engineEpochCounter++
+            installEngine(EngineRegistry.create(engineOverrideIptv ?: settings.current().engineId, Graph.appContext))
         }
         // v1.17 IPTV 大缓冲档（用户需求：美国/英国源卡顿）——首次 prepare 前设置生效
         engine.setLargeBufferPreferred(true)
@@ -684,6 +722,7 @@ class PlayerViewModel(
         val item = repo.itemById(vodId)
             ?: repo.resolveDetail(vodId)   // 目录外条目（实时搜索结果）兜底
         if (item == null) {
+            stopForFatal()
             _ui.value = _ui.value.copy(fatalMsg = "影片不存在或源未加载")
             return
         }
@@ -693,6 +732,7 @@ class PlayerViewModel(
         // 线路构建（含 hhkan 懒解析源）：跨源同名线路或站内多线路
         val lines = VisibleVodLinePolicy.apply(repo.resolveLines(effItem, epStart))
         if (lines.isEmpty()) {
+            stopForFatal()
             _ui.value = _ui.value.copy(fatalMsg = "该集没有可用线路", title = effItem.title)
             return
         }
@@ -702,7 +742,8 @@ class PlayerViewModel(
         val enginePref = memory?.first ?: settings.current().engineId
         val initialLine = memory?.second?.takeIf { it in lines.indices } ?: 0
 
-        engine = EngineRegistry.create(enginePref, Graph.appContext)
+        if (this::engine.isInitialized) runCatching { engine.release() }
+        installEngine(EngineRegistry.create(enginePref, Graph.appContext))
         // 需求⑨修订：更多面板「选集区仅电影隐藏」。分类优先目录 categoryId
         // （1=电影 2=电视剧 3=动漫 4=综艺 6=短剧）；目录外用 classifyVod 启发式，
         // 另对「集名全是清晰度/语言版本（HD中字/蓝光国语/TC，无集/期/话）」的
@@ -1095,6 +1136,7 @@ class PlayerViewModel(
                 }
             }
             RecoveryAction.GIVE_UP -> {
+                stopForFatal()
                 _ui.value = s.copy(fatalMsg = "播放持续卡顿，已完成自动恢复", controlsVisible = false)
                 if (s.isLive) scheduleLiveAutoRetry()
             }
@@ -1104,8 +1146,7 @@ class PlayerViewModel(
     private fun recreateEngineForRecovery(line: Int, resume: Long) {
         val id = engine.engineId
         runCatching { engine.release() }
-        engine = EngineRegistry.create(id, Graph.appContext)
-        engineEpochCounter++
+        installEngine(EngineRegistry.create(id, Graph.appContext))
         _ui.value = _ui.value.copy(
             engineId = engine.engineId, engineName = engine.displayName, engineEpoch = engineEpochCounter,
         )
@@ -1254,8 +1295,7 @@ class PlayerViewModel(
     private fun switchEngine(targetId: String) {
         if (!hasEngine()) return
         runCatching { engine.release() }
-        engine = EngineRegistry.create(targetId, Graph.appContext)
-        engineEpochCounter++
+        installEngine(EngineRegistry.create(targetId, Graph.appContext))
         _ui.value = _ui.value.copy(
             engineId = engine.engineId, engineName = engine.displayName, engineEpoch = engineEpochCounter,
         )
@@ -1314,6 +1354,7 @@ class PlayerViewModel(
             if (reason.contains("DECODING_FAILED")) {
                 OtvLog.w("line fail(${_ui.value.activeLine}): 解码失败（重解析无效）→ 错误态等 30s 自动重试")
                 viewModelScope.launch { saveProgress(force = false) }
+                stopForFatal()
                 _ui.value = _ui.value.copy(fatalMsg = reason, controlsVisible = false)
                 scheduleLiveAutoRetry()
                 return
@@ -1330,6 +1371,7 @@ class PlayerViewModel(
                     sameLineRetries = 0
                     val next = _ui.value.lines.indices.firstOrNull { it != cur && it !in triedLines }
                     if (next == null) {
+                        stopForFatal()
                         _ui.value = _ui.value.copy(fatalMsg = reason, controlsVisible = false)
                         scheduleLiveAutoRetry()
                     } else {
@@ -1341,6 +1383,7 @@ class PlayerViewModel(
                     sameLineRetries = 0
                     OtvLog.w("line fail($cur): $reason → 所有直播源失败，进入错误态")
                     viewModelScope.launch { saveProgress(force = false) }
+                    stopForFatal()
                     _ui.value = _ui.value.copy(fatalMsg = reason, controlsVisible = false)
                     // 直播：错误态 30s 自动重试（fresh）——未开赛/上游抖动不用用户守着重试
                     scheduleLiveAutoRetry()
@@ -1372,6 +1415,7 @@ class PlayerViewModel(
         OtvLog.w("line fail(${_ui.value.activeLine}): $reason → ${next?.let { "换线 $it" } ?: "全部失败"}")
         if (next == null) {
             viewModelScope.launch { saveProgress(force = false) }
+            stopForFatal()
             _ui.value = _ui.value.copy(fatalMsg = reason, controlsVisible = false)
         } else {
             val pos = _ui.value.positionMs
@@ -1408,7 +1452,7 @@ class PlayerViewModel(
         if (idx !in _ui.value.lines.indices || idx == _ui.value.activeLine) return
         // 手动切源 = 用户重选起点：清空换线尝试记录——旧记录会把此前起播过的线路
         // 当「已试过」跳过（实测 bb 失败后跳过此前正常播放的 plu，全线耗尽进错误态）
-        engine.pause()
+        if (hasEngine()) engine.pause()
         _ui.value = _ui.value.copy(playState = EnginePlayState.BUFFERING)
         triedLines.clear()
         sameLineRetries = 0
@@ -1637,6 +1681,33 @@ class PlayerViewModel(
         if (!hasEngine()) return
         engine.setSpeed(v)
         viewModelScope.launch { settings.setSpeed(v) }
+        touch()
+    }
+
+    /** 长按快进手势进行标记（移动端 2026-09-21）；倍速恢复基准在按下瞬间取样 */
+    private var speedBoostActive = false
+    private var speedBeforeBoost = 1f
+
+    /**
+     * 长按画面左/右任一侧：临时提到 [PlaybackPolicy.LONG_PRESS_SPEED]，松手由 [endSpeedBoost] 还原。
+     * 直播不可变速（与网页版「直播不渲染倍速区」同口径）；只动引擎倍速，不写 settings——
+     * 「按住的那一下」不该被记成用户偏好。
+     */
+    fun beginSpeedBoost() {
+        if (speedBoostActive || !hasEngine() || _ui.value.isLive) return
+        speedBeforeBoost = _ui.value.speed.takeIf { it > 0.01f } ?: 1f
+        speedBoostActive = true
+        _ui.value = _ui.value.copy(speedBoost = PlaybackPolicy.LONG_PRESS_SPEED)
+        engine.setSpeed(PlaybackPolicy.LONG_PRESS_SPEED)
+        touch()
+    }
+
+    /** 松手/手势取消：清掉提示并回到用户原倍速（幂等，未按住时直接返回） */
+    fun endSpeedBoost() {
+        if (!speedBoostActive) return
+        speedBoostActive = false
+        _ui.value = _ui.value.copy(speedBoost = null)
+        if (hasEngine()) engine.setSpeed(speedBeforeBoost)
         touch()
     }
 

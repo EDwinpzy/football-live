@@ -2,7 +2,12 @@ package com.qiubo.optimaltv.ui.player
 
 import com.qiubo.optimaltv.data.model.LineInfo
 
-object PlaybackPolicy { const val SEEK_STEP_MS = 10_000L }
+object PlaybackPolicy {
+    const val SEEK_STEP_MS = 10_000L
+    /** 长按左右两侧的临时倍速（2026-09-21 移动端手势）：按住 = 该档，松手回用户倍速。
+     *  网页版 tools/backend-src/www/app.js 同名常量 LP_SPEED 同口径。 */
+    const val LONG_PRESS_SPEED = 3.0f
+}
 
 /** Decide whether a completed item should continue with the next VOD episode. */
 object AutoPlayPolicy {
