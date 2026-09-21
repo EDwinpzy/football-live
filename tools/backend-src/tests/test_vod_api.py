@@ -11,10 +11,61 @@ BACKEND = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 
 import proxy  # noqa: E402
+import vod_api  # noqa: E402
+import vod_sources  # noqa: E402
+
+
+class _StubCatalog:
+    """只回一份最小元数据，避免测试依赖豆瓣抓取。"""
+
+    def detail(self, douban_id, force_refresh=False):
+        return {"id": "douban:" + str(douban_id), "douban_id": str(douban_id),
+                "title": "更新中的剧", "year": "2026", "category": "tv", "sources": []}
+
+    def refresh_detail(self, douban_id):
+        return self.detail(douban_id, force_refresh=True)
+
+
+class VodServiceRefreshTest(unittest.TestCase):
+    """refresh=1 必须真的清掉片源短缓存——默认 resolver 与注入 resolver 两条路径都要覆盖。"""
+
+    def setUp(self):
+        self.registry = vod_sources.SourceRegistry([], version=1)
+        self.invalidated = []
+        real_invalidate = self.registry.invalidate_subject
+
+        def spy(subject):
+            self.invalidated.append(subject.get("title"))
+            return real_invalidate(subject)
+
+        self.registry.invalidate_subject = spy
+
+    def test_default_resolver_clears_short_cache_only_on_refresh(self):
+        service = vod_api.VodService(_StubCatalog(), self.registry)
+        service.detail("1292052", refresh=True)
+        self.assertEqual(self.invalidated, ["更新中的剧"])
+        service.detail("1292052")
+        self.assertEqual(self.invalidated, ["更新中的剧"])
+
+    def test_injected_resolver_also_clears_short_cache_on_refresh(self):
+        seen = []
+        service = vod_api.VodService(
+            _StubCatalog(), self.registry,
+            resolve_sources=lambda subject, wait_for_all=False: seen.append(subject) or [])
+        service.detail("1292052", refresh=True)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(self.invalidated, ["更新中的剧"])
+        service.detail("1292052")
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(self.invalidated, ["更新中的剧"])
 
 
 class _FakeVodService:
-    def home(self, category):
+    home_refreshes = []
+    detail_refreshes = []
+
+    def home(self, category, refresh=False):
+        self.home_refreshes.append(refresh)
         item = {"id": "douban:1292052", "title": "肖申克的救赎"}
         return {"category": category, "sections": [
             {"title": "最近热门", "items": [item]},
@@ -31,7 +82,8 @@ class _FakeVodService:
     def search(self, query, page=1, limit=30):
         return {"query": query, "page": page, "limit": limit, "items": [], "total": 0, "local": True}
 
-    def detail(self, douban_id, defer_sources=False):
+    def detail(self, douban_id, defer_sources=False, refresh=False):
+        self.detail_refreshes.append(refresh)
         return {"id": "douban:" + douban_id, "title": "肖申克的救赎",
                 "source_state": "matching" if defer_sources else "unavailable", "sources": []}
 
@@ -66,6 +118,10 @@ class VodApiContractTest(unittest.TestCase):
         self.assertEqual([s["title"] for s in payload["sections"]], ["最近热门", "最新上映", "豆瓣高分"])
         self.assertTrue(all(i["id"].startswith("douban:") for s in payload["sections"] for i in s["items"]))
 
+    def test_refresh_query_reaches_home_service(self):
+        self.fetch("/vod/home?category=movie&refresh=1")
+        self.assertTrue(proxy.VOD_SERVICE.home_refreshes[-1])
+
     def test_detail_keeps_subject_when_no_source_matches(self):
         payload = self.fetch("/vod/detail/1292052")
         self.assertEqual(payload["id"], "douban:1292052")
@@ -74,6 +130,10 @@ class VodApiContractTest(unittest.TestCase):
 
     def test_detail_distinguishes_matching_from_unavailable(self):
         self.assertEqual(self.fetch("/vod/detail/1292052?defer_sources=1")["source_state"], "matching")
+
+    def test_refresh_query_reaches_detail_service(self):
+        self.fetch("/vod/detail/1292052?refresh=1")
+        self.assertTrue(proxy.VOD_SERVICE.detail_refreshes[-1])
 
     def test_search_has_one_local_api_for_all_clients(self):
         payload = self.fetch("/api/search?q=%E8%82%96%E7%94%B3%E5%85%8B&limit=7")

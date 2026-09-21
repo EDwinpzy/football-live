@@ -110,7 +110,10 @@ fun VodScreen(nav: NavController) {
     val home by Graph.repo.homeFlow.collectAsStateWithLifecycle()
     /* 2026-09-18：进页兜底——目录为空（后端冷启动/热更重启期首轮抓取全失败）时补抓，
        否则 hero 会退化成空底板、分类卡与三栏全空。 */
-    LaunchedEffect(Unit) { Graph.repo.ensureCatalogFresh(); Graph.repo.refreshHome() }
+    LaunchedEffect(Unit) {
+        Graph.repo.ensureCatalogFresh(force = true)
+        Graph.repo.refreshHome(force = true)
+    }
     val cat0 = catalogState.catalog
     val heroesTop = remember(cat0, home) { buildHeroes(cat0, home) }
 
@@ -164,7 +167,7 @@ fun VodScreen(nav: NavController) {
                 // 分类 tab 下三块（原版 LIB_BLOCKS 数据源：最近热门=home 板块 / 最新上线=channel / 最近更新=latest；
                 // home/channel/latest 全挂时降级频道页三栏目 channel-sections）。「全部 ›」独立跳转 all 页
                 val selCatId = categories.getOrNull(catSel)?.first.orEmpty()
-                LaunchedEffect(selCatId) { Graph.repo.libBlocks(selCatId) }
+                LaunchedEffect(selCatId) { Graph.repo.libBlocks(selCatId, force = true) }
                 val libBlocks by Graph.repo.libBlocksFlow.collectAsStateWithLifecycle()
                 val fallbackSections by Graph.repo.sectionsFlow.collectAsStateWithLifecycle()
                 val hotSettled by Graph.repo.hotSettledFlow.collectAsStateWithLifecycle()

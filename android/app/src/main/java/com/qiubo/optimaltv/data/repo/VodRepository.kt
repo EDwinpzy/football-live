@@ -149,7 +149,7 @@ class VodRepository(
         while (_state.value.catalog == null) kotlinx.coroutines.delay(150)
     }
 
-    suspend fun refresh() {
+    suspend fun refresh(force: Boolean = false) {
         _state.value = _state.value.copy(loading = true)
         val cfg = settings.current()
         // 内置后端就绪探测：app 内置 proxy 冷启动需几秒，先轮询 /api/health（仅当指向 127.0.0.1）。
@@ -165,7 +165,8 @@ class VodRepository(
             val results: List<SourceResult> = sources.map { s ->
                 async {
                     try {
-                        SourceResult(s, s.snapshot(), null)
+                        val snapshot = s.snapshot(refresh = force)
+                        SourceResult(s, snapshot, null)
                     } catch (e: Exception) {
                         SourceResult(s, null, e)
                     }
@@ -273,12 +274,17 @@ class VodRepository(
     private var catalogRetry = 0
     private var catalogRetryJob: kotlinx.coroutines.Job? = null
 
+    private var catalogRefreshJob: kotlinx.coroutines.Job? = null
+
     /** 影视页进入兜底：目录还是空的（或条目为空）就补一次刷新。 */
-    fun ensureCatalogFresh() {
+    fun ensureCatalogFresh(force: Boolean = false) {
+        // 活跃 Job 判重对 force 也生效：影视页来回切会把 LaunchedEffect(Unit) 重新触发，
+        // 无脑放行会让同一轮目录抓取并发叠好几份。
+        if (catalogRefreshJob?.isActive == true) return
         val cat = _state.value.catalog
-        if (cat != null && cat.dedupedItems.isNotEmpty()) return
-        if (_state.value.loading) return
-        repoScope.launch { runCatching { refresh() } }
+        if (!force && cat != null && cat.dedupedItems.isNotEmpty()) return
+        if (_state.value.loading && !force) return
+        catalogRefreshJob = repoScope.launch { runCatching { refresh(force = force) } }
     }
 
     private fun scheduleCatalogRetry() {
@@ -300,8 +306,10 @@ class VodRepository(
      * 拉源站首页：精选板块 + 轮播焦点图。fire-and-forget（UI 触发后立即返回），
      * 守卫用活跃 Job 判重——不用 loading 布尔残留判重（协程取消后残留会永久挡住重试）。
      */
-    fun refreshHome() {
-        if (_home.value.sections.isNotEmpty() || _home.value.carousel.isNotEmpty() || homeJob?.isActive == true) return
+    fun refreshHome(force: Boolean = false) {
+        // 进行中的 Job 一律复用（awaitHome 也靠它 join）；force 只绕过「已有内容不再抓」。
+        if (homeJob?.isActive == true) return
+        if (!force && (_home.value.sections.isNotEmpty() || _home.value.carousel.isNotEmpty())) return
         _home.value = _home.value.copy(loading = true)
         homeJob = repoScope.launch {
             val base = settings.current().hhkanBaseUrl
@@ -309,13 +317,17 @@ class VodRepository(
                 _home.value = _home.value.copy(loading = false)
                 return@launch
             }
-            val d = runCatching { VodApiSource.fetchHome(base, okHttp, "movie") }
+            val d = runCatching { VodApiSource.fetchHome(base, okHttp, "movie", refresh = force) }
                 .onFailure { android.util.Log.w("OTV", "home 拉取失败: ${it.javaClass.simpleName} ${it.message}") }
                 .getOrNull()
             if (d == null || (d.sections.isEmpty() && d.carousel.isEmpty())) {
                 android.util.Log.w("OTV", "home 空结果（源站不可达或解析为空），保留空态等待重试")
             }
-            _home.value = HomeState(loading = false, sections = d?.sections.orEmpty(), carousel = d?.carousel.orEmpty())
+            _home.value = if (d != null && (d.sections.isNotEmpty() || d.carousel.isNotEmpty())) {
+                HomeState(loading = false, sections = d.sections, carousel = d.carousel)
+            } else {
+                _home.value.copy(loading = false)
+            }
         }
     }
 
@@ -417,7 +429,10 @@ class VodRepository(
     fun libBlocks(categoryId: String, force: Boolean) {
         val category = categoryId.removePrefix("douban:")
         val cid = categoryNumber(category) ?: return
-        if (cid in libDone || libJobs[cid]?.isActive == true) return
+        // 进行中的 Job 一律复用（门闸重进/自动补抓都会再调一次并 join 它）；
+        // force 只绕过「本类已完成」与失败退避。
+        if (libJobs[cid]?.isActive == true) return
+        if (!force && cid in libDone) return
         // 失败退避：距上次全挂不足 60s 不重试（防源真挂时每次进页都冷抓）
         val failAt = libFailAt[cid]
         if (!force && failAt != null && System.currentTimeMillis() - failAt < 60_000L) return
@@ -431,7 +446,7 @@ class VodRepository(
             fun store(sections: List<HSec>) {
                 _libBlocks.value = _libBlocks.value + (cid to completeBlocks(sections))
             }
-            val home = runCatching { VodApiSource.fetchHome(base, okHttp, category) }
+            val home = runCatching { VodApiSource.fetchHome(base, okHttp, category, refresh = force) }
                 .onFailure { android.util.Log.w("OTV", "豆瓣分类三栏失败: ${it.message}") }
                 .getOrNull()
             val doubanSections = home?.sections.orEmpty()
@@ -670,19 +685,24 @@ class VodRepository(
     /** 已为播放会话拉取过完整补充源的好好看 vid。 */
     private val playbackDetailReady = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-    private suspend fun fetchDetailCached(ref: String): DetailInfo? {
-        detailInfoCache[ref]?.let { return it }
-        val d = runCatching { VodApiSource.fetchDetail(settings.current().hhkanBaseUrl, detailClient, ref) }
+    private suspend fun fetchDetailCached(ref: String, forceRefresh: Boolean = false): DetailInfo? {
+        val cached = detailInfoCache[ref]
+        if (!forceRefresh && cached != null) return cached
+        val d = runCatching {
+            VodApiSource.fetchDetail(
+                settings.current().hhkanBaseUrl, detailClient, ref, refresh = forceRefresh)
+        }
             .onFailure { android.util.Log.w("OTV", "fetchDetail 失败 ref=$ref : ${it.message}") }
             .getOrNull()
-            ?: return null
+            ?: return cached
         if (d.lines.isNotEmpty()) detailInfoCache[ref] = d
-        return d
+        return if (d.lines.isNotEmpty() || cached == null) d else cached
     }
 
     /** 解析详情：拉选集（默认线路）+ 元数据补全；非懒源原样返回 */
-    suspend fun resolveDetail(vodId: String): VodItem? = withContext(Dispatchers.IO) {
-        detailCache[vodId]?.let { return@withContext it }
+    suspend fun resolveDetail(vodId: String, forceRefresh: Boolean = false): VodItem? = withContext(Dispatchers.IO) {
+        val cached = detailCache[vodId]
+        if (!forceRefresh && cached != null) return@withContext cached
         // 目录外条目兜底（实时搜索结果等）：hhkan: 前缀直接构造裸 item 走懒解析
         val item = itemById(vodId) ?: if (vodId.startsWith("douban:")) {
             com.qiubo.optimaltv.data.model.VodItem(
@@ -691,7 +711,7 @@ class VodRepository(
             )
         } else return@withContext null
         if (item.detailRef.isBlank()) return@withContext item
-        val d = fetchDetailCached(item.detailRef) ?: return@withContext null
+        val d = fetchDetailCached(item.detailRef, forceRefresh) ?: return@withContext cached
         // 集数网格展示默认线路（第一条）的选集；全部线路在播放器内换线
         val eps = d.lines.firstOrNull()?.episodes?.mapIndexed { i, (name, _, _) ->
             Episode(i, name.ifBlank { "第${i + 1}集" }, "")

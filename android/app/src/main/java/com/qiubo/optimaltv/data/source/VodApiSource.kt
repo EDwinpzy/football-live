@@ -21,13 +21,15 @@ class VodApiSource(
     override val id: String = "douban"
     override val displayName: String = "豆瓣"
 
-    override suspend fun snapshot(): SourceSnapshot = withContext(Dispatchers.IO) {
+    override suspend fun snapshot(): SourceSnapshot = snapshot(refresh = false)
+
+    suspend fun snapshot(refresh: Boolean): SourceSnapshot = withContext(Dispatchers.IO) {
         val categories = CATEGORIES.map { Category("douban:${it.first}", it.second) }
         val items = coroutineScope {
             CATEGORIES.map { (key, _) ->
                 async {
                     runCatching {
-                        val json = fetchJson(baseUrl, "/vod/home?category=$key", okHttp)
+                        val json = fetchJson(baseUrl, VodRoutes.home(key, refresh), okHttp)
                         val sections = json.optJSONArray("sections")
                         (0 until (sections?.length() ?: 0)).flatMap { i ->
                             parseItems(sections?.optJSONObject(i)?.optJSONArray("items"), key, baseUrl)
@@ -46,15 +48,19 @@ class VodApiSource(
         )
 
         object VodRoutes {
-            fun home(category: String) = "/vod/home?category=$category"
+            fun home(category: String, refresh: Boolean = false) =
+                "/vod/home?category=$category" + if (refresh) "&refresh=1" else ""
             fun filters(category: String) = "/vod/filters/$category"
             /**
              * [deferSources] 只取豆瓣元数据（简介/评分/年份地区类型），跳过全量片源解析。
              * hero 简介只要元数据：带上它会等后端把 22 个站点的搜索+探测全跑完（实测桌面
              * 7.5s，电视弱网远超客户端 45s 读超时）→ 简介长时间停在「加载简介…」。
              */
-            fun detail(id: String, deferSources: Boolean = false) =
-                "/vod/detail/${id.removePrefix("douban:")}" + if (deferSources) "?defer_sources=1" else ""
+            fun detail(id: String, deferSources: Boolean = false, refresh: Boolean = false): String {
+                val deferQuery = if (deferSources) "?defer_sources=1" else ""
+                val refreshQuery = if (!refresh) "" else if (deferSources) "&refresh=1" else "?refresh=1"
+                return "/vod/detail/${id.removePrefix("douban:")}$deferQuery$refreshQuery"
+            }
         }
 
         private fun fetchJson(base: String, path: String, client: OkHttpClient): JSONObject {
@@ -112,8 +118,13 @@ class VodApiSource(
                 )
             }
 
-        fun fetchHome(base: String, client: OkHttpClient, category: String): HhkanSource.HomeData {
-            val json = fetchJson(base, VodRoutes.home(category), client)
+        fun fetchHome(
+            base: String,
+            client: OkHttpClient,
+            category: String,
+            refresh: Boolean = false,
+        ): HhkanSource.HomeData {
+            val json = fetchJson(base, VodRoutes.home(category, refresh), client)
             val sections = json.optJSONArray("sections")
             return HhkanSource.HomeData(
                 sections = (0 until (sections?.length() ?: 0)).mapNotNull { index ->
@@ -150,8 +161,9 @@ class VodApiSource(
             client: OkHttpClient,
             id: String,
             deferSources: Boolean = false,
+            refresh: Boolean = false,
         ): HhkanSource.Companion.DetailInfo {
-            val json = fetchJson(base, VodRoutes.detail(id, deferSources), client)
+            val json = fetchJson(base, VodRoutes.detail(id, deferSources, refresh), client)
             val lineArray = json.optJSONArray("sources")
             val lines = (0 until (lineArray?.length() ?: 0)).mapNotNull lineMap@ { lineIndex ->
                 val line = lineArray?.optJSONObject(lineIndex) ?: return@lineMap null

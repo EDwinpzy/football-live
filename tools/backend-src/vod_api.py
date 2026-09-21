@@ -14,8 +14,8 @@ class VodService:
         self._resolve_play = resolve_play
         self._resolved_lines = {}
 
-    def home(self, category):
-        return self.catalog.home(category)
+    def home(self, category, refresh=False):
+        return self.catalog.refresh_home(category) if refresh else self.catalog.home(category)
 
     def filters(self, category):
         return self.catalog.filters(category)
@@ -31,16 +31,20 @@ class VodService:
     def search(self, query, page=1, limit=30):
         return self.catalog.search(query, page=page, limit=limit)
 
-    def detail(self, douban_id, defer_sources=False):
-        subject = copy.deepcopy(self.catalog.detail(douban_id))
+    def detail(self, douban_id, defer_sources=False, refresh=False):
+        catalog_detail = self.catalog.refresh_detail if refresh else self.catalog.detail
+        subject = copy.deepcopy(catalog_detail(douban_id))
         subject["id"] = "douban:" + str(douban_id).removeprefix("douban:")
         if defer_sources:
             subject["source_state"] = "matching"
             subject["sources"] = []
             return subject
         if self._resolve_sources_waits_for_all:
-            sources = self._resolve_sources(subject, wait_for_all=True) or []
+            resolver = self.registry.refresh_subject if refresh else self._resolve_sources
+            sources = resolver(subject, wait_for_all=True) or []
         else:
+            if refresh:
+                self.registry.invalidate_subject(subject)
             sources = self._resolve_sources(subject) or []
         self._resolved_lines[str(douban_id)] = {str(line.get("id")): copy.deepcopy(line) for line in sources}
         subject["sources"] = sources

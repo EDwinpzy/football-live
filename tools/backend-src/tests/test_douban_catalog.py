@@ -663,6 +663,40 @@ class DoubanCatalogTest(unittest.TestCase):
                 tick.wait(0.02)
             self.assertEqual(cache.get_stale("home:variety")["sections"][0]["items"][0]["title"], "新一版")
 
+    def test_explicit_home_refresh_bypasses_still_fresh_cache(self):
+        """用户再次打开影视页时，即使六小时 TTL 未到也必须检查新增影片。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = douban_catalog.JsonDiskCache(tmp)
+            cache.put("home:variety", {
+                "category": "variety", "stale": False, "source": "douban",
+                "sections": [{"title": title, "items": [{"douban_id": "1", "title": "缓存旧片"}]}
+                             for title in douban_catalog.HOME_SECTION_NAMES],
+            }, fetched_at=time.time())
+            catalog = douban_catalog.DoubanCatalog(
+                fetch=lambda _url: search_payload([{"id": "2", "title": "源站新增片", "rate": "8.0"}]),
+                cache=cache)
+
+            refresh_home = getattr(catalog, "refresh_home", catalog.home)
+            result = refresh_home("variety")
+
+            self.assertEqual(result["sections"][0]["items"][0]["title"], "源站新增片")
+
+    def test_explicit_detail_refresh_bypasses_still_fresh_cache(self):
+        """用户再次打开详情时，七天 TTL 未到也必须取得源站更新后的元数据。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = douban_catalog.JsonDiskCache(tmp)
+            cache.put("detail:1292052", {
+                "id": "douban:1292052", "douban_id": "1292052", "title": "旧详情",
+                "source": "douban", "stale": False,
+            }, fetched_at=time.time())
+            catalog = douban_catalog.DoubanCatalog(
+                fetch=lambda _url: {"id": "1292052", "title": "更新后详情"}, cache=cache)
+
+            refresh_detail = getattr(catalog, "refresh_detail", catalog.detail)
+            result = refresh_detail("1292052")
+
+            self.assertEqual(result["title"], "更新后详情")
+
     def test_cold_cache_serves_snapshot_first_and_refreshes_in_background(self):
         """冷缓存（首装 / 热更换了缓存文件名后的第一次运行）不许同步等源站。
 

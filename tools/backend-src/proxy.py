@@ -3827,7 +3827,8 @@ class Handler(SimpleHTTPRequestHandler):
                     (query.get("q") or [""])[0], page=1,
                     limit=_safe_int((query.get("limit") or ["30"])[0], 30, lo=1, hi=100))
             elif path == "/vod/home":
-                payload = service.home((query.get("category") or ["movie"])[0])
+                refresh = (query.get("refresh") or ["0"])[0].lower() in ("1", "true", "yes")
+                payload = service.home((query.get("category") or ["movie"])[0], refresh=refresh)
             elif path == "/vod/search":
                 payload = service.search(
                     (query.get("q") or [""])[0],
@@ -3841,7 +3842,8 @@ class Handler(SimpleHTTPRequestHandler):
             elif path.startswith("/vod/detail/"):
                 subject_id = unquote(path[len("/vod/detail/"):]).removeprefix("douban:")
                 defer = (query.get("defer_sources") or ["0"])[0].lower() in ("1", "true", "yes")
-                payload = service.detail(subject_id, defer_sources=defer)
+                refresh = (query.get("refresh") or ["0"])[0].lower() in ("1", "true", "yes")
+                payload = service.detail(subject_id, defer_sources=defer, refresh=refresh)
             elif path.startswith("/vod/play/"):
                 parts = [unquote(part) for part in path[len("/vod/play/"):].split("/")]
                 if len(parts) != 3:

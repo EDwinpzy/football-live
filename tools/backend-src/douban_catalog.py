@@ -699,8 +699,9 @@ class DoubanCatalog:
         fallback["upstream_available"] = False
         return fallback
 
-    def _coalesced(self, key, kind, producer, snapshot_value=None, allow_snapshot_first=True):
-        if self.cache:
+    def _coalesced(self, key, kind, producer, snapshot_value=None, allow_snapshot_first=True,
+                   force_refresh=False):
+        if self.cache and not force_refresh:
             fresh = self.cache.get(key, TTL[kind])
             if fresh is not None:
                 return fresh
@@ -854,7 +855,7 @@ class DoubanCatalog:
                 break
         return accepted[:EXPLORE_PAGE_SIZE]
 
-    def home(self, category):
+    def home(self, category, force_refresh=False):
         if category not in CATEGORY_VALUES:
             raise ValueError("unsupported category")
         key = "home:" + category
@@ -887,7 +888,8 @@ class DoubanCatalog:
                 result["source"] = "douban-partial"
             return result
 
-        result = self._coalesced(key, "home", produce, snapshot_value)
+        result = self._coalesced(
+            key, "home", produce, snapshot_value, force_refresh=force_refresh)
         # 兜底路径（快照缺失/为空）可能只有 stale/source 两个键；补齐标准三栏，
         # 客户端不必再处理「没有 sections」这种形态。
         if not result.get("sections"):
@@ -896,6 +898,10 @@ class DoubanCatalog:
         result = _apply_section_policy(category, result)
         self._ingest([item for section in (result.get("sections") or []) for item in (section.get("items") or [])])
         return result
+
+    def refresh_home(self, category):
+        """Revalidate a visible catalogue even while its normal six-hour cache is fresh."""
+        return self.home(category, force_refresh=True)
 
     def filters(self, category):
         if category not in CATEGORY_VALUES:
@@ -1055,7 +1061,7 @@ class DoubanCatalog:
         return {"query": query, "page": int(page), "limit": int(limit), "items": items,
                 "total": len(items), "has_more": False, "source": "local", "local": True}
 
-    def detail(self, douban_id):
+    def detail(self, douban_id, force_refresh=False):
         douban_id = str(douban_id or "").removeprefix("douban:")
         if not douban_id.isdigit():
             raise ValueError("invalid Douban id")
@@ -1072,6 +1078,11 @@ class DoubanCatalog:
 
         fallback = self._snapshot_detail(douban_id) or {"id": "douban:" + douban_id,
                                                         "douban_id": douban_id, "title": "", "sources": []}
-        result = self._coalesced(key, "detail", produce, fallback)
+        result = self._coalesced(
+            key, "detail", produce, fallback, force_refresh=force_refresh)
         self._ingest([result])
         return result
+
+    def refresh_detail(self, douban_id):
+        """Revalidate visible metadata even while its normal seven-day cache is fresh."""
+        return self.detail(douban_id, force_refresh=True)

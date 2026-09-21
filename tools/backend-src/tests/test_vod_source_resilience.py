@@ -162,5 +162,49 @@ class ResolveRetryTest(unittest.TestCase):
         self.assertEqual(calls["n"], 3)                # 3 个源各查一次，没有二次等待
 
 
+class ResolveRefreshTest(unittest.TestCase):
+    def setUp(self):
+        self._real_hhkan = vod_sources.HhkanAdapter
+        self.addCleanup(setattr, vod_sources, "HhkanAdapter", self._real_hhkan)
+
+    def test_explicit_refresh_replaces_cached_episode_list(self):
+        """再次打开详情或选集栏时，必须越过 30 分钟片源缓存取得新增集数。"""
+        state = {"episodes": 2}
+
+        class UpdatingAdapter:
+            def __init__(self, source):
+                self.source = source
+
+            def search(self, subject):
+                return [{"title": subject["title"], "year": subject["year"],
+                         "category": subject["category"], "season": 0}]
+
+            def detail(self, _candidate):
+                return [{
+                    "id": self.source.id + ":1", "source_id": self.source.id,
+                    "name": "线路", "alive": True,
+                    "episodes": [{"name": "第%d集" % i} for i in range(1, state["episodes"] + 1)],
+                }]
+
+        vod_sources.HhkanAdapter = UpdatingAdapter
+        source = vod_sources.VodSource(
+            id="updating", name="更新源", site_url="https://example.test",
+            api_url="https://example.test/api.php/provide/vod/",
+            adapter_type="hhkan", enabled=True, revision=1)
+        registry = vod_sources.SourceRegistry([source], version=1)
+        registry._race_probe = lambda _picked, _deadline: []
+        subject = {"title": "更新中的剧", "year": "2026", "category": "tv", "season": 0}
+        key = vod_sources._subject_cache_key(subject)
+        registry._cache_put(key, [{
+            "id": "updating:1", "source_id": "updating", "name": "线路", "alive": True,
+            "episodes": [{"name": "第1集"}],
+        }])
+
+        refresh_subject = getattr(registry, "refresh_subject", registry.resolve_subject)
+        lines = refresh_subject(subject, wait_for_all=True)
+
+        self.assertEqual(len(lines[0]["episodes"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -193,6 +193,22 @@ class SourceRegistry:
                    if self.history else None)
         return rank_lines(lines, history)
 
+    def refresh_subject(self, subject, wait_for_all=False):
+        """Bypass the short source cache so newly published episodes become visible."""
+        self.invalidate_subject(subject)
+        return self.resolve_subject(subject, wait_for_all=wait_for_all)
+
+    def invalidate_subject(self, subject):
+        """Drop the short resolve cache for [subject] without resolving it again.
+
+        注入 VodService 的自定义 resolver 自己抓源，但仍会经 resolve_subject 读这份
+        短缓存；这里清一次，保证 refresh=1 在那条路径上也真的回源。
+        """
+        cache_key = _subject_cache_key(subject)
+        if cache_key:
+            with self._cache_lock:
+                self._resolve_cache.pop(cache_key, None)
+
     def _search_one(self, source, subject):
         started = time.monotonic()
         try:
@@ -742,6 +758,12 @@ class MacCmsAdapter:
         """
         if not url:
             return ""
+        parsed = urllib.parse.urlsplit(url)
+        if (parsed.hostname or "").lower() in {"jisuzyjx.com", "www.jisuzyjx.com"} \
+                and parsed.path.rstrip("/").lower() == "/play":
+            wrapped = str(urllib.parse.parse_qs(parsed.query).get("url", [""])[0] or "").strip()
+            if re.search(r"\.(?:m3u8|mp4|flv)(?:[?#]|$)", wrapped, re.I):
+                return wrapped
         if re.search(r"\.(?:m3u8|mp4|flv)(?:[?#]|$)", url, re.I):
             return url
         try:

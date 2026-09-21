@@ -135,7 +135,10 @@ fun VodScreen(nav: NavController) {
     val home by Graph.repo.homeFlow.collectAsStateWithLifecycle()
     /* 2026-09-18：进页兜底——目录为空（后端冷启动/热更重启期首轮抓取全失败）时补抓，
        否则 hero 会退化成空底板、分类卡与三栏全空。 */
-    LaunchedEffect(Unit) { Graph.repo.ensureCatalogFresh(); Graph.repo.refreshHome() }
+    LaunchedEffect(Unit) {
+        Graph.repo.ensureCatalogFresh(force = true)
+        Graph.repo.refreshHome(force = true)
+    }
     val cat0 = catalogState.catalog
     val heroesTop = remember(cat0, home) { buildHeroes(cat0, home) }
     var heroIdxTop by remember(heroesTop) { mutableIntStateOf(0) }
@@ -211,9 +214,7 @@ fun VodScreen(nav: NavController) {
                 }
                 // 分类 tab 固定三块，以好好看频道页的当前分类三栏目为主；「全部 ›」独立跳转 all 页。
                 val selCatId = categories.getOrNull(catSel)?.first.orEmpty()
-                LaunchedEffect(selCatId) {
-                    Graph.repo.libBlocks(selCatId)
-                }
+                LaunchedEffect(selCatId) { Graph.repo.libBlocks(selCatId, force = true) }
                 val libBlocks by Graph.repo.libBlocksFlow.collectAsStateWithLifecycle()
                 val hotSettled by Graph.repo.hotSettledFlow.collectAsStateWithLifecycle()
                 /* 分类 id 现为 `douban:movie` 形态；用与 libBlocks 同一套解析，

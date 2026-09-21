@@ -885,7 +885,15 @@ function normalizeVodHome(home) {
     sections: (home.sections || []).map(s => ({ ...s, name: os(s.name || s.title) })),
   };
 }
-function fetchVodHome(category = "movie") {
+function fetchVodHome(category = "movie", refresh = false) {
+  const suffix = refresh ? "&refresh=1" : "";
+  if (refresh) {
+    return fetchJSONCached(
+      BASE + "/vod/home?category=" + encodeURIComponent(category) + suffix, 0, 90000)
+      .then(home => normalizeVodHome({ ...home, sections: (home.sections || []).map(s => ({
+        ...s, items: (s.items || []).map(it => normalizeDoubanItem(it, category)),
+      })) }));
+  }
   if (_vodHomeInflight) return _vodHomeInflight;
   /* 走同一份客户端缓存 + in-flight 表：旧实现是裸 fetchJSON，进影视页时
      buildCatalogProgressive / fetchLibBlocks / 预热三处会把 movie 分类同时打 3 次。 */
@@ -926,7 +934,7 @@ async function buildCatalog() {
 }
 
 /* 首屏目录渐进聚合：不让最慢的一个频道阻塞已经返回的电影/剧集数据。 */
-async function buildCatalogProgressive(onUpdate) {
+async function buildCatalogProgressive(onUpdate, refresh = false) {
   const parts = new Map();
   const snapshot = () => {
     const cats = [], items = [];
@@ -946,7 +954,9 @@ async function buildCatalogProgressive(onUpdate) {
   };
   await Promise.all(CH_CHANNELS.map(async ([cid]) => {
     try {
-      const d = await fetchJSONCached(BASE + "/vod/home?category=" + cid);
+      const d = await fetchJSONCached(
+        BASE + "/vod/home?category=" + cid + (refresh ? "&refresh=1" : ""),
+        refresh ? 0 : 60000);
       parts.set(cid, (d.sections || []).flatMap(s => s.items || []).map(it => normalizeDoubanItem(it, cid)));
       const current = snapshot();
       if (current) onUpdate(current);
@@ -1058,8 +1068,10 @@ function categoryHomeHot(cid, homeSections) {
   return hit && Array.isArray(hit.items) ? hit.items : [];
 }
 
-async function fetchLibBlocks(cid, homeSections) {
-  const doubanHome = await fetchJSONCached(BASE + "/vod/home?category=" + cid, 60000, 30000);
+async function fetchLibBlocks(cid, homeSections, refresh = false) {
+  const doubanHome = await fetchJSONCached(
+    BASE + "/vod/home?category=" + cid + (refresh ? "&refresh=1" : ""),
+    refresh ? 0 : 60000, 30000);
   if (doubanHome.stale) refreshStaleVodHome(cid);
   return (doubanHome.sections || []).map(s => ({ name: s.title || s.name, items: (s.items || []).map(it => normalizeDoubanItem(it, cid)) }));
   /* Legacy compatibility code below remains for old cached hhkan payloads. */
@@ -1120,15 +1132,15 @@ function refreshStaleVodHome(cid) {
 /* v1.25 需求①：板块 SWR 持久缓存（localStorage，10min 新鲜阈值）——
    旧值先上屏秒渲染；足够新鲜（≤10min 且含最近热门）不再回源，否则后台刷新覆盖 */
 function libCacheKey(cid) { return "otvw:lib:v4:" + cid; }
-async function fetchLibBlocksSWR(cid, homeSections, cb) {
+async function fetchLibBlocksSWR(cid, homeSections, cb, refresh = false) {
   const cached = store.get(libCacheKey(cid), null);
   if (cached && cached.sections && cached.sections.length) {
     cb(cached.sections);
     const fresh = Date.now() - (cached.ts || 0) < 600000 &&
       BLOCK_ORDER.every(name => cached.sections.some(s => s.name === name && s.items && s.items.length));
-    if (fresh) return;
+    if (fresh && !refresh) return;
   }
-  const sections = await fetchLibBlocks(cid, homeSections);
+  const sections = await fetchLibBlocks(cid, homeSections, refresh);
   if (sections.length) {
     try { store.set(libCacheKey(cid), { ts: Date.now(), sections }); } catch (e) {}
     cb(sections);
@@ -1250,8 +1262,36 @@ async function runVodGate() {
   revealVod();
 }
 
+async function refreshVodIncremental() {
+  const applyCat = cat => {
+    if (!cat) return;
+    vod.cat = cat;
+    try { store.set("otvw:cat", cat); } catch (e) {}
+    renderVodHero(); renderCatChips(); renderVodLib();
+  };
+  const catP = buildCatalogProgressive(applyCat, true).then(applyCat).catch(() => null);
+  const homeP = fetchVodHome("movie", true).then(home => {
+    if (!home) return null;
+    home._ts = Date.now();
+    vod.car = (home.carousel || []).slice(0, 8);
+    vod.homeSections = home.sections || [];
+    try { store.set("otvw:home", home); } catch (e) {}
+    renderVodHero(); renderVodLib();
+    return home;
+  }).catch(() => null);
+  await Promise.all([catP, homeP]);
+  renderHistRow();
+  renderVodLib(true);
+}
+
 async function initVod() {
-  if (vod.loaded) return;
+  /* 2026-09-21 用户要求：每次进影视页都回源校验一轮（源站新增影片/剧集要能看到）。
+    本地缓存先上屏，增量结果后台合并；回源失败保留旧数据，不把页面清空。 */
+  const refresh = true;
+  if (vod.loaded) {
+    if (refresh) refreshVodIncremental();
+    return;
+  }
   vod.loaded = true;
   /* 2026-09-17 用户要求：影视页要「数据 + 图片都就绪」才上屏，否则留在加载页等。
      gated 期间整页内容 display:none，只剩 #vodLoading，避免先出空壳再一张张补海报。 */
@@ -1276,19 +1316,20 @@ async function initVod() {
   const catP = buildCatalogProgressive(cat => {
     arrived = true; applyVod(cat, null);
     try { store.set("otvw:cat", cat); } catch (e) {}
-  }).then(cat => {
+  }, refresh).then(cat => {
     if (!cat) return null;
     arrived = true; applyVod(cat, null);
     try { store.set("otvw:cat", cat); } catch (e) {}
     return cat;
   }).catch(() => null);
-  const homeP = fetchVodHome().then(home => {
+  const homeP = fetchVodHome("movie", refresh).then(home => {
     if (!home) return null;
     home._ts = Date.now(); arrived = true; applyVod(null, home);
     try { store.set("otvw:home", home); } catch (e) {}
     return home;
   }).catch(() => null);
   const [cat, home] = await Promise.all([catP, homeP]);
+  if (refresh) renderVodLib(true);
   const homeFresh = homeC && Date.now() - (homeC._ts || 0) < 300000;
   if (!cat && !home && !catC && !homeC) {
     $("#vodLoading").textContent = "片库加载失败，请稍后重试";
@@ -1326,11 +1367,11 @@ function renderCatChips() {
     vod.catSel = i;
     store.set("otvw:vodLastCat", cat.id);
     renderCatChips();
-    renderVodLib();
+    renderVodLib(true);
   }));
 }
 
-function renderVodLib() {
+function renderVodLib(refresh = false) {
   const cats = vodCategories();
   const sel = cats[vod.catSel] || { id: "" };
   const host = $("#vodSections");
@@ -1364,7 +1405,7 @@ function renderVodLib() {
     bindCards("#vodSections");
   };
   host.innerHTML = `<div class="page-loading">— 加载中 …</div>`;
-  fetchLibBlocksSWR(cid, vod.homeSections, paint);
+  fetchLibBlocksSWR(cid, vod.homeSections, paint, refresh);
 }
 
 /* 海报竖卡（232×352 r12 + remark 角标）。
@@ -1738,14 +1779,9 @@ async function openDetail(vid, cardHint, autoplay) {
   /* SWR：≤10min 的本地缓存直接用（详情页秒开）；10min~2h 先上屏再后台刷新 */
   let cached = null;
   try { const v = store.get(dkey, null); cached = v && v._d ? v : null; } catch (e) {}
-  const age = cached ? Date.now() - (cached._ts || 0) : Infinity;
-  if (cached && age < 600000) {
+  if (cached) {
     applyDetail(cached._d);
-    if (autoplay && current()) startPlayButton();
-    if (detailRequest === controller) detailRequest = null;
-    return;
   }
-  if (cached) applyDetail(cached._d);
   /* 2026-09-17 详情提速：详情页原先要等「多源匹配 + 线路测速」整段跑完才上屏
      （冷路径实测 12-30s，整页只有一个「加载中…」）。现在拆两段：
      ① `defer_sources=1` 只取豆瓣元数据（多数已随首页补详情落在服务端 7 天缓存里）
@@ -1764,7 +1800,9 @@ async function openDetail(vid, cardHint, autoplay) {
     if (!fast.title) throw new Error(fast.error || "未找到该影片");
     applyDetail(normalizeDetail(fast), true);
     painted = true;
-    const rawDetail = await fetchJSON(BASE + "/vod/detail/" + ref, { timeout: 90000, signal: controller.signal });
+    const rawDetail = await fetchJSON(
+      BASE + "/vod/detail/" + ref + "?refresh=1",
+      { timeout: 90000, signal: controller.signal });
     if (!current()) return;
     const d = normalizeDetail(rawDetail);
     if (!d.title) throw new Error(d.error || "未找到该影片");
@@ -2427,10 +2465,55 @@ function openPlayer(ctx) {
     $("#morePanel").hidden = false;
     showControls();
   }
+  if (ctx.kind === "vod") refreshPlayerEpisodes();
   try {
     if (ctx.kind === "vod") resolveVodAndPlay(ctx);
     else if (ctx.kind === "live") resolveLiveAndPlay(ctx);
   } catch (e) { playerFatal(e.message); }
+}
+
+let playerEpisodeRefresh = null;
+function refreshPlayerEpisodes() {
+  const ctx = pv.ctx;
+  if (!ctx || ctx.kind !== "vod" || playerEpisodeRefresh) return playerEpisodeRefresh;
+  const ref = String(ctx.vid).replace(/^douban:/, "");
+  const request = fetchJSON(BASE + "/vod/detail/" + ref + "?refresh=1", { timeout: 90000 })
+    .then(raw => {
+      if (!pv.ctx || pv.ctx !== ctx || !raw || !raw.title) return;
+      const fresh = {
+        ...raw,
+        cover: raw.poster_url || "",
+        score: +raw.rating || 0,
+        area: (raw.regions || []).join(" / "),
+        tags: raw.genres || [],
+        desc: raw.summary || "",
+        meta: [raw.year, ...(raw.regions || []), ...(raw.genres || [])].filter(Boolean).join(" / "),
+        actors: (raw.actors || []).join(" / "),
+        sources: (raw.sources || []).map(line => ({
+          ...line,
+          episodes: (line.episodes || []).map((ep, index) => ({
+            ep: ep.name || `第${index + 1}集`, pid: line.id, vid: index,
+          })),
+        })),
+      };
+      const lineIndex = Math.min(dLineIdx, Math.max(0, fresh.sources.length - 1));
+      const episodes = (fresh.sources[lineIndex] && fresh.sources[lineIndex].episodes) || [];
+      if (episodes.length <= ctx.epCount || ctx.epIdx >= episodes.length) return;
+      detail = fresh; detail.vid = ctx.vid; dLineIdx = lineIndex;
+      const current = episodes[ctx.epIdx];
+      pv.ctx = {
+        ...ctx,
+        epCount: episodes.length,
+        epName: current.ep || `第${ctx.epIdx + 1}集`,
+        playRef: { pid: current.pid, vid: current.vid },
+      };
+      renderDetailEps();
+      renderMorePanel();
+    })
+    .catch(() => {})
+    .finally(() => { if (playerEpisodeRefresh === request) playerEpisodeRefresh = null; });
+  playerEpisodeRefresh = request;
+  return request;
 }
 
 /* 播放地址解析缓存（v1.32 性能）：{key: {t,d} 已完成 | {p} 在途}，

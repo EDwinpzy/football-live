@@ -92,6 +92,24 @@ class DetailViewModel(private val vodId: String) : ViewModel() {
                     resumePositionMs = resumePos,
                     sourceAvailability = if (full.episodes.isEmpty()) SourceAvailability.UNAVAILABLE else SourceAvailability.AVAILABLE,
                 )
+                // 缓存版本先上屏后强制回源；新增集数只替换详情数据，不重置续播位置或焦点。
+                val refreshed = if (item.detailRef.isNotBlank()) {
+                    Graph.repo.resolveDetail(vodId, forceRefresh = true)
+                } else null
+                if (refreshed != null && refreshed != full) {
+                    val refreshedLines = fullLines.map { line ->
+                        if (line.id == refreshed.id) refreshed else line
+                    }.ifEmpty { listOf(refreshed) }
+                    _ui.value = _ui.value.copy(
+                        item = refreshed,
+                        lines = refreshedLines,
+                        sourceAvailability = if (refreshed.episodes.isEmpty()) {
+                            SourceAvailability.UNAVAILABLE
+                        } else {
+                            SourceAvailability.AVAILABLE
+                        },
+                    )
+                }
                 // 豆瓣刮削：标题非空且未拉过 → 拉一次（预探测语义：字段空不替换）
             }
         }

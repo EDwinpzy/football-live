@@ -35,6 +35,27 @@ import kotlinx.coroutines.withContext
 
 enum class Panel { NONE, MORE }
 
+/**
+ * 「更多」面板刷新判据：只接受信息量不减的一版，且当前集号在新列表里仍然有效。
+ * 集数变少（源站抖动 / 部分线路解析失败）一律拒绝，免得把用户正在看的选集列表打回原形。
+ */
+object EpisodeRefreshPolicy {
+    fun accepts(
+        currentNames: List<String>,
+        incomingNames: List<String>,
+        currentLines: Int,
+        incomingLines: Int,
+        keepIndex: Int,
+    ): Boolean {
+        if (keepIndex !in 0 until incomingNames.size) return false
+        if (incomingNames.size < currentNames.size) return false
+        if (incomingNames.size > currentNames.size) return true
+        if (incomingLines > currentLines) return true
+        // 同集数但集名/线路内容变了：仍然替换，否则「更新了但不显示」。
+        return incomingNames != currentNames
+    }
+}
+
 data class PlayerUiState(
     val title: String = "",
     val epIndex: Int = 0,
@@ -161,6 +182,7 @@ class PlayerViewModel(
     /** 上一次 5 分钟体检的墙上时间（跨会话重启保持节拍，长跑日志不会因换源而断档） */
     private var lastHealthLogAt = 0L
     private var progressJob: Job? = null
+    private var episodeRefreshJob: Job? = null
     /** 直播静默续签循环（90s 重新解析当前源 → 签名变化即热切换） */
     private var renewJob: Job? = null
     /** 直播错误态 30s 自动重试（直播稳定性方案修复 2 配套：未开赛/上游抖动场景
@@ -1650,7 +1672,37 @@ class PlayerViewModel(
 
     fun setPanel(p: Panel) {
         _ui.value = _ui.value.copy(panel = p)
+        if (p == Panel.MORE && !_ui.value.isLive) refreshEpisodesForPanel()
         touch()
+    }
+
+    /** 每次打开更多面板都后台检查新增集数；只增补列表，不重启或移动当前播放。 */
+    private fun refreshEpisodesForPanel() {
+        if (episodeRefreshJob?.isActive == true) return
+        episodeRefreshJob = viewModelScope.launch {
+            val current = currentItem ?: return@launch
+            val fresh = runCatching {
+                repo.resolveDetail(current.id, forceRefresh = true)
+            }.getOrNull() ?: return@launch
+            val state = _ui.value
+            // 线路表只是内存换算（强制刷新已把 detailInfoCache 换成最新一版），不额外打网。
+            val refreshedLines = runCatching {
+                VisibleVodLinePolicy.apply(repo.resolveLines(fresh, state.epIndex))
+            }.getOrDefault(emptyList())
+            if (!EpisodeRefreshPolicy.accepts(
+                    currentNames = current.episodes.map { it.name },
+                    incomingNames = fresh.episodes.map { it.name },
+                    currentLines = state.lines.size,
+                    incomingLines = refreshedLines.size,
+                    keepIndex = state.epIndex,
+                )) return@launch
+            currentItem = fresh
+            _ui.value = state.copy(
+                epCount = fresh.episodes.size,
+                epNames = fresh.episodes.map { it.name },
+                lines = refreshedLines.takeIf { state.activeLine in it.indices } ?: state.lines,
+            )
+        }
     }
 
     /**
