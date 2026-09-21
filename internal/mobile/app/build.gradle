@@ -43,8 +43,10 @@ android {
         buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'true'
         buildConfigField 'String', 'HOTUPDATE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/hotupdate"'
         // APK 应用内更新清单；发布时将对应清单放到静态站点的 apk-update/ 目录。
+        // 联调/自测可用 -PapkUpdateUrl=<https 地址> 临时指向测试清单，不必改死代码。
         buildConfigField 'boolean', 'APK_UPDATE_ENABLED', 'true'
-        buildConfigField 'String', 'APK_UPDATE_URL', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/web/apk-update/mobile.json"'
+        buildConfigField 'String', 'APK_UPDATE_URL',
+                '"' + (project.findProperty('apkUpdateUrl') ?: 'https://appletv-d5ge1bth794873f76.service.tcloudbase.com/web/apk-update/mobile.json') + '"'
         // 启动门闸预算（App.kt 共享读取）：移动端 30s——2026-09-03 事故：首装冷缓存下
         // 90s 兜底全跑满（hhkan 冷抓+327 封面预载），用户感知「卡启动屏打不开」；
         // TV 遥控场景可等 90s，移动端 30s 必进主界面，剩余预载转后台继续

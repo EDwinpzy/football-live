@@ -27,6 +27,7 @@ import argparse
 import hashlib
 import json
 import pathlib
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -86,6 +87,7 @@ def main() -> None:
     ap.add_argument("--force", action="store_true", help="强制更新")
     ap.add_argument("--offline", action="store_true", help="只上传 APK，不写公开清单")
     ap.add_argument("--file-name", default="", help="对象里的文件名，默认取 APK 原名")
+    ap.add_argument("--manifest-name", default="", help="清单对象名（默认取渠道名）；联调可用 test-tv 走独立路径")
     ap.add_argument("--dry-run", action="store_true", help="只校验并打印，不写桶")
     args = ap.parse_args()
 
@@ -113,7 +115,10 @@ def main() -> None:
         certificate_sha256=certs,
     )
 
-    key_manifest = f"{PREFIX}/{args.channel}.json"
+    manifest_name = args.manifest_name or args.channel
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,60}", manifest_name):
+        sys.exit("--manifest-name 只能用小写字母、数字、点、下划线、短横线")
+    key_manifest = f"{PREFIX}/{manifest_name}.json"
     current_raw = get_object(key_manifest)
     if current_raw:
         current = json.loads(current_raw.decode("utf-8"))
@@ -125,6 +130,7 @@ def main() -> None:
     print(f"APK {file_name} · {len(raw) / 1048576:.1f} MB · sha256 {sha256}")
     print(f"签名证书 {certs[0]}")
     print(f"对象 {key_apk}")
+    print(f"清单 {key_manifest} -> {obj_url(key_manifest)}")
     if args.dry_run:
         print("[dry-run] 未写入任何对象")
         return
@@ -147,7 +153,8 @@ def main() -> None:
         "size": len(raw),
         "sha256": sha256,
         "apkUrl": obj_url(key_apk),
-        "manifestUrl": f"{MANIFEST_HOST}/web/apk-update/{args.channel}.json",
+        "manifestUrl": (f"{MANIFEST_HOST}/web/apk-update/{manifest_name}.json"
+                        if manifest_name == args.channel else obj_url(key_manifest)),
         "status": "offline" if args.offline else "published",
     }, ensure_ascii=False, indent=2))
 

@@ -42,8 +42,10 @@ android {
         buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'true'
         buildConfigField 'String', 'HOTUPDATE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/hotupdate"'
         // APK 应用内更新清单；发布时将对应清单放到静态站点的 apk-update/ 目录。
+        // 联调/自测可用 -PapkUpdateUrl=<https 地址> 临时指向测试清单，不必改死代码。
         buildConfigField 'boolean', 'APK_UPDATE_ENABLED', 'true'
-        buildConfigField 'String', 'APK_UPDATE_URL', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/web/apk-update/tv.json"'
+        buildConfigField 'String', 'APK_UPDATE_URL',
+                '"' + (project.findProperty('apkUpdateUrl') ?: 'https://appletv-d5ge1bth794873f76.service.tcloudbase.com/web/apk-update/tv.json') + '"'
         // 启动门闸预算：TV 90s（用户要求全加载完再进，遥控场景可等）；App.kt 共享读取。
         // 2026-09-03 事故教训见 mobile 的 30000 注释
         buildConfigField 'long', 'STARTUP_GATE_MS', '90000'
