@@ -251,6 +251,19 @@ fun VodScreen(nav: NavController) {
                         }
                     }
                 }
+                // 2026-09-22 跳行修复（用户报障「最近观看 DOWN 跳过标签栏直达最近热门」）：
+                // 历史竖版卡高 352 → 几何层容差 176px，chips 与首板块卡片 gap 差 ~164px
+                // 被并成同层，x 中心决胜直落卡片。与 hero/chips 的 DOWN 同口径：显式
+                // 定向到当前选中分类 chip（requestFocus 命中 active 项不触发 hover 切换）。
+                fun historyDownToChip() {
+                    chipScope.launch {
+                        repeat(20) {
+                            if (runCatching { selectedCatChipFocus.requestFocus() }.isSuccess) return@launch
+                            runCatching { vodListState.scrollBy(180f) }   // chips 行通常已组合，兜底露出
+                            delay(60)
+                        }
+                    }
+                }
                 // 板块未就绪时 chip DOWN 被消费并挂起；到账后定向落下（焦点仍在分类行 + 10s 内才落）
                 LaunchedEffect(libFirstCard, pendingLibDown) {
                     if (!pendingLibDown) return@LaunchedEffect
@@ -307,7 +320,8 @@ fun VodScreen(nav: NavController) {
                                         items(history.size, key = { i -> history[i].vodId }) { i ->
                                             HistoryCard(nav, history[i], s, cardReg,
                                                 focusRequester = if (i == 0) firstHistoryFocus else null,
-                                                upToTab = contentUpToTab)
+                                                upToTab = contentUpToTab,
+                                                downToChip = { historyDownToChip() })
                                         }
                                     }
                                 }
@@ -803,7 +817,13 @@ private fun LibCard(nav: NavController, item: VodItem, s: Float, cardReg: FocusR
  * 需求 影视#10：点卡直接进播放页（带历史集数）；需求 影视#3：选中环紧贴卡片边缘。
  */
 @Composable
-private fun HistoryCard(nav: NavController, h: HistoryEntity, s: Float, cardReg: FocusRegistry? = null, focusRequester: FocusRequester? = null, upToTab: (() -> Boolean)? = null) {
+private fun HistoryCard(
+    nav: NavController, h: HistoryEntity, s: Float,
+    cardReg: FocusRegistry? = null,
+    focusRequester: FocusRequester? = null,
+    upToTab: (() -> Boolean)? = null,
+    downToChip: (() -> Unit)? = null,
+) {
     // 旧版本曾以空标题入库（目录外条目详情未回填片名）：空标题时懒解析详情自愈
     var title by remember(h.vodId) { mutableStateOf(h.title) }
     LaunchedEffect(h.vodId) {
@@ -817,8 +837,14 @@ private fun HistoryCard(nav: NavController, h: HistoryEntity, s: Float, cardReg:
                     scaleFocused = 1.05f,
                     onFocusedChange = { if (it) ReturnFocus.mark("vod", "h:" + h.vodId) },
                     externalFocusRequester = cardReg?.fr("h:" + h.vodId),
-                    navOverride = if (upToTab != null) {
-                        { dir -> if (dir == NAV_UP) upToTab.invoke() else false }
+                    navOverride = if (upToTab != null || downToChip != null) {
+                        { dir ->
+                            when (dir) {
+                                NAV_UP -> upToTab?.invoke() ?: false
+                                NAV_DOWN -> if (downToChip != null) { downToChip(); true } else false
+                                else -> false
+                            }
+                        }
                     } else null,
                 ) {
                     nav.navigate("player/" + URLEncoder.encode(h.vodId, "UTF-8") + "/${h.epIndex}")
