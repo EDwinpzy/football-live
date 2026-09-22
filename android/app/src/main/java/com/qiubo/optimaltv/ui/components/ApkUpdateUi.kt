@@ -122,7 +122,11 @@ private fun ApkUpdateStatus(state: ApkUpdateState?, s: Float) {
             )
             Spacer(Modifier.height(10f.sx(s)))
             androidx.compose.material3.Text(
-                "正在下载 ${(state.progress * 100).toInt()}%",
+                if (state.attempt > 1) {
+                    "正在下载 ${(state.progress * 100).toInt()}%（自动重试第 ${state.attempt} 次）"
+                } else {
+                    "正在下载 ${(state.progress * 100).toInt()}%"
+                },
                 color = OtvColors.White60,
                 fontSize = 20f.sxs(s),
             )

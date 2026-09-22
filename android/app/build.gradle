@@ -34,8 +34,8 @@ android {
     // 并含播放器渲染层 key 失配修复（黑屏只剩声音 / 错误卡弹窗后音频仍响 / 切信号源无效）。
     // v1.36（2026-09-22）：「我的」页新增「检查更新」手动入口（手动检查忽略「稍后更新」记忆）。
     // 必须抬 versionCode——已装 1.35 的设备只会被更高的 versionCode 唤醒更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 40)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.38")
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 41)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.39")
         // 方案 §5：双 ABI split 思路——真机 arm64/v7a + 模拟器 x86_64（开发验证用）
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
         // AOSP 谷歌拼音解码器（搜索页拼音候选，2026-08-29）；默认 c++_static（new/delete 需要 libc++）
@@ -87,6 +87,14 @@ android {
             storePassword "optimaltv2026"
             keyAlias "optimaltv"
             keyPassword "optimaltv2026"
+            // v1.39（2026-09-22）：补 v1 签名。minSdk 30 时 AGP 默认只出 v2，
+            // 但投影仪定制 ROM 的包解析器/安装器常读不了 v2-only 包（表现为
+            // 更新包校验反复失败、不停重新下载）；v1+v2 双签是 TV 分发的兼容底线。
+            // 签名证书不变（601F…BA43），已装版本可直接覆盖升级。
+            enableV1Signing = true
+            enableV2Signing = true
+            v1SigningEnabled = true
+            v2SigningEnabled = true
         }
     }
 

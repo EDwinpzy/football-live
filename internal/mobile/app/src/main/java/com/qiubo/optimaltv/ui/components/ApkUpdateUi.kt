@@ -50,7 +50,13 @@ fun ApkUpdateUi() {
                             progress = { downloading.progress.coerceIn(0f, 1f) },
                             modifier = Modifier.fillMaxWidth(),
                         )
-                        Text("正在下载 ${(downloading.progress * 100).toInt()}%")
+                        Text(
+                            if (downloading.attempt > 1) {
+                                "正在下载 ${(downloading.progress * 100).toInt()}%（自动重试第 ${downloading.attempt} 次）"
+                            } else {
+                                "正在下载 ${(downloading.progress * 100).toInt()}%"
+                            },
+                        )
                     }
                     ApkUpdateState.PermissionRequired -> Text("请允许 My TV 安装未知应用，返回后会继续安装。")
                     ApkUpdateState.Installing -> Text("正在打开系统安装器…")

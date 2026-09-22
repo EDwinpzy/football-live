@@ -34,6 +34,7 @@ sealed interface ApkUpdateState {
         val progress: Float,
         val downloadedBytes: Long,
         val totalBytes: Long,
+        val attempt: Int = 1,
     ) : ApkUpdateState
 
     data object PermissionRequired : ApkUpdateState
@@ -313,24 +314,42 @@ object ApkUpdateManager {
         val safeName = manifest.apk.fileName.substringAfterLast('/').ifBlank { "update.apk" }
         val part = File(dir, "$safeName.part")
         val target = File(dir, safeName)
+        ensureFreeSpace(dir, manifest)
+        if (part.exists()) part.delete()
+        if (target.exists()) target.delete()
         var lastError: Throwable? = null
         repeat(MAX_ATTEMPTS) { attempt ->
             try {
-                downloadOnce(manifest.apk, part)
-                verifyArtifact(part, manifest)
+                downloadOnce(manifest.apk, part, attempt + 1)
+                verifySha256(part, manifest)
                 if (target.exists()) target.delete()
                 check(part.renameTo(target)) { "无法保存更新文件" }
+                validatePackage(target, manifest)
                 return target
             } catch (t: Throwable) {
                 lastError = t
                 part.delete()
+                if (t is PackageValidationError) {
+                    target.delete()
+                    throw t
+                }
                 if (attempt + 1 < MAX_ATTEMPTS) delay((attempt + 1) * 1500L)
             }
         }
         throw lastError ?: IllegalStateException("下载失败")
     }
 
-    private fun downloadOnce(artifact: ApkArtifact, part: File) {
+    /** 下载前预检剩余空间：不足时立刻给出可读原因，而不是边下边失败循环烧流量。 */
+    private fun ensureFreeSpace(dir: File, manifest: ApkUpdateManifest) {
+        val needed = manifest.apk.sizeBytes
+        if (needed <= 0) return
+        val free = dir.usableSpace
+        check(free >= needed + 32L * 1024 * 1024) {
+            "存储空间不足：更新包约需 ${needed / 1048576} MB，当前可用仅 ${free / 1048576} MB，请清理设备空间后重试"
+        }
+    }
+
+    private fun downloadOnce(artifact: ApkArtifact, part: File, attempt: Int) {
         // 分片清单按顺序下载并连续写入同一个 .part 文件；单对象清单退化成一段（不校验段摘要）。
         val sources = artifact.parts.ifEmpty { listOf(ApkPart(artifact.url, artifact.sizeBytes, "")) }
         val total = if (artifact.sizeBytes > 0) artifact.sizeBytes else sources.sumOf { it.sizeBytes }
@@ -357,6 +376,7 @@ object ApkUpdateManager {
                                 progress = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f,
                                 downloadedBytes = done,
                                 totalBytes = total,
+                                attempt = attempt,
                             )
                         }
                     }
@@ -397,7 +417,8 @@ object ApkUpdateManager {
         }
     }
 
-    private fun verifyArtifact(file: File, manifest: ApkUpdateManifest) {
+    /** 整包摘要校验：失败多半是传输损坏，仍交给下载重试兜底。 */
+    private fun verifySha256(file: File, manifest: ApkUpdateManifest) {
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->
             val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -409,21 +430,49 @@ object ApkUpdateManager {
         }
         val actualSha = digest.digest().toHex()
         check(actualSha.equals(manifest.apk.sha256, ignoreCase = true)) { "SHA-256 校验失败" }
+    }
 
-        val archive = appContext.packageManager.getPackageArchiveInfo(
+    /**
+     * 包名/签名校验。整包摘要已对上后，这几项失败是确定性的：重下同一个包也不会
+     * 变好，抛 [PackageValidationError] 让重试循环立即收手，直接把原因告诉用户。
+     *
+     * 签名读取双通道：API 28+ 的 signingInfo 在部分投影仪定制 ROM 的包解析器上
+     * 可能取不到，退回老 GET_SIGNATURES 通道；发布包自 v1.39 起 v1+v2 双签，
+     * 两条通道至少一条能读出证书，不再依赖单一解析路径。
+     */
+    @Suppress("DEPRECATION")
+    private fun validatePackage(file: File, manifest: ApkUpdateManifest) {
+        val modern = appContext.packageManager.getPackageArchiveInfo(
             file.absolutePath,
             PackageManager.GET_SIGNING_CERTIFICATES,
-        ) ?: error("APK 解析失败")
-        check(archive.packageName == appContext.packageName) { "APK 包名不匹配" }
+        )
+        val legacy = appContext.packageManager.getPackageArchiveInfo(
+            file.absolutePath,
+            PackageManager.GET_SIGNATURES,
+        )
+        val archive = modern ?: legacy
+            ?: throw PackageValidationError("APK 解析失败（设备系统无法读取安装包）")
+        if (archive.packageName != appContext.packageName) {
+            throw PackageValidationError("APK 包名不匹配")
+        }
         val expected = manifest.apk.certificateSha256
-        if (expected.isNotEmpty()) {
-            val signingInfo = archive.signingInfo ?: error("APK 签名信息缺失")
-            val actual = signingInfo.apkContentsSigners
-                .map { it.toByteArray() }
-                .map { MessageDigest.getInstance("SHA-256").digest(it).toHex().uppercase(Locale.US) }
-            check(actual.any { it in expected }) { "APK 签名证书不匹配" }
+        if (expected.isEmpty()) return
+        val signerBytes = modern?.signingInfo?.apkContentsSigners
+            ?.map { it.toByteArray() }
+            ?.takeIf { it.isNotEmpty() }
+            ?: legacy?.signatures
+                ?.map { it.toByteArray() }
+                ?.takeIf { it.isNotEmpty() }
+            ?: throw PackageValidationError("APK 签名信息缺失（设备系统兼容问题）")
+        val actual = signerBytes
+            .map { MessageDigest.getInstance("SHA-256").digest(it).toHex().uppercase(Locale.US) }
+        if (actual.none { it in expected }) {
+            throw PackageValidationError("APK 签名证书不匹配")
         }
     }
+
+    /** 确定性校验失败：重下同一文件也不会变好，直接报错、不再烧流量重试。 */
+    private class PackageValidationError(message: String) : IllegalStateException(message)
 
     private fun launchInstaller(apk: File) {
         // 安装链路三级降级：ACTION_VIEW（多数 ROM 的安装器都会处理）→

@@ -66,6 +66,10 @@ SHARED_PATHS = [
 
 # 已知差异允许（存在即合理，检查模式跳过漂移比对；改动需在此登记原因）
 ALLOW_DRIFT = {
+    # 2026-09-18 需求：移动端会员页去掉二维码、改按钮续费，RenewalGateway 只进移动端；
+    # TV 版无此通道（当时漏登记，2026-09-22 补录，避免同步工具误覆盖移动端功能）。
+    "app/src/main/java/com/qiubo/optimaltv/ui/paywall/PaywallShared.kt":
+        "移动端独有 RenewalGateway（按钮续费），TV 版无此通道",
     # 2026-09-11 需求⑭：TV 版移除 DLNA 投屏（用户明确只删 TV，移动版保留）；
     # v1.23 时 TV 已删 UI 入口，本轮连共享 VM/data 层一并剥离。
     "app/src/main/java/com/qiubo/optimaltv/ui/player/PlayerViewModel.kt": "TV 剥离投屏（2026-09-11），移动版保留 DLNA",
