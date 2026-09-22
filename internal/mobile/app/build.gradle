@@ -36,8 +36,8 @@ android {
     // 失配修复（黑屏只剩声音 / 错误卡弹窗后音频仍响 / 切信号源无效）。
     // v1.36（2026-09-22）：「我的」页新增「检查更新」手动入口（手动检查忽略「稍后更新」记忆）。
     // 必须抬 versionCode——已装 1.35 的设备只会被更高的 versionCode 唤醒更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 38)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.36")
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 39)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.37")
         // 与 TV 版一致的三 ABI（Chaquopy/libVLC so 需要）；移动版无 cpp 拼音解码器
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
 
