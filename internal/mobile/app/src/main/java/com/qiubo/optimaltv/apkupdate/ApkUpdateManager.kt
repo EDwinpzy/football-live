@@ -169,18 +169,43 @@ object ApkUpdateManager {
 
     fun openUnknownAppSettings() {
         if (!initialized) return
+
+        // 部分投影仪/TV 定制 ROM 裁掉了「安装未知应用」设置页，直接跳转会抛
+        // ActivityNotFoundException 把应用带崩；这里逐级降级到更通用的设置页，
+        // 全部失败时留在弹窗里提示手动处理，而不是闪退。
+        val opened: Boolean
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val intent = Intent(
-                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                Uri.parse("package:${appContext.packageName}"),
-            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            appContext.startActivity(intent)
+            opened = tryStartActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:${appContext.packageName}"),
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            ) || tryStartActivity(
+                Intent(Settings.ACTION_SECURITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            ) || tryStartActivity(
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:${appContext.packageName}"),
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
         } else {
-            appContext.startActivity(
+            opened = tryStartActivity(
                 Intent(Settings.ACTION_SECURITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             )
         }
+        if (!opened) {
+            _state.value = ApkUpdateState.Error(
+                "未能打开系统设置，请在系统设置中手动允许 My TV 安装未知应用后重试",
+            )
+        }
     }
+
+    private fun tryStartActivity(intent: Intent): Boolean = runCatching {
+        appContext.startActivity(intent)
+        true
+    }.onFailure {
+        OtvLog.w("apk update: 无法打开设置页: ${it.message}")
+    }.getOrDefault(false)
 
     private suspend fun checkLatest(manual: Boolean) {
         if (!BuildConfig.APK_UPDATE_ENABLED) {
@@ -393,17 +418,24 @@ object ApkUpdateManager {
     }
 
     private fun launchInstaller(apk: File) {
-        val uri = FileProvider.getUriForFile(
-            appContext,
-            "${appContext.packageName}.fileprovider",
-            apk,
-        )
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        runCatching {
+            val uri = FileProvider.getUriForFile(
+                appContext,
+                "${appContext.packageName}.fileprovider",
+                apk,
+            )
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            appContext.startActivity(intent)
+        }.onFailure {
+            OtvLog.w("apk update: 调起系统安装器失败: ${it.message}")
+            _state.value = ApkUpdateState.Error(
+                "无法调起系统安装器，请稍后重试；若持续失败请手动安装下载的更新包",
+            )
         }
-        appContext.startActivity(intent)
     }
 
     private fun canInstallUnknownApps(): Boolean =
