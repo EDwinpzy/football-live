@@ -749,8 +749,8 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
       <span id="apk-fileinfo" style="letter-spacing:0;font-family:var(--mono);color:var(--faint)"></span></label>
     <label class="f">渠道
       <select id="apk-channel"><option value="tv">TV 版</option><option value="mobile">移动版</option></select></label>
-    <label class="f">versionCode<input id="apk-version-code" class="mono" type="number" min="1" placeholder="例如 35"></label>
-    <label class="f">versionName<input id="apk-version-name" placeholder="例如 1.33"></label>
+    <label class="f">versionCode<input id="apk-version-code" class="mono" type="number" min="1" placeholder="例如 100 = 主版本×100+次版本×10"></label>
+    <label class="f">versionName<input id="apk-version-name" placeholder="例如 1.0（下一版 1.1）"></label>
     <label class="f">最低支持 versionCode<input id="apk-min-version" class="mono" type="number" min="0" value="0"></label>
     <label class="f">发布状态
       <select id="apk-status"><option value="published">立即发布（覆盖公开清单）</option><option value="offline">仅上传（不影响用户）</option></select></label>
@@ -1659,8 +1659,23 @@ async function loadApkUpdates() {
   }
   if (!rows.length) { el.innerHTML = `<div class="empty">还没有公开清单。上传 APK 后选择「立即发布」。</div>`; return; }
   el.innerHTML = `<table class="grid"><tr><th>渠道</th><th>版本</th><th>最低支持</th><th>大小</th><th>SHA-256</th><th>强制</th><th>清单地址</th></tr>` +
-    rows.map(({channel, m}) => `<tr><td>${channel === "tv" ? "TV 版" : "移动版"}</td><td><b>v${m.versionCode}</b> · ${esc(m.versionName)}</td><td>${m.minSupportedVersionCode || 0}</td><td>${apkMb(m.apk?.size || 0)}${(m.apk?.parts?.length || 0) > 1 ? ` <span class="tag" title="单对象上限 100 MiB，已分片下发">${m.apk.parts.length} 片</span>` : ""}</td><td class="mono" title="${esc(m.apk?.sha256 || "")}">${esc((m.apk?.sha256 || "").slice(0, 12))}…</td><td>${m.forceUpdate ? '<span class="tag bad">强制</span>' : '<span class="tag ok">可选</span>'}</td><td class="mono" style="font-size:10px">/web/apk-update/${channel}.json</td></tr>`).join("") + `</table>`;
+    rows.map(({channel, m}) => `<tr><td>${channel === "tv" ? "TV 版" : "移动版"}</td><td><b>V${esc(m.versionName)}</b> <span class="dim">code ${m.versionCode}</span></td><td>${m.minSupportedVersionCode || 0}</td><td>${apkMb(m.apk?.size || 0)}${(m.apk?.parts?.length || 0) > 1 ? ` <span class="tag" title="单对象上限 100 MiB，已分片下发">${m.apk.parts.length} 片</span>` : ""}</td><td class="mono" title="${esc(m.apk?.sha256 || "")}">${esc((m.apk?.sha256 || "").slice(0, 12))}…</td><td>${m.forceUpdate ? '<span class="tag bad">强制</span>' : '<span class="tag ok">可选</span>'}</td><td class="mono" style="font-size:10px">/web/apk-update/${channel}.json</td></tr>`).join("") + `</table>`;
   apkFillDefaults();
+}
+/* 版本号规则（2026-09-22 起）：versionName 走 V1.0 / V1.1 / V1.2 …，每版 +0.1；
+   versionCode = 主版本×100 + 次版本×10（V1.0=100、V1.1=110、V2.0=200，次版本满 9 进主版本）。
+   客户端只比较 versionCode 决定是否提示更新，所以这里预填 +10、名字 +0.1，避免手算出错。 */
+function apkParseName(name) {
+  const m = /^v?(\d+)\.(\d+)$/i.exec(String(name || "").trim());
+  return m ? {major: Number(m[1]), minor: Number(m[2])} : null;
+}
+function apkBumpName(name) {
+  const p = apkParseName(name);
+  return p && p.minor < 9 ? `${p.major}.${p.minor + 1}` : "";
+}
+function apkCodeFor(name) {
+  const p = apkParseName(name);
+  return p ? p.major * 100 + p.minor * 10 : 0;
 }
 function apkFillDefaults() {
   const channel = document.getElementById("apk-channel").value;
@@ -1668,8 +1683,10 @@ function apkFillDefaults() {
   if (!current) return;
   const code = document.getElementById("apk-version-code");
   const name = document.getElementById("apk-version-name");
-  if (!code.value) code.value = Number(current.versionCode || 0) + 1;
-  if (!name.value) name.value = current.versionName || "";
+  const nextName = apkBumpName(current.versionName) || String(current.versionName || "");
+  const nextCode = apkCodeFor(nextName) || (Number(current.versionCode || 0) + 1);
+  if (!code.value) code.value = nextCode;
+  if (!name.value) name.value = nextName;
   const certs = (current.apk?.certificateSha256 || []).join("\n");
   if (!document.getElementById("apk-cert").value && certs) document.getElementById("apk-cert").value = certs;
 }

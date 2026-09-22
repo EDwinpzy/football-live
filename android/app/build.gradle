@@ -33,9 +33,15 @@ android {
     // v1.35（2026-09-21）：移动端长按画面左右两侧 = 3.0x 倍速播放（网页版同款、仅触屏）；
     // 并含播放器渲染层 key 失配修复（黑屏只剩声音 / 错误卡弹窗后音频仍响 / 切信号源无效）。
     // v1.36（2026-09-22）：「我的」页新增「检查更新」手动入口（手动检查忽略「稍后更新」记忆）。
-    // 必须抬 versionCode——已装 1.35 的设备只会被更高的 versionCode 唤醒更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 42)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.40")
+    // ---- 版本号规则（2026-09-22 重置）----
+    // 用户要求：APK 版本与更新记录清零，从 V1.0 重新开始，之后每版 +0.1。
+    //   versionName = V1.0 / V1.1 / V1.2 …（界面展示用）
+    //   versionCode = 主版本×100 + 次版本×10 → V1.0=100、V1.1=110、V1.2=120、V2.0=200
+    // 必须严格递增：客户端 ApkUpdatePolicy 只比较 versionCode（manifest.versionCode
+    // <= 本机 versionCode 即视为无更新），系统安装也不允许降级覆盖。V1.0 取 100 而不是
+    // 10，是为了同时高于重置前的 42，已装 1.4x 的设备仍能收到 V1.0 的更新提示。
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 100)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.0")
         // 方案 §5：双 ABI split 思路——真机 arm64/v7a + 模拟器 x86_64（开发验证用）
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
         // AOSP 谷歌拼音解码器（搜索页拼音候选，2026-08-29）；默认 c++_static（new/delete 需要 libc++）
