@@ -34,8 +34,8 @@ android {
     // 并含播放器渲染层 key 失配修复（黑屏只剩声音 / 错误卡弹窗后音频仍响 / 切信号源无效）。
     // v1.36（2026-09-22）：「我的」页新增「检查更新」手动入口（手动检查忽略「稍后更新」记忆）。
     // 必须抬 versionCode——已装 1.35 的设备只会被更高的 versionCode 唤醒更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 39)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.37")
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 40)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.38")
         // 方案 §5：双 ABI split 思路——真机 arm64/v7a + 模拟器 x86_64（开发验证用）
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
         // AOSP 谷歌拼音解码器（搜索页拼音候选，2026-08-29）；默认 c++_static（new/delete 需要 libc++）
