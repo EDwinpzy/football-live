@@ -202,25 +202,36 @@ class ResetApplyTest(unittest.TestCase):
         self.assertEqual(db.data["announcements"], [])
 
 
-class ResetUiContractTest(unittest.TestCase):
+class ResetUiRemovedContractTest(unittest.TestCase):
+    """2026-09-22：用户要求去掉后台「还原」按钮 → 界面不再有任何清库入口。
+
+    服务端 reset / reset_preview 与双闸逻辑保留（由上面的 Reset*Test 继续保护），
+    只是不再从界面暴露；将来要恢复入口，把 UI 补回来即可，安全边界没动过。
+    """
+
     @classmethod
     def setUpClass(cls):
         cls.html = ADMIN_HTML.read_text(encoding="utf-8")
+        cls.server = ADMIN_SERVER.read_text(encoding="utf-8")
 
-    def test_every_page_has_reset_button(self):
+    def test_ui_no_longer_exposes_reset_entry(self):
         for tab in ("overview", "licenses", "logs", "gen", "hu", "ann", "iptv", "vod-sources"):
-            self.assertIn("resetOpen('" + tab + "')", self.html, tab)
+            self.assertNotIn("resetOpen('" + tab + "')", self.html, tab)
+        self.assertNotIn("resetOpen(", self.html)
+        self.assertNotIn("还原</button>", self.html)
 
-    def test_dialog_requires_password_and_phrase(self):
+    def test_reset_dialog_markup_is_gone(self):
         for anchor in ('id="reset-veil"', 'id="reset-pass"', 'id="reset-confirm"',
                        'id="reset-go"', 'id="reset-ok"', 'id="reset-err"'):
-            self.assertIn(anchor, self.html)
-        self.assertIn("确认短语不匹配", self.html)
-        self.assertIn("请输入后台密码", self.html)
+            self.assertNotIn(anchor, self.html)
+        for fn in ("resetOpen", "resetClose", "resetSubmit", "resetDownloadBackup", "RESET_SCOPE"):
+            self.assertNotIn(fn, self.html)
 
-    def test_dialog_auto_downloads_backup(self):
-        self.assertIn("admin-reset-", self.html)
-        self.assertIn("resetDownloadBackup", self.html)
+    def test_server_side_reset_api_is_still_intact(self):
+        self.assertIn('"/api/reset_preview": h_reset_preview', self.server)
+        self.assertIn('"/api/reset": h_reset', self.server)
+        self.assertIn("确认短语不匹配", self.server)
+        self.assertIn("后台密码不正确", self.server)
 
 
 if __name__ == "__main__":
