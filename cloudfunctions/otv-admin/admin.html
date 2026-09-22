@@ -397,6 +397,14 @@ table.grid td>.u{display:inline-block;max-width:200px;overflow:hidden;text-overf
 /* 操作列常驻：卡密表横宽时「复制 / 封禁 / 出售」不用拖到最右才点得到 */
 table.grid th.ops,table.grid td.ops{position:sticky;right:0;z-index:1;background:var(--bg2);box-shadow:inset 1px 0 0 var(--line),-12px 0 12px -12px rgba(0,0,0,.6)}
 table.grid tr:hover td.ops{background:#151f2b}
+/* 备注列只占 12% 宽，行内输入框+保存/取消会被单元格 overflow 裁掉；
+   编辑态改成右对齐浮层，按钮始终可点（窄屏也不会被裁）。 */
+table.grid td.note-cell{position:relative}
+table.grid td.note-cell.editing{overflow:visible;z-index:3}
+table.grid td.note-cell .note-edit{position:absolute;right:0;top:50%;transform:translateY(-50%);z-index:4;
+  display:flex;align-items:center;gap:6px;padding:5px;border-radius:6px;background:var(--bg2);
+  box-shadow:0 0 0 1px var(--line),0 12px 28px -14px rgba(0,0,0,.9)}
+table.grid td.note-cell .note-edit input{width:150px;padding:5px 8px;font-size:12px}
 #ov-ledger{border:1px solid var(--line);border-radius:var(--r-lg);background:var(--bg2);overflow-x:auto}
 #tab-hu.hu-dragging{outline:2px dashed var(--accent);outline-offset:8px;border-radius:var(--r-lg)}
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:0}
@@ -1372,26 +1380,36 @@ function noteView(code, note, withOps) {
   return text + (withOps ? ` <button class="ghost mini" onclick="editNote('${esc(code)}')">编辑</button>` : "");
 }
 function noteCell(code) {
-  return document.querySelector(`tr[data-key="${code}"] .note-cell`);
+  /* 总览台账与卡密表共用 ledgerTable，行上 data-key 同名；
+     必须限定在卡密表内查找，否则卡密同时出现在总览「最近 8 条」时，
+     编辑框会被写进隐藏的总览表，表现为点「编辑」没反应。 */
+  const scope = document.getElementById("lic-table") || document;
+  const row = Array.from(scope.querySelectorAll("tr[data-key]"))
+    .find(tr => tr.dataset.key === code);
+  return row ? row.querySelector(".note-cell") : null;
 }
 function editNote(code) {
   const cell = noteCell(code);
   if (!cell) return;
   const note = cell.dataset.note || "";
-  cell.innerHTML = `<input class="note-editor" maxlength="200" value="${esc(note)}" placeholder="填写备注" aria-label="卡密备注">` +
-    ` <button class="act mini" onclick="saveNote('${esc(code)}')">保存</button>` +
-    ` <button class="ghost mini" onclick="cancelNote('${esc(code)}')">取消</button>`;
+  cell.classList.add("editing");
+  cell.innerHTML = `<div class="note-edit">` +
+    `<input class="note-editor" maxlength="200" value="${esc(note)}" placeholder="填写备注" aria-label="卡密备注">` +
+    `<button class="act mini" onclick="saveNote('${esc(code)}')">保存</button>` +
+    `<button class="ghost mini" onclick="cancelNote('${esc(code)}')">取消</button></div>`;
   const input = cell.querySelector(".note-editor");
   input.focus();
   input.select();
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") saveNote(code);
+    if (event.key === "Enter") { event.preventDefault(); saveNote(code); }
     if (event.key === "Escape") cancelNote(code);
   });
 }
 function cancelNote(code) {
   const cell = noteCell(code);
-  if (cell) cell.innerHTML = noteView(code, cell.dataset.note || "", true);
+  if (!cell) return;
+  cell.classList.remove("editing");
+  cell.innerHTML = noteView(code, cell.dataset.note || "", true);
 }
 async function saveNote(code) {
   const cell = noteCell(code), input = cell && cell.querySelector(".note-editor");

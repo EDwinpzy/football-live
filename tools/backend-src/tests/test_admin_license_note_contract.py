@@ -7,6 +7,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 SERVER = ROOT / "tools" / "admin_server.py"
 ADMIN = ROOT / "tools" / "admin.html"
+CLOUD_ADMIN = ROOT / "cloudfunctions" / "otv-admin" / "admin.html"
 MIGRATION = ROOT / "tools" / "license_note_migration.sql"
 
 spec = importlib.util.spec_from_file_location("admin_server_note_under_test", SERVER)
@@ -39,6 +40,26 @@ class AdminLicenseNoteContractTest(unittest.TestCase):
         self.assertIn("saveNote", self.admin)
         self.assertIn('api("update_note"', self.admin)
         self.assertIn("取消", self.admin)
+
+    def test_note_lookup_is_scoped_to_license_table(self):
+        """总览台账与卡密表共用 ledgerTable，行上 data-key 同名。
+
+        查找必须限定在 #lic-table，否则同一卡密出现在总览「最近 8 条」时，
+        编辑框会被写进隐藏的总览表——线上表现为「编辑按钮点了没反应」。
+        """
+        body = self.admin.split("function noteCell(code)")[1].split("function editNote")[0]
+        self.assertIn('getElementById("lic-table")', body)
+        self.assertNotIn("document.querySelector(`tr[data-key=", body)
+
+    def test_note_editor_is_a_non_clipped_overlay(self):
+        """备注列只有 12% 宽：编辑态必须脱离单元格 overflow，否则保存按钮被裁掉点不到。"""
+        css = self.admin.split("table.grid tr:hover td.ops{background:#151f2b}")[1].split("/* 备注列")[1]
+        self.assertIn("td.note-cell.editing{overflow:visible", css.split("*/")[1].replace(" ", ""))
+        self.assertIn("note-edit", self.admin)
+
+    def test_cloud_function_copy_matches_tools_admin(self):
+        self.assertTrue(CLOUD_ADMIN.exists(), f"缺少云端副本 {CLOUD_ADMIN}")
+        self.assertEqual(ADMIN.read_text(encoding="utf-8"), CLOUD_ADMIN.read_text(encoding="utf-8"))
 
     def test_update_note_rejects_bad_code_and_overlong_note(self):
         self.assertEqual(admin_server.h_update_note({"code": "bad", "note": "x"}), {"error": "bad_code"})
