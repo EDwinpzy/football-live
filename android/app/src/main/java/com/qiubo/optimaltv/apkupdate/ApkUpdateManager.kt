@@ -1,7 +1,9 @@
 package com.qiubo.optimaltv.apkupdate
 
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -82,6 +84,10 @@ object ApkUpdateManager {
     private val _offer = MutableStateFlow<ApkUpdateOffer?>(null)
     val offer: StateFlow<ApkUpdateOffer?> = _offer.asStateFlow()
 
+    /** 已下载并校验通过的 APK；安装被系统拦下后重试时免重复下载。 */
+    @Volatile
+    private var verifiedApk: File? = null
+
     private val _state = MutableStateFlow<ApkUpdateState?>(null)
     val state: StateFlow<ApkUpdateState?> = _state.asStateFlow()
 
@@ -136,21 +142,22 @@ object ApkUpdateManager {
             .apply()
         _offer.value = null
         _state.value = null
+        verifiedApk = null
     }
 
     fun acceptUpdate() {
         val current = _offer.value ?: return
         if (downloadRunning) return
-        if (!canInstallUnknownApps()) {
-            _state.value = ApkUpdateState.PermissionRequired
-            openUnknownAppSettings()
-            return
-        }
         downloadRunning = true
         _state.value = ApkUpdateState.Downloading(0f, 0L, current.manifest.apk.sizeBytes)
         scope.launch {
             try {
-                val apk = downloadAndVerify(current.manifest)
+                // 部分投影仪/TV 定制 ROM 没有「安装未知应用」开关页（canRequestPackageInstalls
+                // 恒为 false），安装前预检只会把用户卡死甚至因跳设置页闪退；因此先下载，
+                // 直接把安装请求交给系统，真正调不起安装器时再降级到权限提示。
+                val expected = current.manifest.apk.sizeBytes
+                val apk = verifiedApk?.takeIf { it.exists() && (expected <= 0 || it.length() == expected) }
+                    ?: downloadAndVerify(current.manifest).also { verifiedApk = it }
                 _state.value = ApkUpdateState.Installing
                 withContext(Dispatchers.Main) { launchInstaller(apk) }
             } catch (t: Throwable) {
@@ -245,6 +252,7 @@ object ApkUpdateManager {
                 }
                 return
             }
+            verifiedApk = null
             _offer.value = ApkUpdateOffer(manifest, decision)
             if (manual) {
                 _checkState.value = ApkCheckState.UpdateFound(
@@ -418,7 +426,20 @@ object ApkUpdateManager {
     }
 
     private fun launchInstaller(apk: File) {
-        runCatching {
+        // 安装链路三级降级：ACTION_VIEW（多数 ROM 的安装器都会处理）→
+        // PackageInstaller 会话（没有 mime 处理器的 ROM）→ 权限提示/错误。
+        if (tryActionViewInstall(apk)) return
+        if (trySessionInstall(apk)) return
+        if (!canInstallUnknownApps()) {
+            _state.value = ApkUpdateState.PermissionRequired
+            return
+        }
+        _state.value = ApkUpdateState.Error(
+            "无法调起系统安装器，请稍后重试或手动安装下载的更新包",
+        )
+    }
+
+    private fun tryActionViewInstall(apk: File): Boolean = runCatching {
             val uri = FileProvider.getUriForFile(
                 appContext,
                 "${appContext.packageName}.fileprovider",
@@ -430,11 +451,53 @@ object ApkUpdateManager {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             appContext.startActivity(intent)
-        }.onFailure {
-            OtvLog.w("apk update: 调起系统安装器失败: ${it.message}")
-            _state.value = ApkUpdateState.Error(
-                "无法调起系统安装器，请稍后重试；若持续失败请手动安装下载的更新包",
+            true
+    }.onFailure {
+        OtvLog.w("apk update: ACTION_VIEW 调起安装器失败: ${it.message}")
+    }.getOrDefault(false)
+
+    private fun trySessionInstall(apk: File): Boolean = runCatching {
+        val installer = appContext.packageManager.packageInstaller
+        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+        val sessionId = installer.createSession(params)
+        installer.openSession(sessionId).use { session ->
+            apk.inputStream().use { input ->
+                session.openWrite("base", 0, apk.length()).use { output ->
+                    input.copyTo(output)
+                    session.fsync(output)
+                }
+            }
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
+            val callback = PendingIntent.getBroadcast(
+                appContext,
+                sessionId,
+                Intent(appContext, ApkInstallStatusReceiver::class.java),
+                flags,
             )
+            session.commit(callback.intentSender)
+        }
+        true
+    }.onFailure {
+        OtvLog.w("apk update: PackageInstaller 会话调起失败: ${it.message}")
+    }.getOrDefault(false)
+
+    /** PackageInstaller 会话结果回调（由 [ApkInstallStatusReceiver] 转发）。 */
+    internal fun onInstallSessionStatus(status: Int, message: String?, userAction: Intent?) {
+        when (status) {
+            PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                if (userAction == null) return
+                runCatching {
+                    appContext.startActivity(userAction.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }.onFailure { OtvLog.w("apk update: 打开安装确认页失败: ${it.message}") }
+            }
+            PackageInstaller.STATUS_SUCCESS -> _state.value = null
+            else -> {
+                OtvLog.w("apk update: 会话安装未完成 status=$status message=$message")
+                _state.value = ApkUpdateState.Error(
+                    message ?: "系统安装未完成，请稍后重试或手动安装下载的更新包",
+                )
+            }
         }
     }
 
