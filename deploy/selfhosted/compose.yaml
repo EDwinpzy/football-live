@@ -289,6 +289,92 @@ services:
     networks:
       - backend
 
+  metadata-api:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    working_dir: /app/tools
+    command: ["python", "-m", "metadata_center.read_api"]
+    environment:
+      PYTHONPATH: /app/tools
+      PYTHONDONTWRITEBYTECODE: "1"
+      OTV_METADATA_DIR: /srv/metadata
+      OTV_METADATA_PUBLIC_DIR: /srv/objects/hotupdate/metadata
+      OTV_METADATA_BIND: 0.0.0.0
+      OTV_METADATA_PORT: "8094"
+    volumes:
+      - ../../tools/metadata_center:/app/tools/metadata_center:ro
+      - ../../tools/backend-src/pinyin_map.json:/app/tools/backend-src/pinyin_map.json:ro
+      - ${METADATA_HOST_PATH:-./data/metadata}:/srv/metadata:ro
+      - ${OBJECTS_HOST_PATH:-./data/objects}:/srv/objects:ro
+    expose:
+      - "8094"
+    mem_limit: 256m
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    networks:
+      - backend
+
+  metadata-builder:
+    image: python:3.12-alpine
+    profiles: ["ops"]
+    working_dir: /app/tools
+    entrypoint: ["python", "-m", "metadata_center.cli"]
+    environment:
+      PYTHONPATH: /app/tools
+      PYTHONDONTWRITEBYTECODE: "1"
+      OTV_METADATA_DIR: /srv/metadata
+      OTV_METADATA_PUBLIC_DIR: /srv/objects/hotupdate/metadata
+      OTV_METADATA_SNAPSHOT: /srv/metadata/snapshots/douban_snapshot.json
+    volumes:
+      - ../../tools/metadata_center:/app/tools/metadata_center:ro
+      - ../../tools/backend-src/pinyin_map.json:/app/tools/backend-src/pinyin_map.json:ro
+      - ${METADATA_HOST_PATH:-./data/metadata}:/srv/metadata
+      - ${OBJECTS_HOST_PATH:-./data/objects}:/srv/objects
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    networks:
+      - backend
+
+  metadata-refresh:
+    image: python:3.12-alpine
+    profiles: ["ops"]
+    working_dir: /app/tools
+    entrypoint: ["/bin/sh", "/app/tools/metadata_center/refresh.sh"]
+    environment:
+      PYTHONPATH: /app/tools
+      PYTHONDONTWRITEBYTECODE: "1"
+      OTV_METADATA_DIR: /srv/metadata
+      OTV_METADATA_PUBLIC_DIR: /srv/objects/hotupdate/metadata
+      OTV_METADATA_SNAPSHOT: /srv/metadata/snapshots/douban_snapshot.json
+      OTV_METADATA_SOURCE_SNAPSHOT: /app/tools/backend-src/douban_snapshot.json
+    volumes:
+      - ../../tools/metadata_center:/app/tools/metadata_center:ro
+      - ../../tools/build_douban_snapshot.py:/app/tools/build_douban_snapshot.py:ro
+      - ../../tools/backend-src:/app/tools/backend-src
+      - ${METADATA_HOST_PATH:-./data/metadata}:/srv/metadata
+      - ${OBJECTS_HOST_PATH:-./data/objects}:/srv/objects
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    networks:
+      - backend
+
   nginx:
     image: nginx:stable-alpine
     restart: unless-stopped
@@ -309,6 +395,8 @@ services:
       storage:
         condition: service_started
       business-api:
+        condition: service_started
+      metadata-api:
         condition: service_started
     mem_limit: 128m
     logging:

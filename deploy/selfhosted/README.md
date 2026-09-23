@@ -39,3 +39,36 @@ CloudBase service cutoff is **2026-10-09**. Keep the legacy `activate`, `hotupda
 ## Stop and preserve data
 
 Use `docker compose down` to stop containers. Do not pass `--volumes`; `postgres_data` contains the database. Object files persist under `OBJECTS_HOST_PATH`.
+
+## Metadata centre
+
+`metadata-api` answers read-only catalogue queries on internal port `8094`; Nginx publishes it under
+`/metadata/` on the HTTPS NAT port. Published artefacts sit next to the other objects:
+
+- `/v1/storages/object/hotupdate/metadata/manifest.json` - latest version, sizes and SHA-256 values
+- `/v1/storages/object/hotupdate/metadata/metadata-v<version>.sqlite.gz` - full catalogue, gzip, deterministic
+- `/v1/storages/object/hotupdate/metadata/delta-<from>-<to>.sql.gz` - SQL delta between two versions
+
+Endpoints: `/metadata/health`, `/metadata/manifest.json`, `/metadata/search?q=&limit=`, `/metadata/<mytv_id>`,
+`/metadata/<mytv_id>/credits`, `/metadata/<mytv_id>/similar`. `mytv_id` is MyTV-owned and permanent; the original
+Douban reference stays available as `douban_id` and `legacy_ref`, so favourites, history and playback bindings
+keep working.
+
+Host directories: `/srv/mytv/metadata/snapshots` holds the source snapshot, `/srv/mytv/metadata/db` holds
+`metadata-latest.sqlite` (what the API reads), and `/srv/mytv/metadata/build` holds staged builds.
+
+```sh
+cd /srv/mytv
+# rebuild, publish and self-check
+docker compose -f deploy/selfhosted/compose.yaml --profile ops run --rm metadata-builder rebuild
+# inspect the current database and manifest
+docker compose -f deploy/selfhosted/compose.yaml --profile ops run --rm metadata-builder stats
+# re-verify the published hashes without rebuilding
+docker compose -f deploy/selfhosted/compose.yaml --profile ops run --rm metadata-builder verify
+```
+
+`mytv-metadata-refresh.service` and its timer run harvest, rebuild and publish daily at 05:30 Asia/Shanghai
+(21:30 UTC on this host). The harvest step is best effort: if Douban rate-limits the VPS the previous snapshot
+stays in place and the rebuild still runs. A rebuild whose catalogue content is unchanged publishes nothing,
+so an idle day does not create an empty version. Browsers need the migration CA trusted before they can open
+the HTTPS metadata URLs directly.
