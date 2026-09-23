@@ -579,7 +579,8 @@ body.portrait .cta-watch{left:40px;top:390px;width:240px;height:82px}
 body.portrait .cta-watch svg{width:30px;height:30px}
 body.portrait .cta-watch span{font-size:26px}
 body.portrait .live-dots{right:24px;bottom:22px;padding:6px 10px}
-body.portrait .tv-browse{padding:126px 34px 20px}
+body.portrait .tv-browse{padding:142px 34px 20px}
+body.portrait #tvSp{display:block}
 body.portrait .tv-group-chips .chip{height:56px;padding:0 28px;font-size:24px}
 body.portrait .tv-grid{grid-template-columns:repeat(2,1fr);gap:14px 18px}
 body.portrait .ch-row{height:76px;padding:0 14px}
