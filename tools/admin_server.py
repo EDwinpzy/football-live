@@ -872,7 +872,8 @@ def h_hu_delete(d: dict) -> dict:
         return out
     # 元数据已删 → 桶内对象顺手清理（失败不影响结果，孤立对象无害）
     try:
-        req = urllib.request.Request(obj_url(f"backend-hu{version}.zip"), method="DELETE",
+        req = urllib.request.Request(db_import.ENDPOINTS.storage_object_url(f"backend-hu{version}.zip"),
+                                     method="DELETE",
                                      headers={"Authorization": "Bearer " + cloud_token()})
         with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=60):
             pass
@@ -1005,7 +1006,9 @@ def h_hu_upload_chunk(qs: dict, raw: bytes) -> dict:
 
 def _hu_obj_delete(key: str) -> None:
     """尽力清理暂存分片（DELETE 不被支持时静默跳过——残留小对象无害）"""
-    url = obj_url(key)
+    # 删除走私有 storage API：自托管模式下公开对象地址是 VPS 的 HTTPS origin，
+    # 不在 check_url 白名单内，用公开地址删除会在这里抛异常（2026-09-24 线上 502）。
+    url = db_import.ENDPOINTS.storage_object_url(key)
     db_import.check_url(url)
     req = urllib.request.Request(url, method="DELETE",
                                  headers={"Authorization": "Bearer " + cloud_token()})
