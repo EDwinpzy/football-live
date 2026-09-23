@@ -43,6 +43,8 @@ out-*.xml
 #   .superpowers/  superpowers 头脑风暴的本地服务状态（端口 / pid / 本机会话 key）
 #   artifacts/     测试截图与实机证据（docs 里按本机路径引用，体积大且会随磁盘清理淘汰）
 #   work/          会话临时输出（logcat、uiautomator dump、流探针、预览草稿）
+.env
+deploy/selfhosted/.env
 .superpowers/
 artifacts/
 work/

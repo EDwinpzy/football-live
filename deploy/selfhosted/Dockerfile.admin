@@ -1,0 +1,23 @@
+FROM python:3.12-slim
+
+WORKDIR /app/tools
+
+RUN pip install --no-cache-dir cryptography \
+    && mkdir -p /app/tools/out /app/tools/keys
+
+COPY tools/admin_server.py /app/tools/admin_server.py
+COPY tools/admin.html /app/tools/admin.html
+COPY tools/apk_update.py /app/tools/apk_update.py
+COPY tools/db_import.py /app/tools/db_import.py
+COPY tools/license_gen.py /app/tools/license_gen.py
+COPY tools/selfhosted/admin_config.py /app/tools/selfhosted/admin_config.py
+COPY tools/selfhosted/scheduler.py /app/tools/selfhosted/scheduler.py
+COPY tools/backend-src /app/tools/backend-src
+COPY android/app/src/main/res/drawable/my_tv_logo.png /app/tools/my_tv_logo.png
+
+ENV PORT=8791 \
+    PYTHONDONTWRITEBYTECODE=1
+
+EXPOSE 8791
+
+CMD ["python", "/app/tools/admin_server.py"]

@@ -4,7 +4,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 MIGRATION = ROOT / "tools" / "vod_sources_migration.sql"
-HOTUPDATE = ROOT / "cloudfunctions" / "hotupdate" / "index.js"
+BUSINESS_API = ROOT / "tools" / "selfhosted" / "api_service.py"
 
 
 class VodSourcePublishContractTest(unittest.TestCase):
@@ -22,11 +22,11 @@ class VodSourcePublishContractTest(unittest.TestCase):
         self.assertIn("sha256", sql)
         self.assertIn("at least one enabled source", sql)
 
-    def test_hotupdate_exposes_vod_source_check(self):
-        js = HOTUPDATE.read_text(encoding="utf-8")
-        self.assertIn('url.pathname === "/vod-sources/check"', js)
-        self.assertIn('rpc("vod_source_public_check"', js)
-        self.assertIn("VOD_SOURCE_CACHE_MS = 2 * 60 * 1000", js)
+    def test_selfhosted_hotupdate_api_exposes_vod_source_check(self):
+        api = BUSINESS_API.read_text(encoding="utf-8")
+        self.assertIn('"/vod-sources/check"', api)
+        self.assertIn('"vod_source_public_check"', api)
+        self.assertIn("VOD_SOURCE_CACHE_SECONDS = 120", api)
 
 
 if __name__ == "__main__":

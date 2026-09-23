@@ -13,14 +13,15 @@
   import.sql      PG licenses 表导入脚本（INSERT ... ON CONFLICT DO NOTHING）
 
 私钥 tools/keys/private_key.pem 是整个体系的命根子：不进仓库、不贴进任何会话，请离线备份一份。
-两种来源（load_priv 自动选）：环境变量 OTV_PRIV_KEY（云端后台补货用；云函数 /var/user 只读，
-落不了文件，所以直接读环境变量）优先，其次本机 tools/keys/private_key.pem。
+私钥来源优先级：环境变量 OTV_PRIV_KEY，其次运行时文件 OTV_PRIV_KEY_FILE，最后本机
+tools/keys/private_key.pem。私钥不得放进镜像或仓库。
 """
 import argparse
 import base64
 import json
 import os
 import secrets
+import stat
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -60,14 +61,17 @@ def load_priv():
     if env:
         return serialization.load_pem_private_key(
             env.replace("\\n", "\n").encode("utf-8"), password=None)
-    if not PRIV_PATH.exists():
+    path = Path(os.environ.get("OTV_PRIV_KEY_FILE") or PRIV_PATH)
+    if not path.exists():
         sys.exit("私钥不存在，先执行: python license_gen.py init")
-    return serialization.load_pem_private_key(PRIV_PATH.read_bytes(), password=None)
+    if os.name == "posix" and stat.S_IMODE(path.stat().st_mode) & 0o077:
+        sys.exit("私钥文件权限不安全，必须限制为 0600 或更严格")
+    return serialization.load_pem_private_key(path.read_bytes(), password=None)
 
 
 def load_pub():
     env = os.environ.get("OTV_PRIV_KEY")
-    if env:
+    if env or os.environ.get("OTV_PRIV_KEY_FILE"):
         # 云端没有公钥文件：从私钥推导（同一把钥匙，结果与本机 keys/public_key.pem 一致）
         return load_priv().public_key()
     if not PUB_PATH.exists():

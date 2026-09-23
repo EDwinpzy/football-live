@@ -55,13 +55,14 @@ object EmbeddedBackend {
             // 再崩=崩溃循环，内容永久不可用）；现捕获后走 assets 二次尝试并留日志
             Thread {
                 try {
+                    val migrationCaPath = writeMigrationCa(appCtx).absolutePath
                     var ex = extractBest(appCtx)
                     makeRuntimeDirs(ex.dir)
                     try {
                         // Chaquopy 要求：先 Python.start(AndroidPlatform(context))，再 getInstance()
                         com.chaquo.python.Python.start(com.chaquo.python.android.AndroidPlatform(appCtx))
                         val mod = com.chaquo.python.Python.getInstance().getModule("proxy_runner")
-                        mod.callAttr("start", ex.dir.absolutePath, PORT)
+                        mod.callAttr("start", ex.dir.absolutePath, PORT, BuildConfig.API_BASE_URL, migrationCaPath)
                         if (ex.src.startsWith("hot") && probeHealthy(appCtx, ex.code)) {
                             // 热更包健康起服：记激活版本 + 上报 applied（强制更新闭环）
                             com.qiubo.optimaltv.hotupdate.HotUpdateManager.notifyApplied(appCtx, ex.code)
@@ -77,7 +78,7 @@ object EmbeddedBackend {
                             makeRuntimeDirs(ex.dir)
                             try {
                                 val mod2 = com.chaquo.python.Python.getInstance().getModule("proxy_runner")
-                                mod2.callAttr("start", ex.dir.absolutePath, PORT)
+                                mod2.callAttr("start", ex.dir.absolutePath, PORT, BuildConfig.API_BASE_URL, migrationCaPath)
                                 com.qiubo.optimaltv.hotupdate.HotUpdateManager.notifyActiveAssets(appCtx)
                                 Log.i(TAG, "后端已启动（回退 assets）port=$PORT")
                             } catch (e2: Exception) {
@@ -91,11 +92,12 @@ object EmbeddedBackend {
                     // 解压阶段异常（磁盘满/IO 错）：再给一次 assets 全新解压机会
                     Log.e(TAG, "后端解压失败（${e.message}），尝试 assets 重解压", e)
                     try {
+                        val caPath = writeMigrationCa(appCtx).absolutePath
                         val ex2 = Extracted(extractZipIfNeeded(appCtx), "assets", 0)
                         makeRuntimeDirs(ex2.dir)
                         com.chaquo.python.Python.start(com.chaquo.python.android.AndroidPlatform(appCtx))
                         com.chaquo.python.Python.getInstance()
-                            .getModule("proxy_runner").callAttr("start", ex2.dir.absolutePath, PORT)
+                            .getModule("proxy_runner").callAttr("start", ex2.dir.absolutePath, PORT, BuildConfig.API_BASE_URL, caPath)
                         com.qiubo.optimaltv.hotupdate.HotUpdateManager.notifyActiveAssets(appCtx)
                         Log.i(TAG, "后端已启动（解压异常后 assets 重试成功）port=$PORT")
                     } catch (e2: Exception) {
@@ -107,6 +109,14 @@ object EmbeddedBackend {
         } catch (e: Exception) {
             Log.e(TAG, "后端初始化失败: ${e.message}", e)
         }
+    }
+
+    private fun writeMigrationCa(ctx: Context): File {
+        val target = File(ctx.filesDir, "mytv_migration_ca.pem")
+        ctx.resources.openRawResource(R.raw.mytv_migration_ca).use { input ->
+            target.outputStream().use { output -> input.copyTo(output) }
+        }
+        return target
     }
 
     private fun makeRuntimeDirs(dir: File) {

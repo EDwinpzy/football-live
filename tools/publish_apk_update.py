@@ -30,7 +30,6 @@ import pathlib
 import re
 import sys
 import urllib.error
-import urllib.parse
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -50,17 +49,26 @@ from apk_update import (  # noqa: E402
 
 BUCKET = "hotupdate"
 PREFIX = "apk-update"
-MANIFEST_HOST = "https://appletv-d5ge1bth794873f76.service.tcloudbase.com"
-
-
 def obj_url(key: str) -> str:
-    return f"{db_import.BASE}/v1/storages/object/{BUCKET}/{urllib.parse.quote(key, safe='/')}"
+    """Public download URL written into the manifest."""
+    return db_import.ENDPOINTS.public_object_url(BUCKET, key)
+
+
+def upload_object_url(key: str) -> str:
+    """Private storage API URL used by the publisher for uploads and reads."""
+    return db_import.ENDPOINTS.storage_object_url(key)
+
+
+def manifest_url(manifest_name: str) -> str:
+    if manifest_name in ("tv", "mobile"):
+        return db_import.ENDPOINTS.public_web_url(f"apk-update/{manifest_name}.json")
+    return obj_url(f"{PREFIX}/{manifest_name}.json")
 
 
 def put_object(key: str, raw: bytes, ctype: str, token: str) -> None:
-    url = obj_url(key) + "?x-upsert=true"
+    url = upload_object_url(key) + "?x-upsert=true"
     db_import.check_url(url)
-    req = urllib.request.Request(url, data=raw, method="POST", headers={
+    req = urllib.request.Request(url, data=raw, method=db_import.ENDPOINTS.storage_upload_method, headers={
         "Content-Type": ctype,
         "Authorization": "Bearer " + token,
         "x-upsert": "true",
@@ -70,7 +78,7 @@ def put_object(key: str, raw: bytes, ctype: str, token: str) -> None:
 
 
 def get_object(key: str) -> bytes | None:
-    url = obj_url(key)
+    url = upload_object_url(key)
     db_import.check_url(url)
     req = urllib.request.Request(url, method="GET")
     try:
@@ -190,8 +198,7 @@ def main() -> None:
         "sha256": sha256,
         "parts": len(parts_desc),
         "apkUrl": obj_url(key_apk) if not parts_desc else "",
-        "manifestUrl": (f"{MANIFEST_HOST}/web/apk-update/{manifest_name}.json"
-                        if manifest_name == args.channel else obj_url(key_manifest)),
+        "manifestUrl": manifest_url(manifest_name),
         "status": "offline" if args.offline else "published",
     }, ensure_ascii=False, indent=2))
 

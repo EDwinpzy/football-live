@@ -8,6 +8,17 @@ plugins {
 // 复验/联调可临时抬高版本号打一个升级包（-PapkVersionCode / -PapkVersionName），不必改死代码。
 def apkVersionCodeOverride = project.findProperty('apkVersionCode')
 def apkVersionNameOverride = project.findProperty('apkVersionName')
+def defaultApiBaseUrl = 'https://103.236.97.137:35208'
+def apiBaseUrl = (project.findProperty('apiBaseUrl') ?: defaultApiBaseUrl).toString().trim().replaceAll('/+$', '')
+def apiBaseUri = java.net.URI.create(apiBaseUrl)
+if (apiBaseUri.scheme != 'https' || !apiBaseUri.host || apiBaseUri.userInfo ||
+        !(apiBaseUri.path in ['', '/']) || apiBaseUri.query || apiBaseUri.fragment ||
+        apiBaseUri.port == 0 || apiBaseUri.port > 65535) {
+    throw new GradleException('apiBaseUrl must be an HTTPS origin without a path, query, or fragment')
+}
+def apiBaseUrlConstant = '"' + apiBaseUrl + '"'
+def releaseStorePassword = project.findProperty('OTV_RELEASE_STORE_PASSWORD') ?: System.getenv('OTV_RELEASE_STORE_PASSWORD') ?: ''
+def releaseKeyPassword = project.findProperty('OTV_RELEASE_KEY_PASSWORD') ?: System.getenv('OTV_RELEASE_KEY_PASSWORD') ?: ''
 
 android {
     namespace 'com.qiubo.optimaltv'
@@ -40,8 +51,8 @@ android {
     // 必须严格递增：客户端 ApkUpdatePolicy 只比较 versionCode（manifest.versionCode
     // <= 本机 versionCode 即视为无更新），系统安装也不允许降级覆盖。V1.0 取 100 而不是
     // 10，是为了同时高于重置前的 42，已装 1.4x 的设备仍能收到 V1.0 的更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 100)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.0")
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 110)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.1")
         // 方案 §5：双 ABI split 思路——真机 arm64/v7a + 模拟器 x86_64（开发验证用）
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
         // AOSP 谷歌拼音解码器（搜索页拼音候选，2026-08-29）；默认 c++_static（new/delete 需要 libc++）
@@ -54,14 +65,16 @@ android {
         // 可以共存，但桌面会出现两个同名图标），分发时按设备类型二选一。
         resValue 'string', 'app_name', 'My TV'
         buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'    // 正式包：卡密门禁生效（未激活/过期走激活页）
-        buildConfigField 'String', 'LICENSE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/activate"'
+        buildConfigField 'String', 'API_BASE_URL', apiBaseUrlConstant
+        buildConfigField 'String', 'LICENSE_ENDPOINT', '"' + apiBaseUrl + '/activate"'
         buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'true'
-        buildConfigField 'String', 'HOTUPDATE_ENDPOINT', '"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/hotupdate"'
+        buildConfigField 'String', 'HOTUPDATE_ENDPOINT', '"' + apiBaseUrl + '/hotupdate"'
+        buildConfigField 'String', 'IPTV_LATEST_URL', '"' + apiBaseUrl + '/iptv/latest"'
         // APK 应用内更新清单；发布时将对应清单放到静态站点的 apk-update/ 目录。
         // 联调/自测可用 -PapkUpdateUrl=<https 地址> 临时指向测试清单，不必改死代码。
         buildConfigField 'boolean', 'APK_UPDATE_ENABLED', 'true'
         buildConfigField 'String', 'APK_UPDATE_URL',
-                '"' + (project.findProperty('apkUpdateUrl') ?: 'https://appletv-d5ge1bth794873f76.service.tcloudbase.com/web/apk-update/tv.json') + '"'
+                '"' + (project.findProperty('apkUpdateUrl') ?: (apiBaseUrl + '/web/apk-update/tv.json')) + '"'
         // 启动门闸预算：TV 90s（用户要求全加载完再进，遥控场景可等）；App.kt 共享读取。
         // 2026-09-03 事故教训见 mobile 的 30000 注释
         buildConfigField 'long', 'STARTUP_GATE_MS', '90000'
@@ -90,9 +103,9 @@ android {
         release {
             // 发布签名（2026-08-27 生成，10 年有效期；上架商店若换自有签名须先卸载旧包）
             storeFile file("../optimaltv-release.keystore")
-            storePassword "optimaltv2026"
+            storePassword releaseStorePassword
             keyAlias "optimaltv"
-            keyPassword "optimaltv2026"
+            keyPassword releaseKeyPassword
             // v1.39（2026-09-22）：补 v1 签名。minSdk 30 时 AGP 默认只出 v2，
             // 但投影仪定制 ROM 的包解析器/安装器常读不了 v2-only 包（表现为
             // 更新包校验反复失败、不停重新下载）；v1+v2 双签是 TV 分发的兼容底线。
@@ -149,7 +162,7 @@ chaquopy {
 // debug 测试包不进 apk/——直接用项目根 build 构建输出目录。
 tasks.register("copyTvApk", Copy) {
     from(layout.buildDirectory.file("outputs/apk/release/app-release.apk"))
-    into(file("D:/MyProjects/My TV/apk/TV版"))
+    into(rootProject.file("../apk/TV版"))
     rename { "MyTV-TV版.apk" }
 }
 // AGP 的 assemble 任务在 android 插件注册后才出现，须在 afterEvaluate 挂接依赖

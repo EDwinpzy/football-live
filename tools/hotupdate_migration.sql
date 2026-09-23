@@ -13,6 +13,7 @@
 --   客户端链路 = hotupdate 云函数（env 注入 publishable key，anon 身份）调公开 RPC；
 --   管理链路  = 本地 admin_server.py（svc_import signin）调管理 RPC + Storage API 上传。
 
+-- SELFHOSTED-OMIT-BEGIN: CloudBase Storage metadata and RLS are replaced by local object storage.
 -- ===== 1) 公开桶 =====
 insert into storage.buckets (id, name, public, file_size_limit)
 values ('hotupdate', 'hotupdate', true, 209715200)
@@ -24,6 +25,7 @@ create policy "otv_hotupdate_admin_rw" on storage.objects
   for all to authenticated
   using (bucket_id = 'hotupdate' and auth.uid()::text = '2094843486709620737')
   with check (bucket_id = 'hotupdate' and auth.uid()::text = '2094843486709620737');
+-- SELFHOSTED-OMIT-END
 
 -- ===== 3) 表 =====
 create table if not exists public.hotupdate_pkg (

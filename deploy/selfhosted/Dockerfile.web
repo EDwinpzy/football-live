@@ -1,0 +1,18 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/vendor
+
+WORKDIR /app
+
+COPY tools/backend-src/ /app/
+COPY cloudfunctions/otv-web/vendor/ /app/vendor/
+
+# The pinned QuickJS extension was built for CPython 3.11. The current
+# Ubuntu host only has the cached Python 3.12 image; normalize the extension
+# filename for its loader. The bridge smoke-check exercises Context/eval.
+RUN cp /app/vendor/_quickjs.cpython-311-x86_64-linux-gnu.so /app/vendor/_quickjs.so
+
+EXPOSE 8090
+CMD ["python", "proxy.py", "8090"]

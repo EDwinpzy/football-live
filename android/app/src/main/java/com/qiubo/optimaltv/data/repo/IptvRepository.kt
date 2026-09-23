@@ -2,6 +2,7 @@ package com.qiubo.optimaltv.data.repo
 
 import android.content.Context
 import android.os.SystemClock
+import com.qiubo.optimaltv.BuildConfig
 import com.qiubo.optimaltv.OtvLog
 import com.qiubo.optimaltv.data.source.UrlGuard
 import kotlinx.coroutines.Dispatchers
@@ -49,9 +50,8 @@ class IptvRepository(context: Context) {
          *     上游每日 EPG 校验，gh-proxy ~4s / jsdelivr ~1.6s）；
          *  ④⑤ vbskycn/iptv 聚合（原源，gh-proxy 实测 2.7s；raw 直连国内超时仅作兜底）。 */
         val SOURCES = listOf(
-                // 2026-09-17：后台自建站点（Sites）已退役，电视源改指 CloudBase 线上主后端，
-                // 与内置后端 _iptv_fetch_m3u / 网页版电视频道表同一地址（实测 HTTP 200 / 128 频道）。
-                "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/iptv/latest",
+                // 由 apiBaseUrl Gradle 属性注入：迁移后指向新服务器，旧 CloudBase 地址不再内置。
+                BuildConfig.IPTV_LATEST_URL,
             "https://gh-proxy.com/raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
             "https://cdn.jsdelivr.net/gh/Guovin/iptv-api@gd/output/result.m3u",
             "https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",

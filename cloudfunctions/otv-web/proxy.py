@@ -106,6 +106,49 @@ def project_match_state(item, now=None):
 # 测试可替换；生产环境首次访问影视 API 时再初始化，避免启动阶段触网。
 VOD_SERVICE = None
 _VOD_SERVICE_LOCK = threading.Lock()
+_VOD_REMOTE_CONFIG_URL = os.environ.get("OTV_VOD_SOURCE_CONFIG_URL", "").strip()
+_VOD_REMOTE_CONFIG_LOCK = threading.Lock()
+_VOD_REMOTE_CONFIG_STATE = {"last_attempt": 0.0, "registry": None}
+_VOD_REMOTE_CONFIG_TTL = 30.0
+
+
+def _refresh_remote_vod_registry():
+    """Load the latest published My TV source config from the private business API."""
+    if not _VOD_REMOTE_CONFIG_URL:
+        return None
+    now = time.monotonic()
+    registry = _VOD_REMOTE_CONFIG_STATE["registry"]
+    if now - _VOD_REMOTE_CONFIG_STATE["last_attempt"] < _VOD_REMOTE_CONFIG_TTL:
+        return registry
+    with _VOD_REMOTE_CONFIG_LOCK:
+        now = time.monotonic()
+        if now - _VOD_REMOTE_CONFIG_STATE["last_attempt"] < _VOD_REMOTE_CONFIG_TTL:
+            return _VOD_REMOTE_CONFIG_STATE["registry"]
+        _VOD_REMOTE_CONFIG_STATE["last_attempt"] = now
+        try:
+            target = urlparse(_VOD_REMOTE_CONFIG_URL)
+            if (target.scheme != "http" or target.hostname != "business-api" or
+                    target.port != 8082 or target.path != "/internal/vod-sources" or
+                    target.username or target.password or target.query or target.fragment):
+                return _VOD_REMOTE_CONFIG_STATE["registry"]
+            req = urlreq.Request(_VOD_REMOTE_CONFIG_URL, headers={"Accept": "application/json"})
+            with urlreq.urlopen(req, timeout=4) as response:
+                payload = json.loads(response.read(512 * 1024).decode("utf-8"))
+            config = payload.get("config") if isinstance(payload, dict) else None
+            version = payload.get("version") if isinstance(payload, dict) else None
+            if (not isinstance(payload, dict) or payload.get("ret") != 0 or
+                    not isinstance(config, dict) or not isinstance(config.get("sources"), list)):
+                return _VOD_REMOTE_CONFIG_STATE["registry"]
+            version = int(version or config.get("version") or 0)
+            if version <= 0:
+                return _VOD_REMOTE_CONFIG_STATE["registry"]
+            config = dict(config)
+            config["version"] = version
+            registry = vod_sources.SourceRegistry.from_dict(config)
+            _VOD_REMOTE_CONFIG_STATE["registry"] = registry
+            return registry
+        except Exception:
+            return _VOD_REMOTE_CONFIG_STATE["registry"]
 
 
 def _vod_data_dir(preferred=None):
@@ -122,6 +165,7 @@ def _vod_data_dir(preferred=None):
 
 def _get_vod_service():
     global VOD_SERVICE
+    remote_registry = _refresh_remote_vod_registry()
     if VOD_SERVICE is None:
         with _VOD_SERVICE_LOCK:
             if VOD_SERVICE is None:
@@ -129,7 +173,7 @@ def _get_vod_service():
                 local_index = media_index.MediaIndex(cache_root / "media" / "mytv.db")
                 catalog = douban_catalog.DoubanCatalog(
                     cache=douban_catalog.JsonDiskCache(cache_root / "douban"), media_index=local_index)
-                registry = vod_sources.SourceRegistry.load_current()
+                registry = remote_registry or vod_sources.SourceRegistry.load_current()
                 registry.history = vod_sources.LineHistory(cache_root / "vod_line_history.json")
                 registry.stats = vod_sources.SourceStats(cache_root / "vod_source_stats.json")
                 VOD_SERVICE = vod_api.VodService(catalog, registry)
@@ -137,8 +181,10 @@ def _get_vod_service():
                 # 访客直接搜索（没打开过影视首页）也必须先有结果。
                 catalog.warm_index()
     # 管理端发布的配置由 App 原子写入运行目录；请求到来时热替换，无需重启 App。
-    current = vod_sources.SourceRegistry.load_current()
-    if hasattr(VOD_SERVICE, "registry") and current.version > VOD_SERVICE.registry.version:
+    current = remote_registry or vod_sources.SourceRegistry.load_current()
+    if hasattr(VOD_SERVICE, "registry") and (
+            (remote_registry is not None and current.version != VOD_SERVICE.registry.version) or
+            current.version > VOD_SERVICE.registry.version):
         current.history = VOD_SERVICE.registry.history
         current.stats = VOD_SERVICE.registry.stats
         VOD_SERVICE.registry = current
@@ -4356,8 +4402,9 @@ class Handler(SimpleHTTPRequestHandler):
 # 与 app IptvRepository.SOURCES 同源：线上主后端托管 latest（2026-09-17 起为 CloudBase
 # appletv-d5ge1bth794873f76，自建站点对象存储已退役）优先，上游每日校验列表殿后。
 # 服务端出站无跨源限制，客户端拿到即可播（线路经 /api/relay）。
+_IPTV_LOCAL_ENDPOINT = os.environ.get("OTV_IPTV_LATEST_URL", "").strip()
 IPTV_SOURCES = [
-    "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/iptv/latest",
+    _IPTV_LOCAL_ENDPOINT or "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/iptv/latest",
     "https://gh-proxy.com/raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
     "https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",
 ]
@@ -4400,7 +4447,14 @@ def _iptv_fetch_m3u(timeout=15.0):
     for u in IPTV_SOURCES:
         pr = urlparse(u)
         host = (pr.hostname or "").lower()
-        if pr.scheme != "https" or host not in allowed_hosts or not _host_public(host):
+        trusted_local = (
+            bool(_IPTV_LOCAL_ENDPOINT)
+            and u == _IPTV_LOCAL_ENDPOINT
+            and pr.scheme == "http"
+            and host == "business-api"
+        )
+        if host not in allowed_hosts or (
+                not trusted_local and (pr.scheme != "https" or not _host_public(host))):
             continue
         try:
             req = urlreq.Request(u, headers={"User-Agent": UA})

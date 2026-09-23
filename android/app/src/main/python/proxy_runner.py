@@ -6,11 +6,46 @@ app 侧 EmbeddedBackend 解压 zip 后调用 start(dir, port)：
 """
 import sys
 import os
+import ssl
 import threading
+import urllib.request
+from urllib.parse import urlsplit
 
 
-def start(backend_dir, port=8090):
+def configure_api_environment(api_base_url, migration_ca_path):
+    """Point embedded web fallbacks at this APK's backend and trust its private CA."""
+    origin = str(api_base_url or "").strip().rstrip("/")
+    try:
+        parsed = urlsplit(origin)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("api_base_url must be an HTTPS origin") from exc
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+            or parsed.path not in ("", "/") or parsed.query or parsed.fragment
+            or (port is not None and not 1 <= port <= 65535)):
+        raise ValueError("api_base_url must be an HTTPS origin")
+    origin = f"https://{parsed.netloc}"
+    ca_path = str(migration_ca_path or "").strip()
+    if not ca_path or not os.path.isfile(ca_path):
+        raise ValueError("migration CA file is missing")
+
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=ca_path)
+    urllib.request.install_opener(urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=context)
+    ))
+
+    os.environ["OTV_CLOUD_BASE"] = origin + "/web"
+    os.environ["OTV_LICENSE_ENDPOINT"] = origin + "/activate"
+    os.environ["OTV_IPTV_LATEST_URL"] = origin + "/iptv/latest"
+    os.environ["OTV_APK_UPDATE_OBJECT_BASE"] = origin + "/v1/storages/object/hotupdate"
+
+
+def start(backend_dir, port=8090, api_base_url=None, migration_ca_path=None):
     """启动内置后端（阻塞前先 setpath 再起线程）。"""
+    if api_base_url is None or migration_ca_path is None:
+        raise ValueError("api_base_url and migration_ca_path are required")
+    configure_api_environment(api_base_url, migration_ca_path)
     sys.path.insert(0, backend_dir)
     # Hot-update extraction replaces backend_dir.  Store scraped metadata beside it
     # under filesDir so SQLite survives both backend and APK upgrades.

@@ -52,6 +52,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextvars import ContextVar
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -65,6 +66,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "backend-src"))
 import db_import  # noqa: E402  复用 signin/URL 白名单（凭据读 keys/svc_import_*.txt 或 env）
+from selfhosted.admin_config import load_admin_credentials, load_session_secret  # noqa: E402
 import hhkan  # noqa: E402
 import vod_sources  # noqa: E402
 from apk_update import (  # noqa: E402
@@ -78,6 +80,7 @@ from apk_update import (  # noqa: E402
 
 PORT = int(os.environ.get("PORT") or 8791)
 CLOUD = bool(os.environ.get("PORT")) or os.environ.get("OTV_CLOUD") == "1"
+SELFHOSTED = os.environ.get("OTV_SELFHOSTED_MODE") == "1"
 HTML_PATH = ROOT / "admin.html"
 # 品牌字标：本地 = Android 工程 res 只读引用；云端（HTTP 云函数/容器）= 同目录捆绑文件
 _LOGO_LOCAL = ROOT / "my_tv_logo.png"
@@ -86,7 +89,8 @@ LOGO_PATH = _LOGO_LOCAL if _LOGO_LOCAL.exists() else _LOGO_REPO
 
 # ---------------- 登录门禁（v1.20） ----------------
 
-ADMIN_USER = os.environ.get("OTV_ADMIN_USER") or "admin"
+_ADMIN_CREDENTIALS = load_admin_credentials(os.environ)
+ADMIN_USER = (_ADMIN_CREDENTIALS[0] if _ADMIN_CREDENTIALS else None) or os.environ.get("OTV_ADMIN_USER") or "admin"
 # 密码优先级：env > keys/admin_pass.txt（首启生成一次）> 本地随机（每次启动变化并打印）
 _admin_pass_file = ROOT / "keys" / "admin_pass.txt"
 
@@ -108,19 +112,27 @@ def _resolve_admin_pass() -> str:
         return secrets.token_urlsafe(6)
 
 
-ADMIN_PASS = _resolve_admin_pass()
+ADMIN_PASS = _ADMIN_CREDENTIALS[1] if _ADMIN_CREDENTIALS else _resolve_admin_pass()
 # 补货产物目录：云端 /var/user 只读，用 OTV_OUT_DIR 指到 /tmp（与 license_gen.py 同一开关）
 OUT_ROOT = Path(os.environ.get("OTV_OUT_DIR") or (ROOT / "out"))
 # 会话签名密钥：优先 env；缺省时由登录凭据派生**固定**值。
 # 不能退回随机值——云函数多实例/冷启动各自随机会让 Cookie 时验时不验
 # （2026-09-16 线上实测：登录成功后再连发 8 次带 Cookie 请求，7 次 401）。
-SESSION_SECRET = os.environ.get("OTV_ADMIN_SECRET") or hashlib.sha256(
+_CONFIGURED_SESSION_SECRET = load_session_secret(os.environ)
+SESSION_SECRET = _CONFIGURED_SESSION_SECRET or hashlib.sha256(
     f"otv-admin-session:{ADMIN_USER}:{ADMIN_PASS}".encode("utf-8")).hexdigest()
 SESSION_TTL = 12 * 3600
 COOKIE = "otv_admin_sess"
 # 免登录开关（用户可要求；默认关）：OTV_ADMIN_NOAUTH=1 时网关匿名直达后台，
 # 谁拿到 /admin/ 地址都能改卡密、推热更、发公告。改 env 即时生效，不用重新部署代码。
 NOAUTH = os.environ.get("OTV_ADMIN_NOAUTH") == "1"
+_IPTV_PUBLISH_LEASE = ContextVar("mytv_iptv_publish_lease", default=None)
+
+
+def _assert_iptv_publish_lease() -> None:
+    lease = _IPTV_PUBLISH_LEASE.get()
+    if lease is not None:
+        lease.assert_valid()
 
 
 def _sign(expires: int) -> str:
@@ -204,7 +216,8 @@ def cloud_token() -> str:
 
 
 def rpc(name: str, payload: dict) -> dict:
-    url = db_import.BASE + "/v1/rdb/rest/rpc/" + name
+    _assert_iptv_publish_lease()
+    url = db_import.REST_BASE + "/rpc/" + name
     db_import.check_url(url)
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"), method="POST",
@@ -229,7 +242,7 @@ def rpc(name: str, payload: dict) -> dict:
 # ---------------- v1.18 热更新管理（公测版） ----------------
 
 HU_BUCKET = "hotupdate"
-HU_ENDPOINT = "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/hotupdate"
+HU_ENDPOINT = db_import.HOTUPDATE_ENDPOINT
 # 与 APK HotUpdateManager / hotupdate_admin_upsert RPC 的校验口径一致
 HU_REQUIRED_ENTRIES = (
     "proxy.py", "hhkan.py", "scraper.py", "team_backdrop.py", "decrypt_stream.js",
@@ -258,18 +271,19 @@ APK_CERT_ENV = "OTV_APK_CERT_SHA256"
 
 
 def obj_url(key: str) -> str:
-    return f"{db_import.BASE}/v1/storages/object/{HU_BUCKET}/{key}"
+    return db_import.ENDPOINTS.public_object_url(HU_BUCKET, key)
 
 
 def _apk_obj_url(key: str) -> str:
-    """APK 文件名允许中文，清单中的下载 URL 必须进行路径编码。"""
-    return f"{db_import.BASE}/v1/storages/object/{HU_BUCKET}/{urllib.parse.quote(key, safe='/')}"
+    """APK 下载链接指向公网 HTTPS 对象地址；上传使用私有 storage 服务地址。"""
+    return db_import.ENDPOINTS.public_object_url(HU_BUCKET, key)
 
 
 def pg_put(key: str, raw: bytes, ctype: str) -> None:
-    url = obj_url(key) + "?x-upsert=true"
+    _assert_iptv_publish_lease()
+    url = db_import.ENDPOINTS.storage_object_url(key) + "?x-upsert=true"
     db_import.check_url(url)
-    req = urllib.request.Request(url, data=raw, method="POST", headers={
+    req = urllib.request.Request(url, data=raw, method=db_import.ENDPOINTS.storage_upload_method, headers={
         "Content-Type": ctype,
         "Authorization": "Bearer " + cloud_token(),
         "x-upsert": "true",
@@ -280,7 +294,7 @@ def pg_put(key: str, raw: bytes, ctype: str) -> None:
 
 def pg_get_public(key: str, max_bytes: int = 32 * 1024 * 1024):
     """读公开桶对象（匿名 GET，与客户端拉取同一路径）"""
-    url = obj_url(key)
+    url = db_import.ENDPOINTS.storage_object_url(key)
     db_import.check_url(url)
     req = urllib.request.Request(url, method="GET")
     with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=120) as r:
@@ -400,7 +414,7 @@ def _apk_publish(raw: bytes, meta: dict) -> dict:
         "sha256": sha,
         "key": key,
         "apkUrl": apk_url,
-        "manifestUrl": f"https://appletv-d5ge1bth794873f76.service.tcloudbase.com/web/apk-update/{meta['channel']}.json",
+        "manifestUrl": db_import.ENDPOINTS.public_web_url(f"apk-update/{meta['channel']}.json"),
         "manifest": manifest,
     }
 
@@ -558,7 +572,7 @@ RESET_BACKUP_PAGE = 1000
 def _rest(table: str, query: str = "", method: str = "GET", body: bytes | None = None,
           headers: dict | None = None, timeout: int = 120):
     """PostgREST 直连（表级）。返回 (status, bytes, headers)。"""
-    url = db_import.BASE + "/v1/rdb/rest/" + table + (("?" + query) if query else "")
+    url = db_import.REST_BASE + "/" + table + (("?" + query) if query else "")
     db_import.check_url(url)
     h = {"Accept": "application/json", "Authorization": "Bearer " + cloud_token()}
     if body is not None:
@@ -689,7 +703,7 @@ def reset_apply(scope: str, password: str, confirm: str) -> dict:
     backup = {
         "schema": 1, "scope": scope, "label": spec["label"],
         "capturedAt": datetime.now(timezone.utc).isoformat(),
-        "environment": "appletv-d5ge1bth794873f76",
+        "environment": db_import.ENDPOINTS.environment_name,
         "rows": backup_rows,
     }
     raw = json.dumps(backup, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -1054,9 +1068,7 @@ def h_hu_health(_d: dict) -> dict:
     """热更端点连通探测：合法 deviceId + apkVersion=0 → 函数参数层拒绝（ret=400 bad_apk），
     证明 网关/云函数/signin/RPC 全链路活着且不入库；ret=0+blackout=true = 端点活着但处于
     紧急停更（OTV_HU_OFF=1），界面显示 BLACKOUT: ON 而非异常。"""
-    u = urllib.parse.urlsplit(HU_ENDPOINT + "/check")
-    if u.scheme != "https" or u.hostname != "appletv-d5ge1bth794873f76.service.tcloudbase.com" or u.port is not None:
-        return {"ok": False, "detail": "目标 URL 不在白名单"}
+    db_import.check_url(HU_ENDPOINT + "/check")
     body = json.dumps({"deviceId": "healthcheck0000", "apkVersion": 0, "hotVersion": 0}).encode("utf-8")
     req = urllib.request.Request(HU_ENDPOINT + "/check", data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
@@ -1610,6 +1622,49 @@ def h_iptv_mode(d: dict) -> dict:
     return out
 
 
+def _guard_iptv_publisher(handler, *, automatic: bool = False):
+    """Serialize local scheduled work with manual publishes through a DB lease."""
+    if not SELFHOSTED:
+        return handler
+
+    def guarded(d: dict) -> dict:
+        from selfhosted.scheduler import DatabasePublishLock
+
+        try:
+            with DatabasePublishLock(rpc).hold() as acquired:
+                if not acquired:
+                    return {"error": "电视源正在发布，请稍后重试"}
+                lease_token = _IPTV_PUBLISH_LEASE.set(acquired)
+                try:
+                    acquired.assert_valid()
+                    if automatic:
+                        mode = rpc("iptv_admin_get_mode", {})
+                        if not isinstance(mode, dict) or mode.get("mode") != "auto":
+                            return {"skipped": True, "reason": "manual mode is active"}
+                    result = handler(d)
+                    acquired.assert_valid()
+                    return result
+                finally:
+                    _IPTV_PUBLISH_LEASE.reset(lease_token)
+        except Exception as exc:  # noqa: BLE001 - never publish without the shared lock
+            sys.stderr.write(
+                f"[admin] IPTV publish lock unavailable ({type(exc).__name__}); operation skipped\n"
+            )
+            return {"error": "电视源发布锁不可用，操作未执行"}
+
+    guarded.__name__ = getattr(handler, "__name__", "guarded")
+    guarded.__doc__ = getattr(handler, "__doc__", None)
+    return guarded
+
+
+# The auto route is also used by the daily scheduler. Manual publication,
+# rollback, and mode changes take the same database lease.
+h_iptv_auto_run = _guard_iptv_publisher(h_iptv_auto_run, automatic=True)
+h_iptv_publish = _guard_iptv_publisher(h_iptv_publish)
+h_iptv_rollback = _guard_iptv_publisher(h_iptv_rollback)
+h_iptv_mode = _guard_iptv_publisher(h_iptv_mode)
+
+
 def h_iptv_latest(_d: dict) -> dict:
     """当前线上 latest 内容探针（拉公开桶，验证客户端视角）"""
     try:
@@ -1832,10 +1887,8 @@ def h_health(_d: dict) -> dict:
     （参数层拒绝，不入库不留审计痕迹；signin/RPC 链路由业务请求自然验证）。
     带 protocol=2 并以 400 为主判据；426（协议升级提示）同样说明链路活着，
     否则 v1.26+ 分协议校验上线后探针会恒定误报「异常」。"""
-    url = "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/activate"
-    u = urllib.parse.urlsplit(url)
-    if u.scheme != "https" or u.hostname != "appletv-d5ge1bth794873f76.service.tcloudbase.com" or u.port is not None:
-        return {"ok": False, "detail": "目标 URL 不在白名单"}
+    url = db_import.ACTIVATE_ENDPOINT
+    db_import.check_url(url)
     body = json.dumps({"code": "OTV-0000-0000", "deviceId": "healthcheck0000",
                        "protocol": 2}).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST",
@@ -2109,11 +2162,34 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     bind = "0.0.0.0" if CLOUD else "127.0.0.1"
     srv = ThreadingHTTPServer((bind, PORT), Handler)
+    scheduler = None
+    if SELFHOSTED and os.environ.get("OTV_IPTV_SCHEDULER_ENABLED", "1") == "1":
+        from selfhosted.scheduler import DailyIptvScheduler
+
+        schedule_at = os.environ.get("OTV_IPTV_DAILY_TIME", "06:30")
+        try:
+            hour_text, minute_text = schedule_at.split(":", 1)
+            hour, minute = int(hour_text), int(minute_text)
+            if len(hour_text) != 2 or len(minute_text) != 2:
+                raise ValueError
+            scheduler = DailyIptvScheduler(
+                lambda: h_iptv_auto_run({"source": "daily-scheduler"}),
+                hour=hour,
+                minute=minute,
+                logger=lambda msg: print(f"[scheduler] {msg}"),
+            )
+            scheduler.start()
+            print(f"IPTV daily rebuild scheduled for {schedule_at} Asia/Shanghai")
+        except ValueError:
+            srv.server_close()
+            raise ValueError("OTV_IPTV_DAILY_TIME must use HH:MM")
     url = f"http://127.0.0.1:{PORT}/" if not CLOUD else f"http://0.0.0.0:{PORT}/（容器平台对外域名）"
     print(f"My TV 后台管理系统 v1.20 已启动: {url}")
     print(f"功能: 卡密 · 补货 · 热更新 · APK 更新 · 公告 · 电视源管理（v1.20）")
     if CLOUD:
-        if os.environ.get("OTV_ADMIN_PASS"):
+        if _ADMIN_CREDENTIALS:
+            print("登录门禁: 已从安全运行时凭据加载")
+        elif os.environ.get("OTV_ADMIN_PASS"):
             print("登录门禁: 账号 OTV_ADMIN_USER / 密码 OTV_ADMIN_PASS（环境变量）")
         else:
             print("⚠ 云端形态未设置 OTV_ADMIN_PASS，使用随机密码（见 keys/admin_pass.txt）——"
@@ -2126,6 +2202,10 @@ def main() -> None:
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\n已退出。")
+    finally:
+        if scheduler:
+            scheduler.stop()
+        srv.server_close()
 
 
 if __name__ == "__main__":

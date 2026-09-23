@@ -10,11 +10,12 @@ class CloudCuContractTest(unittest.TestCase):
         return (ROOT / relative).read_text(encoding="utf-8")
 
     def test_hotupdate_function_coalesces_postgres_reads(self):
-        js = self.read("cloudfunctions/hotupdate/index.js")
-        self.assertIn("ANNOUNCE_CACHE_MS = 5 * 60 * 1000", js)
-        self.assertIn("announcementLatestCached()", js)
-        self.assertIn("hotupdateCheckCached(hotVersion, apkVersion)", js)
-        self.assertIn("stale-while-revalidate=300", js)
+        api = self.read("tools/selfhosted/api_service.py")
+        self.assertIn("ANNOUNCE_CACHE_SECONDS = 300", api)
+        self.assertIn("CHECK_CACHE_SECONDS = 120", api)
+        self.assertIn('"announcement_latest"', api)
+        self.assertIn('"hotupdate_check"', api)
+        self.assertIn("stale-while-revalidate=300", api)
 
     def test_native_announcement_polling_is_foreground_only(self):
         for path in (

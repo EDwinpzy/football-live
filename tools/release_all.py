@@ -19,6 +19,23 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
+CLOUDBASE_ENV_ID = "appletv-d5ge1bth794873f76"
+
+
+def cloudbase_code_update_command(tcb):
+    """Update otv-web code without redeploying its existing function config."""
+    return [
+        tcb,
+        "fn",
+        "code",
+        "update",
+        "otv-web",
+        "--dir",
+        ".",
+        "-e",
+        CLOUDBASE_ENV_ID,
+        "--json",
+    ]
 
 
 def run(cmd, cwd, input_text=None):
@@ -31,7 +48,7 @@ def run(cmd, cwd, input_text=None):
 def main():
     parser = argparse.ArgumentParser(description="Build local deliverables; deploy only with explicit --deploy")
     parser.add_argument("--deploy", action="store_true",
-                        help="deploy otv-web after the user has explicitly approved the exact scope")
+                        help="update otv-web code while preserving its existing function configuration")
     args = parser.parse_args()
 
     # 豆瓣快照是云端/离线环境唯一的影视数据来源（首页、详情、本地搜索都靠它）：
@@ -63,17 +80,17 @@ def main():
         raise SystemExit("build_backend_zip 失败")
 
     if args.deploy:
-        # tcb 部署是交互式（选择 Update with merged config）——回车选默认。
         tcb = shutil.which("tcb.cmd") or shutil.which("tcb")
         if not tcb:
             raise SystemExit("未找到 tcb CLI；请先确认 npm 全局 bin 已加入 PATH")
-        ok2 = run([tcb, "fn", "deploy", "otv-web", "--httpFn", "--dir", ".",
-                   "-e", "appletv-d5ge1bth794873f76", "--force"],
-                  os.path.join(ROOT, "cloudfunctions", "otv-web"), input_text="\n")
+        ok2 = run(
+            cloudbase_code_update_command(tcb),
+            os.path.join(ROOT, "cloudfunctions", "otv-web"),
+        )
         if not ok2:
-            raise SystemExit("tcb 部署 otv-web 失败（可手动: cd cloudfunctions/otv-web && tcb fn deploy otv-web --httpFn --dir . -e appletv-d5ge1bth794873f76 --force）")
+            raise SystemExit("tcb 更新 otv-web 代码失败（函数环境变量、运行时和触发器未由本命令修改）")
     if args.deploy:
-        print("\n[OK] 本地交付物已构建\n[OK] 云端网页版已部署（/web/ 即时生效）\n"
+        print("\n[OK] 本地交付物已构建\n[OK] CloudBase otv-web 代码已更新（保留现有函数配置）\n"
               "[OK] App 热更包已重建（android/app/src/main/assets/backend/python-backend.zip，含 www 前端）\n"
               "-> App 热更新仍需到后台手动上传并发布。")
     else:

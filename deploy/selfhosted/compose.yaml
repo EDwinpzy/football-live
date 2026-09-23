@@ -1,0 +1,327 @@
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../../tools/selfhosted/db_bootstrap.sql:/docker-entrypoint-initdb.d/00-db-bootstrap.sql:ro
+      - ../../tools/selfhosted/iptv_publish_lock.sql:/docker-entrypoint-initdb.d/iptv_publish_lock.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    mem_limit: 1536m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - backend
+
+  health:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    command: ["python", "/app/health.py"]
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      OBJECTS_ROOT: /srv/objects
+      HEALTH_BIND: 0.0.0.0
+      HEALTH_PORT: "8080"
+    volumes:
+      - ../../tools/selfhosted/health.py:/app/health.py:ro
+      - ${OBJECTS_HOST_PATH:-./data/objects}:/srv/objects
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8080"
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    networks:
+      - backend
+
+  auth:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    command: ["python", "/app/auth_service.py"]
+    environment:
+      OTV_AUTH_USERS_FILE: /run/secrets/auth-users.json
+      OTV_JWT_SECRET_FILE: /run/secrets/jwt-signing-key
+      OTV_AUTH_BIND: 0.0.0.0
+      OTV_AUTH_PORT: "8081"
+      OTV_AUTH_TOKEN_TTL: "7200"
+    volumes:
+      - ../../tools/selfhosted/auth_service.py:/app/auth_service.py:ro
+      - ${AUTH_SECRETS_HOST_PATH:-/srv/mytv/secrets}/auth-users.json:/run/secrets/auth-users.json:ro
+      - ${AUTH_SECRETS_HOST_PATH:-/srv/mytv/secrets}/jwt-signing-key:/run/secrets/jwt-signing-key:ro
+    expose:
+      - "8081"
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    networks:
+      - backend
+
+  storage:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    command: ["python", "/app/storage_service.py"]
+    environment:
+      OTV_STORAGE_ROOT: /srv/objects
+      OTV_STORAGE_BIND: 0.0.0.0
+      OTV_STORAGE_PORT: "8092"
+      OTV_STORAGE_BUCKETS: hotupdate
+      OTV_STORAGE_ADMIN_SUBJECTS: "2094843486709620737"
+      OTV_JWT_SECRET_FILE: /run/secrets/jwt-signing-key
+    volumes:
+      - ../../tools/selfhosted/storage_service.py:/app/storage_service.py:ro
+      - ../../tools/selfhosted/auth_service.py:/app/auth_service.py:ro
+      - ${OBJECTS_HOST_PATH:-./data/objects}:/srv/objects
+      - ${AUTH_SECRETS_HOST_PATH:-/srv/mytv/secrets}/jwt-signing-key:/run/secrets/jwt-signing-key:ro
+    expose:
+      - "8092"
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    networks:
+      - backend
+
+  postgrest:
+    image: postgrest/postgrest:v12.2.8
+    restart: unless-stopped
+    environment:
+      PGRST_DB_URI: postgres://${POSTGREST_DB_USER:-authenticator}:${POSTGREST_DB_PASSWORD:?set POSTGREST_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-optimal_tv}
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SIGNING_KEY:?set JWT_SIGNING_KEY}
+      PGRST_SERVER_HOST: 0.0.0.0
+      PGRST_SERVER_PORT: "3000"
+      PGRST_DB_AGGREGATES_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "3000"
+    mem_limit: 192m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - backend
+
+  business-api:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    command: ["python", "/app/api_service.py"]
+    environment:
+      OTV_POSTGREST_RPC_URL: http://postgrest:3000/rpc
+      OTV_PUBLIC_BASE_URL: ${OTV_PUBLIC_BASE_URL:-https://103.236.97.137:35208}
+      OTV_STORAGE_ROOT: /srv/objects
+      OTV_HU_OFF: ${OTV_HU_OFF:-0}
+      OTV_API_BIND: 0.0.0.0
+      OTV_API_PORT: "8082"
+    volumes:
+      - ../../tools/selfhosted/api_service.py:/app/api_service.py:ro
+      - ${OBJECTS_HOST_PATH:-./data/objects}:/srv/objects:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgrest:
+        condition: service_started
+    expose:
+      - "8082"
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    networks:
+      - backend
+
+  web-api:
+    build:
+      context: ../..
+      dockerfile: deploy/selfhosted/Dockerfile.web
+    restart: unless-stopped
+    environment:
+      PORT: "8090"
+      OTV_BIND: 0.0.0.0
+      OTV_CLOUD_RELAY: "0"
+      OTV_HHKAN_SNAPSHOT_FIRST: "1"
+      OTV_LICENSE_ENDPOINT: http://business-api:8082/activate
+      OTV_APK_UPDATE_OBJECT_BASE: http://storage:8092/v1/storages/object/hotupdate
+      OTV_IPTV_LATEST_URL: http://business-api:8082/iptv/latest
+      OTV_VOD_SOURCE_CONFIG_URL: http://business-api:8082/internal/vod-sources
+    depends_on:
+      business-api:
+        condition: service_started
+      storage:
+        condition: service_started
+    expose:
+      - "8090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/health', timeout=2)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    mem_limit: 768m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - backend
+
+  admin:
+    image: selfhosted-admin:latest
+    build:
+      context: ../..
+      dockerfile: deploy/selfhosted/Dockerfile.admin
+    restart: unless-stopped
+    environment:
+      PORT: "8791"
+      OTV_CLOUD: "1"
+      OTV_SELFHOSTED_MODE: "1"
+      OTV_IPTV_SCHEDULER_ENABLED: "1"
+      OTV_IPTV_DAILY_TIME: "06:30"
+      OTV_ADMIN_CREDENTIALS_FILE: /run/secrets/admin-credentials.json
+      OTV_ADMIN_SECRET_FILE: /run/secrets/admin-session-secret
+      OTV_AUTH_CREDENTIALS_FILE: /run/secrets/admin-api-credentials.json
+      OTV_REST_BASE: http://postgrest:3000
+      OTV_STORAGE_BASE: http://storage:8092/v1/storages/object/hotupdate
+      OTV_HOTUPDATE_ENDPOINT: http://business-api:8082/hotupdate
+      OTV_ACTIVATE_ENDPOINT: http://business-api:8082/activate
+      OTV_PRIV_KEY_FILE: /run/secrets/license/private_key.pem
+      OTV_PUBLIC_BASE_URL: ${OTV_PUBLIC_BASE_URL:-https://103.236.97.137:35208}
+      OTV_HU_OFF: ${OTV_HU_OFF:-0}
+      OTV_OUT_DIR: /tmp/out
+      OTV_ADMIN_NOAUTH: "0"
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ../../tools/admin_server.py:/app/tools/admin_server.py:ro
+      - ../../tools/admin.html:/app/tools/admin.html:ro
+      - ../../tools/apk_update.py:/app/tools/apk_update.py:ro
+      - ../../tools/db_import.py:/app/tools/db_import.py:ro
+      - ../../tools/license_gen.py:/app/tools/license_gen.py:ro
+      - ../../tools/selfhosted:/app/tools/selfhosted:ro
+      - ../../tools/backend-src:/app/tools/backend-src:ro
+      - ${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}/admin-credentials.json:/run/secrets/admin-credentials.json:ro
+      - ${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}/admin-session-secret:/run/secrets/admin-session-secret:ro
+      - ${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}/admin-api-credentials.json:/run/secrets/admin-api-credentials.json:ro
+      - ${LICENSE_SECRETS_HOST_PATH:-/srv/mytv/secrets/license}:/run/secrets/license:ro
+    depends_on:
+      postgrest:
+        condition: service_started
+      storage:
+        condition: service_started
+      business-api:
+        condition: service_started
+    expose:
+      - "8791"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    mem_limit: 384m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - backend
+
+  apk-publisher:
+    image: python:3.12-slim
+    profiles: ["ops"]
+    entrypoint: ["python", "/app/tools/publish_apk_update.py"]
+    environment:
+      OTV_SELFHOSTED_MODE: "1"
+      OTV_PUBLIC_BASE_URL: ${OTV_PUBLIC_BASE_URL:-https://103.236.97.137:35208}
+      OTV_AUTH_URL: http://auth:8081/auth/v1/signin
+      OTV_REST_BASE: http://postgrest:3000
+      OTV_STORAGE_BASE: http://storage:8092/v1/storages/object/hotupdate
+      OTV_AUTH_CREDENTIALS_FILE: /run/secrets/admin-api-credentials.json
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ../../tools/publish_apk_update.py:/app/tools/publish_apk_update.py:ro
+      - ../../tools/db_import.py:/app/tools/db_import.py:ro
+      - ../../tools/apk_update.py:/app/tools/apk_update.py:ro
+      - ${RELEASE_APK_HOST_PATH:-./releases}:/releases:ro
+      - ${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}/admin-api-credentials.json:/run/secrets/admin-api-credentials.json:ro
+    depends_on:
+      auth:
+        condition: service_started
+      storage:
+        condition: service_started
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    mem_limit: 1024m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    networks:
+      - backend
+
+  nginx:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    ports:
+      - "${HEALTH_HOST_PORT:-8080}:8080"
+      - "${TLS_HOST_PORT:-8443}:8443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${TLS_SERVER_CERT_HOST_PATH:-/srv/mytv/secrets/tls/server.crt}:/run/secrets/server.crt:ro
+      - ${TLS_SERVER_KEY_HOST_PATH:-/srv/mytv/secrets/tls/server.key}:/run/secrets/server.key:ro
+    depends_on:
+      health:
+        condition: service_started
+      web-api:
+        condition: service_started
+      admin:
+        condition: service_started
+      storage:
+        condition: service_started
+      business-api:
+        condition: service_started
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    networks:
+      - backend
+
+volumes:
+  postgres_data:
+
+networks:
+  backend:
+    driver: bridge

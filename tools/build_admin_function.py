@@ -20,6 +20,7 @@ from pathlib import Path
 TOOLS = Path(__file__).resolve().parent
 PROJ = TOOLS.parent
 FUNC = PROJ / "cloudfunctions" / "otv-admin"
+BRIDGE_CA = PROJ / "cloudfunctions" / "activate" / "mytv_migration_ca.pem"
 
 FILES = ("admin_server.py", "apk_update.py", "scf_main.py", "admin.html", "db_import.py", "license_gen.py",
          "requirements.txt")
@@ -61,6 +62,8 @@ def main() -> None:
     for name in BACKEND_FILES:
         shutil.copy2(TOOLS / "backend-src" / name, FUNC / name)
         print("cloudfunctions/otv-admin/", name)
+    copy_bridge_ca(FUNC)
+    print("cloudfunctions/otv-admin/ mytv_migration_ca.pem")
     shutil.copy2(
         PROJ / "android" / "app" / "src" / "main" / "res" / "drawable" / "my_tv_logo.png",
         FUNC / "my_tv_logo.png")
@@ -82,6 +85,15 @@ def main() -> None:
     (FUNC / "package.json").write_text(PKG, encoding="utf-8", newline="\n")
     print("cloudfunctions/otv-admin/ scf_bootstrap + package.json")
     print("部署包就绪:", FUNC)
+
+
+def copy_bridge_ca(destination: Path) -> Path:
+    """Include the public migration CA used by the legacy admin proxy."""
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    target = destination / BRIDGE_CA.name
+    shutil.copy2(BRIDGE_CA, target)
+    return target
 
 
 if __name__ == "__main__":
