@@ -26,7 +26,7 @@ def _metadata(mytv_id=10_000_123, douban_id="1292052", *, media_type="tv", episo
     }
 
 
-def _line(episode_count=2, *, source_id="source-1"):
+def _line(episode_count=2, *, source_id="source-1", match_score=90):
     return {
         "id": source_id + ":content-42:0",
         "source_id": source_id,
@@ -34,6 +34,7 @@ def _line(episode_count=2, *, source_id="source-1"):
         "name": "线路甲·主线",
         "height": 1080,
         "score": 91,
+        "match_score": match_score,
         "episodes": [
             {"index": index, "name": "第%d集" % (index + 1),
              "url": "https://media.example/%d.m3u8?token=secret" % index}
@@ -101,7 +102,7 @@ class VodResolverContractTest(unittest.TestCase):
         self.assertEqual(result.preferred.source_id, "source-1")
         self.assertEqual(result.preferred.content_id, "content-42")
         self.assertEqual(result.preferred.episode_index, 0)
-        self.assertEqual(result.preferred.match_score, 100)
+        self.assertEqual(result.preferred.match_score, 90)
         self.assertEqual(result.preferred.quality["height"], 1080)
         self.assertNotIn("url", result.to_public_dict()["preferred"])
         self.assertNotIn("secret", repr(result.to_public_dict()))
@@ -164,14 +165,15 @@ class VodResolverContractTest(unittest.TestCase):
         self.assertIsNone(result.preferred)
         self.assertEqual(result.status, "TEMPORARILY_UNAVAILABLE")
 
-    def test_expired_index_is_exposed_as_stale_available(self):
+    def test_expired_index_cannot_produce_a_playable_candidate(self):
         old_entry = {"resolved_at": NOW - 31 * 86400, "lines": [_line()]}
         resolver, _metadata_client, _index = self.make_resolver(entries={"1292052": old_entry})
 
         result = resolver.resolve(mytv_id=10_000_123, episode=1)
 
-        self.assertEqual(result.status, "STALE_AVAILABLE")
-        self.assertIsNotNone(result.preferred)
+        self.assertEqual(result.status, "TEMPORARILY_UNAVAILABLE")
+        self.assertIsNone(result.preferred)
+        self.assertEqual(result.backups, ())
         self.assertGreater(result.cache["age_ms"], 30 * 86400 * 1000)
 
     def test_entry_from_an_expired_index_version_is_marked_stale(self):
@@ -191,8 +193,41 @@ class VodResolverContractTest(unittest.TestCase):
         result = resolver.resolve(mytv_id=10_000_123, episode=1)
 
         self.assertEqual(result.resolve_version, "current-v2")
-        self.assertEqual(result.status, "STALE_AVAILABLE")
-        self.assertIsNotNone(result.preferred)
+        self.assertEqual(result.status, "TEMPORARILY_UNAVAILABLE")
+        self.assertIsNone(result.preferred)
+        self.assertEqual(result.backups, ())
+
+    def test_quality_score_is_not_a_substitute_for_match_confidence(self):
+        line = _line()
+        del line["match_score"]
+        resolver, _metadata_client, _index = self.make_resolver(
+            entries={"1292052": {"resolved_at": NOW, "lines": [line]}})
+
+        result = resolver.resolve(mytv_id=10_000_123, episode=1)
+
+        self.assertEqual(line["score"], 91)
+        self.assertIsNone(result.preferred)
+        self.assertEqual(result.backups, ())
+        self.assertEqual(result.status, "TEMPORARILY_UNAVAILABLE")
+
+    def test_match_confidence_below_auto_threshold_is_not_playable(self):
+        resolver, _metadata_client, _index = self.make_resolver(
+            entries={"1292052": {"resolved_at": NOW, "lines": [_line(match_score=79)]}})
+
+        result = resolver.resolve(mytv_id=10_000_123, episode=1)
+
+        self.assertIsNone(result.preferred)
+        self.assertEqual(result.backups, ())
+        self.assertEqual(result.status, "TEMPORARILY_UNAVAILABLE")
+
+    def test_match_confidence_at_auto_threshold_is_playable(self):
+        threshold = vod_sources.AUTO_MATCH_THRESHOLD
+        resolver, _metadata_client, _index = self.make_resolver(
+            entries={"1292052": {"resolved_at": NOW, "lines": [_line(match_score=threshold)]}})
+
+        result = resolver.resolve(mytv_id=10_000_123, episode=1)
+
+        self.assertEqual(result.preferred.match_score, threshold)
 
     def test_episode_less_than_one_is_rejected(self):
         resolver, _metadata_client, _index = self.make_resolver()

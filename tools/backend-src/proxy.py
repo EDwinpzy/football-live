@@ -4528,6 +4528,18 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def log_message(self, fmt, *args):
+        route = self.path.split("?", 1)[0]
+        if route == "/vod/resolve" or route.startswith("/vod/resolve/"):
+            status = next((str(value) for value in args
+                           if isinstance(value, int) and 100 <= value <= 599), None)
+            if status is None:
+                status = next((str(value) for value in args
+                               if isinstance(value, str) and re.fullmatch(r"[1-5][0-9]{2}", value)),
+                              "unknown")
+            method = str(getattr(self, "command", "GET") or "GET").upper()
+            print("[%s] \"%s /vod/resolve/:mytv_id\" %s" % (
+                time.strftime("%H:%M:%S"), method, status))
+            return
         print("[%s] %s" % (time.strftime("%H:%M:%S"), fmt % args))
 
 

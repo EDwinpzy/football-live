@@ -5,6 +5,7 @@ import threading
 import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
+from unittest.mock import patch
 
 
 BACKEND = pathlib.Path(__file__).resolve().parents[1]
@@ -185,6 +186,16 @@ class VodApiContractTest(unittest.TestCase):
             with self.subTest(path=path):
                 status, _ = self.fetch_status(path)
                 self.assertEqual(status, 400)
+
+    def test_resolve_request_log_anonymizes_mytv_id(self):
+        with patch("builtins.print") as printed:
+            payload = self.fetch("/vod/resolve/10000123?episode=1")
+
+        self.assertEqual(payload["mytv_id"], 10000123)
+        output = "\n".join(" ".join(str(arg) for arg in call.args)
+                            for call in printed.call_args_list)
+        self.assertIn('"GET /vod/resolve/:mytv_id" 200', output)
+        self.assertNotIn("10000123", output)
 
     def test_backend_packaging_requires_new_vod_modules(self):
         root = BACKEND.parents[1]

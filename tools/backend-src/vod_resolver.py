@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import metadata_client
+import vod_sources
 
 
 DEFAULT_INDEX_MAX_AGE_SECONDS = 30 * 86400
@@ -175,6 +176,9 @@ class VodResolver:
         entry = index_result.entry
         if not isinstance(entry, dict):
             return unavailable(index_result.version, cache)
+        if index_result.stale:
+            return unavailable(index_result.version, {
+                "kind": "stale_index", "age_ms": cache["age_ms"]})
         if not _entry_identity_matches(entry, canonical_id, douban_id):
             return unavailable(index_result.version, cache)
 
@@ -212,6 +216,9 @@ class VodResolver:
             source_name = str(getattr(source, "name", "") or line.get("source_name") or "").strip()
             if not source_name:
                 continue
+            match_score = _match_confidence(line.get("match_score"))
+            if match_score is None or match_score < vod_sources.AUTO_MATCH_THRESHOLD:
+                continue
 
             episodes = line.get("episodes")
             if not isinstance(episodes, list):
@@ -240,7 +247,7 @@ class VodResolver:
                 source_name=source_name,
                 content_id=content_id,
                 episode_index=episode_index,
-                match_score=100,
+                match_score=match_score,
                 quality=_quality(line),
             ))
         return result
@@ -263,6 +270,30 @@ def _nonnegative_integer(value):
         return int(text)
     except (ValueError, OverflowError):
         return None
+
+
+def _match_confidence(value):
+    """Accept only the explicit title-match score persisted with a line.
+
+    ``score`` is the source-line quality/ranking score in the existing index;
+    it is never substituted for match confidence. The index must carry the
+    resolver's verified ``match_score`` and meet the shared AUTO_MATCH_THRESHOLD.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not value.is_integer():
+            return None
+        score = int(value)
+    else:
+        text = str(value).strip()
+        if not _DIGITS.fullmatch(text):
+            return None
+        try:
+            score = int(text)
+        except (ValueError, OverflowError):
+            return None
+    return score if 0 <= score <= 100 else None
 
 
 def _metadata_identity_matches(detail, mytv_id):
