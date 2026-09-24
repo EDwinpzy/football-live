@@ -1,13 +1,19 @@
-"""云端片源兜底：本机出口连不上片源站时，用云端同一份 proxy.py 解析线路。
+"""片源兜底链：本机出口连不上片源站时，按顺序用外部来源补线路。
 
 2026-09-24 实测：自建 VPS 出口连不上 hongniuzy2 / bfzyapi / jyzyapi / haohankan
 等站点（curl 000 超时），网页版详情页因此整天显示「暂无片源」；但同一条线路的
-播放地址（hn.bfvvs.com 等）在 VPS 上可取。修复思路与足球「云端兜底」一致：
-本地匹配为空时向云端 `/vod/detail/{id}?refresh=1` 取一次线路，取到就照常用。
+播放地址（hn.bfvvs.com 等）在 VPS 上可取。方案演变：
+
+* 第一版：本地匹配为空时回 CloudBase `/vod/detail/{id}?refresh=1` 取一次线路
+  （`OTV_VOD_CLOUD_FALLBACK`）。能用，但 CloudBase 2026-10-09 到期。
+* 第二版（当前）：本机 `tools/build_vod_line_index.py` 解析好线路生成静态索引，
+  推到 VPS 对象桶；`proxy.py` 读索引（`OTV_VOD_LINE_INDEX_URL`）当主兜底，
+  云端回源降级为可选最后一环，自建栈默认关闭 → 不再依赖外部服务。
 """
 
 import pathlib
 import sys
+import time
 import types
 import unittest
 
@@ -67,7 +73,7 @@ class VodCloudSourceFallbackTest(unittest.TestCase):
         local_line = dict(CLOUD_LINE, id="local:1:1", source_id=LOCAL_HONGNIU_ID)
         service = vod_api.VodService(
             _StubCatalog(), registry,
-            resolve_sources=lambda subject: [local_line], cloud_sources=cloud)
+            resolve_sources=lambda subject: [local_line], fallback_sources=[cloud])
         payload = service.detail("36660844")
         self.assertEqual([line["id"] for line in payload["sources"]], ["local:1:1"])
         self.assertEqual(payload["source_state"], "ready")
@@ -83,7 +89,7 @@ class VodCloudSourceFallbackTest(unittest.TestCase):
         registry = _registry((LOCAL_HONGNIU_ID, "红牛"))
         service = vod_api.VodService(
             _StubCatalog(), registry,
-            resolve_sources=lambda subject: [], cloud_sources=cloud)
+            resolve_sources=lambda subject: [], fallback_sources=[cloud])
         payload = service.detail("36660844")
         self.assertEqual(payload["source_state"], "ready")
         self.assertEqual([line["id"] for line in payload["sources"]], ["hongniu:192708:1"])
@@ -102,7 +108,7 @@ class VodCloudSourceFallbackTest(unittest.TestCase):
         service = vod_api.VodService(
             _StubCatalog(), registry,
             resolve_sources=lambda subject: [],
-            cloud_sources=lambda subject, douban_id: [dict(UNKNOWN_LINE), dict(CLOUD_LINE)])
+            fallback_sources=[lambda subject, douban_id: [dict(UNKNOWN_LINE), dict(CLOUD_LINE)]])
         payload = service.detail("36660844")
         self.assertEqual([line["id"] for line in payload["sources"]], ["hongniu:192708:1"])
 
@@ -110,7 +116,7 @@ class VodCloudSourceFallbackTest(unittest.TestCase):
         service = vod_api.VodService(
             _StubCatalog(), vod_sources.SourceRegistry([], version=1),
             resolve_sources=lambda subject: [],
-            cloud_sources=lambda subject, douban_id: [dict(UNKNOWN_LINE)])
+            fallback_sources=[lambda subject, douban_id: [dict(UNKNOWN_LINE)]])
         payload = service.detail("36660844")
         self.assertEqual([line["id"] for line in payload["sources"]], ["hhkan:1:9"])
 
@@ -120,7 +126,7 @@ class VodCloudSourceFallbackTest(unittest.TestCase):
 
         service = vod_api.VodService(
             _StubCatalog(), _registry((LOCAL_HONGNIU_ID, "红牛")),
-            resolve_sources=lambda subject: [], cloud_sources=boom)
+            resolve_sources=lambda subject: [], fallback_sources=[boom])
         payload = service.detail("36660844")
         self.assertEqual(payload["sources"], [])
         self.assertEqual(payload["source_state"], "unavailable")
@@ -179,6 +185,141 @@ class ProxyCloudVodSourcesTest(unittest.TestCase):
         proxy._cloud_get_json = fake
         proxy.CLOUD_VOD_FALLBACK_ENABLED = True
         self.assertEqual(proxy._cloud_vod_sources({"title": "早春晴朗"}, "36660844"), [])
+
+
+INDEX_LINE = {
+    "id": "hongniu:192708:1",
+    "source_id": "hongniu",
+    "source_name": "红牛",
+    "name": "红牛·hnm3u8",
+    "episodes": [{"index": 0, "name": "第01集", "url": "https://hn.bfvvs.com/play/azpXyk5d/index.m3u8"}],
+}
+
+
+class VodFallbackChainTest(unittest.TestCase):
+    """兜底链按顺序试：第一个给出线路的 provider 生效，空/异常都继续往下。"""
+
+    def setUp(self):
+        self.registry = _registry((LOCAL_HONGNIU_ID, "红牛"))
+
+    def _service(self, *providers):
+        return vod_api.VodService(
+            _StubCatalog(), self.registry,
+            resolve_sources=lambda subject: [], fallback_sources=list(providers))
+
+    def test_first_non_empty_provider_wins(self):
+        calls = []
+
+        def first(subject, douban_id):
+            calls.append("first")
+            return [dict(INDEX_LINE)]
+
+        def second(subject, douban_id):
+            calls.append("second")
+            return [dict(INDEX_LINE, id="other:1:1")]
+
+        payload = self._service(first, second).detail("36660844")
+        self.assertEqual(calls, ["first"])
+        self.assertEqual(payload["sources"][0]["source_id"], LOCAL_HONGNIU_ID)
+
+    def test_empty_and_failing_provider_fall_through(self):
+        calls = []
+
+        def empty(subject, douban_id):
+            calls.append("empty")
+            return []
+
+        def boom(subject, douban_id):
+            calls.append("boom")
+            raise RuntimeError("network down")
+
+        def good(subject, douban_id):
+            calls.append("good")
+            return [dict(INDEX_LINE)]
+
+        payload = self._service(empty, boom, good).detail("36660844")
+        self.assertEqual(calls, ["empty", "boom", "good"])
+        self.assertEqual(payload["source_state"], "ready")
+
+    def test_no_provider_configured_keeps_unavailable(self):
+        payload = self._service().detail("36660844")
+        self.assertEqual(payload["source_state"], "unavailable")
+
+
+class VodLineIndexTest(unittest.TestCase):
+    """静态索引兜底：按豆瓣 id 命中、按标题+年份回落、过期与缺索引都回落空。"""
+
+    def setUp(self):
+        self._real_url = proxy.VOD_LINE_INDEX_URL
+        self._real_payload = getattr(proxy, "_vod_index_payload", None)
+        self._cache = dict(proxy._vod_index_cache)
+
+    def tearDown(self):
+        proxy.VOD_LINE_INDEX_URL = self._real_url
+        if self._real_payload is not None:
+            proxy._vod_index_payload = self._real_payload
+        proxy._vod_index_cache.update(self._cache)
+
+    def _payload(self, entries):
+        proxy._vod_index_payload = lambda: {"schema": 1, "entries": entries}
+
+    def test_entry_matched_by_douban_id(self):
+        self._payload({"36660844": {"title": "早春晴朗", "year": "2026",
+                                    "resolved_at": int(time.time()), "lines": [INDEX_LINE]}})
+        proxy.VOD_LINE_INDEX_URL = "http://storage:8092/vod-lines.json"
+        lines = proxy._index_vod_sources({"title": "早春晴朗", "year": "2026"}, "douban:36660844")
+        self.assertEqual([line["id"] for line in lines], ["hongniu:192708:1"])
+
+    def test_entry_matched_by_title_and_year_when_id_missing(self):
+        self._payload({"99999999": {"title": "早春晴朗", "year": "2026",
+                                    "resolved_at": int(time.time()), "lines": [INDEX_LINE]}})
+        proxy.VOD_LINE_INDEX_URL = "http://storage:8092/vod-lines.json"
+        lines = proxy._index_vod_sources({"title": "早春晴朗", "year": "2026"}, "36660844")
+        self.assertEqual(len(lines), 1)
+
+    def test_stale_entry_is_ignored(self):
+        old = int(time.time()) - int((proxy.VOD_LINE_INDEX_MAX_AGE_DAYS + 1) * 86400)
+        self._payload({"36660844": {"title": "早春晴朗", "year": "2026",
+                                    "resolved_at": old, "lines": [INDEX_LINE]}})
+        proxy.VOD_LINE_INDEX_URL = "http://storage:8092/vod-lines.json"
+        self.assertEqual(proxy._index_vod_sources({"title": "早春晴朗"}, "36660844"), [])
+
+    def test_missing_index_returns_empty(self):
+        proxy.VOD_LINE_INDEX_URL = ""
+        self.assertEqual(proxy._index_vod_sources({"title": "早春晴朗"}, "36660844"), [])
+        proxy.VOD_LINE_INDEX_URL = "http://storage:8092/vod-lines.json"
+        proxy._vod_index_payload = lambda: None
+        self.assertEqual(proxy._index_vod_sources({"title": "早春晴朗"}, "36660844"), [])
+
+
+class VodFallbackOrderTest(unittest.TestCase):
+    """自建栈口径：索引优先、云端默认不再参与。"""
+
+    def setUp(self):
+        self._real_url = proxy.VOD_LINE_INDEX_URL
+        self._real_cloud = proxy.CLOUD_VOD_FALLBACK_ENABLED
+
+    def tearDown(self):
+        proxy.VOD_LINE_INDEX_URL = self._real_url
+        proxy.CLOUD_VOD_FALLBACK_ENABLED = self._real_cloud
+
+    def test_index_only_when_cloud_disabled(self):
+        proxy.VOD_LINE_INDEX_URL = "http://storage:8092/vod-lines.json"
+        proxy.CLOUD_VOD_FALLBACK_ENABLED = False
+        providers = proxy._vod_fallback_sources()
+        self.assertEqual(providers, (proxy._index_vod_sources,))
+
+    def test_cloud_is_last_resort_when_enabled(self):
+        proxy.VOD_LINE_INDEX_URL = "http://storage:8092/vod-lines.json"
+        proxy.CLOUD_VOD_FALLBACK_ENABLED = True
+        self.assertEqual(
+            proxy._vod_fallback_sources(),
+            (proxy._index_vod_sources, proxy._cloud_vod_sources))
+
+    def test_no_provider_when_both_disabled(self):
+        proxy.VOD_LINE_INDEX_URL = ""
+        proxy.CLOUD_VOD_FALLBACK_ENABLED = False
+        self.assertEqual(proxy._vod_fallback_sources(), ())
 
 
 class CloudGetJsonGateTest(unittest.TestCase):

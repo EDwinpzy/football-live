@@ -165,11 +165,14 @@ services:
       PORT: "8090"
       OTV_BIND: 0.0.0.0
       OTV_CLOUD_RELAY: "0"
-      # 2026-09-24：自建 VPS 出口连不上片源站 API（hongniuzy2 / bfzyapi / jyzyapi /
-      # hhkan 实测全部 curl 000），网页版影视详情页只能显示「暂无片源」。通用中继
-      # 仍然是关的（整栈不回退依赖 CloudBase）；这里只为「片源匹配」单开一条云端兜底，
-      # 本地匹配为空时回 CloudBase 取线路。CloudBase 正式退场时改这一个开关即可。
-      OTV_VOD_CLOUD_FALLBACK: "1"
+      # 2026-09-24：自建 VPS 出口连不上片源站 API（实测 18 个采集站全 curl 000，Cloudflare/
+      # 海外 IP 全超时），服务器侧匹配必然为空。主兜底改为「本机解析好的静态索引」：文件由
+      # tools/build_vod_line_index.py 生成后 scp 到 /srv/mytv/objects/hotupdate/vod-lines.json，
+      # 这里按对象桶地址读取，不依赖任何外部服务。
+      OTV_VOD_LINE_INDEX_URL: http://storage:8092/v1/storages/object/hotupdate/vod-lines.json
+      OTV_VOD_LINE_INDEX_MAX_AGE_DAYS: "30"
+      # 旧的 CloudBase 回源链路降级为可选最后一环；自建栈默认关闭（对方环境 2026-10-09 到期）。
+      OTV_VOD_CLOUD_FALLBACK: "0"
       OTV_HHKAN_SNAPSHOT_FIRST: "1"
       OTV_LICENSE_ENDPOINT: http://business-api:8082/activate
       OTV_APK_UPDATE_OBJECT_BASE: http://storage:8092/v1/storages/object/hotupdate

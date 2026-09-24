@@ -67,6 +67,13 @@ _VOD_FALLBACK_ENV = os.environ.get("OTV_VOD_CLOUD_FALLBACK")
 CLOUD_VOD_FALLBACK_ENABLED = (
     CLOUD_RELAY_ENABLED if _VOD_FALLBACK_ENV is None
     else _VOD_FALLBACK_ENV.strip().lower() not in ("", "0", "false", "no"))
+"""片源静态索引（2026-09-24，去 CloudBase 依赖的主方案）：自建 VPS 出口到不了片源站
+（Cloudflare/海外 IP 全部连接超时，实测 18 个采集站全 000），而用户本机网络可以。
+所以由本机 `tools/build_vod_line_index.py` 解析好线路、生成 JSON 索引推到 VPS 对象桶，
+VPS 在本地匹配为空时直接读这份索引。索引地址为空即关闭该链路。"""
+VOD_LINE_INDEX_URL = os.environ.get("OTV_VOD_LINE_INDEX_URL", "").strip()
+VOD_LINE_INDEX_TTL = float(os.environ.get("OTV_VOD_LINE_INDEX_TTL", "300") or 300)
+VOD_LINE_INDEX_MAX_AGE_DAYS = float(os.environ.get("OTV_VOD_LINE_INDEX_MAX_AGE_DAYS", "30") or 30)
 # APK 应用内更新清单由后台写入 CloudBase 公开桶；网页函数只负责以稳定的
 # /web/apk-update/{tv,mobile}.json 地址代理它，避免每次发 APK 都重新部署网页函数。
 APK_UPDATE_OBJECT_BASE = os.environ.get(
@@ -186,7 +193,7 @@ def _get_vod_service():
                 registry.history = vod_sources.LineHistory(cache_root / "vod_line_history.json")
                 registry.stats = vod_sources.SourceStats(cache_root / "vod_source_stats.json")
                 VOD_SERVICE = vod_api.VodService(
-                    catalog, registry, cloud_sources=_cloud_vod_sources)
+                    catalog, registry, fallback_sources=_vod_fallback_sources())
                 # 内置豆瓣快照预热搜索索引：云端出口到不了豆瓣，冷实例即便是
                 # 访客直接搜索（没打开过影视首页）也必须先有结果。
                 catalog.warm_index()
@@ -247,6 +254,74 @@ def _cloud_vod_sources(subject, douban_id):
         return []
     sources = data.get("sources") if isinstance(data, dict) else None
     return sources if isinstance(sources, list) else []
+
+
+_vod_index_cache = {"ts": 0.0, "loaded": False, "data": None}
+_vod_index_lock = threading.Lock()
+
+
+def _vod_index_payload():
+    """拉取并缓存片源静态索引；失败同样进缓存，避免每次请求都去捶远端。"""
+    if not VOD_LINE_INDEX_URL:
+        return None
+    now = time.time()
+    with _vod_index_lock:
+        if _vod_index_cache["loaded"] and now - _vod_index_cache["ts"] < VOD_LINE_INDEX_TTL:
+            return _vod_index_cache["data"]
+    data = None
+    try:
+        req = urlreq.Request(VOD_LINE_INDEX_URL, headers={"User-Agent": UA})
+        with urlreq.urlopen(req, timeout=15) as resp:
+            parsed = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        if isinstance(parsed, dict):
+            data = parsed
+    except Exception:
+        data = None
+    with _vod_index_lock:
+        _vod_index_cache.update(ts=now, loaded=True, data=data)
+    return data
+
+
+def _index_vod_sources(subject, douban_id):
+    """从本机解析好、推上来的静态索引里取线路（先按豆瓣 id，再按标题+年份回落）。"""
+    payload = _vod_index_payload()
+    if not isinstance(payload, dict):
+        return []
+    entries = payload.get("entries")
+    if not isinstance(entries, dict) or not entries:
+        return []
+    ref = str(douban_id or "").removeprefix("douban:")
+    entry = entries.get(ref)
+
+    def entry_key(candidate):
+        return (vod_sources.normalize_title(candidate.get("title")), str(candidate.get("year") or ""))
+
+    if not isinstance(entry, dict) and subject.get("title"):
+        want = (vod_sources.normalize_title(subject.get("title")), str(subject.get("year") or ""))
+        for candidate in entries.values():
+            if isinstance(candidate, dict) and entry_key(candidate) == want:
+                entry = candidate
+                break
+    if not isinstance(entry, dict):
+        return []
+    try:
+        resolved_at = float(entry.get("resolved_at") or 0)
+    except (TypeError, ValueError):
+        resolved_at = 0.0
+    if not resolved_at or time.time() - resolved_at > VOD_LINE_INDEX_MAX_AGE_DAYS * 86400:
+        return []
+    lines = entry.get("lines")
+    return [line for line in lines if isinstance(line, dict)] if isinstance(lines, list) else []
+
+
+def _vod_fallback_sources():
+    """片源兜底顺序：静态索引优先（无外部依赖），云端回源作为可选最后一环。"""
+    providers = []
+    if VOD_LINE_INDEX_URL:
+        providers.append(_index_vod_sources)
+    if CLOUD_VOD_FALLBACK_ENABLED:
+        providers.append(_cloud_vod_sources)
+    return tuple(providers)
 
 
 def fetch_source():

@@ -7,24 +7,25 @@ import copy
 
 class VodService:
     def __init__(self, catalog, registry, resolve_sources=None, resolve_play=None,
-                 cloud_sources=None):
+                 fallback_sources=()):
         self.catalog = catalog
         self.registry = registry
         self._resolve_sources = resolve_sources or registry.resolve_subject
         self._resolve_sources_waits_for_all = resolve_sources is None
         self._resolve_play = resolve_play
-        # 云端片源兜底：本机出口到不了片源站时（自建 VPS 实测连不上 hongniuzy2 /
-        # bfzyapi / hazyapi 等站点）回调云端同一份 proxy.py 取一次线路。返回空列表
-        # 或抛异常都照旧走「暂无片源」路径，不改变本地匹配成功的既有行为。
-        self._cloud_sources = cloud_sources
+        # 片源兜底链：本地匹配为空时按顺序试这些 provider，第一个给出线路的就用。
+        # 自建 VPS 出口到不了片源站（实测 Cloudflare/海外全超时），所以线上用的是
+        # 「本机解析好、推到 VPS 的静态索引」；旧的云端回源链路保留为可选最后一环。
+        # 任一 provider 返回空或抛异常都继续往下走，绝不改变本地匹配成功的既有行为。
+        self._fallback_sources = tuple(fallback_sources)
         self._resolved_lines = {}
 
-    def _adopt_cloud_lines(self, sources):
-        """把云端兜底线路翻译成本机 registry 的 source_id。
+    def _adopt_external_lines(self, sources):
+        """把外部兜底线路翻译成本机 registry 的 source_id。
 
         2026-09-24 自建 VPS 实测：云端（CloudBase）的影视源 id 是 ``hongniu`` 这类
         slug，而自建后台管的是数据库里的 UUID 主键，两边名字一样、id 不同。直接合并
-        的话 ``/vod/play`` 会以「影视源不存在」失败（实测 400）。这里按源名把云端
+        的话 ``/vod/play`` 会以「影视源不存在」失败（实测 400）。这里按源名把外部
         线路落到本机同名源上；本机没有的源（例如没配的「好好看」）直接丢掉，避免
         播放器反复撞上必然失败的线路。本机 registry 为空时不做翻译，原样保留。
         """
@@ -78,11 +79,16 @@ class VodService:
             if refresh:
                 self.registry.invalidate_subject(subject)
             sources = self._resolve_sources(subject) or []
-        if not sources and self._cloud_sources is not None:
-            try:
-                sources = self._adopt_cloud_lines(self._cloud_sources(subject, douban_id))
-            except Exception:
-                sources = []
+        if not sources:
+            for provider in self._fallback_sources:
+                try:
+                    candidate = provider(subject, douban_id)
+                except Exception:
+                    candidate = None
+                candidate = self._adopt_external_lines(candidate)
+                if candidate:
+                    sources = candidate
+                    break
         self._resolved_lines[str(douban_id)] = {str(line.get("id")): copy.deepcopy(line) for line in sources}
         subject["sources"] = sources
         subject["source_state"] = "ready" if sources else "unavailable"
