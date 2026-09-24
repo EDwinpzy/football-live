@@ -1,6 +1,9 @@
 package com.qiubo.optimaltv.data.repo
 
+import com.qiubo.optimaltv.BuildConfig
+import com.qiubo.optimaltv.data.catalog.MetadataCatalogStore
 import com.qiubo.optimaltv.data.model.Category
+import com.qiubo.optimaltv.data.model.CatalogMedia
 import com.qiubo.optimaltv.data.model.Episode
 import com.qiubo.optimaltv.data.model.LineInfo
 import com.qiubo.optimaltv.data.model.VodItem
@@ -80,11 +83,12 @@ internal object CatalogOriginPolicy {
     const val SNAPSHOT_VERSION = 3
 
     fun allows(sourceId: String, itemId: String): Boolean =
-        sourceId == "douban" && itemId.startsWith("douban:")
+        (sourceId == "douban" && itemId.startsWith("douban:")) ||
+            (sourceId == "metadata" && itemId.startsWith("mytv:"))
 }
 
 internal object VodIdPolicy {
-    fun isCatalogId(id: String): Boolean = id.startsWith("douban:")
+    fun isCatalogId(id: String): Boolean = id.startsWith("douban:") || id.startsWith("mytv:")
 }
 
 internal object PlaybackLineSelector {
@@ -108,6 +112,10 @@ class VodRepository(
     private val okHttp: okhttp3.OkHttpClient,
     private val appContext: android.content.Context,
 ) {
+    private val metadataCatalog by lazy {
+        MetadataCatalogStore(appContext, okHttp, BuildConfig.API_BASE_URL)
+    }
+
     private val _state = MutableStateFlow(CatalogState(loading = true))
     val state: StateFlow<CatalogState> = _state.asStateFlow()
 
@@ -152,15 +160,32 @@ class VodRepository(
     suspend fun refresh(force: Boolean = false) {
         _state.value = _state.value.copy(loading = true)
         val cfg = settings.current()
-        // 内置后端就绪探测：app 内置 proxy 冷启动需几秒，先轮询 /api/health（仅当指向 127.0.0.1）。
-        // 2026-09-18：预算 15s → 40s。热更刚落地的第一次启动要重解压 38MB 包 + Chaquopy 起
-        // Python + 装载 22MB 快照，15s 常常刚好不够；探测本身是本地回环，超预算即放弃。
-        waitBackendReady(cfg.hhkanBaseUrl, tries = 80)
-        // 目录和元数据只来自设备端豆瓣模块；播放源只在详情/播放阶段参与匹配。
-        val sources = buildList {
-            if (cfg.hhkanBaseUrl.isNotBlank()) add(VodApiSource(cfg.hhkanBaseUrl, okHttp))
-        }
         try {
+          metadataCatalog.refreshIfNeeded(force)
+          val installedMetadata = metadataCatalog.hasInstalledDatabase()
+          if (installedMetadata) {
+              val items = metadataCatalog.all().map { VodApiSource.fromCatalogMedia(it, cfg.hhkanBaseUrl) }
+              if (items.isNotEmpty()) {
+                  val categories = metadataCategories(items)
+                  val groups = items.groupBy { it.normTitle }
+                  val state = CatalogState(
+                      loading = false,
+                      catalog = Aggregated(categories, groups.map { it.value.first() }, groups),
+                      sourceStates = listOf(SourceState("metadata", "本地影视目录", true, "${items.size} 部")),
+                  )
+                  _state.value = state
+                  catalogRetry = 0
+                  repoScope.launch { runCatching { writeSnapshot(categories, items) } }
+                  return
+              }
+          }
+
+          // 无有效 metadata SQLite 时保留现有本地 API / JSON 种子回退链。
+          // 内置后端就绪探测：app 内置 proxy 冷启动需几秒，先轮询 /api/health。
+          waitBackendReady(cfg.hhkanBaseUrl, tries = 80)
+          val sources = buildList {
+              if (cfg.hhkanBaseUrl.isNotBlank()) add(VodApiSource(cfg.hhkanBaseUrl, okHttp))
+          }
           coroutineScope {
             val results: List<SourceResult> = sources.map { s ->
                 async {
@@ -230,13 +255,46 @@ class VodRepository(
     fun siblings(normTitle: String): List<VodItem> =
         _state.value.catalog?.groups?.get(normTitle) ?: emptyList()
 
-    fun search(query: String): List<VodItem> {
+    suspend fun search(query: String): List<VodItem> {
         val q = query.trim()
         if (q.isEmpty()) return emptyList()
-        return _state.value.catalog?.dedupedItems?.filter { item ->
-            item.title.contains(q, true) || item.tags.any { it.contains(q, true) }
-                    || item.year == q || item.area.contains(q, true)
-        } ?: emptyList()
+        if (metadataCatalog.hasInstalledDatabase()) {
+            return metadataCatalog.search(q)
+                .sortedWith(
+                    compareByDescending<CatalogMedia> { it.popularity }
+                        .thenByDescending { it.mytvId.toLongOrNull() ?: 0L },
+                )
+                .map { VodApiSource.fromCatalogMedia(it, settings.current().hhkanBaseUrl) }
+                .distinctBy(VodItem::normTitle)
+        }
+        return withContext(Dispatchers.Default) {
+            _state.value.catalog?.dedupedItems?.filter { item ->
+                item.title.contains(q, true) || item.tags.any { it.contains(q, true) }
+                        || item.year == q || item.area.contains(q, true)
+                        || item.searchTerms.any { it.contains(q, true) }
+            } ?: emptyList()
+        }
+    }
+
+    private fun metadataCategories(items: List<VodItem>): List<Category> = items
+        .distinctBy { it.categoryId }
+        .map { item ->
+            val key = item.categoryId.removePrefix("douban:")
+            Category(item.categoryId, when (key) {
+                "movie" -> "电影"
+                "tv" -> "电视剧"
+                "anime" -> "动漫"
+                "variety" -> "综艺"
+                "short" -> "短剧"
+                else -> key
+            })
+        }
+
+    private fun categoryForMediaType(mediaType: String): String = when (mediaType.trim().lowercase()) {
+        "tv", "series", "tv_series", "show" -> "tv"
+        "anime", "animation" -> "anime"
+        "variety", "short" -> mediaType.trim().lowercase()
+        else -> "movie"
     }
 
     /** 分类页三栏目缓存；好好看是唯一卡片目录源。 */
@@ -312,6 +370,14 @@ class VodRepository(
         if (!force && (_home.value.sections.isNotEmpty() || _home.value.carousel.isNotEmpty())) return
         _home.value = _home.value.copy(loading = true)
         homeJob = repoScope.launch {
+            val localItems = runCatching { metadataCatalog.all() }
+                .getOrDefault(emptyList())
+                .map { VodApiSource.fromCatalogMedia(it, settings.current().hhkanBaseUrl) }
+            if (localItems.isNotEmpty()) {
+                val sections = localHomeSections(localItems)
+                _home.value = HomeState(loading = false, sections = sections)
+                if (metadataCatalog.hasInstalledDatabase()) return@launch
+            }
             val base = settings.current().hhkanBaseUrl
             if (base.isBlank()) {
                 _home.value = _home.value.copy(loading = false)
@@ -337,6 +403,49 @@ class VodRepository(
         homeJob?.join()
     }
 
+    private fun localHomeSections(items: List<VodItem>): List<HSec> {
+        val movies = items.filter { it.categoryId == "douban:movie" }
+        val pool = movies.ifEmpty { items }
+        return listOf(
+            HSec("最近热门", pool.take(24)),
+            HSec("最新上映", pool.sortedByDescending { it.year.toIntOrNull() ?: 0 }.take(24)),
+            HSec("豆瓣高分", pool.sortedByDescending { it.rating }.take(24)),
+        ).filter { it.items.isNotEmpty() }
+    }
+
+    /** Local metadata source for the fixed library sections; metadata rows are read popularity-first. */
+    private fun localMetadataBlocks(category: String, rows: List<CatalogMedia>, imageProxyBase: String): List<HSec> {
+        val categoryRows = rows.filter { media -> metadataCategoryKey(media.mediaType) == category }
+        if (categoryRows.isEmpty()) return emptyList()
+
+        fun section(name: String, selected: List<CatalogMedia>) = HSec(
+            name,
+            selected.take(24).map { VodApiSource.fromCatalogMedia(it, imageProxyBase) },
+        )
+
+        val byRelease = categoryRows.sortedWith(
+            compareByDescending<CatalogMedia> { it.year.toIntOrNull() ?: 0 }
+                .thenByDescending { it.updatedAt },
+        )
+        val byUpdate = categoryRows.asSequence()
+            .filter { it.updatedAt > 0L }
+            .sortedByDescending(CatalogMedia::updatedAt)
+            .toList()
+        return listOf(
+            section("最近热门", categoryRows),
+            section("最新上线", byRelease),
+            section("最近更新", byUpdate),
+        )
+    }
+
+    private fun metadataCategoryKey(mediaType: String): String = when (mediaType.trim().lowercase()) {
+        "tv", "series", "tv_series", "show" -> "tv"
+        "anime", "animation" -> "anime"
+        "variety" -> "variety"
+        "short" -> "short"
+        else -> "movie"
+    }
+
     /** 片库分类三块：固定「最近热门 / 最新上线 / 最近更新」，当前分类数据优先。 */
     private val _libBlocks = MutableStateFlow<Map<Int, List<HSec>>>(emptyMap())
     val libBlocksFlow: StateFlow<Map<Int, List<HSec>>> = _libBlocks.asStateFlow()
@@ -357,8 +466,6 @@ class VodRepository(
     private val LIB_RETRY_DELAYS = longArrayOf(2_000L, 4_000L, 8_000L, 15_000L, 25_000L, 40_000L)
     private val libRetries = java.util.concurrent.ConcurrentHashMap<Int, Int>()
     private val libRetryJobs = java.util.concurrent.ConcurrentHashMap<Int, kotlinx.coroutines.Job>()
-    /** 后端先回过期快照时，等待同一请求的后台 SWR 完成，再把三栏替换成当天数据。 */
-    private val staleLibRefreshJobs = java.util.concurrent.ConcurrentHashMap<Int, kotlinx.coroutines.Job>()
 
     /** 门闸等「三栏真的有内容」的轮询步长：判据读内存，2s 足够且不空转 CPU */
     private val LIB_CONTENT_POLL_MS = 2_000L
@@ -398,8 +505,8 @@ class VodRepository(
         }
     }
 
-    /** 三块展示顺序与网页、后端一致；空栏目也保留，防止标题被吞。 */
-    private val blockOrder = listOf("最近热门", "最新上映", "豆瓣高分")
+    /** 片库固定三栏；首页的 Douban 精选栏目由 homeFlow 独立提供。 */
+    private val blockOrder = listOf("最近热门", "最新上线", "最近更新")
     private fun completeBlocks(sections: List<HSec>): List<HSec> =
         blockOrder.map { name -> sections.firstOrNull { it.name == name } ?: HSec(name, emptyList()) }
 
@@ -416,11 +523,7 @@ class VodRepository(
         _hotSettled.value = _hotSettled.value + cid
     }
 
-    /**
-     * 拉分类下三块：先取好好看频道页自带的当前分类三栏目；只有某栏缺失时才按
-     * 当前分类补位。旧版先用首页/全站 latest 拼接，既会混类，也会让三栏接口沦为
-     * 全挂后的兜底，源站稍有波动便丢标题。
-     */
+    /** Read the selected category from the local metadata catalogue; network refresh is handled separately. */
     fun libBlocks(categoryId: String) {
         libBlocks(categoryId, force = false)
     }
@@ -438,65 +541,29 @@ class VodRepository(
         if (!force && failAt != null && System.currentTimeMillis() - failAt < 60_000L) return
         libJobs[cid] = repoScope.launch {
             val base = settings.current().hhkanBaseUrl
-            if (base.isBlank()) {
-                _libBlocks.value = _libBlocks.value + (cid to completeBlocks(emptyList()))
-                markHotSettled(cid)
-                return@launch
-            }
-            fun store(sections: List<HSec>) {
-                _libBlocks.value = _libBlocks.value + (cid to completeBlocks(sections))
-            }
-            val home = runCatching { VodApiSource.fetchHome(base, okHttp, category, refresh = force) }
-                .onFailure { android.util.Log.w("OTV", "豆瓣分类三栏失败: ${it.message}") }
-                .getOrNull()
-            val doubanSections = home?.sections.orEmpty()
-            store(doubanSections)
-            if (home?.stale == true) {
-                refreshStaleHome(cid, category)
-                libFailAt.remove(cid)
-                libRetries.remove(cid)
-            } else if (doubanSections.any { it.items.isNotEmpty() }) {
+            val localRows = runCatching { metadataCatalog.all() }.getOrDefault(emptyList())
+            val localSections = localMetadataBlocks(category, localRows, base)
+            val hasLocalSections = localSections.any { it.items.isNotEmpty() }
+            val installedMetadata = runCatching { metadataCatalog.hasInstalledDatabase() }.getOrDefault(false)
+            _libBlocks.value = _libBlocks.value + (cid to completeBlocks(localSections))
+            if (hasLocalSections && installedMetadata) {
                 libDone += cid
                 libFailAt.remove(cid)
                 libRetries.remove(cid)
+            } else if (hasLocalSections) {
+                // The packaged seed is an immediate offline fallback. Re-read after catalogue refresh
+                // so an installed SQLite package replaces those seed rows without delaying first paint.
+                scheduleLibRetry(cid)
             } else {
                 libFailAt[cid] = System.currentTimeMillis()
                 scheduleLibRetry(cid)
             }
             markHotSettled(cid)
         }
-        // 超时兜底：慢网 8s 后先展示固定三栏空态；后到内容只填栏，不改信息架构。
+        // Timeout marker remains as a guard if catalogue access stalls during storage recovery.
         repoScope.launch {
             kotlinx.coroutines.delay(8_000L)
             markHotSettled(cid)
-        }
-    }
-
-    /**
-     * /vod/home 的 stale-while-revalidate 首次会先给随包快照。
-     * 快照不能算作当天刷新完成：后台抓取结束后再次取同一接口，收到 fresh 数据就替换三栏。
-     */
-    private fun refreshStaleHome(cid: Int, category: String) {
-        if (staleLibRefreshJobs[cid]?.isActive == true) return
-        staleLibRefreshJobs[cid] = repoScope.launch {
-            try {
-                repeat(30) {
-                    kotlinx.coroutines.delay(1_000L)
-                    val home = runCatching {
-                        VodApiSource.fetchHome(settings.current().hhkanBaseUrl, okHttp, category)
-                    }.getOrNull() ?: return@repeat
-                    if (home.stale) return@repeat
-                    if (home.sections.any { it.items.isNotEmpty() }) {
-                        _libBlocks.value = _libBlocks.value + (cid to completeBlocks(home.sections))
-                        libDone += cid
-                        libFailAt.remove(cid)
-                        libRetries.remove(cid)
-                    }
-                    return@launch
-                }
-            } finally {
-                staleLibRefreshJobs.remove(cid)
-            }
         }
     }
 
@@ -527,9 +594,9 @@ class VodRepository(
     suspend fun vodMeta(vodId: String): String = withContext(Dispatchers.IO) {
         val item = itemById(vodId) ?: return@withContext ""
         if (item.detailRef.isNotBlank()) {
-            fetchDetailCached(item.detailRef)?.meta?.takeIf { it.isNotBlank() } ?: item.year
+            fetchDetailCached(item.detailRef)?.meta?.takeIf { it.isNotBlank() } ?: item.meta.ifBlank { item.year }
         } else {
-            (listOf(item.year, item.area).filter { it.isNotBlank() } + item.tags).joinToString(" / ")
+            item.meta.ifBlank { (listOf(item.year, item.area).filter { it.isNotBlank() } + item.tags).joinToString(" / ") }
         }
     }
 
@@ -623,6 +690,21 @@ class VodRepository(
     private val filtersCache = java.util.concurrent.ConcurrentHashMap<Int, HhkanSource.FilterOptions>()
 
     suspend fun allFilters(cid: Int = 1): HhkanSource.FilterOptions = withContext(Dispatchers.IO) {
+        val local = metadataCatalog.all()
+        if (local.isNotEmpty()) {
+            val wanted = categoryKey(cid)
+            val items = local.filter { categoryForMediaType(it.mediaType) == wanted }
+            val options = HhkanSource.FilterOptions(
+                types = items.flatMap { it.genres }.distinct().sorted(),
+                areas = items.flatMap { it.regions }.distinct().sorted(),
+                years = items.map { it.year }.filter(String::isNotBlank).distinct().sortedDescending(),
+                ratings = listOf("9", "8", "7", "6"),
+            )
+            if (options.types.isNotEmpty() || options.areas.isNotEmpty() || options.years.isNotEmpty()) {
+                filtersCache[cid] = options
+                return@withContext options
+            }
+        }
         filtersCache[cid]?.let { return@withContext it }
         // 内置后端冷启动期连接拒绝会被 runCatching 吞成空筛选（UI 再白吃 2.5s×4 重试）——
         // 先等 /api/health 就绪（已就绪时毫秒级通过）
@@ -645,6 +727,34 @@ class VodRepository(
         by: String = "3",
         page: Int = 1,
     ): HhkanSource.ShowPage? = withContext(Dispatchers.IO) {
+        val local = metadataCatalog.all()
+        if (local.isNotEmpty()) {
+            val key = categoryKey(cid)
+            val imageProxyBase = settings.current().hhkanBaseUrl
+            var items = local.asSequence()
+                .filter { categoryForMediaType(it.mediaType) == key }
+                .map { VodApiSource.fromCatalogMedia(it, imageProxyBase) }
+                .filter { type.isBlank() || it.tags.any { tag -> tag.equals(type, ignoreCase = true) } }
+                .filter { area.isBlank() || it.area.contains(area, ignoreCase = true) }
+                .filter { year.isBlank() || it.year == year }
+                .filter {
+                    val threshold = Regex("\\d+(?:\\.\\d+)?").find(rating)?.value?.toDoubleOrNull()
+                    threshold == null || it.rating >= threshold
+                }
+                .toList()
+            items = when (by.lowercase()) {
+                "2", "new" -> items.sortedByDescending { it.year.toIntOrNull() ?: 0 }
+                "1", "rating" -> items.sortedByDescending { it.rating }
+                else -> items
+            }
+            val pageSize = 48
+            val start = (page.coerceAtLeast(1) - 1) * pageSize
+            return@withContext HhkanSource.ShowPage(
+                items = items.drop(start).take(pageSize),
+                hasMore = start + pageSize < items.size,
+                upstreamAvailable = true,
+            )
+        }
         runCatching { waitBackendReady(settings.current().hhkanBaseUrl) }
         val base = settings.current().hhkanBaseUrl
         if (base.isBlank()) return@withContext null
@@ -704,14 +814,20 @@ class VodRepository(
         val cached = detailCache[vodId]
         if (!forceRefresh && cached != null) return@withContext cached
         // 目录外条目兜底（实时搜索结果等）：hhkan: 前缀直接构造裸 item 走懒解析
-        val item = itemById(vodId) ?: if (vodId.startsWith("douban:")) {
+        val localMedia = when {
+            vodId.startsWith("mytv:") -> metadataCatalog.findByMyTvId(vodId.removePrefix("mytv:"))
+            vodId.startsWith("douban:") -> metadataCatalog.findByLegacyDoubanId(vodId)
+            else -> null
+        }
+        val item = itemById(vodId) ?: localMedia?.let { VodApiSource.fromCatalogMedia(it, settings.current().hhkanBaseUrl) }
+            ?: if (vodId.startsWith("douban:")) {
             com.qiubo.optimaltv.data.model.VodItem(
                 id = vodId, sourceId = "douban", title = "", categoryId = "",
                 detailRef = vodId.removePrefix("douban:"),
             )
         } else return@withContext null
         if (item.detailRef.isBlank()) return@withContext item
-        val d = fetchDetailCached(item.detailRef, forceRefresh) ?: return@withContext cached
+        val d = fetchDetailCached(item.detailRef, forceRefresh) ?: return@withContext (cached ?: item)
         // 集数网格展示默认线路（第一条）的选集；全部线路在播放器内换线
         val eps = d.lines.firstOrNull()?.episodes?.mapIndexed { i, (name, _, _) ->
             Episode(i, name.ifBlank { "第${i + 1}集" }, "")
@@ -879,6 +995,9 @@ class VodRepository(
                 categoryId = e.optString("c"), year = e.optString("y"), area = e.optString("ar"),
                 rating = e.optDouble("r", 0.0), posterUrl = e.optString("p"), heroUrl = e.optString("h"),
                 remark = e.optString("rm"), detailRef = e.optString("d"),
+                mytvId = e.optString("mytv_id").ifBlank { e.optString("m") },
+                searchTerms = (0 until (e.optJSONArray("q")?.length() ?: 0))
+                    .mapNotNull { e.optJSONArray("q")?.optString(it)?.takeIf(String::isNotBlank) },
             ).takeIf { it.id.isNotBlank() && it.title.isNotBlank() }
         }
         if (cats.isEmpty() || items.isEmpty()) return null
@@ -924,7 +1043,8 @@ class VodRepository(
                             .put("id", it.id).put("s", it.sourceId).put("t", it.title)
                             .put("c", it.categoryId).put("y", it.year).put("ar", it.area)
                             .put("r", it.rating).put("p", it.posterUrl).put("h", it.heroUrl)
-                            .put("rm", it.remark).put("d", it.detailRef),
+                            .put("rm", it.remark).put("d", it.detailRef)
+                            .put("mytv_id", it.mytvId).put("q", org.json.JSONArray(it.searchTerms)),
                     )
                 }
             },

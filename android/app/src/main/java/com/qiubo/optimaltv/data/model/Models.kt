@@ -4,6 +4,28 @@ data class Category(val id: String, val name: String)
 
 data class Episode(val index: Int, val name: String, val url: String)
 
+/** Stable row read from the versioned metadata SQLite catalogue. */
+data class CatalogMedia(
+    val mytvId: String,
+    val mediaType: String,
+    val title: String,
+    val originalTitle: String = "",
+    val year: String = "",
+    val updatedAt: Long = 0L,
+    val overview: String = "",
+    val posterUrl: String = "",
+    val rating: Double = 0.0,
+    val popularity: Double = 0.0,
+    val genres: List<String> = emptyList(),
+    val regions: List<String> = emptyList(),
+    val externalIds: Map<String, String> = emptyMap(),
+    val actors: List<String> = emptyList(),
+    val directors: List<String> = emptyList(),
+    val searchTerms: List<String> = emptyList(),
+) {
+    val legacyRef: String? get() = externalIds["douban"]?.takeIf(String::isNotBlank)?.let { "douban:$it" }
+}
+
 enum class SourceAvailability {
     MATCHING, AVAILABLE, UNAVAILABLE;
 
@@ -52,6 +74,10 @@ data class VodItem(
     val meta: String = "",
     /** 演员表（详情接口 actors，已清洗为「A / B / C」） */
     val actors: String = "",
+    /** 元数据中心的永久 ID；本地用户记录仍以原有 [id] 为键。 */
+    val mytvId: String = "",
+    /** 目录索引字段，仅用于内存搜索；不会写入用户进度或收藏表。 */
+    val searchTerms: List<String> = emptyList(),
 ) {
     /** 归一化标题：去空白 + 全角转半角小写，用于跨源分组 */
     val normTitle: String by lazy {
