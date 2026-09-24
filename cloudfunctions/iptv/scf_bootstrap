@@ -1,4 +1,0 @@
-#!/bin/bash
-cd /var/user
-export PORT=${PORT:-9000}
-exec python3 index.py

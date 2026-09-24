@@ -56,7 +56,10 @@ class LicenseV2ResetContractTest(unittest.TestCase):
     def test_reset_requires_environment_snapshot_and_confirmation(self):
         src = RESET.read_text(encoding="utf-8")
         self.assertIn("CLEAR-ALL-LICENSES", src)
-        self.assertIn("appletv-d5ge1bth794873f76", src)
+        self.assertIn('"mytv-selfhosted"', src)
+        self.assertNotIn("appletv-d5ge1bth794873f76", src)
+        self.assertIn('TOOLS / "selfhosted" / "import_licenses.py"', src)
+        self.assertNotIn("tools/db_import.py", src)
         self.assertIn("--snapshot", src)
         self.assertIn("snapshot", src)
         self.assertIn("regenerate", src)

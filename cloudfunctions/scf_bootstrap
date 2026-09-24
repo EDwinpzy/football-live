@@ -1,3 +1,0 @@
-#!/bin/bash
-export PORT=9000
-/var/lang/python311/bin/python3.11 index.py

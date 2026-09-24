@@ -2,12 +2,13 @@
 """Snapshot, clear, and regenerate My TV license inventory for protocol v2.
 
 The destructive operation is intentionally separate from the schema migration.
-Credentials are reused from tools/db_import.py and are never printed.
+Credentials are read from the self-hosted runtime configuration and are never printed.
 """
 import argparse
 import hashlib
 import hmac
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -16,21 +17,21 @@ import urllib.request
 from collections import Counter
 from datetime import datetime, timezone
 
-import db_import
+from selfhosted import runtime_client
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TOOLS = pathlib.Path(__file__).resolve().parent
 OUT = ROOT / "out" / "license-v2-reset"
-ENVIRONMENT = "appletv-d5ge1bth794873f76"
+ENVIRONMENT = "mytv-selfhosted"
 CONFIRM = "CLEAR-ALL-LICENSES"
 PAGE_SIZE = 200
 PLANS = ("weekly", "monthly", "quarterly", "yearly", "lifetime")
 
 
 def _rpc(name: str, payload: dict, token: str):
-    url = db_import.BASE + "/v1/rdb/rest/rpc/" + name
-    db_import.check_url(url)
+    url = runtime_client.REST_BASE + "/rpc/" + name
+    runtime_client.check_url(url)
     req = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -38,7 +39,7 @@ def _rpc(name: str, payload: dict, token: str):
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + token},
     )
     try:
-        with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=60) as response:
+        with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=60) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
@@ -71,7 +72,7 @@ def _digest(payload: dict) -> str:
 def create_snapshot(environment: str) -> pathlib.Path:
     if environment != ENVIRONMENT:
         raise SystemExit(f"环境不匹配，只允许 {ENVIRONMENT}")
-    token = db_import.signin()
+    token = runtime_client.signin()
     licenses = _all_rows(token, "admin_license_v2_export")
     logs = _all_rows(token, "admin_license_v2_log_export")
     counts = Counter(str(row.get("plan", "")) for row in licenses)
@@ -120,7 +121,7 @@ def clear_inventory(environment: str, snapshot_path: pathlib.Path, confirmation:
         raise SystemExit(f"确认短语错误；必须显式传入 --confirm {CONFIRM}")
     if not snapshot.get("licenses"):
         raise SystemExit("快照中没有卡密；为防止误操作，拒绝清空")
-    token = db_import.signin()
+    token = runtime_client.signin()
     result = _rpc(
         "admin_license_v2_clear",
         {"p_environment": environment, "p_confirm": confirmation},
@@ -149,8 +150,12 @@ def regenerate_inventory(environment: str, snapshot_path: pathlib.Path):
             check=True,
             cwd=TOOLS,
         )
-        batch = TOOLS / "out" / f"{datetime.now().strftime('%Y%m%d')}-{plan}-{count}"
-        subprocess.run([sys.executable, str(TOOLS / "db_import.py"), str(batch)], check=True, cwd=TOOLS)
+        batch = pathlib.Path(os.environ.get("OTV_OUT_DIR") or (TOOLS / "out")) / f"{datetime.now().strftime('%Y%m%d')}-{plan}-{count}"
+        subprocess.run(
+            [sys.executable, str(TOOLS / "selfhosted" / "import_licenses.py"), str(batch)],
+            check=True,
+            cwd=TOOLS,
+        )
         generated.append({"plan": plan, "count": count, "batch": str(batch)})
     manifest = snapshot_path.parent / "regenerated.json"
     manifest.write_text(json.dumps(generated, ensure_ascii=False, indent=2), encoding="utf-8")

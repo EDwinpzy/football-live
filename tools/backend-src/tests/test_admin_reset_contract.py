@@ -88,7 +88,7 @@ class ResetScopeSafetyTest(unittest.TestCase):
         out = admin_server.reset_preview("vod")
         self.assertTrue(out["unsupported"])
         self.assertEqual(out["total"], 0)
-        self.assertIn("控制台", out["reason"])
+        self.assertIn("后台服务账号", out["reason"])
         self.assertIn("error", admin_server.reset_apply("vod", "test-pass", "还原影视源"))
 
     def test_routes_registered(self):

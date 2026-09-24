@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parent
 KEY_DIR = ROOT / "keys"
 PRIV_PATH = KEY_DIR / "private_key.pem"
 PUB_PATH = KEY_DIR / "public_key.pem"
-# 输出目录：云端 /var/user 只读，云函数里用 OTV_OUT_DIR 指到 /tmp（见 build_admin_function.py）
+# 自建管理容器将临时批次目录通过 OTV_OUT_DIR 指到可写路径。
 OUT_DIR = Path(os.environ.get("OTV_OUT_DIR") or (ROOT / "out"))
 LEDGER_PATH = OUT_DIR / "used_codes.txt"
 

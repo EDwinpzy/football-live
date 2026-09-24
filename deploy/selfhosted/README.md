@@ -4,21 +4,21 @@ This directory contains the self-hosted My TV stack. Only Nginx publishes host p
 
 The file API allows only the `hotupdate` bucket. Its HTTPS object route is `/v1/storages/object/{bucket}/{key}` and supports `GET`, `HEAD`, and single byte ranges. Upload and deletion require a valid service JWT. Admin pages and business APIs are exposed only through Nginx over the configured HTTPS NAT port.
 
-The CloudBase migration scope is restricted to My TV's 13 `public` business tables and object keys under `apk-update/`, `backend-hu*.zip`, and `iptv/` in the `hotupdate` bucket. Other CloudBase schemas, buckets, and object keys are excluded.
-
 The self-hosted admin runs the existing IPTV source rebuild daily at 06:30 Asia/Shanghai. Scheduled rebuilds, manual publishes, rollbacks, and mode changes share a database lease with a five-minute expiry and 30-second renewal. If the lease RPC is unavailable, publication fails closed; a crashed process releases the lease automatically after expiry.
 
 ## Prepare the VPS
 
 1. Install Docker Engine and the Docker Compose plugin from the Ubuntu 24.04 package repository.
-2. Copy this directory and `tools/selfhosted/health.py` to the same relative paths on the VPS.
+2. Check out the approved repository version under `/srv/mytv`; Compose builds the web and admin images from this checkout.
 3. Create `/srv/mytv/objects`, `/srv/mytv/secrets`, and `/srv/mytv/secrets/license`. Copy `.env.example` to `.env`; generate separate random values for the Postgres administrator, PostgREST `authenticator` role, and JWT signing key. Create `auth-users.json` with salted PBKDF2 password hashes and a `jwt-signing-key` file containing the same JWT key used by PostgREST and the private file API.
 4. Create root-only `admin-credentials.json`, `admin-session-secret`, and `admin-api-credentials.json` files. The admin API account must use the My TV service subject `2094843486709620737`; store only its salted hash in `auth-users.json` and keep its matching username/password in `admin-api-credentials.json`. The original license-signing key, if available, belongs at `/srv/mytv/secrets/license/private_key.pem`; do not generate a replacement because existing apps trust the original public key.
 5. Restrict `.env` and all secret files to root (`chmod 600`); make the object directory writable by the storage service.
 6. In the provider NAT panel, forward an external port to internal TCP port 8080. Do not add or change a security group.
-7. Start the staging stack with `docker compose up -d --build` and check `docker compose ps` plus `curl http://127.0.0.1:8080/health`.
+7. From the repository root, run `python tools/release_all.py` to build `dist/` and the embedded backend package. Then start the stack with `docker compose -f deploy/selfhosted/compose.yaml up -d --build` and check `docker compose -f deploy/selfhosted/compose.yaml ps` plus `curl http://127.0.0.1:8080/health`.
 
-The HTTP health endpoint intentionally serves only `/health`; never send credentials or App traffic to it. The HTTPS certificate is issued for the VPS IP and its migration CA is packaged with both APKs and the CloudBase bridge functions. If the original license-signing key is not installed, license replenishment stays unavailable while migrated existing licenses continue to work.
+On this deployment host, `python tools/release_all.py --deploy` performs the same local build and then invokes the configured self-hosted Compose deployment entry. Compose passes its PostgreSQL credentials to the admin container so the signed-license importer can write directly to the private database; no external database endpoint is used.
+
+The HTTP health endpoint intentionally serves only `/health`; never send credentials or App traffic to it. The HTTPS certificate is issued for the VPS IP and its migration CA is packaged with both APKs. If the original license-signing key is not installed, license replenishment stays unavailable while existing licenses continue to work.
 
 ## Publish an APK from the VPS
 
@@ -32,9 +32,7 @@ docker compose -f deploy/selfhosted/compose.yaml --profile ops run --rm apk-publ
   --title "后台迁移" --note "后台服务已迁移到新服务器"
 ```
 
-Use `--channel mobile` for the mobile package. During the CloudBase compatibility period, publish the same release to CloudBase storage as well so already-installed clients can download it from their existing update endpoint. The CloudBase bridge sends API requests to this VPS; it does not carry large APK or hot-update binaries through a function response.
-
-CloudBase service cutoff is **2026-10-09**. Keep the legacy `activate`, `hotupdate`, and `iptv` bridges plus APK/hot-update object mirrors active until then. Publish the migration APK with forced update and minimum supported version `100`; confirm that existing clients can download and install it before the cutoff. After the verified data cutover, the VPS is the sole writer. This migration covers My TV resources only.
+Use `--channel mobile` for the mobile package. The self-hosted storage service serves APK and hot-update objects; publish each release through this stack so installed clients use the configured self-hosted origin.
 
 ## Stop and preserve data
 

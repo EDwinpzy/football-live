@@ -59,6 +59,23 @@ class SelfHostedApiContractTests(unittest.TestCase):
         })[1], {"ret": 400, "msg": "bad_code"})
         self.assertEqual(rpc.calls, [])
 
+    def test_restore_forwards_device_without_an_activation_card_code(self):
+        response = {
+            "ret": 0, "ticket": {"v": 1}, "licenseCode": "OTV-ABCDE-23456",
+            "activatedAt": "2026-01-01T00:00:00Z", "expireAt": "2026-10-01T00:00:00Z",
+        }
+        api, rpc = self.make_api({"activate_code": response})
+        status, body, _headers = api.handle("POST", "/activate", {
+            "protocol": 2, "action": "restore", "code": "", "deviceId": "a" * 64,
+        })
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body, response)
+        self.assertEqual(rpc.calls, [("activate_code", {
+            "p_protocol": 2, "p_action": "restore", "p_code": None,
+            "p_device": "a" * 64, "p_current_code": None, "p_ip": None,
+        })])
+
     def test_hotupdate_check_preserves_rpc_payload_and_public_download_url(self):
         response = {"ret": 0, "hasUpdate": True, "pkg": {"objectKey": "backend-hu21.zip"}}
         api, rpc = self.make_api({"hotupdate_check": response}, public_base_url="https://tv.example")

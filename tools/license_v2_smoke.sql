@@ -13,8 +13,12 @@ declare
   second_result json;
   third_result json;
   verify_result json;
+  restore_result json;
+  unbound_restore_result json;
   renew_result json;
   original_expiry timestamptz;
+  original_activated_at timestamptz;
+  original_devices jsonb;
 begin
   select array_agg(code order by code) into cards
     from (select code from public.licenses
@@ -50,6 +54,31 @@ begin
   end if;
 
   original_expiry := (first_result->>'expireAt')::timestamptz;
+  select activated_at, expire_at, devices
+    into original_activated_at, original_expiry, original_devices
+    from public.licenses where code = card_one;
+  restore_result := public.activate_code('', device_a, null, 2, 'restore', null);
+  if (restore_result->>'ret')::int <> 0
+     or restore_result->>'licenseCode' <> card_one
+     or restore_result->>'ticket' <> first_result->>'ticket' then
+    raise exception 'same-device restore did not return the canonical authorization';
+  end if;
+  if (restore_result->>'activatedAt')::timestamptz <> original_activated_at
+     or (restore_result->>'expireAt')::timestamptz <> original_expiry then
+    raise exception 'restore changed the activation or expiry response';
+  end if;
+  unbound_restore_result := public.activate_code('', device_c, null, 2, 'restore', null);
+  if (unbound_restore_result->>'ret')::int <> 404
+     or unbound_restore_result->>'msg' <> 'restore_not_found' then
+    raise exception 'restore returned an authorization for an unbound device';
+  end if;
+  if not exists (select 1 from public.licenses where code = card_one
+                 and activated_at = original_activated_at
+                 and expire_at = original_expiry
+                 and devices = original_devices) then
+    raise exception 'restore changed activation fields, devices, or expiry';
+  end if;
+
   renew_result := public.activate_code(card_two, device_a, null, 2, 'renew', card_one);
   if (renew_result->>'ret')::int <> 0 or renew_result->>'licenseCode' <> card_one then
     raise exception 'renewal did not retain the canonical card';

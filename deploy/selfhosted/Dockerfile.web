@@ -7,7 +7,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY tools/backend-src/ /app/
-COPY cloudfunctions/otv-web/vendor/ /app/vendor/
+COPY tools/backend-src/vendor/ /app/vendor/
+COPY dist/ /app/www/
 
 # The pinned QuickJS extension was built for CPython 3.11. The current
 # Ubuntu host only has the cached Python 3.12 image; normalize the extension

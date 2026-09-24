@@ -148,11 +148,11 @@ class VodApiContractTest(unittest.TestCase):
         root = BACKEND.parents[1]
         admin = (root / "tools" / "admin_server.py").read_text(encoding="utf-8")
         build = (root / "tools" / "build_backend_zip.py").read_text(encoding="utf-8")
-        web_build = (root / "tools" / "build_web_function.py").read_text(encoding="utf-8")
+        web_build = (root / "deploy" / "selfhosted" / "Dockerfile.web").read_text(encoding="utf-8")
         for name in ("douban_catalog.py", "douban_snapshot.json", "vod_api.py", "vod_sources.py", "vod_sources.default.json"):
             self.assertIn(name, admin)
             self.assertIn(name, build)
-            self.assertIn(name, web_build)
+        self.assertIn("COPY tools/backend-src/ /app/", web_build)
 
 
 if __name__ == "__main__":

@@ -49,15 +49,18 @@ class SelfHostedIngressConfigTests(unittest.TestCase):
         for value, label in (
             ("web-api:", "web API service"),
             ("dockerfile: deploy/selfhosted/Dockerfile.web", "web API image"),
-            ("OTV_CLOUD_RELAY: \"0\"", "no CloudBase relay dependency"),
             ("OTV_LICENSE_ENDPOINT: http://business-api:8082/activate", "local activation API"),
             ("OTV_APK_UPDATE_OBJECT_BASE: http://storage:8092/v1/storages/object/hotupdate", "local file storage"),
             ("OTV_IPTV_LATEST_URL: http://business-api:8082/iptv/latest", "local IPTV API"),
+            ("OTV_METADATA_API_URL: http://metadata-api:8094", "private metadata API"),
             ("OTV_VOD_SOURCE_CONFIG_URL: http://business-api:8082/internal/vod-sources", "private published VOD configuration"),
         ):
             self.require(value, compose, label)
+        self.assertNotIn("OTV_CLOUD_RELAY", compose)
+        self.assertNotIn("OTV_VOD_CLOUD_FALLBACK", compose)
         self.require("python:3.12-slim", dockerfile, "Python 3.12 runtime")
-        self.require("COPY cloudfunctions/otv-web/vendor/ /app/vendor/", dockerfile, "vendored QuickJS runtime")
+        self.require("COPY tools/backend-src/vendor/ /app/vendor/", dockerfile, "vendored QuickJS runtime")
+        self.require("COPY dist/ /app/www/", dockerfile, "built static web assets")
         self.require("cp /app/vendor/_quickjs.cpython-311-x86_64-linux-gnu.so /app/vendor/_quickjs.so", dockerfile,
                      "QuickJS extension loader name")
         proxy = (ROOT / "tools" / "backend-src" / "proxy.py").read_text(encoding="utf-8")
