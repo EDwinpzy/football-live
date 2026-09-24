@@ -2,7 +2,7 @@
 
 This directory contains the self-hosted My TV stack. Only Nginx publishes host ports: provider NAT maps external HTTPS `35208` to internal `8443`, and external health port `25182` to internal `8080`. Do not change security groups or NAT mappings. The health port exposes only `/health`; application traffic uses HTTPS on port `35208`.
 
-The file API allows only the `hotupdate` bucket. Its HTTPS object route is `/v1/storages/object/{bucket}/{key}` and supports `GET`, `HEAD`, and single byte ranges. Upload and deletion require a valid service JWT. Admin pages and business APIs are exposed only through Nginx over the configured HTTPS NAT port.
+The file API allows only the `hotupdate` bucket. Its HTTPS object route is `/v1/storages/object/{bucket}/{key}` and supports `GET`, `HEAD`, and single byte ranges. Upload and deletion require a valid service JWT. Admin pages and business APIs are exposed only through Nginx over the configured HTTPS NAT port. The Admin UI is available at `/` and `/admin/`; `/admin` redirects to `/admin/`, and both entries reach the same static assets and API handlers.
 
 The self-hosted admin runs the existing IPTV source rebuild daily at 06:30 Asia/Shanghai. Scheduled rebuilds, manual publishes, rollbacks, and mode changes share a database lease with a five-minute expiry and 30-second renewal. If the lease RPC is unavailable, publication fails closed; a crashed process releases the lease automatically after expiry.
 
@@ -11,12 +11,39 @@ The self-hosted admin runs the existing IPTV source rebuild daily at 06:30 Asia/
 1. Install Docker Engine and the Docker Compose plugin from the Ubuntu 24.04 package repository.
 2. Check out the approved repository version under `/srv/mytv`; Compose builds the web and admin images from this checkout.
 3. Create `/srv/mytv/objects`, `/srv/mytv/secrets`, and `/srv/mytv/secrets/license`. Copy `.env.example` to `.env`; generate separate random values for the Postgres administrator, PostgREST `authenticator` role, and JWT signing key. Create `auth-users.json` with salted PBKDF2 password hashes and a `jwt-signing-key` file containing the same JWT key used by PostgREST and the private file API.
-4. Create root-only `admin-credentials.json`, `admin-session-secret`, and `admin-api-credentials.json` files. The admin API account must use the My TV service subject `2094843486709620737`; store only its salted hash in `auth-users.json` and keep its matching username/password in `admin-api-credentials.json`. The original license-signing key, if available, belongs at `/srv/mytv/secrets/license/private_key.pem`; do not generate a replacement because existing apps trust the original public key.
+4. Create root-only `admin-credentials.json`, `admin-session-secret`, and `admin-api-credentials.json` files. The admin API account must use the My TV service subject `2094843486709620737`; store only its salted hash in `auth-users.json` and keep its matching username/password in `admin-api-credentials.json`. Create `/srv/mytv/secrets/license-importer-db-password` for the restricted license-import role as described below. The original license-signing key, if available, belongs at `/srv/mytv/secrets/license/private_key.pem`; do not generate a replacement because existing apps trust the original public key.
 5. Restrict `.env` and all secret files to root (`chmod 600`); make the object directory writable by the storage service.
 6. In the provider NAT panel, forward an external port to internal TCP port 8080. Do not add or change a security group.
 7. From the repository root, run `python tools/release_all.py` to build `dist/` and the embedded backend package. Then start the stack with `docker compose -f deploy/selfhosted/compose.yaml up -d --build` and check `docker compose -f deploy/selfhosted/compose.yaml ps` plus `curl http://127.0.0.1:8080/health`.
 
-On this deployment host, `python tools/release_all.py --deploy` performs the same local build and then invokes the configured self-hosted Compose deployment entry. Compose passes its PostgreSQL credentials to the admin container so the signed-license importer can write directly to the private database; no external database endpoint is used.
+On this deployment host, `python tools/release_all.py --deploy` performs the same local build and then invokes the configured self-hosted Compose deployment entry. The Admin container does not receive the PostgreSQL bootstrap credentials. It mounts only a separate password file for `license_importer`, which can insert issued licenses and read only their `code` column for duplicate detection.
+
+### Provision the license-import database role
+
+Generate a strong password directly into the root-only file mounted by Admin. Keep this file outside the repository and do not add its contents to `.env`:
+
+```sh
+sudo sh -c 'umask 077; openssl rand -base64 36 > /srv/mytv/secrets/license-importer-db-password'
+```
+
+After the `public.licenses` table exists, open a privileged PostgreSQL session:
+
+```sh
+docker compose -f deploy/selfhosted/compose.yaml exec -it postgres \
+  sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+```
+
+In `psql`, create the restricted role and grants, then use `\password` to set its password by entering the value from the root-only secret file at the prompt (the password is not included in shell history):
+
+```sql
+CREATE ROLE license_importer LOGIN;
+GRANT CONNECT ON DATABASE optimal_tv TO license_importer;
+GRANT USAGE ON SCHEMA public TO license_importer;
+GRANT INSERT (code, plan, days, ticket, note), SELECT (code)
+    ON TABLE public.licenses TO license_importer;
+```
+
+If `POSTGRES_DB` is changed from `optimal_tv`, use that database name in the `GRANT CONNECT` statement. The column-level `SELECT (code)` privilege is required by the importer's `ON CONFLICT (code) DO NOTHING` clause; the role cannot read license details or modify existing rows.
 
 The HTTP health endpoint intentionally serves only `/health`; never send credentials or App traffic to it. The HTTPS certificate is issued for the VPS IP and its migration CA is packaged with both APKs. If the original license-signing key is not installed, license replenishment stays unavailable while existing licenses continue to work.
 

@@ -78,6 +78,7 @@ _LOGO_REPO = ROOT.parent / "android" / "app" / "src" / "main" / "res" / "drawabl
 LOGO_PATH = _LOGO_LOCAL if _LOGO_LOCAL.exists() else _LOGO_REPO
 
 # ---------------- 登录门禁（v1.20） ----------------
+# Nginx keeps the direct `/` entry and also strips `/admin/` before proxying it here.
 
 _ADMIN_CREDENTIALS = load_admin_credentials(os.environ)
 ADMIN_USER = (_ADMIN_CREDENTIALS[0] if _ADMIN_CREDENTIALS else None) or os.environ.get("OTV_ADMIN_USER") or "admin"
@@ -1070,13 +1071,20 @@ def h_gen(d: dict) -> dict:
     if imp.returncode != 0:
         return {"error": f"批次 {batch} 已签发但入库失败（可手动重跑 selfhosted/import_licenses.py）:\n"
                          + (imp.stderr or imp.stdout)[-400:]}
+    result_match = re.fullmatch(
+        r"Inserted (\d+) of (\d+) validated license tickets into self-hosted PostgreSQL\.",
+        imp.stdout.strip(),
+    )
+    if not result_match:
+        return {"error": "无法解析卡密导入结果:\n" + imp.stdout[-300:]}
+    inserted, validated = map(int, result_match.groups())
     csv_path = OUT_ROOT / batch / "cards.csv"
     try:
         csv_text = csv_path.read_text(encoding="utf-8")
     except OSError:
         csv_text = ""
     # 容器临时目录不作为长期存储：将 CSV 文本一并回传给后台下载入口。
-    return {"batch": batch, "imported": count,
+    return {"batch": batch, "imported": inserted, "validated": validated,
             "csv": str(csv_path), "csv_text": csv_text}
 
 

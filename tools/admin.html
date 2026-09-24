@@ -6,8 +6,8 @@
 <title>My TV 后台管理</title>
 <!-- 2026-09-05 二次重设计：中性专业暗色（石墨底 + 蓝单强调 + 小圆角卡片），应用户「换个正常点的风格」。
      同日初版「票房小窗」主题化设计存档于 _archive-20260905-admin/admin-20260905-票房小窗.html。
-     自建后台由 Compose 管理容器通过 /admin/ 路径提供本 UI。
-     v1.22 favicon 相对路径约定保留：经网关 /admin/ 子路径部署。 -->
+     后台可通过网关根路径 / 或 /admin/ 访问；/admin 会补齐尾斜杠。
+     favicon 使用相对路径，兼容这两个入口。 -->
 <link rel="icon" type="image/png" href="logo.png">
 <style>
 /* ==== 中性专业暗色 · tokens（2026-09-05 风格二：去主题化，正常后台） ==== */
@@ -600,7 +600,7 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
   <span class="mq-cell" id="sys-activate"><i class="lamp idle"></i>激活端点 …</span>
   <span class="mq-cell" id="sys-hu"><i class="lamp idle"></i>热更端点 …</span>
   <span class="blackout hide-narrow" id="sys-blackout">BLACKOUT: …</span>
-  <span class="mq-right hide-narrow">云端 appletv-d5ge1bth794873f76 · 登录会话 12h</span>
+  <span class="mq-right hide-narrow">自建实例 · 登录会话 12h</span>
 </header>
 
 <div class="stage">
@@ -617,7 +617,7 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
   <div class="rail-grp">Sources</div>
   <button data-tab="iptv"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.75" y="2.75" width="12.5" height="8.5" rx="1.5"/><path d="M8 11.25V13.5M5.5 13.5h5"/></svg>电视源</button>
   <button data-tab="vod-sources"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5h12v8H2z"/><path d="m6.5 7 3 1.5-3 1.5zM5 2.5l3 2 3-2"/></svg>影视源</button>
-  <div class="rail-foot" id="verbs-note">私钥签发 · 白名单 RPC<br>登录会话 12h</div>
+  <div class="rail-foot" id="verbs-note">私钥签发 · license_importer 最小权限入库<br>登录会话 12h</div>
 </nav>
 
 <main class="window">
@@ -1066,7 +1066,7 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
 
 </div><!-- /stage -->
 
-<footer class="echo" id="toast"><span class="rc-stamp" id="echo-stamp">✓</span><time id="echo-time"></time><span class="msg" id="echo-msg">会话就绪 · 管理端已连接</span><span class="tail" id="echo-tail">云端身份 svc_import · 凭证 2 小时自动续期</span></footer>
+<footer class="echo" id="toast"><span class="rc-stamp" id="echo-stamp">✓</span><time id="echo-time"></time><span class="msg" id="echo-msg">会话就绪 · 管理端已连接</span><span class="tail" id="echo-tail">自建身份 license_importer · 密码文件只读挂载</span></footer>
 
 <script>
 /* ---- 登录门禁（v1.20）：whoami 探测 → 未登录弹浮层；api 统一 Cookie 会话 ---- */
@@ -1179,9 +1179,8 @@ function toast(msg, err) {
   } catch (e) {}
 })();
 
-/* v1.21 部署前缀自适应：本地形态页面在根路径（API_BASE="/"）；云端经网关 /admin
-   子路径转发（API_BASE="/admin/"）。此前写死绝对路径 /api/...，云端请求会落到
-   网关根 404（表象=登录失败/端点异常）。页面须带尾斜杠访问（/admin/）。 */
+/* 按访问路径构造 API 前缀：根入口 `/` 得到 API_BASE="/"，/admin/ 入口得到 API_BASE="/admin/"。
+   Nginx 转发 /admin/ 时剥掉此前缀，再由同一组 /api/* 路由处理请求。 */
 const API_BASE = (location.pathname.endsWith("/") ? location.pathname
                   : location.pathname + "/").replace(/[^/]*$/, "") || "/";
 
@@ -1483,10 +1482,10 @@ async function gen() {
   const csvHref = d.csv_text
     ? `data:text/csv;charset=utf-8,${encodeURIComponent(d.csv_text)}`
     : "";
-  ok.innerHTML = `批次 <b>${esc(d.batch)}</b> 已生成并入库（${d.imported} 个）<br>发卡平台导入文件：<code>${esc(d.csv)}</code>`
+  ok.innerHTML = `批次 <b>${esc(d.batch)}</b> 已插入 ${d.imported} / 验证 ${d.validated} 个卡密<br>发卡平台导入文件：<code>${esc(d.csv)}</code>`
     + (csvHref ? ` <a class="ghost mini" download="${esc(d.batch)}-cards.csv" href="${csvHref}">下载 cards.csv</a>` : "");
   ok.style.display = "block";
-  toast(`批次 ${d.batch} 已入库（${d.imported} 个卡密）`);
+  toast(`批次 ${d.batch} 已插入 ${d.imported} / 验证 ${d.validated} 个卡密`);
   loadStats();
 }
 

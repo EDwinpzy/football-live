@@ -72,7 +72,7 @@ def test_current_release_and_apk_runtime_config_has_no_cloudbase_paths():
         ROOT / "deploy/selfhosted/compose.yaml",
         ROOT / "deploy/selfhosted/.env.example",
     )
-    forbidden = ("tcb ", "tcloudbase", "otv_cloud:", "otv_cloud_relay", "otv_vod_cloud_fallback",
+    forbidden = ("tcb ", "tcloudbase", "otv_cloud:",
                  "cloudbase api", "cloudbase admin", "cloudbase relay")
     for path in paths:
         content = path.read_text(encoding="utf-8").lower()
@@ -81,6 +81,8 @@ def test_current_release_and_apk_runtime_config_has_no_cloudbase_paths():
 
     compose = (ROOT / "deploy/selfhosted/compose.yaml").read_text(encoding="utf-8")
     assert "OTV_APK_UPDATE_OBJECT_BASE: http://storage:8092/v1/storages/object/hotupdate" in compose
+    assert 'OTV_CLOUD_RELAY: "0"' in compose
+    assert 'OTV_VOD_CLOUD_FALLBACK: "0"' in compose
 
 
 def test_web_proxy_keeps_the_internal_metadata_api_endpoint():

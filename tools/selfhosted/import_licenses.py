@@ -116,12 +116,13 @@ def _read_batch(batch_dir: str | Path, public_key) -> list[tuple[str, str, int, 
 
 def connect_selfhosted_database():
     """Connect only to the private Compose PostgreSQL service, never an external host."""
-    if os.environ.get("PGHOST", "postgres") != "postgres" or os.environ.get("PGPORT", "5432") != "5432":
-        raise ValueError("license import is restricted to the self-hosted postgres service")
-    database = os.environ.get("PGDATABASE", "")
-    username = os.environ.get("PGUSER", "")
-    password = os.environ.get("PGPASSWORD", "")
-    if not database or not username or not password:
+    database = os.environ.get("OTV_LICENSE_IMPORT_DB", "")
+    username = os.environ.get("OTV_LICENSE_IMPORT_USER", "")
+    password_file = os.environ.get("OTV_LICENSE_IMPORT_PASSWORD_FILE", "")
+    if not database or not username or not password_file:
+        raise ValueError("self-hosted PostgreSQL credentials are not configured")
+    password = Path(password_file).read_text(encoding="utf-8").strip()
+    if not password:
         raise ValueError("self-hosted PostgreSQL credentials are not configured")
     try:
         import psycopg
@@ -137,16 +138,19 @@ def import_batch(
     *,
     connect: Callable[[], object] | None = None,
     public_key=None,
-) -> int:
+) -> tuple[int, int]:
     key = public_key if public_key is not None else load_public_key()
     entries = _read_batch(batch_dir, key)
     if connect is None:
         connect = connect_selfhosted_database
     connection = connect()
+    inserted_count = 0
     with connection:
         with connection.cursor() as cursor:
-            cursor.executemany(INSERT_SQL, entries)
-    return len(entries)
+            for entry in entries:
+                cursor.execute(INSERT_SQL, entry)
+                inserted_count += cursor.rowcount
+    return inserted_count, len(entries)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -156,11 +160,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("batch_dir", help="license_gen batch directory containing cards.csv and tickets.jsonl")
     args = parser.parse_args(argv)
     try:
-        count = import_batch(args.batch_dir)
+        inserted, validated = import_batch(args.batch_dir)
     except (ValueError, RuntimeError, OSError) as exc:
         print(f"license batch import failed: {exc}", file=sys.stderr)
         return 1
-    print(f"Imported {count} validated license tickets into self-hosted PostgreSQL.")
+    print(f"Inserted {inserted} of {validated} validated license tickets into self-hosted PostgreSQL.")
     return 0
 
 

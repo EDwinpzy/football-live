@@ -1,26 +1,39 @@
-# Task 1 report — remove CloudBase from the current release path
+# Task 1 report — retire CloudBase from the current release path
 
-## Result
+## Scope and baseline
 
-The release command now builds the local Douban snapshot, catalogue seed, Web static assets, and embedded backend ZIP. With `--deploy`, it calls only the configured self-hosted Docker Compose entry. The old CloudBase/SCF builders, bridge packer, deployment helpers, `db_import.py`, legacy bridge tests, and tracked `cloudfunctions/` sources have been removed. The QuickJS vendor files were moved into `tools/backend-src/vendor/` for the self-hosted Web image.
+This worktree is `codex/mytv-selfhost-task1`. Its starting commit was `fb75ac8` (`refactor(release): remove cloudbase production path`), which already contains the main Task 1 implementation. The follow-up fix commit contains the uncommitted review fixes, the regression updates, this report, and the local visual evidence.
 
-The self-hosted admin now imports license batches through `tools/selfhosted/import_licenses.py`. It checks the generated CSV/ticket correspondence and ticket signatures before inserting into PostgreSQL. The admin image installs the PostgreSQL driver and receives the private Compose database connection settings. Runtime containers mount only the self-hosted helper modules they need; the one-time CloudBase migration and reconciliation tools are not included in those mounts.
+## Implementation
 
-The self-hosted API accepts `action=restore`. It sends no card code to the RPC, which selects the latest active, unexpired, non-banned authorization bound to the requesting device, writes an audit result, and returns the normal ticket fields. It does not modify activation time, devices, or expiry. The smoke SQL and API/client contract tests cover this behavior.
+The baseline implementation moves the current release path to the self-hosted Compose stack: the release command builds the local Douban snapshot, catalogue seed, Web static assets, and embedded backend ZIP; its deploy option invokes the configured Compose entry. CloudBase/SCF builders, bridge packers, deployment helpers, legacy database import code/tests, and tracked `cloudfunctions/` sources were removed. QuickJS vendor files now live under `tools/backend-src/vendor/` for the self-hosted Web image. The self-hosted restore action uses the device-bound latest active authorization and records its audit result without changing activation time, devices, or expiry.
 
-The Compose configuration retains the required internal metadata API URL and self-hosted object-storage URL, and removes the CloudBase relay, VOD fallback, and admin mode switches. The self-hosted deployment README now describes building and starting this stack. Two adjacent source comments in `tools/admin.html` and `tools/license_gen.py` were also updated because they named the deleted CloudBase packaging path.
+The follow-up review fixes:
+
+- Explicitly set both `OTV_CLOUD_RELAY` and `OTV_VOD_CLOUD_FALLBACK` to `0` in the self-hosted Web API environment.
+- Keep PostgreSQL bootstrap credentials out of the Admin container. License imports use the dedicated `license_importer` role and a host-mounted password file mounted read-only; the README documents the role's limited column grants.
+- Report actual inserted rows separately from validated tickets. `ON CONFLICT DO NOTHING` rows no longer inflate the inserted count, and the Admin page displays both numbers.
+- Preserve the gateway root Admin route and add `/admin` → `/admin/` redirection plus `/admin/` prefix forwarding. Nginx strips that prefix before forwarding, so the same handler serves `/`, `/logo.png`, and `/api/*`; the page derives its asset and API base from the public path.
+- Replace stale cloud-applet and cloud-identity labels in the Admin page with the self-hosted instance and importer-role labels.
+- Remove the obsolete test that compared the Admin page to a retired CloudBase copy. Retain the self-hosted Docker image contract test and add a regression for the Admin identity labels.
 
 ## Verification
 
-- `python -X utf8 -m pytest tools/tests/test_current_release_has_no_cloudbase.py -q` — **5 passed**. The deployment call is recorded by a fake runner; Docker is not started.
-- Required release/config/import/restore regressions — **51 passed, 1 skipped**. The skipped check is POSIX file-permission coverage on Windows.
-- `python -X utf8 -m pytest tools/backend-src/tests -q` — **379 passed**.
-- `git diff --check HEAD` — passed.
+| Check | Command or evidence | Result |
+|---|---|---|
+| Full tools suite, no exclusions | `python -m pytest -q tools/tests` | **175 passed, 3 skipped** |
+| Backend suite | `python -m pytest -q tools/backend-src/tests` | **379 passed** |
+| Admin runtime | `python -m pytest -q tools/tests/test_selfhosted_admin_runtime.py` | **9 passed, 1 skipped** |
+| Ingress contract | `test_admin_root_and_prefixed_routes_preserve_static_and_api_paths` | Confirms `/admin` redirect, prefix stripping, root routing, static resource and API path conventions. No Nginx container was started. |
+| Diff formatting | `git diff --check` | Passed |
+| Admin visual state | Local Playwright Chromium preview at 1600×1000 | The actual Admin HTML and logo loaded; the page visibly shows “已插入 2 / 验证 5 个卡密”. Screenshot: [`artifacts/acceptance/2026-09-24/admin/local-import-preview.png`](../../../artifacts/acceptance/2026-09-24/admin/local-import-preview.png). |
 
-## Limits
+The screenshot is **simulated API, local UI visual inspection; not staging E2E evidence**. The preview served the current `tools/admin.html` and local logo on loopback and intercepted API calls with fixture responses. Its `2` inserted and `5` validated values are mock data, not a PostgreSQL write result. The earlier prefix-routing smoke also used a local prefix-strip preview rather than an Nginx container. Neither preview proves staging routing or database behavior.
 
-`tools/build_web_assets.py` and its `dist/` output are owned by Web Task 1 and are not present in this worktree yet. The release contract verifies the frozen no-argument call, but a real full-chain build and Docker image build could not be run until that dependency is integrated. No Compose deployment, production credential access, or production state change was performed.
+## Remaining integration acceptance
 
-## Commit
+Staging must verify both public Admin entries (`/` and `/admin/`) through the actual Nginx container at two viewport sizes, then perform a controlled license write and read it back from the database. Those checks remain for the integration phase. This Task 1 completion did not deploy, build APKs, publish, access staging, or touch production.
 
-Required subject: `refactor(release): remove cloudbase production path`.
+## Follow-up commit
+
+Subject: `fix(selfhosted): isolate license import credentials and admin routes`.

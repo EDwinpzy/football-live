@@ -14,7 +14,6 @@ import pytest
 
 ROOT = Path(__file__).parents[2]
 HTML = ROOT / "tools" / "admin.html"
-CLOUD_HTML = ROOT / "cloudfunctions" / "otv-admin" / "admin.html"
 
 SOURCE = HTML.read_text(encoding="utf-8")
 
@@ -80,10 +79,6 @@ def test_release_menu_contract_is_untouched():
     assert 'data-release-tab="hu"' in SOURCE
     assert 'data-release-tab="apk"' in SOURCE
     assert "function switchReleaseTab" in SOURCE
-
-
-def test_cloud_copy_is_byte_identical():
-    assert HTML.read_bytes() == CLOUD_HTML.read_bytes()
 
 
 # ---- 新结构：控制塔命令轨 ----
