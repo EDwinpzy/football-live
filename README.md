@@ -26,15 +26,15 @@ My TV 是一款面向电视大屏、手机和平板的原生影视应用，采�
 Android 原生影视应用（TV 大屏 + 手机/平板双端）+ 云端网页版。Kotlin + Jetpack Compose + Media3，
 tvOS 深色风格；Python 后端内嵌进 app（Chaquopy），设备端自给自足。商业化 = 卡密付费（公测版）。
 
-> 📋 **文档总入口**见 **[docs/README.md](docs/README.md)**；架构看 **[项目文档](docs/01-overview/项目文档.md)**，
-> 构建发布看 **[开发与发布手册](docs/02-guides/开发与发布手册.md)**。本 README 只做结构介绍与快速上手。
+> 📋 **文档只有两份**：本 README（项目介绍与快速上手）+ **[项目文档](docs/项目文档.md)**（唯一总文档：
+> 第一部分=现状与架构，第二部分=开发、发布与运维手册）。
 
 ## 快速使用
 
 | 我想… | 怎么做 |
 |---|---|
-| 用网页版 | 手机浏览器打开 https://appletv-d5ge1bth794873f76.service.tcloudbase.com/web/ （首次「风险提醒」点确定即过；国内可直连） |
-| 进后台管理 | https://appletv-d5ge1bth794873f76.service.tcloudbase.com/admin/ · 账号 `admin`，密码 = 函数环境变量 `OTV_ADMIN_PASS` |
+| 用网页版 | 主入口 https://103.236.97.137:35208/web/ （自建 VPS；浏览器需先信任迁移 CA `android/app/src/main/res/raw/mytv_migration_ca.pem`）· 兼容入口 https://appletv-d5ge1bth794873f76.service.tcloudbase.com/web/ |
+| 进后台管理 | 主入口 https://103.236.97.137:35208/ · 账号 `admin`，口令见本机 `tools/keys/admin_pass.txt`（不入库）· 兼容入口 https://appletv-d5ge1bth794873f76.service.tcloudbase.com/admin/ |
 | 本地构建后端与网页 | `python tools/release_all.py`（默认只在本机生成部署包和 App 热更新包，不触碰公网） |
 | 部署/推送 | `python tools/release_all.py --deploy` 部署网页版 → 重打两个 APK → `node 后台管理系统/scripts/ops/hu-upload.mjs` 上传并发布热更 → `git push origin main` |
 | 发新 APK | `android/` 或 `internal/mobile/` 下 `./gradlew assembleRelease`（v1.19 起双 flavor 退役，单线发布），产物自动归档到 `apk/` |
@@ -43,7 +43,7 @@ tvOS 深色风格；Python 后端内嵌进 app（Chaquopy），设备端自给�
 
 发布边界：**2026-09-17 起用户长期授权全流程自动执行**——改动验证通过后自动构建 APK、自动部署网页版、自动上传发布热更、
 自动更新记录文档、自动 `git push`，不再逐项征求确认（原「G3 明确确认」门禁已取消）。仍要先问的只有不可恢复的破坏性操作，
-以及需要用户做产品取舍的改动。同一份约定见仓库根 `AGENTS.md` 与 `docs/02-guides/开发与发布手册.md`。
+以及需要用户做产品取舍的改动。同一份约定见仓库根 `AGENTS.md` 与 `docs/项目文档.md`（第二部分）。
 
 ## 目录结构
 
@@ -63,7 +63,7 @@ My TV/
 │       ├── python/           # Chaquopy Python 源码（proxy.py 后端、scraper 等）
 │       └── cpp/pinyinime/    # AOSP 谷歌拼音解码器（搜索页拼音候选）
 ├── internal/mobile/          # 移动版工程（触屏；data/playback/license 与 TV 版字节级一致，sync_shared.py 监管）
-├── cloudfunctions/           # CloudBase 云函数（部署包；2026-09-16 起为线上主后端）
+├── cloudfunctions/           # CloudBase 云函数（部署包；2026-09-23 起仅作旧客户端兼容入口 + 对象镜像）
 │   │                         #   activate / hotupdate / iptv / 网页版 / 后台管理全在
 │   │                         #   appletv-d5ge1bth794873f76 这一个环境（国内可直连）
 │   ├── activate/             # 卡密激活 v2（App LICENSE_ENDPOINT）
@@ -74,18 +74,18 @@ My TV/
 ├── 后台管理系统/             # 自建站点形态（Sites / Worker）——已退役，仅留源码与运维脚本参考
 ├── tools/                    # 构建/运维脚本 + 旧后台 UI 源码（admin.html/admin_server.py）+ SQL 迁移
 ├── docs/
-│   ├── README.md             # 文档总入口
-│   ├── 01-overview/          # 当前架构与项目现状
-│   ├── 02-guides/            # 开发、发布和云端操作指南
-│   ├── 04-records/           # 版本史与测试记录
-│   ├── superpowers/          # 设计规格与实施计划
+│   ├── 项目文档.md           # 唯一总文档：第一部分=现状与架构，第二部分=开发/发布/运维手册
+│   ├── 04-records/           # 版本史与测试记录（追加式日志）
+│   ├── superpowers/          # 设计规格与实施计划（过程产物，完成后保留追溯）
 │   └── assets/               # 文档截图和展示素材
 └── apk/                      # 构建产物（TV版/ 移动版/ 归档-旧版/）
 ```
 
-> 2026-09-16 起，后台管理 / 卡密激活 / 热更分发 / 电视源发布全部跑在腾讯云 CloudBase
-> （`appletv-d5ge1bth794873f76`），线上入口
-> https://appletv-d5ge1bth794873f76.service.tcloudbase.com/admin/ 。
+> **线上主环境（2026-09-23 起）**：后台管理 / 卡密激活 / 热更分发 / 电视源发布 / 网页版 / 影视元数据中心
+> 全部跑在自建 VPS `https://103.236.97.137:35208`（仓库副本 `/srv/mytv`，部署见
+> [项目文档](docs/项目文档.md) 第二部分 §9）。
+> 腾讯云 CloudBase（`appletv-d5ge1bth794873f76`）自 2026-09-23 起降级为**兼容入口 + 对象镜像**，服务截止日
+> **2026-10-09**：旧版 APK 仍从它的 `activate` / `hotupdate` / `iptv` 窄路由请求并转发到 VPS。
 > 内嵌目录 **[后台管理系统](./后台管理系统)** 是上一代自建站点（Sites / Cloudflare Worker + D1）
 > 的源码与运维脚本，已退役，仅供迁移对照与历史追溯。
 
@@ -97,9 +97,9 @@ My TV/
 
 ## 当前版本
 
-TV / 移动 APK **V1.0**（versionCode 100）· 网页版 **v1.36** · 热更 **v20**（均已发布）。逐版本变更与实测证据见
+TV / 移动 APK **V1.1**（versionCode 110）· 热更 **v22**（均已发布）。逐版本变更与实测证据见
 `docs/04-records/版本史.md` 与 `docs/04-records/测试记录.md`。
 
 > **APK 版本号 2026-09-22 重置**：APK 版本与更新记录清零后从 **V1.0** 重新计起，每版 +0.1；
 > `versionCode = 主版本×100 + 次版本×10`（V1.0=100、V1.1=110、V2.0=200），必须严格递增——客户端比对
-> `versionCode` 判断更新，低于本机的版本不会提示。规则见《开发与发布手册》§3.2.1。
+> `versionCode` 判断更新，低于本机的版本不会提示。规则见《项目文档》第二部分 §3.2.1。

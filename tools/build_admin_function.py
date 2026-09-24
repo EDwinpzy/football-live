@@ -80,7 +80,7 @@ def main() -> None:
         print("cloudfunctions/otv-admin/ vendor/ (%d wheel): %s" % (len(found), ", ".join(found)))
     else:
         print("⚠ tools/vendor 下没找到签名依赖 wheel（云端补货会在运行时缺 cryptography）——"
-              "按《开发与发布手册》§5.1 的 pip download 命令补上再汇组")
+              "按《项目文档》第二部分 §5.1 的 pip download 命令补上再汇组")
     (FUNC / "scf_bootstrap").write_text(BOOTSTRAP, encoding="utf-8", newline="\n")
     (FUNC / "package.json").write_text(PKG, encoding="utf-8", newline="\n")
     print("cloudfunctions/otv-admin/ scf_bootstrap + package.json")
