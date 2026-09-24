@@ -2,9 +2,12 @@
 import hashlib
 import importlib
 import json
+import re
 import sys
 import zipfile
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -35,6 +38,8 @@ def test_build_assets_is_stable_and_emits_a_cache_contract(tmp_path):
     source = tmp_path / "source"
     dist = tmp_path / "dist"
     _write_source(source, app=b"console.log('one');\n", css=b"body { color: white; }\n")
+    dist.mkdir()
+    (dist / "asset-manifest.json").write_text("legacy manifest\n", encoding="utf-8")
 
     first = build_assets(source, dist)
     first_files = {path: (dist / path).read_bytes() for path in first.referenced_files}
@@ -58,7 +63,9 @@ def test_build_assets_is_stable_and_emits_a_cache_contract(tmp_path):
     assert "style.css?v=" not in html
     assert "app.js?v=" not in html
 
-    manifest = json.loads((dist / "asset-manifest.json").read_text(encoding="utf-8"))
+    assert (dist / "manifest.json").is_file()
+    assert not (dist / "asset-manifest.json").exists()
+    manifest = json.loads((dist / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["cacheControl"]["/index.html"] == "no-store"
     assert manifest["cacheControl"][f"/{app_path}"] == "public, max-age=31536000, immutable"
     assert manifest["cacheControl"][f"/{css_path}"] == "public, max-age=31536000, immutable"
@@ -95,7 +102,79 @@ def test_changed_source_gets_a_new_url_without_overwriting_the_old_asset(tmp_pat
     assert not (dist / old_app).exists()
 
 
-def test_backend_zip_contains_the_hashed_web_bundle(tmp_path, monkeypatch):
+def test_source_hash_named_assets_cannot_replace_generated_bundle_bytes(tmp_path):
+    build_assets = _load_builder().build_assets
+    source = tmp_path / "source"
+    dist = tmp_path / "dist"
+    app_bytes = b"window.app = 'source';\n"
+    css_bytes = b"body { color: white; }\n"
+    _write_source(source, app=app_bytes, css=css_bytes)
+    app_digest = hashlib.sha256(app_bytes).hexdigest()[:16]
+    css_digest = hashlib.sha256(css_bytes).hexdigest()[:16]
+    (source / "assets" / f"app.{app_digest}.js").write_bytes(b"poison app\n")
+    (source / "assets" / f"style.{css_digest}.css").write_bytes(b"poison css\n")
+
+    result = build_assets(source, dist)
+
+    app_path = next(path for path in result.referenced_files if path.endswith(".js"))
+    css_path = next(path for path in result.referenced_files if path.endswith(".css"))
+    assert (dist / app_path).read_bytes() == app_bytes
+    assert (dist / css_path).read_bytes() == css_bytes
+    manifest = json.loads((dist / "manifest.json").read_text(encoding="utf-8"))
+    hashes = {asset["path"]: asset["sha256"] for asset in manifest["assets"]}
+    assert hashes[f"/{app_path}"] == hashlib.sha256((dist / app_path).read_bytes()).hexdigest()
+    assert hashes[f"/{css_path}"] == hashlib.sha256((dist / css_path).read_bytes()).hexdigest()
+
+
+def test_output_nested_in_source_is_rejected_without_changing_source(tmp_path):
+    build_assets = _load_builder().build_assets
+    source = tmp_path / "source"
+    output = source / "dist"
+    _write_source(source, app=b"window.app = 1;\n", css=b"body {}\n")
+    before = {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()}
+
+    with pytest.raises(ValueError):
+        build_assets(source, output)
+
+    assert {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()} == before
+
+
+def test_source_nested_in_output_is_rejected_before_stale_asset_cleanup(tmp_path):
+    build_assets = _load_builder().build_assets
+    output = tmp_path / "output"
+    source = output / "source"
+    _write_source(source, app=b"window.app = 1;\n", css=b"body {}\n")
+    before = {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()}
+    stale = output / "assets" / "app.0000000000000000.js"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"old generated asset")
+    previous = {"referencedFiles": ["assets/app.0000000000000000.js"]}
+    (output / "manifest.json").write_text(json.dumps(previous), encoding="utf-8")
+    (output / "asset-manifest.json").write_text(json.dumps(previous), encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        build_assets(source, output)
+
+    assert stale.read_bytes() == b"old generated asset"
+    assert {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()} == before
+
+
+def test_removed_source_asset_is_removed_from_persistent_dist(tmp_path):
+    build_assets = _load_builder().build_assets
+    source = tmp_path / "source"
+    dist = tmp_path / "dist"
+    _write_source(source, app=b"window.app = 1;\n", css=b"body {}\n")
+    source_asset = source / "assets" / "logo.svg"
+    build_assets(source, dist)
+    assert (dist / "assets" / "logo.svg").is_file()
+
+    source_asset.unlink()
+    build_assets(source, dist)
+
+    assert not (dist / "assets" / "logo.svg").exists()
+
+
+def _make_backend_zip_fixture(tmp_path, monkeypatch):
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     build_zip = importlib.import_module("tools.build_backend_zip")
@@ -122,13 +201,20 @@ def test_backend_zip_contains_the_hashed_web_bundle(tmp_path, monkeypatch):
         archive.writestr("www/style.css", "old css")
         archive.writestr("www/assets/app.0000000000000000.js", "stale app")
         archive.writestr("www/assets/style.0000000000000000.css", "stale css")
+        archive.writestr("www/asset-manifest.json", "stale manifest")
+        archive.writestr("www/assets/football/fb-01.jpg", b"existing poster")
 
     monkeypatch.setattr(build_zip, "SRC_DIR", str(source))
     monkeypatch.setattr(build_zip, "SRC_ZIP", str(input_zip))
     monkeypatch.setattr(build_zip, "MOBILE_ZIP", str(mobile_zip))
     monkeypatch.setattr(build_zip, "TMP_ZIP", str(temp_zip))
-    monkeypatch.setattr(build_zip, "POSTER_DIR", str(tmp_path / "no-posters"))
+    poster_dir = tmp_path / "posters"
+    monkeypatch.setattr(build_zip, "POSTER_DIR", str(poster_dir))
+    return build_zip, source, input_zip, mobile_zip, poster_dir
 
+
+def test_backend_zip_contains_the_hashed_web_bundle(tmp_path, monkeypatch):
+    build_zip, source, input_zip, mobile_zip, _poster_dir = _make_backend_zip_fixture(tmp_path, monkeypatch)
     build_zip.main()
     first_archive = input_zip.read_bytes()
     build_zip.main()
@@ -147,6 +233,74 @@ def test_backend_zip_contains_the_hashed_web_bundle(tmp_path, monkeypatch):
         assert archive.read(f"www/{app_path}") == (source / "www" / "app.js").read_bytes()
         assert "www/assets/app.0000000000000000.js" not in names
         assert "www/assets/style.0000000000000000.css" not in names
-        assert "www/asset-manifest.json" in names
+        assert "www/asset-manifest.json" not in names
+        assert "www/manifest.json" in names
+        assert archive.read("www/assets/football/fb-01.jpg") == b"existing poster"
     assert input_zip.read_bytes() == first_archive
     assert mobile_zip.read_bytes() == input_zip.read_bytes()
+
+
+def test_removed_source_asset_is_removed_from_next_backend_zip(tmp_path, monkeypatch):
+    build_zip, source, input_zip, _mobile_zip, _poster_dir = _make_backend_zip_fixture(tmp_path, monkeypatch)
+    build_zip.main()
+    with zipfile.ZipFile(input_zip) as archive:
+        assert "www/assets/logo.svg" in archive.namelist()
+
+    (source / "www" / "assets" / "logo.svg").unlink()
+    build_zip.main()
+    with zipfile.ZipFile(input_zip) as archive:
+        assert "www/assets/logo.svg" not in archive.namelist()
+        assert archive.read("www/assets/football/fb-01.jpg") == b"existing poster"
+
+
+def test_backend_zip_retains_previous_hashed_bundle_for_one_build(tmp_path, monkeypatch):
+    build_zip, source, input_zip, _mobile_zip, _poster_dir = _make_backend_zip_fixture(tmp_path, monkeypatch)
+    build_zip.main()
+
+    def packaged_app_path():
+        with zipfile.ZipFile(input_zip) as archive:
+            html = archive.read("www/index.html").decode("utf-8")
+        match = re.search(r'src="(assets/app\.[0-9a-f]{16}\.js)"', html)
+        assert match
+        return match.group(1)
+
+    first = packaged_app_path()
+    (source / "www" / "app.js").write_text("window.app = 'revision 2';\n", encoding="utf-8")
+    build_zip.main()
+    second = packaged_app_path()
+    with zipfile.ZipFile(input_zip) as archive:
+        names = set(archive.namelist())
+    assert second != first
+    assert f"www/{first}" in names
+    assert f"www/{second}" in names
+
+    (source / "www" / "app.js").write_text("window.app = 'revision 3';\n", encoding="utf-8")
+    build_zip.main()
+    third = packaged_app_path()
+    with zipfile.ZipFile(input_zip) as archive:
+        names = set(archive.namelist())
+    assert third != second
+    assert f"www/{first}" not in names
+    assert f"www/{second}" in names
+    assert f"www/{third}" in names
+
+
+def test_football_pool_is_preserved_or_replaced_by_existing_rules(tmp_path, monkeypatch):
+    build_zip, source, input_zip, _mobile_zip, poster_dir = _make_backend_zip_fixture(tmp_path, monkeypatch)
+    source_pool = source / "www" / "assets" / "football" / "fb-01.jpg"
+    source_pool.parent.mkdir(parents=True)
+    source_pool.write_bytes(b"source poster")
+    build_zip.main()
+    with zipfile.ZipFile(input_zip) as archive:
+        assert archive.read("www/assets/football/fb-01.jpg") == b"existing poster"
+
+    source_pool.unlink()
+    build_zip.main()
+    with zipfile.ZipFile(input_zip) as archive:
+        assert archive.read("www/assets/football/fb-01.jpg") == b"existing poster"
+
+    poster_dir.mkdir()
+    (poster_dir / "new-poster.jpg").write_bytes(b"replacement poster")
+    build_zip.main()
+    with zipfile.ZipFile(input_zip) as archive:
+        assert archive.read("www/assets/football/fb-01.jpg") == b"replacement poster"

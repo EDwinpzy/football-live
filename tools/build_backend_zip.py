@@ -12,6 +12,7 @@ pool 大小由 LiveRepository.posterUrl 同步维护（POSTER_POOL = 36）。
 
 用法: python build_backend_zip.py
 """
+import json
 import os
 import re
 import shutil
@@ -42,6 +43,9 @@ WWW_ASSETS_PREFIX = "www/assets/"
 FB_PREFIX = "www/assets/football/"
 # ZIP 条目时间统一固定，确保相同源码重复构建得到相同 SHA-256。
 FIXED_ZIP_TIME = (2026, 1, 1, 0, 0, 0)
+_HASHED_WEB_REFERENCE_RE = re.compile(
+    r"^assets/(?:app\.[0-9a-f]{16}\.js|style\.[0-9a-f]{16}\.css)$"
+)
 
 
 def write_entry(zout, filename, data, template=None):
@@ -56,6 +60,31 @@ def write_entry(zout, filename, data, template=None):
         info.create_system = 3
         info.external_attr = 0o644 << 16
     zout.writestr(info, data)
+
+
+def copied_web_files(manifest_bytes):
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return set()
+    files = manifest.get("copiedFiles", []) if isinstance(manifest, dict) else []
+    if not isinstance(files, list):
+        return set()
+    return {"www/" + name for name in files if isinstance(name, str)}
+
+
+def referenced_web_files(manifest_bytes):
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return set()
+    files = manifest.get("referencedFiles", []) if isinstance(manifest, dict) else []
+    if not isinstance(files, list):
+        return set()
+    return {
+        name for name in files
+        if isinstance(name, str) and _HASHED_WEB_REFERENCE_RE.fullmatch(name)
+    }
 
 
 def main():
@@ -96,10 +125,24 @@ def main():
     zout = zipfile.ZipFile(TMP_ZIP, "w", zipfile.ZIP_DEFLATED)
     replaced, dropped, added = [], 0, 0
     # 热更包内的 HTML 引用按内容哈希命名的 JS/CSS；其余静态资源仍按原路径复制。
+    previous_copies = set()
+    previous_refs = set()
+    existing_names = set(zin.namelist())
+    try:
+        previous_manifest_bytes = zin.read("www/manifest.json")
+        previous_copies = copied_web_files(previous_manifest_bytes)
+        previous_refs = referenced_web_files(previous_manifest_bytes)
+    except KeyError:
+        pass
+    current_manifest_bytes = web_files.get("www/manifest.json", b"{}")
+    current_copies = copied_web_files(current_manifest_bytes)
+    current_refs = referenced_web_files(current_manifest_bytes)
+    for relative in previous_refs - current_refs:
+        archive_path = "www/" + relative
+        if archive_path in existing_names:
+            web_files[archive_path] = zin.read(archive_path)
     www_replace = set(web_files)
-    stale_hashed_asset = re.compile(
-        r"^www/assets/(?:app\.[0-9a-f]{16}\.js|style\.[0-9a-f]{16}\.css)$"
-    )
+    stale_copies = previous_copies - current_copies - {"www/" + path for path in previous_refs}
     stale_web_assets = 0
     for item in zin.infolist():
         base = os.path.basename(item.filename)
@@ -109,8 +152,14 @@ def main():
             replaced.append(item.filename)
         elif replace_posters and item.filename.startswith(FB_PREFIX):
             dropped += 1  # 旧海报池整池移除（需求：原来的海报都去掉）
-        elif stale_hashed_asset.fullmatch(item.filename) and item.filename not in www_replace:
-            stale_web_assets += 1  # 清除上一个 APK zip 中过期的 JS/CSS 哈希文件
+        elif (item.filename == "www/asset-manifest.json"
+              or (item.filename in stale_copies and not item.filename.startswith(FB_PREFIX))):
+            stale_web_assets += 1  # 移除旧清单记录的静态文件及旧版清单
+        elif (item.filename.startswith(WWW_ASSETS_PREFIX)
+              and not item.filename.startswith(FB_PREFIX)
+              and not item.filename.endswith(".log")
+              and item.filename not in www_replace):
+            stale_web_assets += 1  # 同步删除已从普通静态目录移除的文件
         elif item.filename in www_replace:
             data = web_files[item.filename]
             write_entry(zout, item.filename, data, item)
@@ -118,8 +167,7 @@ def main():
         else:
             write_entry(zout, item.filename, zin.read(item.filename), item)
     # www_replace 中 zip 里没有的（新文件）也写入
-    with zipfile.ZipFile(SRC_ZIP, "r") as zexist:
-        existing = set(zexist.namelist())
+    existing = existing_names
     # 新增的后端模块/数据文件（例如好好看快照）在旧 zip 中没有同名条目，
     # 必须显式写入；旧实现只会覆盖既有 REPL 文件。
     for name in REPL:

@@ -7,7 +7,7 @@ import json
 import re
 import shutil
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -34,15 +34,27 @@ def _rewrite_single_reference(html: str, pattern: str, replacement: str, descrip
     return rewritten
 
 
-def _referenced_files_from_manifest(path: Path) -> set[str]:
+def _read_manifest(path: Path) -> dict[str, Any]:
     try:
-        previous = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return set()
-    files = previous.get("referencedFiles", [])
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _manifest_files(manifest: dict[str, Any], key: str) -> set[str]:
+    files = manifest.get(key, [])
     if not isinstance(files, list):
         return set()
     return {item for item in files if isinstance(item, str)}
+
+
+def _output_file(output: Path, relative: str) -> Path | None:
+    path = PurePosixPath(relative)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    candidate = output.joinpath(*path.parts)
+    return candidate if candidate.resolve().is_relative_to(output) else None
 
 
 def build_assets(source_dir: str | Path, output_dir: str | Path) -> BuildResult:
@@ -55,8 +67,8 @@ def build_assets(source_dir: str | Path, output_dir: str | Path) -> BuildResult:
     """
     source = Path(source_dir).resolve()
     output = Path(output_dir).resolve()
-    if source == output or source in output.parents:
-        raise ValueError("output_dir must not be the source directory or a child of it")
+    if source == output or source in output.parents or output in source.parents:
+        raise ValueError("source_dir and output_dir must not overlap")
 
     required = {name: source / name for name in ("index.html", "app.js", "style.css")}
     missing = [path.name for path in required.values() if not path.is_file()]
@@ -64,8 +76,10 @@ def build_assets(source_dir: str | Path, output_dir: str | Path) -> BuildResult:
         raise FileNotFoundError(f"missing Web source files: {', '.join(missing)}")
 
     output.mkdir(parents=True, exist_ok=True)
-    manifest_path = output / "asset-manifest.json"
-    previous_files = _referenced_files_from_manifest(manifest_path)
+    manifest_path = output / "manifest.json"
+    previous_manifest = _read_manifest(manifest_path)
+    previous_refs = _manifest_files(previous_manifest, "referencedFiles")
+    previous_copies = _manifest_files(previous_manifest, "copiedFiles")
 
     source_bytes = {
         name: required[name].read_bytes()
@@ -92,27 +106,39 @@ def build_assets(source_dir: str | Path, output_dir: str | Path) -> BuildResult:
         "application script",
     )
 
+    source_assets = source / "assets"
+    copied_files = []
+    if source_assets.is_dir():
+        for asset in sorted(path for path in source_assets.rglob("*") if path.is_file()):
+            relative = f"assets/{asset.relative_to(source_assets).as_posix()}"
+            target = output / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(asset, target)
+            copied_files.append(relative)
+    web_manifest = source / "manifest.webmanifest"
+    if web_manifest.is_file():
+        shutil.copyfile(web_manifest, output / "manifest.webmanifest")
+        copied_files.append("manifest.webmanifest")
+
     (output / "index.html").write_text(html, encoding="utf-8", newline="\n")
     for source_name, relative_name in zip(("app.js", "style.css"), referenced_files):
         target = output / relative_name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source_bytes[source_name])
 
-    source_assets = source / "assets"
-    if source_assets.is_dir():
-        for asset in sorted(path for path in source_assets.rglob("*") if path.is_file()):
-            target = output / "assets" / asset.relative_to(source_assets)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(asset, target)
-    web_manifest = source / "manifest.webmanifest"
-    if web_manifest.is_file():
-        shutil.copyfile(web_manifest, output / "manifest.webmanifest")
+    current_refs = set(referenced_files)
+    current_copies = set(copied_files)
+    for old_copy in previous_copies - current_copies - current_refs - previous_refs:
+        target = _output_file(output, old_copy)
+        if target is not None:
+            target.unlink(missing_ok=True)
 
-    keep_refs = previous_files | set(referenced_files)
+    keep_refs = previous_refs | current_refs
     output_assets = output / "assets"
     for old in output_assets.rglob("*") if output_assets.is_dir() else ():
         if old.is_file() and _HASHED_ASSET_RE.fullmatch(old.name):
-            if old.relative_to(output).as_posix() not in keep_refs:
+            relative = old.relative_to(output).as_posix()
+            if relative not in keep_refs and relative not in current_copies:
                 old.unlink()
 
     cache_control = {
@@ -123,6 +149,7 @@ def build_assets(source_dir: str | Path, output_dir: str | Path) -> BuildResult:
     manifest = {
         "format": 1,
         "referencedFiles": list(referenced_files),
+        "copiedFiles": sorted(copied_files),
         "assets": [
             {
                 "path": f"/{path}",
@@ -140,6 +167,7 @@ def build_assets(source_dir: str | Path, output_dir: str | Path) -> BuildResult:
         encoding="utf-8",
         newline="\n",
     )
+    (output / "asset-manifest.json").unlink(missing_ok=True)
     return BuildResult(manifest=manifest, referenced_files=referenced_files)
 
 
