@@ -1,5 +1,6 @@
 import json
 import pathlib
+import socket
 import sys
 import threading
 import unittest
@@ -196,6 +197,38 @@ class VodApiContractTest(unittest.TestCase):
                             for call in printed.call_args_list)
         self.assertIn('"GET /vod/resolve/:mytv_id" 200', output)
         self.assertNotIn("10000123", output)
+
+    def test_resolve_request_log_anonymizes_absolute_form_target(self):
+        target = "http://example.test/vod/resolve/10000124?episode=1"
+        request = (
+            "GET %s HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"
+            % target
+        ).encode("ascii")
+        with patch("builtins.print") as printed:
+            with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=3) as conn:
+                conn.sendall(request)
+                response = b""
+                while True:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    response += chunk
+
+        self.assertIn(b"200 OK", response)
+        output = "\n".join(" ".join(str(arg) for arg in call.args)
+                            for call in printed.call_args_list)
+        self.assertIn('"GET /vod/resolve/:mytv_id" 200', output)
+        self.assertNotIn("10000124", output)
+
+    def test_request_log_handles_missing_path_on_malformed_request(self):
+        handler = object.__new__(proxy.Handler)
+        handler.command = "GET"
+
+        with patch("builtins.print") as printed:
+            handler.log_message("code %d, message %s", 400, "Bad request")
+
+        printed.assert_called_once()
+        self.assertIn("code 400, message Bad request", printed.call_args.args[0])
 
     def test_backend_packaging_requires_new_vod_modules(self):
         root = BACKEND.parents[1]

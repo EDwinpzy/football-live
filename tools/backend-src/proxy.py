@@ -4528,8 +4528,14 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def log_message(self, fmt, *args):
-        route = self.path.split("?", 1)[0]
-        if route == "/vod/resolve" or route.startswith("/vod/resolve/"):
+        request_target = str(getattr(self, "path", "") or "")
+        try:
+            route = urlparse(request_target).path
+        except ValueError:
+            route = request_target
+        route = route.split("?", 1)[0]
+        if (route == "/vod/resolve" or route.startswith("/vod/resolve/") or
+                "/vod/resolve/" in route):
             status = next((str(value) for value in args
                            if isinstance(value, int) and 100 <= value <= 599), None)
             if status is None:
