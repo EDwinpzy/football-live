@@ -59,12 +59,64 @@ FAST_RESOLVER_MAX_IN_FLIGHT = 6
 FAST_SOURCE_HEALTH_TTL_SECONDS = 300
 FAST_SOURCE_SOFT_TIMEOUT_SECONDS = 0.700
 FAST_RESOLVER_BUDGET_SECONDS = 1.500
+FAST_SOURCE_JOB_TIMEOUT_SECONDS = 1.500
+SOURCE_RESPONSE_MAX_BYTES = 512 * 1024
+HHKAN_SOURCE_RESPONSE_MAX_BYTES = 512 * 1024
 """源质量画像 + 熔断：连续 BREAKER_CONSEC_FAILS 次搜索失败 → 冷却
 BREAKER_COOLDOWN_SECONDS 秒内跳过该源（冷却到期自动放行试探，成功即复位）；
 延迟用半衰期 STATS_EMA_HALFLIFE_SECONDS 的 EMA，老数据自动失权。"""
 BREAKER_CONSEC_FAILS = 3
 BREAKER_COOLDOWN_SECONDS = 1800
 STATS_EMA_HALFLIFE_SECONDS = 7 * 86400
+
+_SOURCE_JOB_CONTEXT = threading.local()
+
+
+def _active_source_deadline():
+    return getattr(_SOURCE_JOB_CONTEXT, "deadline", None)
+
+
+def _remaining_source_timeout(deadline=None):
+    deadline = _active_source_deadline() if deadline is None else deadline
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    # Leave a small scheduling margin so the propagated timeout never exceeds
+    # the absolute deadline due to float rounding and call overhead.
+    if remaining <= 0.000001:
+        raise TimeoutError("source request deadline exceeded")
+    return remaining - 0.000001
+
+
+def _set_response_socket_timeout(response, timeout):
+    """Keep each streamed read within the source job's absolute deadline."""
+    fp = getattr(response, "fp", None)
+    raw = getattr(fp, "raw", None)
+    sock = getattr(raw, "_sock", None)
+    if sock is not None and timeout is not None:
+        sock.settimeout(max(0.001, timeout))
+
+
+def _read_response_body(response, max_bytes, deadline=None):
+    """Read a bounded body in small chunks, refreshing the socket's remaining timeout."""
+    if max_bytes is None and deadline is None:
+        return response.read()
+
+    chunks = []
+    received = 0
+    # Keep the read size bounded even when callers ask for an unlimited body.
+    while max_bytes is None or received < max_bytes:
+        remaining = _remaining_source_timeout(deadline) if deadline is not None else None
+        _set_response_socket_timeout(response, remaining)
+        read_size = 16 * 1024 if max_bytes is None else min(16 * 1024, max_bytes - received)
+        if read_size <= 0:
+            break
+        chunk = response.read(read_size)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        received += len(chunk)
+    return b"".join(chunks)
 
 
 class UnsafeSourceUrl(ValueError):
@@ -183,7 +235,7 @@ class SourceRegistry:
                     break
                 try:
                     future = self._fast_executor.submit(
-                        self._search_one, source, copy.deepcopy(subject))
+                        self._search_fast_one, source, copy.deepcopy(subject))
                 except RuntimeError:
                     self._fast_slots.release()
                     break
@@ -308,16 +360,36 @@ class SourceRegistry:
             with self._cache_lock:
                 self._resolve_cache.pop(cache_key, None)
 
+    def _search_fast_one(self, source, subject):
+        deadline = time.monotonic() + max(0.0, float(FAST_SOURCE_JOB_TIMEOUT_SECONDS))
+        previous_deadline = _active_source_deadline()
+        _SOURCE_JOB_CONTEXT.deadline = deadline
+        try:
+            return self._search_one(source, subject)
+        finally:
+            if previous_deadline is None:
+                try:
+                    del _SOURCE_JOB_CONTEXT.deadline
+                except AttributeError:
+                    pass
+            else:
+                _SOURCE_JOB_CONTEXT.deadline = previous_deadline
+
     def _search_one(self, source, subject):
         started = time.monotonic()
+        deadline = _active_source_deadline()
         try:
             adapter = HhkanAdapter(source) if source.adapter_type == "hhkan" else MacCmsAdapter(source)
             candidates = adapter.search(subject)
+            if deadline is not None:
+                _remaining_source_timeout(deadline)
             best = max(candidates, key=lambda item: match_score(subject, item), default=None)
             confidence = match_score(subject, best) if best else 0
             if not best or confidence < AUTO_MATCH_THRESHOLD:
                 return source, [], None, _elapsed_ms(started)
             lines = adapter.detail(best)
+            if deadline is not None:
+                _remaining_source_timeout(deadline)
             for line in lines:
                 if isinstance(line, dict):
                     line["match_score"] = confidence
@@ -728,10 +800,13 @@ def _validate_public_url(url, resolve_dns=False):
 def _default_fetch(url):
     _validate_public_url(url, resolve_dns=True)
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json, application/xml, text/html"})
-    with urllib.request.urlopen(request, timeout=8) as response:
+    deadline = _active_source_deadline()
+    timeout = min(8.0, _remaining_source_timeout(deadline)) if deadline is not None else 8
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         final_url = response.geturl()
         _validate_public_url(final_url, resolve_dns=True)
-        return {"final_url": final_url, "content_type": response.headers.get_content_type(), "body": response.read(512 * 1024).decode("utf-8", "replace")}
+        body = _read_response_body(response, SOURCE_RESPONSE_MAX_BYTES, deadline)
+        return {"final_url": final_url, "content_type": response.headers.get_content_type(), "body": body.decode("utf-8", "replace")}
 
 
 def _probe_fetch(url):
@@ -894,12 +969,28 @@ class HhkanAdapter:
             import hhkan as module
         self.module = module
 
+    def _get_search_token(self):
+        deadline = _active_source_deadline()
+        if deadline is None:
+            return self.module.get_search_token()
+        return self.module.get_search_token(
+            timeout=_remaining_source_timeout(deadline),
+            max_bytes=HHKAN_SOURCE_RESPONSE_MAX_BYTES)
+
+    def _get_page(self, path):
+        deadline = _active_source_deadline()
+        if deadline is None:
+            return self.module.get_page(path)
+        return self.module.get_page(
+            path, timeout=_remaining_source_timeout(deadline),
+            max_bytes=HHKAN_SOURCE_RESPONSE_MAX_BYTES)
+
     def search(self, subject):
         title = str(subject.get("title") or "").strip()
-        token = self.module.get_search_token()
+        token = self._get_search_token()
         path = "/search?t=%s&k=%s&p=1" % (
             urllib.parse.quote(token), urllib.parse.quote(title))
-        html = self.module.get_page(path)
+        html = self._get_page(path)
         candidates = []
         for match in re.finditer(r'href=["\']/detail/(\d+)\.html["\'][^>]*>(.*?)</a>', html, re.I | re.S):
             block = match.group(2)
@@ -911,7 +1002,7 @@ class HhkanAdapter:
 
     def detail(self, candidate):
         vid = int(candidate.get("id") or 0)
-        detail = self.module.parse_detail(self.module.get_page("/detail/%d.html" % vid), vid=vid)
+        detail = self.module.parse_detail(self._get_page("/detail/%d.html" % vid), vid=vid)
         lines = []
         for index, raw in enumerate(detail.get("sources") or []):
             episodes = []

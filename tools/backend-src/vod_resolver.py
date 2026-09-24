@@ -237,7 +237,12 @@ class VodResolver:
 
         candidates = self._candidates(entry, requested_episode, registry_snapshot)
         if not candidates:
-            return unavailable(index_result.version, cache)
+            try:
+                return self._resolve_missing_index(
+                    detail, canonical_id, requested_episode, index_result.version,
+                    cache_key, cache, cancel_event)
+            except Exception:
+                return unavailable(index_result.version, cache)
 
         status = "STALE_AVAILABLE" if index_result.stale else "MATCHED"
         cache["kind"] = "stale_index" if index_result.stale else "static_index"
@@ -406,14 +411,11 @@ class VodResolver:
                 if item is not None and now - item[0] < FAILURE_TTL_SECONDS:
                     current = item[1]
 
-            if current is not None and current.preferred is not None:
-                preferred = current.preferred
-                backups = list(current.backups)
-                backups.extend(candidates)
-            else:
-                preferred = candidates[0]
-                backups = list(current.backups) if current is not None else []
-                backups.extend(candidates[1:])
+            if current is None or current.preferred is None:
+                return
+            preferred = current.preferred
+            backups = list(current.backups)
+            backups.extend(candidates)
             unique = _unique_backups(preferred, backups)
             merged = ResolveResult(
                 status="MATCHED", mytv_id=mytv_id, episode=episode,
@@ -424,16 +426,15 @@ class VodResolver:
             last_good = self._last_good.get(key)
             if last_good is not None and now - last_good[0] < LAST_GOOD_TTL_SECONDS:
                 last_result = last_good[1]
-                last_preferred = last_result.preferred or preferred
-                last_backups = _unique_backups(
-                    last_preferred, list(last_result.backups) + candidates)
-                last_result = ResolveResult(
-                    status="MATCHED", mytv_id=mytv_id, episode=episode,
-                    resolve_version=version, preferred=last_preferred,
-                    backups=tuple(last_backups), cache={"kind": "miss", "age_ms": 0})
-                self._cache_store_locked(self._last_good, key, last_result, now)
-            elif current is None or current.preferred is None:
-                self._cache_store_locked(self._last_good, key, merged, now)
+                last_preferred = last_result.preferred
+                if last_preferred is not None:
+                    last_backups = _unique_backups(
+                        last_preferred, list(last_result.backups) + candidates)
+                    last_result = ResolveResult(
+                        status="MATCHED", mytv_id=mytv_id, episode=episode,
+                        resolve_version=version, preferred=last_preferred,
+                        backups=tuple(last_backups), cache={"kind": "miss", "age_ms": 0})
+                    self._cache_store_locked(self._last_good, key, last_result, now)
 
     def _cache_put_if_current(self, cache, key, result, registry, generation):
         with self._cache_lock:

@@ -15,6 +15,8 @@ import threading
 import time
 import unittest
 import concurrent.futures
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 
 BACKEND = pathlib.Path(__file__).resolve().parents[1]
@@ -319,6 +321,108 @@ class FastResolverPoolTest(unittest.TestCase):
                     future.result(timeout=1)
                 except concurrent.futures.CancelledError:
                     pass
+
+    def test_timed_out_searches_self_release_bounded_pool_slots(self):
+        delay_seconds = 0.3
+
+        class SlowResponseHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                time.sleep(delay_seconds)
+                body = b'{"code":1,"list":[]}'
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except OSError:
+                    pass  # The client has already timed out and closed its socket.
+
+            def log_message(self, _format, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), SlowResponseHandler)
+        server.daemon_threads = True
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        api_url = "http://127.0.0.1:%d/api.php/provide/vod/" % server.server_port
+        registry = vod_sources.SourceRegistry(
+            [vod_sources.VodSource(
+                "s%d" % index, "s%d" % index, "http://127.0.0.1", api_url,
+                "macms_json") for index in range(6)])
+        try:
+            with patch.object(vod_sources, "FAST_SOURCE_JOB_TIMEOUT_SECONDS", 0.08, create=True), \
+                    patch.object(vod_sources, "_validate_public_url",
+                                 side_effect=lambda url, resolve_dns=False: url):
+                first = registry.submit_fast_searches(dict(SUBJECT))
+                first_results = [future.result(timeout=2) for future in first]
+
+                self.assertEqual(len(first), 3)
+                self.assertTrue(all(result[2] is not None for result in first_results))
+                self.assertLess(max(result[3] for result in first_results), 500)
+
+                callbacks_finished = threading.Event()
+                remaining_callbacks = [len(first)]
+                callback_lock = threading.Lock()
+
+                def note_slot_released(_future):
+                    with callback_lock:
+                        remaining_callbacks[0] -= 1
+                        if remaining_callbacks[0] == 0:
+                            callbacks_finished.set()
+
+                for future in first:
+                    future.add_done_callback(note_slot_released)
+                self.assertTrue(callbacks_finished.wait(2))
+
+                recovered = registry.submit_fast_searches(dict(SUBJECT))
+                self.assertEqual(len(recovered), 3)
+                recovered_results = [future.result(timeout=2) for future in recovered]
+                self.assertTrue(all(result[2] is not None for result in recovered_results))
+        finally:
+            registry.close()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=1)
+
+    def test_hhkan_fast_search_passes_timeout_and_body_limit_to_fetch(self):
+        import hhkan
+
+        source = vod_sources.VodSource(
+            "hhkan-test", "hhkan-test", "https://hhkan.example",
+            "https://hhkan.example/api", "hhkan")
+        registry = vod_sources.SourceRegistry([source])
+        observed = []
+        token_observed = []
+
+        def slow_page(path, timeout=None, max_bytes=None):
+            observed.append((path, timeout, max_bytes))
+            time.sleep(0.02)
+            raise TimeoutError("source request timed out")
+
+        def search_token(timeout=None, max_bytes=None):
+            token_observed.append((timeout, max_bytes))
+            return "test-token"
+
+        with patch.object(vod_sources, "FAST_SOURCE_JOB_TIMEOUT_SECONDS", 0.1, create=True), \
+                patch.object(hhkan, "get_page", side_effect=slow_page), \
+                patch.object(hhkan, "get_search_token", side_effect=search_token):
+            try:
+                futures = registry.submit_fast_searches(dict(SUBJECT))
+                _source_result, _lines, error, elapsed_ms = futures[0].result(timeout=1)
+            finally:
+                registry.close()
+
+        self.assertIsNotNone(error)
+        self.assertLess(elapsed_ms, 500)
+        self.assertEqual(len(observed), 1)
+        self.assertGreater(observed[0][1], 0)
+        self.assertLessEqual(observed[0][1], 0.1)
+        self.assertGreater(observed[0][2], 0)
+        self.assertEqual(len(token_observed), 1)
+        self.assertGreater(token_observed[0][0], 0)
+        self.assertLessEqual(token_observed[0][0], 0.1)
+        self.assertGreater(token_observed[0][1], 0)
 
 
 if __name__ == "__main__":

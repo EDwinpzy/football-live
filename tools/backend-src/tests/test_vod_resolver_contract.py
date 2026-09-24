@@ -1,6 +1,9 @@
+import concurrent.futures
 import pathlib
 import sys
+import time
 import unittest
+from unittest.mock import patch
 
 
 BACKEND = pathlib.Path(__file__).resolve().parents[1]
@@ -76,10 +79,14 @@ class _RecordingIndex:
             entry=entry, version=self.version, age_ms=age_seconds * 1000, stale=stale)
 
 
-def _registry(enabled=True):
+def _registry(enabled=True, source_ids=("source-1",)):
     return vod_sources.SourceRegistry([
-        vod_sources.VodSource("source-1", "线路甲", "https://source.example", "https://api.example",
-                             "maccms", enabled=enabled)
+        vod_sources.VodSource(source_id,
+                              "线路甲" if source_id == "source-1" else "线路" + source_id,
+                              "https://%s.example" % source_id,
+                              "https://api.%s.example" % source_id,
+                              "maccms", enabled=enabled)
+        for source_id in source_ids
     ], version=17)
 
 
@@ -257,6 +264,73 @@ class VodResolverContractTest(unittest.TestCase):
         self.assertIsNone(result.preferred)
         self.assertEqual(result.backups, ())
         self.assertEqual(result.status, "TEMPORARILY_UNAVAILABLE")
+
+    def test_static_index_without_requested_episode_uses_dynamic_lookup(self):
+        short_entry = {"resolved_at": NOW, "lines": [_line(episode_count=1)]}
+        resolver, _metadata_client, _index = self.make_resolver(
+            entries={"1292052": short_entry})
+        registry = _registry()
+        self.addCleanup(registry.close)
+        future = concurrent.futures.Future()
+        future.set_result((registry.sources[0], [_line()], None, 100))
+        submitted = []
+
+        def submit(subject, max_sources):
+            submitted.append((subject, max_sources))
+            return (future,)
+
+        registry.submit_fast_searches = submit
+        resolver.registry = registry
+
+        result = resolver.resolve(mytv_id=10_000_123, episode=2)
+
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(submitted[0][0]["title"], "早春晴朗")
+        self.assertEqual(result.status, "MATCHED")
+        self.assertEqual(result.preferred.episode_index, 1)
+
+    def test_late_source_cannot_become_preferred_without_an_on_time_candidate(self):
+        resolver, _metadata_client, _index = self.make_resolver(
+            entries={"different-key": {"resolved_at": NOW, "lines": []}})
+        registry = _registry()
+        self.addCleanup(registry.close)
+        late = concurrent.futures.Future()
+        registry.submit_fast_searches = lambda _subject, max_sources: (late,)
+        resolver.registry = registry
+
+        with patch.object(vod_resolver, "FAST_SOURCE_SOFT_TIMEOUT_SECONDS", 0.01):
+            result = resolver.resolve(mytv_id=10_000_123, episode=1)
+
+        self.assertEqual(result.status, "TEMPORARILY_UNAVAILABLE")
+        self.assertIsNone(result.preferred)
+        late.set_result((registry.sources[0], [_line()], None, 701))
+
+        key = (10_000_123, 1, "2026092401")
+        cached = resolver._hot_cache.get(key)
+        self.assertNotIn(key, resolver._last_good)
+        self.assertTrue(cached is None or cached[1].preferred is None)
+
+    def test_late_source_only_joins_backups_behind_on_time_preferred(self):
+        resolver, _metadata_client, _index = self.make_resolver(
+            entries={"different-key": {"resolved_at": NOW, "lines": []}})
+        registry = _registry(source_ids=("source-1", "source-2"))
+        self.addCleanup(registry.close)
+        on_time = concurrent.futures.Future()
+        on_time.set_result((registry.sources[0], [_line(source_id="source-1")], None, 1))
+        late = concurrent.futures.Future()
+        registry.submit_fast_searches = lambda _subject, max_sources: (on_time, late)
+        resolver.registry = registry
+
+        with patch.object(vod_resolver, "FAST_SOURCE_SOFT_TIMEOUT_SECONDS", 0.01):
+            result = resolver.resolve(mytv_id=10_000_123, episode=1)
+            time.sleep(0.02)
+            late.set_result((registry.sources[1], [_line(source_id="source-2")], None, 701))
+
+        key = (10_000_123, 1, "2026092401")
+        cached = resolver._last_good[key][1]
+        self.assertEqual(result.preferred.source_id, "source-1")
+        self.assertEqual(cached.preferred.source_id, "source-1")
+        self.assertEqual([candidate.source_id for candidate in cached.backups], ["source-2"])
 
     def test_disabled_or_unknown_source_is_not_returned(self):
         metadata = _FakeMetadataClient(_metadata())
