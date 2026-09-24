@@ -230,6 +230,28 @@ class VodApiContractTest(unittest.TestCase):
         printed.assert_called_once()
         self.assertIn("code 400, message Bad request", printed.call_args.args[0])
 
+    def test_malformed_resolve_request_does_not_log_mytv_id(self):
+        mytv_id = "10000125"
+        request = (
+            "GET /vod/resolve/%s BADVERSION\r\nHost: localhost\r\n"
+            "Connection: close\r\n\r\n" % mytv_id
+        ).encode("ascii")
+        with patch("builtins.print") as printed:
+            with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=3) as conn:
+                conn.sendall(request)
+                response = b""
+                while True:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    response += chunk
+
+        output = "\n".join(" ".join(str(arg) for arg in call.args)
+                            for call in printed.call_args_list)
+        self.assertIn(b"Bad request version", response)
+        self.assertNotIn(mytv_id.encode("ascii"), response)
+        self.assertNotIn(mytv_id, output)
+
     def test_backend_packaging_requires_new_vod_modules(self):
         root = BACKEND.parents[1]
         admin = (root / "tools" / "admin_server.py").read_text(encoding="utf-8")

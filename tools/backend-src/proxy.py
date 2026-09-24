@@ -4529,6 +4529,11 @@ class Handler(SimpleHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         request_target = str(getattr(self, "path", "") or "")
+        if not request_target:
+            requestline = str(getattr(self, "requestline", "") or "")
+            requestline_parts = requestline.split()
+            if len(requestline_parts) >= 2:
+                request_target = requestline_parts[1]
         try:
             route = urlparse(request_target).path
         except ValueError:

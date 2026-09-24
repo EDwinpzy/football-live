@@ -22,7 +22,7 @@ python -m pytest tools/backend-src/tests/test_vod_resolver_contract.py tools/bac
 
 初始 RED：收集失败，明确提示 `vod_resolver` 和 `metadata_client` 模块尚不存在（2 个 `ModuleNotFoundError`，退出码 1）。
 
-复审新增两项访问日志回归测试。修复前，absolute-form 请求目标会把原始 MyTV ID 写入日志；缺少 `self.path` 时 `log_message` 抛出 `AttributeError`。修复后两项测试均通过：日志从解析后的 URL 路径识别 `/vod/resolve/`，缺失路径时安全回退。
+复审新增三项访问日志回归测试。修复前，absolute-form 请求目标会把原始 MyTV ID 写入日志；缺少 `self.path` 时 `log_message` 抛出 `AttributeError`；malformed HTTP 请求在 `self.path` 设置前报错时，响应日志会回退打印含 ID 的原始 `requestline`。修复后，origin-form、absolute-form、直接缺少路径和真实 malformed 请求覆盖均通过：日志从解析后的目标路径识别 `/vod/resolve/`，缺少路径时从请求行安全提取目标。
 
 ## 验证结果
 
@@ -30,7 +30,7 @@ python -m pytest tools/backend-src/tests/test_vod_resolver_contract.py tools/bac
 
 ```text
 python -m pytest tools/backend-src/tests/test_vod_resolver_contract.py tools/backend-src/tests/test_metadata_client.py tools/backend-src/tests/test_vod_api.py -q
-38 passed in 1.71s（包含复审新增的两项访问日志测试）。
+39 passed in 1.73s（包含复审新增的三项访问日志测试）。
 ```
 
 整套后端测试运行一次：
@@ -53,3 +53,5 @@ python -m pytest tools/backend-src/tests -q
 提交主题：`feat(vod): add mytv id resolver contract`
 
 复审修正提交主题：`fix(vod): redact absolute-form resolver request targets`
+
+Malformed 请求行脱敏修正提交主题：`fix(vod): redact malformed resolver request lines`
