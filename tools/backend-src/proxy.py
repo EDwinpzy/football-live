@@ -58,6 +58,15 @@ CLOUD_RELAY_BASE = os.environ.get(
     "OTV_CLOUD_BASE",
     "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/web")
 CLOUD_RELAY_ENABLED = os.environ.get("OTV_CLOUD_RELAY", "1") != "0"
+"""影视片源云端兜底开关（2026-09-24）：自建 VPS 出口连不上片源站 API
+（hongniuzy2 / bfzyapi / jyzyapi / hhkan 实测 curl 000），网页版影视详情页因此只剩
+「暂无片源」。整站通用中继（比赛/直播）在自建栈里是明确关掉的迁移契约，所以这里给
+片源单开一条：默认跟随通用中继（设备/本地默认开），自建部署用
+OTV_VOD_CLOUD_FALLBACK=1 显式打开，CloudBase 退场时只需改这一个开关。"""
+_VOD_FALLBACK_ENV = os.environ.get("OTV_VOD_CLOUD_FALLBACK")
+CLOUD_VOD_FALLBACK_ENABLED = (
+    CLOUD_RELAY_ENABLED if _VOD_FALLBACK_ENV is None
+    else _VOD_FALLBACK_ENV.strip().lower() not in ("", "0", "false", "no"))
 # APK 应用内更新清单由后台写入 CloudBase 公开桶；网页函数只负责以稳定的
 # /web/apk-update/{tv,mobile}.json 地址代理它，避免每次发 APK 都重新部署网页函数。
 APK_UPDATE_OBJECT_BASE = os.environ.get(
@@ -176,7 +185,8 @@ def _get_vod_service():
                 registry = remote_registry or vod_sources.SourceRegistry.load_current()
                 registry.history = vod_sources.LineHistory(cache_root / "vod_line_history.json")
                 registry.stats = vod_sources.SourceStats(cache_root / "vod_source_stats.json")
-                VOD_SERVICE = vod_api.VodService(catalog, registry)
+                VOD_SERVICE = vod_api.VodService(
+                    catalog, registry, cloud_sources=_cloud_vod_sources)
                 # 内置豆瓣快照预热搜索索引：云端出口到不了豆瓣，冷实例即便是
                 # 访客直接搜索（没打开过影视首页）也必须先有结果。
                 catalog.warm_index()
@@ -206,10 +216,10 @@ def _safe_int(v, default, lo=None, hi=None):
 
 
 
-def _cloud_get_json(path, timeout=12):
+def _cloud_get_json(path, timeout=12, allow_when_relay_off=False):
     """云端 otv-web 兜底请求（同一份 proxy.py 的云端部署）：返回解析后的 dict。
     未启用/网络失败/响应异常一律抛错，由调用方回落原有失败路径。"""
-    if not CLOUD_RELAY_ENABLED:
+    if not CLOUD_RELAY_ENABLED and not allow_when_relay_off:
         raise RuntimeError("cloud relay disabled")
     req = urlreq.Request(CLOUD_RELAY_BASE + path, headers={"User-Agent": UA})
     with urlreq.urlopen(req, timeout=timeout) as resp:
@@ -217,6 +227,26 @@ def _cloud_get_json(path, timeout=12):
     if not isinstance(data, dict):
         raise RuntimeError("cloud relay non-dict response")
     return data
+
+
+def _cloud_vod_sources(subject, douban_id):
+    """影视片源兜底（2026-09-24）：自建 VPS 出口到不了片源站（hongniuzy2 / bfzyapi /
+    jyzyapi / hhkan 实测 curl 000 超时），网页版详情页只能显示「暂无片源」，而线路的
+    播放地址（hn.bfvvs.com 等）在 VPS 上可取。这里复用足球同款云端兜底：本地匹配为
+    空时问云端 `/vod/detail/{id}?refresh=1` 要一次线路。任何失败都返回空列表，绝不
+    把「本地匹配成功」的既有路径带进网络等待。"""
+    if not CLOUD_VOD_FALLBACK_ENABLED:
+        return []
+    ref = str(douban_id or "").removeprefix("douban:")
+    if not ref:
+        return []
+    try:
+        data = _cloud_get_json("/vod/detail/" + ref + "?refresh=1", timeout=25,
+                              allow_when_relay_off=True)
+    except Exception:
+        return []
+    sources = data.get("sources") if isinstance(data, dict) else None
+    return sources if isinstance(sources, list) else []
 
 
 def fetch_source():

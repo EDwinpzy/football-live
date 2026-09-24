@@ -93,6 +93,19 @@ function relay(u, ref) {
   return BASE + "/api/relay?u=" + encodeURIComponent(u) + (ref === "none" ? "&ref=none" : "");
 }
 
+/* 影视播放的取流策略（2026-09-24）：
+   自建服务器出口连不上部分影视 CDN（实测 hnts.ymuuy.com:65 / c.baisiweiting.com:18443
+   从服务器 curl 全部超时），中继只能返回 499，网页版点播就卡在「无法播放 HTTP 400」。
+   但用户浏览器所在的网络能直连这些 CDN（实测同一地址 200 + Access-Control-Allow-Origin: *）。
+   所以 https 直链优先浏览器直连，直连失败再立刻回中继（同一线路只多试一次）；
+   http 直链保持中继——https 页面拉 http 分片会被浏览器按混合内容拦掉。 */
+function vodDirectOk(u) { return /^https:\/\//i.test(String(u || "")); }
+function vodAttach(raw, resume) {
+  if (!raw) return;
+  const direct = vodDirectOk(raw);
+  attachPlayer(direct ? raw : relay(raw, "none"), resume, { raw, direct });
+}
+
 /* 影视页顶部 hero 是全宽铺图：豆瓣列表接口只给 ~240 宽的 s_ratio_poster，拉到 1920
    糊成一片。同一张图有 /view/photo/large/public/（1142×1600）这个最大尺寸，这里统一升级。
    后端 /vod/home 已下发 hero_url 时优先用它，取不到再就地换算。 */
@@ -2558,7 +2571,7 @@ async function resolveVodAndPlay(ctx) {
     const d = await resolvePlayCached(ctx.vid, ctx.playRef.pid, ctx.playRef.vid);
     pv.sources = (d.sources || []).filter(x => x && x.url && x.alive !== false).map(x => x.url);
     if (!pv.sources.length) throw new Error("未解析到播放地址");
-    attachPlayer(relay(pv.sources[0], "none"), ctx.resume || 0);
+    vodAttach(pv.sources[0], ctx.resume || 0);
     pushHistory({ id: ctx.vid, title: ctx.title, cover: ctx.cover || "", epIndex: ctx.epIdx || 0 });
     if ("mediaSession" in navigator)
       navigator.mediaSession.metadata = new MediaMetadata({ title: ctx.title, artist: ctx.epName || "" });
@@ -2652,9 +2665,10 @@ async function resolveFreshLiveSource(index) {
   return d.url;
 }
 
-function attachPlayer(url, resume) {
+function attachPlayer(url, resume, opts) {
   const v = pv.video, ctx = pv.ctx;
   const gen = ++pv.recoveryGen;
+  const opt = opts || {};
   pv.recovering = false;
   $("#bufSpin").hidden = false;
   if (pv.hls) { pv.hls.destroy(); pv.hls = null; }
@@ -2666,9 +2680,21 @@ function attachPlayer(url, resume) {
     pv.hls.loadSource(url); pv.hls.attachMedia(v);
     pv.hls.on(Hls.Events.ERROR, (_, d) => {
       if (!d.fatal || gen !== pv.recoveryGen) return;
+      /* 直连失败（CDN 要 Referer / 不给 CORS）→ 同一线路先回中继，别浪费一次恢复额度 */
+      if (opt.direct && opt.raw) {
+        attachPlayer(relay(opt.raw, "none"), resume, { raw: opt.raw });
+        return;
+      }
       recoverPlayback(`HLS ${d.type || "error"}/${d.details || "unknown"}`, gen);
     });
-  } else { v.src = url; v.onerror = () => { if (gen === pv.recoveryGen) recoverPlayback("原生播放器错误", gen); }; }
+  } else {
+    v.src = url;
+    v.onerror = () => {
+      if (gen !== pv.recoveryGen) return;
+      if (opt.direct && opt.raw) { attachPlayer(relay(opt.raw, "none"), resume, { raw: opt.raw }); return; }
+      recoverPlayback("原生播放器错误", gen);
+    };
+  }
   v.onloadedmetadata = () => {
     $("#bufSpin").hidden = true;
     if (resume > 0 && ctx.kind === "vod" && (!v.duration || resume < v.duration - 30)) {
@@ -2730,7 +2756,7 @@ async function recoverPlayback(reason, expectedGen) {
       pv.srcIdx = (pv.srcIdx + 1) % pv.sources.length;
     }
     pv.recovering = false;
-    attachPlayer(relay(pv.sources[pv.srcIdx], "none"), resume);
+    vodAttach(pv.sources[pv.srcIdx], resume);
   } catch (e) {
     pv.recovering = false;
     recoverPlayback(reason + ": " + e.message, pv.recoveryGen);
@@ -2741,7 +2767,8 @@ function nextSource() {
   pv.srcIdx++;
   if (pv.srcIdx < pv.sources.length) {
     hint("线路失效，切换下一个源");
-    attachPlayer(relay(pv.sources[pv.srcIdx], pv.ctx.kind === "vod" ? "none" : undefined), 0);
+    if (pv.ctx.kind === "vod") vodAttach(pv.sources[pv.srcIdx], 0);
+    else attachPlayer(relay(pv.sources[pv.srcIdx]), 0);
     if (pv.ctx.kind === "live") renderSrcPicker();
   } else if (pv.ctx.kind === "vod" && pv.ctx.epIdx < pv.ctx.epCount - 1) {
     hint("本集所有源失败，尝试下一集");

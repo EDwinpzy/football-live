@@ -165,6 +165,11 @@ services:
       PORT: "8090"
       OTV_BIND: 0.0.0.0
       OTV_CLOUD_RELAY: "0"
+      # 2026-09-24：自建 VPS 出口连不上片源站 API（hongniuzy2 / bfzyapi / jyzyapi /
+      # hhkan 实测全部 curl 000），网页版影视详情页只能显示「暂无片源」。通用中继
+      # 仍然是关的（整栈不回退依赖 CloudBase）；这里只为「片源匹配」单开一条云端兜底，
+      # 本地匹配为空时回 CloudBase 取线路。CloudBase 正式退场时改这一个开关即可。
+      OTV_VOD_CLOUD_FALLBACK: "1"
       OTV_HHKAN_SNAPSHOT_FIRST: "1"
       OTV_LICENSE_ENDPOINT: http://business-api:8082/activate
       OTV_APK_UPDATE_OBJECT_BASE: http://storage:8092/v1/storages/object/hotupdate
