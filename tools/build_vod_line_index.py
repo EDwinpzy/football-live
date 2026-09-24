@@ -40,7 +40,10 @@ import vod_sources  # noqa: E402
 
 SNAPSHOT = BACKEND / "douban_snapshot.json"
 DEFAULT_OUT = ROOT / "artifacts" / "vod-lines.json"
-LINE_KEYS = ("id", "source_id", "source_name", "name", "episodes", "height", "alive", "latency_ms", "score")
+LINE_KEYS = (
+    "id", "source_id", "source_name", "name", "episodes", "height", "alive",
+    "latency_ms", "score", "match_score",
+)
 
 
 def load_subjects(snapshot_path: pathlib.Path) -> list[dict]:
@@ -66,12 +69,15 @@ def load_subjects(snapshot_path: pathlib.Path) -> list[dict]:
 def trim_line(line: dict) -> dict:
     out = {key: line.get(key) for key in LINE_KEYS if key in line}
     episodes = []
-    for index, episode in enumerate(out.get("episodes") or []):
+    for episode in out.get("episodes") or []:
         if not isinstance(episode, dict):
             continue
+        episode_index = episode.get("index")
+        if isinstance(episode_index, bool) or not isinstance(episode_index, int) or episode_index < 0:
+            continue
         episodes.append({
-            "index": episode.get("index", index),
-            "name": episode.get("name") or "第%d集" % (index + 1),
+            "index": episode_index,
+            "name": episode.get("name") or "第%d集" % (episode_index + 1),
             "url": episode.get("url") or "",
         })
     out["episodes"] = [episode for episode in episodes if episode["url"]]

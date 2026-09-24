@@ -62,6 +62,26 @@ class VodServiceRefreshTest(unittest.TestCase):
         self.assertEqual(self.invalidated, ["更新中的剧"])
 
 
+class VodResolverLifecycleTest(unittest.TestCase):
+    def test_proxy_shutdown_closes_the_active_source_registry(self):
+        class Registry:
+            def __init__(self):
+                self.close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+
+        class Service:
+            def __init__(self, registry):
+                self.registry = registry
+
+        registry = Registry()
+        with patch.object(proxy, "VOD_SERVICE", Service(registry)):
+            proxy._shutdown_vod_service()
+
+        self.assertEqual(registry.close_calls, 1)
+
+
 class _FakeVodService:
     home_refreshes = []
     detail_refreshes = []

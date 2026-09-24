@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
+import concurrent.futures
 
 
 BACKEND = pathlib.Path(__file__).resolve().parents[1]
@@ -200,6 +201,124 @@ class BreakerRoutingTest(RacingTestCase):
         registry = self._registry(["s1", "s2"], stats=stats)
         lines = registry.resolve_subject(dict(SUBJECT))
         self.assertEqual({line["source_id"] for line in lines}, {"s1", "s2"})
+
+
+class FastResolverPoolTest(unittest.TestCase):
+    def test_title_match_score_is_added_separately_from_line_quality_score(self):
+        source = _source("s1")
+        registry = vod_sources.SourceRegistry([source])
+        original = vod_sources.MacCmsAdapter
+
+        class MatchedAdapter:
+            def __init__(self, _source):
+                pass
+
+            def search(self, subject):
+                return [{"id": "content-1", "title": subject["title"],
+                         "year": "1994", "category": "movie", "season": 0}]
+
+            def detail(self, _candidate):
+                return [{"id": "s1:content-1", "source_id": "s1", "source_name": "s1",
+                         "score": 97, "episodes": [{"index": 0, "name": "Episode 1",
+                                                      "url": "https://media.example/1.m3u8"}]}]
+
+        vod_sources.MacCmsAdapter = MatchedAdapter
+        try:
+            _source_obj, lines, error, _elapsed = registry._search_one(
+                source, {"title": "肖申克的救赎", "year": "1994", "category": "movie", "season": 0})
+        finally:
+            vod_sources.MacCmsAdapter = original
+
+        self.assertIsNone(error)
+        self.assertEqual(lines[0]["match_score"], 100)
+        self.assertEqual(lines[0]["score"], 97)
+
+    def test_health_order_is_cached_for_five_minutes(self):
+        class RecordingStats:
+            def __init__(self):
+                self.sort_calls = 0
+
+            def is_circuit_open(self, _source_id, now=None):
+                return False
+
+            def sort_sources(self, sources):
+                self.sort_calls += 1
+                return list(reversed(sources))
+
+        now = [10.0]
+        stats = RecordingStats()
+        registry = vod_sources.SourceRegistry(
+            [_source("s1"), _source("s2"), _source("s3")],
+            stats=stats, clock=lambda: now[0])
+
+        first = registry.resolver_source_order()
+        second = registry.resolver_source_order()
+        now[0] += 301
+        third = registry.resolver_source_order()
+
+        self.assertEqual([item.id for item in first], ["s3", "s2", "s1"])
+        self.assertEqual([item.id for item in second], ["s3", "s2", "s1"])
+        self.assertEqual([item.id for item in third], ["s3", "s2", "s1"])
+        self.assertEqual(stats.sort_calls, 2)
+
+    def test_open_circuit_is_filtered_fresh_without_rebuilding_health_order(self):
+        class RecordingStats:
+            def __init__(self):
+                self.sort_calls = 0
+                self.open_source = None
+
+            def is_circuit_open(self, source_id, now=None):
+                return source_id == self.open_source
+
+            def sort_sources(self, sources):
+                self.sort_calls += 1
+                return list(reversed(sources))
+
+        stats = RecordingStats()
+        registry = vod_sources.SourceRegistry(
+            [_source("s1"), _source("s2"), _source("s3")], stats=stats)
+        first = registry.resolver_source_order()
+        stats.open_source = "s2"
+        during_cooldown = registry.resolver_source_order()
+        stats.open_source = None
+        after_cooldown = registry.resolver_source_order()
+
+        self.assertEqual([item.id for item in first], ["s3", "s2", "s1"])
+        self.assertEqual([item.id for item in during_cooldown], ["s3", "s1"])
+        self.assertEqual([item.id for item in after_cooldown], ["s3", "s2", "s1"])
+        self.assertEqual(stats.sort_calls, 1)
+
+    def test_close_cancels_queued_bounded_resolver_searches(self):
+        registry = vod_sources.SourceRegistry(
+            [_source("s%d" % index) for index in range(6)])
+        release = threading.Event()
+        started = {"s%d" % index: threading.Event() for index in range(6)}
+
+        def blocked_search(source, _subject):
+            started[source.id].set()
+            release.wait()
+            return source, [], None, 100
+
+        registry._search_one = blocked_search
+        try:
+            active = registry.submit_fast_searches(dict(SUBJECT))
+            self.assertTrue(all(started["s%d" % index].wait(1) for index in range(3)))
+            queued = registry.submit_fast_searches(dict(SUBJECT))
+            registry.close()
+
+            self.assertEqual(len(active), 3)
+            self.assertEqual(len(queued), 3)
+            self.assertTrue(all(future.cancelled() for future in queued))
+        finally:
+            release.set()
+            close = getattr(registry, "close", None)
+            if close:
+                close()
+            for future in locals().get("active", ()):
+                try:
+                    future.result(timeout=1)
+                except concurrent.futures.CancelledError:
+                    pass
 
 
 if __name__ == "__main__":

@@ -53,6 +53,12 @@ PROBE_MAX_WORKERS = 18
 PROBE_TIMEOUT_SECONDS = 4
 PROBE_EARLY_EXIT_ALIVE = 3
 PROBE_EARLY_GRACE = 0.8
+FAST_RESOLVER_MAX_SOURCES = 3
+FAST_RESOLVER_MAX_WORKERS = 3
+FAST_RESOLVER_MAX_IN_FLIGHT = 6
+FAST_SOURCE_HEALTH_TTL_SECONDS = 300
+FAST_SOURCE_SOFT_TIMEOUT_SECONDS = 0.700
+FAST_RESOLVER_BUDGET_SECONDS = 1.500
 """源质量画像 + 熔断：连续 BREAKER_CONSEC_FAILS 次搜索失败 → 冷却
 BREAKER_COOLDOWN_SECONDS 秒内跳过该源（冷却到期自动放行试探，成功即复位）；
 延迟用半衰期 STATS_EMA_HALFLIFE_SECONDS 的 EMA，老数据自动失权。"""
@@ -77,7 +83,8 @@ class VodSource:
 
 
 class SourceRegistry:
-    def __init__(self, sources=(), version=1, history=None, probe=None, stats=None):
+    def __init__(self, sources=(), version=1, history=None, probe=None, stats=None,
+                 clock=time.monotonic):
         self.sources = tuple(sources)
         self.version = int(version)
         self.history = history
@@ -85,6 +92,14 @@ class SourceRegistry:
         self.stats = stats
         self._resolve_cache = {}
         self._cache_lock = threading.Lock()
+        self._resolver_clock = clock
+        self._resolver_pool_lock = threading.RLock()
+        self._resolver_closed = False
+        self._resolver_health_at = None
+        self._resolver_health_order = ()
+        self._fast_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=FAST_RESOLVER_MAX_WORKERS, thread_name_prefix="vod-fast")
+        self._fast_slots = threading.BoundedSemaphore(FAST_RESOLVER_MAX_IN_FLIGHT)
 
     @classmethod
     def from_dict(cls, payload):
@@ -120,6 +135,90 @@ class SourceRegistry:
 
     def to_dict(self):
         return {"schema": 1, "version": self.version, "sources": [asdict(source) for source in self.sources]}
+
+    def resolver_source_order(self):
+        """Return the enabled, non-circuit-open sources in a five-minute health order."""
+        now = self._resolver_clock()
+        with self._resolver_pool_lock:
+            if (self._resolver_health_at is not None and
+                    now - self._resolver_health_at < FAST_SOURCE_HEALTH_TTL_SECONDS):
+                ordered = self._resolver_health_order
+            else:
+                ordered = None
+
+        if ordered is None:
+            enabled = [source for source in self.sources if source.enabled]
+            ordered = self.stats.sort_sources(enabled) if self.stats else enabled
+            with self._resolver_pool_lock:
+                if not self._resolver_closed:
+                    self._resolver_health_at = now
+                    self._resolver_health_order = tuple(ordered)
+
+        # The ranking can be reused for five minutes, while circuit state remains live.
+        stats = self.stats
+        return [source for source in ordered
+                if source.enabled and (not stats or not stats.is_circuit_open(source.id))]
+
+    def submit_fast_searches(self, subject, max_sources=FAST_RESOLVER_MAX_SOURCES):
+        """Submit at most three fast-path source searches to a bounded shared pool.
+
+        The returned futures carry the existing ``(source, lines, error, elapsed_ms)``
+        result. Callers may stop waiting after their request budget; outstanding work
+        remains in this same bounded pool and must not create per-request executors.
+        """
+        try:
+            limit = max(0, min(FAST_RESOLVER_MAX_SOURCES, int(max_sources)))
+        except (TypeError, ValueError, OverflowError):
+            limit = FAST_RESOLVER_MAX_SOURCES
+        if limit == 0:
+            return ()
+
+        futures = []
+        for source in self.resolver_source_order()[:limit]:
+            if not self._fast_slots.acquire(blocking=False):
+                break
+            with self._resolver_pool_lock:
+                if self._resolver_closed:
+                    self._fast_slots.release()
+                    break
+                try:
+                    future = self._fast_executor.submit(
+                        self._search_one, source, copy.deepcopy(subject))
+                except RuntimeError:
+                    self._fast_slots.release()
+                    break
+                except BaseException:
+                    self._fast_slots.release()
+                    for submitted in futures:
+                        submitted.cancel()
+                    raise
+            future.add_done_callback(self._release_fast_slot)
+            future.add_done_callback(self._record_fast_search)
+            futures.append(future)
+        return tuple(futures)
+
+    def _release_fast_slot(self, _future):
+        self._fast_slots.release()
+
+    def _record_fast_search(self, future):
+        if not self.stats:
+            return
+        try:
+            source, _group, error, elapsed = future.result()
+        except Exception:
+            return
+        try:
+            self.stats.record_search(source.id, error is None, elapsed)
+        except Exception:
+            return
+
+    def close(self):
+        """Stop accepting resolver work and cancel searches that have not started."""
+        with self._resolver_pool_lock:
+            if self._resolver_closed:
+                return
+            self._resolver_closed = True
+        self._fast_executor.shutdown(wait=False, cancel_futures=True)
 
     def resolve_subject(self, subject, wait_for_all=False):
         """Search enabled adapters and return only confident, normalized lines.
@@ -215,9 +314,14 @@ class SourceRegistry:
             adapter = HhkanAdapter(source) if source.adapter_type == "hhkan" else MacCmsAdapter(source)
             candidates = adapter.search(subject)
             best = max(candidates, key=lambda item: match_score(subject, item), default=None)
-            if not best or match_score(subject, best) < AUTO_MATCH_THRESHOLD:
+            confidence = match_score(subject, best) if best else 0
+            if not best or confidence < AUTO_MATCH_THRESHOLD:
                 return source, [], None, _elapsed_ms(started)
-            return source, adapter.detail(best), None, _elapsed_ms(started)
+            lines = adapter.detail(best)
+            for line in lines:
+                if isinstance(line, dict):
+                    line["match_score"] = confidence
+            return source, lines, None, _elapsed_ms(started)
         except Exception as exc:  # noqa: BLE001 - 单源失败不拖累整批，但要记下来
             return source, [], str(exc)[:120], _elapsed_ms(started)
 

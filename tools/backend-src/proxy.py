@@ -8,6 +8,7 @@
 用法: python proxy.py [port]   (默认 8090)
 """
 import os
+import atexit
 import re
 import json
 import hhkan  # 影视源（hhkan0.com 抓取）
@@ -130,6 +131,17 @@ _VOD_REMOTE_CONFIG_STATE = {"last_attempt": 0.0, "registry": None}
 _VOD_REMOTE_CONFIG_TTL = 30.0
 
 
+def _shutdown_vod_service():
+    service = VOD_SERVICE
+    registry = getattr(service, "registry", None)
+    close = getattr(registry, "close", None)
+    if callable(close):
+        close()
+
+
+atexit.register(_shutdown_vod_service)
+
+
 def _refresh_remote_vod_registry():
     """Load the latest published My TV source config from the private business API."""
     if not _VOD_REMOTE_CONFIG_URL:
@@ -212,12 +224,17 @@ def _get_vod_service():
     if hasattr(VOD_SERVICE, "registry") and (
             (remote_registry is not None and current.version != VOD_SERVICE.registry.version) or
             current.version > VOD_SERVICE.registry.version):
+        previous = VOD_SERVICE.registry
         current.history = VOD_SERVICE.registry.history
         current.stats = VOD_SERVICE.registry.stats
         VOD_SERVICE.registry = current
         VOD_SERVICE._resolve_sources = current.resolve_subject
         if getattr(VOD_SERVICE, "resolver", None) is not None:
             VOD_SERVICE.resolver.registry = current
+            VOD_SERVICE.resolver.invalidate_source_configuration()
+        close = getattr(previous, "close", None)
+        if callable(close):
+            close()
     return VOD_SERVICE
 
 

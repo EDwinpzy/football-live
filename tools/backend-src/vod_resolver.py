@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
+import concurrent.futures
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -12,6 +15,13 @@ import vod_sources
 
 
 DEFAULT_INDEX_MAX_AGE_SECONDS = 30 * 86400
+LAST_GOOD_TTL_SECONDS = 30 * 60
+HOT_RESULT_TTL_SECONDS = 6 * 60 * 60
+FAILURE_TTL_SECONDS = 15
+FAST_CACHE_MAX_ENTRIES = 512
+MAX_FAST_SOURCES = 3
+FAST_SOURCE_SOFT_TIMEOUT_SECONDS = vod_sources.FAST_SOURCE_SOFT_TIMEOUT_SECONDS
+FAST_RESOLVE_BUDGET_SECONDS = vod_sources.FAST_RESOLVER_BUDGET_SECONDS
 RESOLVE_STATUSES = frozenset({
     "RESOLVING",
     "FAST_PATH_FAILED",
@@ -133,12 +143,26 @@ class ResolveResult:
 class VodResolver:
     """Resolve an explicit metadata mapping to URL-free source references."""
 
-    def __init__(self, metadata, index, registry):
+    def __init__(self, metadata, index, registry, clock=time.monotonic):
         self.metadata = metadata
         self.index = index
         self.registry = registry
+        self._clock = clock
+        self._cache_lock = threading.RLock()
+        self._last_good = OrderedDict()
+        self._hot_cache = OrderedDict()
+        self._failure_cache = OrderedDict()
+        self._cache_generation = 0
 
-    def resolve(self, mytv_id, episode=1):
+    def invalidate_source_configuration(self):
+        """Drop cached references when the configured source registry is replaced."""
+        with self._cache_lock:
+            self._cache_generation += 1
+            self._last_good.clear()
+            self._hot_cache.clear()
+            self._failure_cache.clear()
+
+    def resolve(self, mytv_id, episode=1, cancel_event=None):
         canonical_id = _positive_integer(mytv_id, "mytv_id")
         requested_episode = _positive_integer(episode, "episode")
         unavailable = lambda version=None, cache=None: ResolveResult(
@@ -173,22 +197,51 @@ class VodResolver:
                  "age_ms": max(0, int(index_result.age_ms or 0))}
         if index_result.conflict:
             return unavailable(index_result.version, cache)
-        entry = index_result.entry
-        if not isinstance(entry, dict):
-            return unavailable(index_result.version, cache)
         if index_result.stale:
             return unavailable(index_result.version, {
                 "kind": "stale_index", "age_ms": cache["age_ms"]})
-        if not _entry_identity_matches(entry, canonical_id, douban_id):
+        entry = index_result.entry
+        if isinstance(entry, dict) and not _entry_identity_matches(entry, canonical_id, douban_id):
             return unavailable(index_result.version, cache)
 
-        candidates = self._candidates(entry, requested_episode)
+        registry_snapshot = self.registry
+        generation = self._cache_generation
+        cache_key = (canonical_id, requested_episode,
+                     None if index_result.version is None else str(index_result.version))
+        cached = self._cache_get(self._last_good, cache_key, LAST_GOOD_TTL_SECONDS)
+        if cached is not None:
+            result = self._cached_result(cached, canonical_id, requested_episode,
+                                         index_result.version, "last_good", registry_snapshot)
+            if result is not None and self._cache_snapshot_is_current(registry_snapshot, generation):
+                return result
+        cached = self._cache_get(self._hot_cache, cache_key, HOT_RESULT_TTL_SECONDS)
+        if cached is not None:
+            result = self._cached_result(cached, canonical_id, requested_episode,
+                                         index_result.version, "hot_cache", registry_snapshot)
+            if result is not None and self._cache_snapshot_is_current(registry_snapshot, generation):
+                return result
+        cached = self._cache_get(self._failure_cache, cache_key, FAILURE_TTL_SECONDS)
+        if cached is not None:
+            result = self._cached_result(cached, canonical_id, requested_episode,
+                                         index_result.version, "failure", registry_snapshot)
+            if result is not None and self._cache_snapshot_is_current(registry_snapshot, generation):
+                return result
+
+        if not isinstance(entry, dict):
+            try:
+                return self._resolve_missing_index(
+                    detail, canonical_id, requested_episode, index_result.version,
+                    cache_key, cache, cancel_event)
+            except Exception:
+                return unavailable(index_result.version, cache)
+
+        candidates = self._candidates(entry, requested_episode, registry_snapshot)
         if not candidates:
             return unavailable(index_result.version, cache)
 
         status = "STALE_AVAILABLE" if index_result.stale else "MATCHED"
         cache["kind"] = "stale_index" if index_result.stale else "static_index"
-        return ResolveResult(
+        result = ResolveResult(
             status=status,
             mytv_id=canonical_id,
             episode=requested_episode,
@@ -197,11 +250,273 @@ class VodResolver:
             backups=tuple(candidates[1:]),
             cache=cache,
         )
+        if not self._cache_put_if_current(
+                self._hot_cache, cache_key, result, registry_snapshot, generation):
+            return unavailable(index_result.version, cache)
+        return result
 
-    def _candidates(self, entry, requested_episode):
+    def _resolve_missing_index(self, detail, mytv_id, episode, version, cache_key,
+                               miss_cache, cancel_event):
+        registry_snapshot = self.registry
+        generation = self._cache_generation
+        submit = getattr(registry_snapshot, "submit_fast_searches", None)
+        if not callable(submit):
+            result = self._unavailable_result(mytv_id, episode, version, miss_cache)
+            self._cache_put_if_current(
+                self._failure_cache, cache_key, result, registry_snapshot, generation)
+            return result
+
+        subject = _source_subject(detail)
+        started = time.monotonic()
+        soft_deadline = started + FAST_SOURCE_SOFT_TIMEOUT_SECONDS
+        hard_deadline = started + FAST_RESOLVE_BUDGET_SECONDS
+        futures = tuple(submit(subject, max_sources=MAX_FAST_SOURCES) or ())
+        if not futures:
+            result = self._unavailable_result(mytv_id, episode, version, miss_cache)
+            self._cache_put_if_current(
+                self._failure_cache, cache_key, result, registry_snapshot, generation)
+            return result
+
+        pending = set(futures)
+        completed_candidates = []
+        late_futures = []
+        preferred = None
+        cancelled = False
+        received_source_result = False
+        try:
+            while pending:
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    for future in pending:
+                        future.cancel()
+                    break
+                deadline = hard_deadline if received_source_result else soft_deadline
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                timeout = min(remaining, 0.05 if cancel_event is not None else remaining)
+                done, pending = concurrent.futures.wait(
+                    pending, timeout=timeout,
+                    return_when=concurrent.futures.FIRST_COMPLETED)
+                if not done:
+                    continue
+                received_source_result = True
+                future_order = {future: index for index, future in enumerate(futures)}
+                for future in sorted(done, key=lambda item: future_order[item]):
+                    candidates = self._future_candidates(future, episode, registry_snapshot)
+                    if not candidates:
+                        if self._future_candidates(
+                                future, episode, registry_snapshot, allow_late=True):
+                            late_futures.append(future)
+                        continue
+                    completed_candidates.extend(candidates)
+                    if preferred is None:
+                        preferred = candidates[0]
+                if preferred is not None:
+                    break
+        except BaseException:
+            for future in pending:
+                future.cancel()
+            for future in futures:
+                if future not in pending and not future.done():
+                    future.cancel()
+            raise
+
+        if cancelled:
+            return self._unavailable_result(mytv_id, episode, version, miss_cache)
+
+        if preferred is None:
+            result = self._unavailable_result(mytv_id, episode, version, miss_cache)
+            stored = self._cache_put_if_current(
+                self._failure_cache, cache_key, result, registry_snapshot, generation)
+        else:
+            backups = _unique_backups(preferred, completed_candidates)
+            result = ResolveResult(
+                status="MATCHED", mytv_id=mytv_id, episode=episode,
+                resolve_version=version, preferred=preferred,
+                backups=tuple(backups), cache={"kind": "miss", "age_ms": 0})
+            with self._cache_lock:
+                stored = (generation == self._cache_generation and
+                          self.registry is registry_snapshot)
+                if stored:
+                    now = self._clock()
+                    self._cache_store_locked(self._hot_cache, cache_key, result, now)
+                    self._cache_store_locked(self._last_good, cache_key, result, now)
+
+        if not stored:
+            for future in pending:
+                future.cancel()
+            return self._unavailable_result(mytv_id, episode, version, miss_cache)
+
+        for future in tuple(pending) + tuple(late_futures):
+            future.add_done_callback(
+                lambda done, key=cache_key, requested_episode=episode,
+                canonical_id=mytv_id, resolve_version=version,
+                snapshot=registry_snapshot, current_generation=generation:
+                self._safe_merge_late_candidate(done, key, requested_episode,
+                                                 canonical_id, resolve_version,
+                                                 snapshot, current_generation))
+        return result
+
+    def _future_candidates(self, future, episode, registry=None, allow_late=False):
+        try:
+            value = future.result()
+        except (concurrent.futures.CancelledError, Exception):
+            return []
+        if not isinstance(value, tuple) or len(value) != 4:
+            return []
+        _source, lines, error, elapsed_ms = value
+        if error is not None or not isinstance(lines, (list, tuple)):
+            return []
+        try:
+            elapsed_ms = float(elapsed_ms)
+        except (TypeError, ValueError, OverflowError):
+            return []
+        if elapsed_ms > FAST_SOURCE_SOFT_TIMEOUT_SECONDS * 1000 and not allow_late:
+            return []
+        return self._candidates({"lines": lines}, episode, registry)
+
+    def _safe_merge_late_candidate(self, future, key, episode, mytv_id, version,
+                                   registry, generation):
+        try:
+            self._merge_late_candidate(future, key, episode, mytv_id, version,
+                                       registry, generation)
+        except Exception:
+            return
+
+    def _merge_late_candidate(self, future, key, episode, mytv_id, version,
+                              registry, generation):
+        candidates = self._future_candidates(future, episode, registry, allow_late=True)
+        if not candidates:
+            return
+        with self._cache_lock:
+            if generation != self._cache_generation or self.registry is not registry:
+                return
+            now = self._clock()
+            current = None
+            item = self._hot_cache.get(key)
+            if item is not None and now - item[0] < HOT_RESULT_TTL_SECONDS:
+                current = item[1]
+            if current is None:
+                item = self._last_good.get(key)
+                if item is not None and now - item[0] < LAST_GOOD_TTL_SECONDS:
+                    current = item[1]
+            if current is None:
+                item = self._failure_cache.get(key)
+                if item is not None and now - item[0] < FAILURE_TTL_SECONDS:
+                    current = item[1]
+
+            if current is not None and current.preferred is not None:
+                preferred = current.preferred
+                backups = list(current.backups)
+                backups.extend(candidates)
+            else:
+                preferred = candidates[0]
+                backups = list(current.backups) if current is not None else []
+                backups.extend(candidates[1:])
+            unique = _unique_backups(preferred, backups)
+            merged = ResolveResult(
+                status="MATCHED", mytv_id=mytv_id, episode=episode,
+                resolve_version=version, preferred=preferred,
+                backups=tuple(unique), cache={"kind": "miss", "age_ms": 0})
+            self._cache_store_locked(self._hot_cache, key, merged, now)
+            self._failure_cache.pop(key, None)
+            last_good = self._last_good.get(key)
+            if last_good is not None and now - last_good[0] < LAST_GOOD_TTL_SECONDS:
+                last_result = last_good[1]
+                last_preferred = last_result.preferred or preferred
+                last_backups = _unique_backups(
+                    last_preferred, list(last_result.backups) + candidates)
+                last_result = ResolveResult(
+                    status="MATCHED", mytv_id=mytv_id, episode=episode,
+                    resolve_version=version, preferred=last_preferred,
+                    backups=tuple(last_backups), cache={"kind": "miss", "age_ms": 0})
+                self._cache_store_locked(self._last_good, key, last_result, now)
+            elif current is None or current.preferred is None:
+                self._cache_store_locked(self._last_good, key, merged, now)
+
+    def _cache_put_if_current(self, cache, key, result, registry, generation):
+        with self._cache_lock:
+            if generation != self._cache_generation or self.registry is not registry:
+                return False
+            self._cache_store_locked(cache, key, result, self._clock())
+            return True
+
+    def _cache_store_locked(self, cache, key, result, now):
+        cache[key] = (now, result)
+        cache.move_to_end(key)
+        while len(cache) > FAST_CACHE_MAX_ENTRIES:
+            cache.popitem(last=False)
+
+    @staticmethod
+    def _unavailable_result(mytv_id, episode, version, cache):
+        return ResolveResult(
+            status="TEMPORARILY_UNAVAILABLE", mytv_id=mytv_id,
+            episode=episode, resolve_version=version, preferred=None,
+            backups=(), cache=dict(cache))
+
+    def _cache_get(self, cache, key, ttl_seconds):
+        now = self._clock()
+        with self._cache_lock:
+            item = cache.get(key)
+            if item is None:
+                return None
+            stored_at, result = item
+            age = max(0.0, now - stored_at)
+            if age >= ttl_seconds:
+                cache.pop(key, None)
+                return None
+            cache.move_to_end(key)
+            return result, int(age * 1000)
+
+    def _cached_result(self, cached, mytv_id, episode, version, kind, registry):
+        result, age_ms = cached
+        if result.preferred is None:
+            return ResolveResult(
+                status=result.status, mytv_id=mytv_id, episode=episode,
+                resolve_version=version, preferred=None, backups=(),
+                cache={"kind": kind, "age_ms": age_ms})
         configured = {
             str(getattr(source, "id", "")): source
-            for source in getattr(self.registry, "sources", ())
+            for source in getattr(registry, "sources", ())
+            if getattr(source, "id", None) and bool(getattr(source, "enabled", True))
+        }
+        candidates = (result.preferred,) + tuple(result.backups)
+        valid = []
+        for candidate in candidates:
+            source = configured.get(candidate.source_id)
+            if (source is None or candidate.episode_index != episode - 1 or
+                    candidate.match_score < vod_sources.AUTO_MATCH_THRESHOLD):
+                continue
+            valid.append(ResolveCandidate(
+                source_id=candidate.source_id,
+                source_name=str(getattr(source, "name", "") or candidate.source_name),
+                content_id=candidate.content_id,
+                episode_index=candidate.episode_index,
+                match_score=candidate.match_score,
+                quality=dict(candidate.quality),
+            ))
+        if not valid:
+            return None
+        return ResolveResult(
+            status="MATCHED",
+            mytv_id=mytv_id,
+            episode=episode,
+            resolve_version=version,
+            preferred=valid[0],
+            backups=tuple(valid[1:]),
+            cache={"kind": kind, "age_ms": age_ms},
+        )
+
+    def _cache_snapshot_is_current(self, registry, generation):
+        with self._cache_lock:
+            return generation == self._cache_generation and self.registry is registry
+
+    def _candidates(self, entry, requested_episode, registry=None):
+        registry = self.registry if registry is None else registry
+        configured = {
+            str(getattr(source, "id", "")): source
+            for source in getattr(registry, "sources", ())
             if getattr(source, "id", None)
         }
         result = []
@@ -225,10 +540,10 @@ class VodResolver:
                 continue
             wanted_index = requested_episode - 1
             matching = []
-            for position, item in enumerate(episodes):
+            for item in episodes:
                 if not isinstance(item, dict):
                     continue
-                mapped_index = _nonnegative_integer(item.get("index", position))
+                mapped_index = _nonnegative_integer(item.get("index"))
                 if mapped_index == wanted_index:
                     matching.append(item)
             if len(matching) != 1:
@@ -355,6 +670,30 @@ def _quality(line):
     if score is not None and (score != score or abs(score) == float("inf")):
         score = None
     return {"height": height or 0, "score": score, "latency_ms": latency}
+
+
+def _source_subject(detail):
+    """Pass only reviewed metadata fields to source matching; never derive identity."""
+    keys = ("title", "original_title", "aliases", "year", "category", "season")
+    subject = {key: detail[key] for key in keys if key in detail}
+    if "category" not in subject and detail.get("media_type") is not None:
+        subject["category"] = detail["media_type"]
+    return subject
+
+
+def _unique_backups(preferred, candidates):
+    preferred_key = (preferred.source_id, preferred.content_id, preferred.episode_index)
+    seen = {preferred_key}
+    result = []
+    for candidate in candidates:
+        if not isinstance(candidate, ResolveCandidate):
+            continue
+        key = (candidate.source_id, candidate.content_id, candidate.episode_index)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(candidate)
+    return result
 
 
 def _timestamp(value):
