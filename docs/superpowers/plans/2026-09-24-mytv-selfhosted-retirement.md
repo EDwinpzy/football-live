@@ -18,6 +18,7 @@
 - IP 与迁移 CA 只作为测试入口；生产验收必须使用正式域名和公共 CA 证书。
 - 私钥、卡密、Cookie 和服务密钥不得写入 Git、镜像、普通日志或文档。
 - CloudBase 不作为默认回滚目标；回滚使用已验证的 Git 提交、自建容器镜像、异机备份和对象校验清单。
+- 保留当前 APK 的同设备授权恢复：只能还原已绑定且有效的授权，不增加设备位、不延长有效期；忽略旧 APK 兼容不等于删除当前客户端功能。
 
 ## Review Focus
 
@@ -50,6 +51,9 @@
 - Delete: tools/cloudrun-admin/build_context.py
 - Modify: tools/admin_server.py
 - Modify: tools/apk_update.py
+- Modify: tools/selfhosted/api_service.py
+- Modify: tools/license_v2_migration.sql
+- Modify: tools/license_v2_smoke.sql
 - Delete: tools/db_import.py
 - Create: tools/selfhosted/import_licenses.py
 - Create: tools/tests/test_selfhosted_license_import.py
@@ -61,6 +65,10 @@
 - Modify: deploy/selfhosted/.env.example
 - Modify: deploy/selfhosted/README.md
 - Test: tools/tests/test_selfhosted_admin_config.py
+- Test: tools/backend-src/tests/test_selfhosted_api_contract.py
+- Modify: tools/backend-src/tests/test_license_restore_contract.py
+- Delete: tools/backend-src/tests/test_activate_v2_contract.py
+- Test: tools/backend-src/tests/test_license_v2_contract.py
 - Create: tools/tests/test_current_release_has_no_cloudbase.py
 
 **Interfaces:**
@@ -87,7 +95,7 @@ Expected: FAIL，测试报告当前发布器仍构造 CloudBase CLI 命令或把
 
 - [ ] **Step 3: 改写发布流程并移除旧合同**
 
-修改 tools/release_all.py，使本地构建和自建部署不调用 CloudBase 函数/桥接构建器，也不探测 CloudBase CLI。用 test_current_release_has_no_cloudbase.py 覆盖新发布合同并删除旧 test_release_all_cloudbase_update.py。删除只验证旧 bridge/SCF 行为的测试、不再调用的 CloudBase 部署器和 cloudfunctions/ 下可部署函数源码。CloudBase 卡密批次导入替换为 tools/selfhosted/import_licenses.py，保留 license_gen.py 的批次格式与校验、改为写入自建数据库；同步更新 tools/admin_server.py 与 tools/apk_update.py 的过期 CloudBase 对象/管理说明。Web 源码由 Web 计划的新静态资源构建步骤产出，不再写入 cloudfunctions/。Compose 与示例环境移除 CloudBase relay、点播兜底、对象镜像和管理入口变量。保留 tools/selfhosted/import_cloudbase.py、database_reconcile.py 和必要 SQL 作为显式的一次性迁移/审计工具，不把它们纳入普通打包/部署/启动路径。
+修改 tools/release_all.py，使本地构建和自建部署不调用 CloudBase 函数/桥接构建器，也不探测 CloudBase CLI。用 test_current_release_has_no_cloudbase.py 覆盖新发布合同并删除旧 test_release_all_cloudbase_update.py。删除只验证旧 bridge/SCF 行为的测试、不再调用的 CloudBase 部署器和 cloudfunctions/ 下可部署函数源码。CloudBase 卡密批次导入替换为 tools/selfhosted/import_licenses.py，保留 license_gen.py 的批次格式与校验、改为写入自建数据库；同步更新 tools/admin_server.py 与 tools/apk_update.py 的过期 CloudBase 对象/管理说明。Web 源码由 Web 计划的新静态资源构建步骤产出，不再写入 cloudfunctions/。Compose 与示例环境移除 CloudBase relay、点播兜底、对象镜像和管理入口变量。保留 tools/selfhosted/import_cloudbase.py、database_reconcile.py 和必要 SQL 作为显式的一次性迁移/审计工具，不把它们纳入普通打包/部署/启动路径。将 `action=restore` 接入自建 API 和 RPC；按 device 查询已绑定的最新有效授权，写审计结果并复用标准票据响应，不读取空卡密、不创建授权、不更新设备数组或有效期。把 `test_license_restore_contract.py` 改为检查两个 Android 客户端及自建 API/SQL；删除依赖旧 CloudBase bridge 文件的 `test_activate_v2_contract.py`，由现有 self-hosted API 与 SQL 合同覆盖。
 
 - [ ] **Step 4: 运行发布与配置合同测试**
 
@@ -137,7 +145,7 @@ Expected: FAIL，输出指出正式 Release 尚未由显式公共 HTTPS origin �
 
 - [ ] **Step 3: 在两个 APK 工程中实现同一 Release origin 校验**
 
-Release 任务只接受显式 apiBaseUrl=https://正式域名，拒绝 IP、非 HTTPS、路径/查询/片段和测试 CA origin。TV 与移动工程共用同一校验规则和失败信息；HotUpdateManager、license 与 IptvRepository 只从统一 BuildConfig endpoint 取路由，删除过期 CloudBase 注释和硬编码域名。Debug 仍可由测试者显式选择自建测试 origin。正式域名未取得前，只运行负例配置测试，不生成宣称可发布的 Release APK。
+Release 任务只接受显式 apiBaseUrl=https://正式域名，拒绝 IP、非 HTTPS、路径/查询/片段和测试 CA origin。TV 与移动工程共用同一校验规则和失败信息；HotUpdateManager、license 与 IptvRepository 只从统一 BuildConfig endpoint 取路由，删除过期 CloudBase 注释和硬编码域名。Debug 仍可由测试者显式选择自建测试 origin。配置测试可以用隔离的语法 fixture 验证允许路径，但 fixture 不得写入或打包成 APK。没有 Task 3 真实验证的正式域名时，不构建或宣称可发布的 Release APK。
 
 ```groovy
 def uri = new URI(apiBaseUrl)
@@ -150,7 +158,7 @@ if (releaseTask && (!isPublicHttpsDomain(uri) || uri.rawPath || uri.query || uri
 
 Run: python -m pytest tools/tests/test_release_api_origin_contract.py tools/tests/test_release_signing_config.py -q
 
-Expected: PASS，全部当前 Release 工程拒绝无效入口并接受同一个 HTTPS 域名。提交消息：build(android): require verified self-hosted release origin。
+Expected: PASS，全部当前 Release 工程拒绝无效入口、使用同一 origin 校验规则；fixture 仅用于验证配置逻辑。待 Task 3 取得并验证正式域名后，才构建当前 Release APK 并核对其 BuildConfig origin。提交消息：build(android): require verified self-hosted release origin。
 
 ### Task 3: 从 VPS 验收出口、域名、TLS、对象和恢复能力
 
@@ -271,7 +279,7 @@ if any(check.status != "PASS" for check in required):
 
 - [ ] **Step 2: 退役当前 CloudBase 生产入口**
 
-冻结 CloudBase 生产写入，导出并校验保留所需的数据/对象清单，然后关闭当前版本依赖的函数触发器、托管入口、relay、对象镜像和发布权限。保留项目及数据作为只读归档；本计划不删除 CloudBase 项目、历史数据或旧 APK，也不要求旧 APK继续可用。
+在全部门槛通过并取得用户最终切换确认后，冻结 CloudBase 生产写入，导出并校验保留所需的数据/对象清单，然后关闭当前版本依赖的函数触发器、托管入口、relay、对象镜像和发布权限。保留项目及数据作为只读归档；本计划不删除 CloudBase 项目、历史数据或旧 APK，也不要求旧 APK继续可用。
 
 - [ ] **Step 3: 进行切换后 smoke test 与零请求复核**
 
