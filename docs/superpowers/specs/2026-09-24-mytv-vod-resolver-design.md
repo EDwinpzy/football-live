@@ -1,7 +1,7 @@
 # My TV 点播 Source Resolver 设计
 
 日期：2026-09-24  
-状态：待用户规格审核  
+状态：已由用户批准（2026-09-24）
 依据：桌面全链路优化方案及当前 web-api、metadata center、静态 vod-lines 索引和两套 Android VOD 实现。
 
 ## 1. 目标

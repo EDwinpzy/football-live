@@ -1,7 +1,7 @@
 # My TV 自建服务器与 CloudBase 退役设计
 
 日期：2026-09-24  
-状态：待用户规格审核  
+状态：已由用户批准（2026-09-24）
 依据：桌面方案《MyTV-新云服务器全链路性能优化方案-彻底去CloudBase版-2026-09-24.md》、既有《2026-09-23-cloudbase-self-hosted-migration-design.md》及本轮用户补充的旧 APK 范围。
 
 ## 1. 目标与范围

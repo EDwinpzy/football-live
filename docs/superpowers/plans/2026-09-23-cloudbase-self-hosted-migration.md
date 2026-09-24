@@ -1,5 +1,7 @@
 # CloudBase Self-Hosted Migration Implementation Plan
 
+> **状态：已被 2026-09-24 的自建服务器与 CloudBase 退役计划取代。** 仅把这里已完成的 VPS/Compose/健康检查步骤作为历史证据参考；不要执行本计划的旧 APK 兼容代理、旧 CloudBase 管理桥或 2026-10-09 兼容期要求。当前实施入口见 docs/superpowers/plans/2026-09-24-mytv-selfhosted-retirement.md。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把 My TV 的 CloudBase 数据库、对象存储、管理/API、激活、热更新、电视源和网页迁到现有 Ubuntu VPS，并保留旧 App 的 CloudBase 地址作为过渡代理。
