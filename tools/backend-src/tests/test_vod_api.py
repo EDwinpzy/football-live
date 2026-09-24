@@ -93,6 +93,17 @@ class _FakeVodService:
     def source_status(self):
         return {"version": 1, "sources": []}
 
+    def resolve(self, mytv_id, episode=1):
+        return {
+            "mytv_id": mytv_id,
+            "episode": episode,
+            "resolve_version": 11,
+            "preferred": None,
+            "backups": [],
+            "cache": {"kind": "none", "age_ms": 0},
+            "status": "TEMPORARILY_UNAVAILABLE",
+        }
+
 
 class VodApiContractTest(unittest.TestCase):
     @classmethod
@@ -112,6 +123,13 @@ class VodApiContractTest(unittest.TestCase):
     def fetch(self, path):
         with urllib.request.urlopen("http://127.0.0.1:%d%s" % (self.server.server_port, path), timeout=3) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def fetch_status(self, path):
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:%d%s" % (self.server.server_port, path), timeout=3) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as response:
+            return response.code, json.loads(response.read().decode("utf-8"))
 
     def test_vod_home_uses_douban_cards(self):
         payload = self.fetch("/vod/home?category=movie")
@@ -143,6 +161,30 @@ class VodApiContractTest(unittest.TestCase):
     def test_filter_contract_has_no_language_row(self):
         payload = self.fetch("/vod/filters/movie")
         self.assertEqual(payload["filters"], ["类别", "类型", "地区", "年份", "评分", "排序"])
+
+    def test_resolve_route_exposes_fixed_contract(self):
+        payload = self.fetch("/vod/resolve/10000123?episode=2")
+        self.assertEqual(payload, {
+            "mytv_id": 10000123,
+            "episode": 2,
+            "resolve_version": 11,
+            "preferred": None,
+            "backups": [],
+            "cache": {"kind": "none", "age_ms": 0},
+            "status": "TEMPORARILY_UNAVAILABLE",
+        })
+
+    def test_resolve_route_rejects_empty_nonnumeric_and_invalid_parameters(self):
+        for path in (
+            "/vod/resolve/?episode=1",
+            "/vod/resolve/nope?episode=1",
+            "/vod/resolve/10000123?episode=",
+            "/vod/resolve/10000123?episode=abc",
+            "/vod/resolve/10000123?episode=0",
+        ):
+            with self.subTest(path=path):
+                status, _ = self.fetch_status(path)
+                self.assertEqual(status, 400)
 
     def test_backend_packaging_requires_new_vod_modules(self):
         root = BACKEND.parents[1]

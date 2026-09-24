@@ -18,6 +18,8 @@ import douban_catalog
 import media_index
 import vod_api
 import vod_sources
+import metadata_client
+import vod_resolver
 import time
 import time as _time  # 模块级别名：resolve_team_icon 等用 _time，与 _tdb_search_team 内局部导入一致
 import threading
@@ -192,8 +194,16 @@ def _get_vod_service():
                 registry = remote_registry or vod_sources.SourceRegistry.load_current()
                 registry.history = vod_sources.LineHistory(cache_root / "vod_line_history.json")
                 registry.stats = vod_sources.SourceStats(cache_root / "vod_source_stats.json")
+                resolver = vod_resolver.VodResolver(
+                    metadata_client.MetadataClient(),
+                    vod_resolver.StaticLineIndex(
+                        _vod_index_payload,
+                        max_age_seconds=VOD_LINE_INDEX_MAX_AGE_DAYS * 86400),
+                    registry,
+                )
                 VOD_SERVICE = vod_api.VodService(
-                    catalog, registry, fallback_sources=_vod_fallback_sources())
+                    catalog, registry, fallback_sources=_vod_fallback_sources(),
+                    resolver=resolver)
                 # 内置豆瓣快照预热搜索索引：云端出口到不了豆瓣，冷实例即便是
                 # 访客直接搜索（没打开过影视首页）也必须先有结果。
                 catalog.warm_index()
@@ -206,6 +216,8 @@ def _get_vod_service():
         current.stats = VOD_SERVICE.registry.stats
         VOD_SERVICE.registry = current
         VOD_SERVICE._resolve_sources = current.resolve_subject
+        if getattr(VOD_SERVICE, "resolver", None) is not None:
+            VOD_SERVICE.resolver.registry = current
     return VOD_SERVICE
 
 
@@ -3969,7 +3981,7 @@ class Handler(SimpleHTTPRequestHandler):
     def _vod_api(self, parsed):
         """统一豆瓣目录与播放源接口。"""
         path = parsed.path
-        query = parse_qs(parsed.query)
+        query = parse_qs(parsed.query, keep_blank_values=True)
         try:
             # 初始化失败必须回一份可读的 503，别让异常逃出处理器把响应整条丢掉。
             service = _get_vod_service()
@@ -3990,6 +4002,19 @@ class Handler(SimpleHTTPRequestHandler):
                 payload = service.filters(unquote(path[len("/vod/filters/"):]))
             elif path.startswith("/vod/show/"):
                 payload = service.show(unquote(path[len("/vod/show/"):]), query)
+            elif path == "/vod/resolve" or path.startswith("/vod/resolve/"):
+                raw_mytv_id = path[len("/vod/resolve/"):] if path.startswith("/vod/resolve/") else ""
+                mytv_id = unquote(raw_mytv_id)
+                if not re.fullmatch(r"[0-9]+", mytv_id):
+                    raise ValueError("mytv_id must be a positive integer")
+                episode_values = query.get("episode")
+                raw_episode = "1" if episode_values is None else episode_values[0]
+                if len(episode_values or []) > 1 or not re.fullmatch(r"[0-9]+", raw_episode):
+                    raise ValueError("episode must be a positive integer")
+                episode = int(raw_episode)
+                if episode < 1:
+                    raise ValueError("episode must be a positive integer")
+                payload = service.resolve(int(mytv_id), episode)
             elif path.startswith("/vod/detail/"):
                 subject_id = unquote(path[len("/vod/detail/"):]).removeprefix("douban:")
                 defer = (query.get("defer_sources") or ["0"])[0].lower() in ("1", "true", "yes")
@@ -4012,7 +4037,10 @@ class Handler(SimpleHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store" if "/play/" in path or "/detail/" in path else "max-age=30")
+        self.send_header("Cache-Control", "no-store" if (
+            "/play/" in path or "/detail/" in path or path == "/vod/resolve" or
+            path.startswith("/vod/resolve/")
+        ) else "max-age=30")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
