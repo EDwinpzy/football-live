@@ -110,6 +110,10 @@ def build_assets(source_dir: str | Path, output_dir: str | Path) -> BuildResult:
     copied_files = []
     if source_assets.is_dir():
         for asset in sorted(path for path in source_assets.rglob("*") if path.is_file()):
+            # app/style hash URLs are immutable. Source copies must never take
+            # ownership of these names, including bundles left by older builds.
+            if _HASHED_ASSET_RE.fullmatch(asset.name):
+                continue
             relative = f"assets/{asset.relative_to(source_assets).as_posix()}"
             target = output / relative
             target.parent.mkdir(parents=True, exist_ok=True)

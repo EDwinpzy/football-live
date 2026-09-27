@@ -4,6 +4,7 @@ import importlib
 import json
 import re
 import sys
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -124,6 +125,57 @@ def test_source_hash_named_assets_cannot_replace_generated_bundle_bytes(tmp_path
     hashes = {asset["path"]: asset["sha256"] for asset in manifest["assets"]}
     assert hashes[f"/{app_path}"] == hashlib.sha256((dist / app_path).read_bytes()).hexdigest()
     assert hashes[f"/{css_path}"] == hashlib.sha256((dist / css_path).read_bytes()).hexdigest()
+
+
+def test_source_hash_named_assets_cannot_replace_previous_immutable_urls(tmp_path):
+    build_assets = _load_builder().build_assets
+    source = tmp_path / "source"
+    dist = tmp_path / "dist"
+    _write_source(source, app=b"window.revision = 1;\n", css=b"body { color: white; }\n")
+
+    first = build_assets(source, dist)
+    old_app = next(path for path in first.referenced_files if path.endswith(".js"))
+    old_css = next(path for path in first.referenced_files if path.endswith(".css"))
+    old_bytes = {old_app: (dist / old_app).read_bytes(), old_css: (dist / old_css).read_bytes()}
+    (source / "app.js").write_bytes(b"window.revision = 2;\n")
+    (source / "style.css").write_bytes(b"body { color: black; }\n")
+    (source / "assets" / Path(old_app).name).write_bytes(b"poison old app URL\n")
+    (source / "assets" / Path(old_css).name).write_bytes(b"poison old css URL\n")
+
+    build_assets(source, dist)
+
+    assert {path: (dist / path).read_bytes() for path in old_bytes} == old_bytes
+
+
+def test_self_hosted_web_image_builds_and_uses_hashed_dist(tmp_path):
+    dockerfile = (ROOT / "deploy" / "selfhosted" / "Dockerfile.web").read_text(encoding="utf-8")
+    for contract in (
+        "FROM python:3.12-slim AS web-assets",
+        "COPY tools/backend-src/www/ /build/www/",
+        "COPY tools/build_web_assets.py /build/build_web_assets.py",
+        "RUN python /build/build_web_assets.py /build/www /build/web-dist",
+        "COPY tools/backend-src/*.py tools/backend-src/*.json /app/",
+        "COPY --from=web-assets /build/web-dist/ /app/www/",
+    ):
+        assert contract in dockerfile
+    assert "COPY tools/backend-src/ /app/" not in dockerfile
+
+    source = tmp_path / "www"
+    dist = tmp_path / "web-dist"
+    _write_source(source, app=b"window.dockerBuild = true;\n", css=b"body { color: navy; }\n")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "build_web_assets.py"), str(source), str(dist)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "输出目录：" in result.stdout
+    html = (dist / "index.html").read_text(encoding="utf-8")
+    for reference in re.findall(r'(?:src|href)="(assets/[^\"]+)"', html):
+        asset = dist / reference
+        assert asset.is_file()
+        expected_prefix = Path(reference).name.split(".")[1]
+        assert hashlib.sha256(asset.read_bytes()).hexdigest().startswith(expected_prefix)
 
 
 def test_output_nested_in_source_is_rejected_without_changing_source(tmp_path):
