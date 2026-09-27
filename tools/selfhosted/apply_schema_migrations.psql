@@ -1,0 +1,117 @@
+\set ON_ERROR_STOP on
+
+CREATE TABLE IF NOT EXISTS public.schema_migrations (
+    version text PRIMARY KEY,
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'db_bootstrap.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir db_bootstrap.sql
+INSERT INTO public.schema_migrations (version) VALUES ('db_bootstrap.sql');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'base_schema.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir base_schema.sql
+INSERT INTO public.schema_migrations (version) VALUES ('base_schema.sql');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'license_v2_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../license_v2_migration.sql
+INSERT INTO public.schema_migrations (version) VALUES ('license_v2_migration.sql');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'license_note_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../license_note_migration.sql
+INSERT INTO public.schema_migrations (version) VALUES ('license_note_migration.sql');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'admin_sold_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../admin_sold_migration.sql
+INSERT INTO public.schema_migrations (version) VALUES ('admin_sold_migration.sql');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'hotupdate_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../hotupdate_migration.sql
+INSERT INTO public.schema_migrations (version) VALUES ('hotupdate_migration.sql');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'announcement_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../announcement_migration.sql
+INSERT INTO public.schema_migrations (version) VALUES ('announcement_migration.sql');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'iptv_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../iptv_migration.sql
+INSERT INTO public.schema_migrations (version) VALUES ('iptv_migration.sql');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'vod_sources_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../vod_sources_migration.sql
+INSERT INTO public.schema_migrations (version) VALUES ('vod_sources_migration.sql');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'pg_cu_optimization_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../pg_cu_optimization_migration.sql
+INSERT INTO public.schema_migrations (version) VALUES ('pg_cu_optimization_migration.sql');
+COMMIT;
+\endif
+
+-- Reconcile the importer role every deployment so password rotation and grant
+-- drift are repaired before PostgREST or the admin API can start.
+BEGIN;
+\ir license_importer_role.sql
+INSERT INTO public.schema_migrations (version)
+VALUES ('license_importer_role_v1')
+ON CONFLICT (version) DO UPDATE SET applied_at = EXCLUDED.applied_at;
+COMMIT;
+
+\ir license_importer_smoke.psql

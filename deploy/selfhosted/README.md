@@ -14,11 +14,11 @@ The self-hosted admin runs the existing IPTV source rebuild daily at 06:30 Asia/
 4. Create root-only `admin-credentials.json`, `admin-session-secret`, and `admin-api-credentials.json` files. The admin API account must use the My TV service subject `2094843486709620737`; store only its salted hash in `auth-users.json` and keep its matching username/password in `admin-api-credentials.json`. Create `/srv/mytv/secrets/license-importer-db-password` for the restricted license-import role as described below. The original license-signing key, if available, belongs at `/srv/mytv/secrets/license/private_key.pem`; do not generate a replacement because existing apps trust the original public key.
 5. Restrict `.env` and all secret files to root (`chmod 600`); make the object directory writable by the storage service.
 6. In the provider NAT panel, forward an external port to internal TCP port 8080. Do not add or change a security group.
-7. From the repository root, run `python tools/release_all.py` to build `dist/` and the embedded backend package. Then start the stack with `docker compose -f deploy/selfhosted/compose.yaml up -d --build` and check `docker compose -f deploy/selfhosted/compose.yaml ps` plus `curl http://127.0.0.1:8080/health`.
+7. From the repository root, run `python tools/release_all.py` to build `dist/` and the embedded backend package. Then start the stack with `docker compose -f deploy/selfhosted/compose.yaml up -d --build` and check `docker compose -f deploy/selfhosted/compose.yaml ps` plus `curl http://127.0.0.1:8080/health`. Before PostgREST starts, the one-shot `schema-migrations` service applies each missing SQL version to the existing PostgreSQL volume and records its filename and timestamp in `public.schema_migrations`.
 
-On this deployment host, `python tools/release_all.py --deploy` performs the same local build and then invokes the configured self-hosted Compose deployment entry. The Admin container does not receive the PostgreSQL bootstrap credentials. It mounts only a separate password file for `license_importer`, which can insert issued licenses and read only their `code` column for duplicate detection.
+On this deployment host, `python tools/release_all.py --deploy` performs the same local build and then invokes the configured self-hosted Compose deployment entry. The Admin container does not receive the PostgreSQL bootstrap credentials. It mounts only the separate password file for `license_importer`, which can insert issued licenses and read only their `code` column for duplicate detection.
 
-### Provision the license-import database role
+### Prepare the license-import password
 
 Generate a strong password directly into the root-only file mounted by Admin. Keep this file outside the repository and do not add its contents to `.env`:
 
@@ -26,24 +26,7 @@ Generate a strong password directly into the root-only file mounted by Admin. Ke
 sudo sh -c 'umask 077; openssl rand -base64 36 > /srv/mytv/secrets/license-importer-db-password'
 ```
 
-After the `public.licenses` table exists, open a privileged PostgreSQL session:
-
-```sh
-docker compose -f deploy/selfhosted/compose.yaml exec -it postgres \
-  sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
-```
-
-In `psql`, create the restricted role and grants, then use `\password` to set its password by entering the value from the root-only secret file at the prompt (the password is not included in shell history):
-
-```sql
-CREATE ROLE license_importer LOGIN;
-GRANT CONNECT ON DATABASE optimal_tv TO license_importer;
-GRANT USAGE ON SCHEMA public TO license_importer;
-GRANT INSERT (code, plan, days, ticket, note), SELECT (code)
-    ON TABLE public.licenses TO license_importer;
-```
-
-If `POSTGRES_DB` is changed from `optimal_tv`, use that database name in the `GRANT CONNECT` statement. The column-level `SELECT (code)` privilege is required by the importer's `ON CONFLICT (code) DO NOTHING` clause; the role cannot read license details or modify existing rows.
+The `schema-migrations` service reads this file without printing its contents, creates or repairs `license_importer`, and reconciles its grants before PostgREST starts. It records the role policy version and runs a rollback-only SQL smoke check that verifies insert, duplicate import, code-only reads, rejected detail reads, and rejected updates. A missing/empty password file or a failed migration keeps PostgREST and dependent API services stopped. On each Compose rollout, the role password is refreshed from this file, so rotate the file and restart the stack together.
 
 The HTTP health endpoint intentionally serves only `/health`; never send credentials or App traffic to it. The HTTPS certificate is issued for the VPS IP and its migration CA is packaged with both APKs. If the original license-signing key is not installed, license replenishment stays unavailable while existing licenses continue to work.
 

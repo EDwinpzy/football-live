@@ -1,5 +1,7 @@
 import unittest
 from pathlib import Path
+import re
+import yaml
 
 from tools.selfhosted.import_cloudbase import (
     BUSINESS_TABLES,
@@ -34,6 +36,67 @@ class SelfHostedDatabaseContractTests(unittest.TestCase):
         self.assertIn("POSTGREST_DB_USER:-authenticator", compose)
         self.assertIn("POSTGREST_DB_USER=authenticator", env_example)
 
+    def test_existing_postgres_volumes_migrate_before_postgrest_starts(self):
+        compose = yaml.safe_load((ROOT / "deploy" / "selfhosted" / "compose.yaml").read_text(encoding="utf-8"))
+        migrations = (ROOT / "tools" / "selfhosted" / "apply_schema_migrations.psql").read_text(encoding="utf-8")
+        runner = (ROOT / "tools" / "selfhosted" / "apply_schema_migrations.sh").read_text(encoding="utf-8")
+
+        services = compose["services"]
+        migration_service = services["schema-migrations"]
+        self.assertEqual(migration_service["depends_on"]["postgres"]["condition"], "service_healthy")
+        self.assertEqual(
+            services["postgrest"]["depends_on"]["schema-migrations"]["condition"],
+            "service_completed_successfully",
+        )
+        migration_environment = migration_service["environment"]
+        self.assertIn("POSTGRES_PASSWORD", migration_environment)
+        self.assertIn("LICENSE_IMPORTER_PASSWORD_FILE", migration_environment)
+        self.assertNotIn("LICENSE_IMPORTER_PASSWORD", migration_environment)
+        self.assertIn("license-importer-db-password", " ".join(migration_service["volumes"]))
+        migration_mounts = " ".join(migration_service["volumes"])
+        for migration_file in (
+            "apply_schema_migrations.psql",
+            "db_bootstrap.sql",
+            "iptv_publish_lock.sql",
+            "base_schema.sql",
+            "license_importer_role.sql",
+            "license_importer_smoke.psql",
+            *MIGRATION_ORDER,
+        ):
+            self.assertIn(migration_file, migration_mounts)
+        self.assertIn("schema_migrations", migrations)
+        self.assertIn("license_v2_migration.sql", migrations)
+        self.assertIn("license_importer_smoke.psql", migrations)
+        self.assertIn("ON_ERROR_STOP=1", runner)
+        self.assertIn("output_file", runner)
+        self.assertIn("schema migration failed", runner)
+        self.assertNotIn("printf '%s\\n' \"$LICENSE_IMPORTER_PASSWORD\"", runner)
+
+    def test_license_import_role_is_reconciled_with_least_privilege_grants(self):
+        policy = (ROOT / "tools" / "selfhosted" / "license_importer_role.sql").read_text(encoding="utf-8").lower()
+        smoke = (ROOT / "tools" / "selfhosted" / "license_importer_smoke.psql").read_text(encoding="utf-8").lower()
+
+        self.assertIn("license_importer_password", policy)
+        self.assertIn("revoke all privileges on all tables in schema public", policy)
+        self.assertIn("grant insert (code, plan, days, ticket, note), select (code)", policy)
+        self.assertIn("has_column_privilege", policy)
+        self.assertIn("has_table_privilege", policy)
+        self.assertIn("on conflict (code) do nothing", smoke)
+        self.assertIn("perform ticket", smoke)
+        self.assertIn("update public.licenses", smoke)
+        self.assertIn("insufficient_privilege", smoke)
+        self.assertIn("rollback", smoke)
+
+    def test_runtime_runner_strips_cloudbase_only_migration_sections(self):
+        runner = (ROOT / "tools" / "selfhosted" / "apply_schema_migrations.sh").read_text(encoding="utf-8")
+        hotupdate = (ROOT / "tools" / "hotupdate_migration.sql").read_text(encoding="utf-8")
+
+        self.assertIn("SELFHOSTED-OMIT-BEGIN", runner)
+        self.assertIn("SELFHOSTED-OMIT-END", runner)
+        self.assertIn("hotupdate_migration.sql", runner)
+        self.assertIn("SELFHOSTED-OMIT-BEGIN", hotupdate)
+        self.assertIn("storage.buckets", hotupdate)
+
     def test_migrations_are_explicitly_ordered_and_exclude_destructive_reset(self):
         self.assertEqual(
             MIGRATION_ORDER,
@@ -50,6 +113,11 @@ class SelfHostedDatabaseContractTests(unittest.TestCase):
         )
         self.assertTrue(all((ROOT / "tools" / name).is_file() for name in MIGRATION_ORDER))
         self.assertNotIn("license_v2_reset.sql", MIGRATION_ORDER)
+        runtime_versions = re.findall(
+            r"WHERE version = '([^']+\.sql)'",
+            (ROOT / "tools" / "selfhosted" / "apply_schema_migrations.psql").read_text(encoding="utf-8"),
+        )
+        self.assertEqual(tuple(runtime_versions), ("db_bootstrap.sql", "base_schema.sql", *MIGRATION_ORDER))
 
     def test_reconciliation_report_contains_only_counts_and_sequence_state(self):
         report = build_reconciliation_report(

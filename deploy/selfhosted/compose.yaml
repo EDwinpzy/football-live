@@ -49,6 +49,47 @@ services:
     networks:
       - backend
 
+  schema-migrations:
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
+    restart: "no"
+    entrypoint: ["/bin/sh", "/app/tools/selfhosted/apply_schema_migrations.sh"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-optimal_tv}
+      POSTGREST_DB_PASSWORD: ${POSTGREST_DB_PASSWORD:?set POSTGREST_DB_PASSWORD}
+      LICENSE_IMPORTER_PASSWORD_FILE: /run/secrets/license-importer-db-password
+    volumes:
+      - ../../tools/selfhosted/apply_schema_migrations.sh:/app/tools/selfhosted/apply_schema_migrations.sh:ro
+      - ../../tools/selfhosted/apply_schema_migrations.psql:/app/tools/selfhosted/apply_schema_migrations.psql:ro
+      - ../../tools/selfhosted/db_bootstrap.sql:/app/tools/selfhosted/db_bootstrap.sql:ro
+      - ../../tools/selfhosted/iptv_publish_lock.sql:/app/tools/selfhosted/iptv_publish_lock.sql:ro
+      - ../../tools/selfhosted/base_schema.sql:/app/tools/selfhosted/base_schema.sql:ro
+      - ../../tools/selfhosted/license_importer_role.sql:/app/tools/selfhosted/license_importer_role.sql:ro
+      - ../../tools/selfhosted/license_importer_smoke.psql:/app/tools/selfhosted/license_importer_smoke.psql:ro
+      - ../../tools/license_v2_migration.sql:/app/tools/license_v2_migration.sql:ro
+      - ../../tools/license_note_migration.sql:/app/tools/license_note_migration.sql:ro
+      - ../../tools/admin_sold_migration.sql:/app/tools/admin_sold_migration.sql:ro
+      - ../../tools/hotupdate_migration.sql:/app/tools/hotupdate_migration.sql:ro
+      - ../../tools/announcement_migration.sql:/app/tools/announcement_migration.sql:ro
+      - ../../tools/iptv_migration.sql:/app/tools/iptv_migration.sql:ro
+      - ../../tools/vod_sources_migration.sql:/app/tools/vod_sources_migration.sql:ro
+      - ../../tools/pg_cu_optimization_migration.sql:/app/tools/pg_cu_optimization_migration.sql:ro
+      - ${LICENSE_IMPORT_PASSWORD_HOST_PATH:-/srv/mytv/secrets/license-importer-db-password}:/run/secrets/license-importer-db-password:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 96m
+    logging:
+      driver: json-file
+      options:
+        max-size: 1m
+        max-file: "2"
+    networks:
+      - backend
+
   auth:
     image: python:3.12-alpine
     restart: unless-stopped
@@ -115,6 +156,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema-migrations:
+        condition: service_completed_successfully
     expose:
       - "3000"
     mem_limit: 192m
