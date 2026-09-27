@@ -5,11 +5,15 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import re
+import struct
 import sys
 import tempfile
+import zlib
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +59,75 @@ REQUIRED_NETWORK_PROFILE_IDS = {
 }
 REQUIRED_PLAYBACK_PRODUCTS = {"android_tv", "android_mobile", "web"}
 REQUIRED_SAMPLE_DURATIONS = {5, 30}
+REQUIRED_ACCEPTANCE_ROW_IDS = {
+    *(f"tv-{number:02d}" for number in range(1, 18)),
+    "tv-remote-focus", "tv-dlna-na", "tv-gesture-na",
+    *(f"mobile-{number:02d}" for number in range(1, 18)),
+    "mobile-dlna", "mobile-gesture", "mobile-tv-remote-na",
+    *(f"selfhosted-{number:02d}" for number in range(1, 7)),
+    "web-all-workflows", "admin-all-workflows", "mobile-rotation",
+}
+REQUIRED_BROWSER_ROW_IDS = {
+    *(f"web-{number:02d}-{view}" for number in range(1, 13) for view in ("desktop", "mobile")),
+    *(f"admin-{number:02d}-{view}" for number in (*range(1, 7), *range(8, 16)) for view in ("desktop", "mobile")),
+    "admin-import-desktop-53", "admin-import-mobile-54",
+    "admin-import-desktop-55", "admin-import-mobile-56",
+    "admin-import-desktop-57", "admin-import-mobile-58",
+}
+REQUIRED_LONGRUN_ROW_IDS = {
+    "android_tv-representative-120m",
+    "android_mobile-representative-120m",
+    "web-representative-120m",
+}
+REQUIRED_MEDIA_SAMPLE_IDS = {
+    *(f"sample-movie-{number:02d}" for number in range(1, 11)),
+    *(f"sample-series-{number:02d}" for number in range(1, 11)),
+}
+REQUIRED_MEDIA_PLAYBACK_ROW_IDS = {
+    f"{sample_id}-{product}-{duration}m"
+    for sample_id in REQUIRED_MEDIA_SAMPLE_IDS
+    for product in REQUIRED_PLAYBACK_PRODUCTS
+    for duration in REQUIRED_SAMPLE_DURATIONS
+}
+REQUIRED_PERFORMANCE_METRIC_IDS = {
+    "metadata-api-p95", "business-api-p95", "resolver-fast-path-p95",
+    "resolver-first-source-p50", "resolver-match-rate", "http-5xx",
+    "tv-cached-home", "tv-catalog-first-screen", "tv-detail-basic-info",
+    "tv-first-frame-p50", "tv-first-frame-p95", "tv-30min-interruption-rate",
+    "tv-rebuffer-ratio", "tv-auto-switch-recovery", "tv-severe-jank",
+    "mobile-cached-home", "mobile-catalog-first-screen", "mobile-detail-basic-info",
+    "mobile-first-frame-p50", "mobile-first-frame-p95", "mobile-30min-interruption-rate",
+    "mobile-rebuffer-ratio", "mobile-auto-switch-recovery", "mobile-severe-jank",
+    "direct-relay-distribution",
+}
+REQUIRED_SERVICE_ROW_IDS = {"importer-least-privilege", "importer-signature-validation"}
+REQUIRED_ROW_IDS = {
+    "acceptance_runs": REQUIRED_ACCEPTANCE_ROW_IDS - {"tv-dlna-na", "tv-gesture-na", "mobile-tv-remote-na"},
+    "browser_runs": REQUIRED_BROWSER_ROW_IDS,
+    "longrun_runs": REQUIRED_LONGRUN_ROW_IDS,
+    "media_samples": REQUIRED_MEDIA_SAMPLE_IDS,
+    "network_profiles": REQUIRED_NETWORK_PROFILE_IDS,
+    "performance_metrics": REQUIRED_PERFORMANCE_METRIC_IDS,
+    "service_runs": REQUIRED_SERVICE_ROW_IDS,
+}
+REQUIRED_DEPLOYMENT_ROW_IDS = {
+    "isolated_staging", "vps_egress", "database_backup_restore",
+    "cloudbase_runtime_requests", "object_storage_contract",
+}
+REQUIRED_PRODUCT_DOMAINS = {
+    "acceptance_runs": {"android_tv", "android_mobile", "web", "admin", "selfhosted"},
+    "browser_runs": {"web", "admin"},
+    "longrun_runs": {"android_tv", "android_mobile", "web"},
+}
+CANONICAL_ROW_IDS = {
+    "acceptance_runs": REQUIRED_ACCEPTANCE_ROW_IDS,
+    "browser_runs": REQUIRED_BROWSER_ROW_IDS,
+    "longrun_runs": REQUIRED_LONGRUN_ROW_IDS,
+    "media_samples": REQUIRED_MEDIA_SAMPLE_IDS,
+    "network_profiles": REQUIRED_NETWORK_PROFILE_IDS,
+    "performance_metrics": REQUIRED_PERFORMANCE_METRIC_IDS,
+    "service_runs": REQUIRED_SERVICE_ROW_IDS,
+}
 REQUIRED_BROWSER_WORKFLOWS = {
     "web": {
         "首页",
@@ -113,6 +186,15 @@ RUN_RESULT_FIELDS = {
     "readback_status",
     "readback_evidence_ref",
 }
+_SELF_TEST_ACTIVE: ContextVar[bool] = ContextVar("mytv_acceptance_self_test_active", default=False)
+_VIEWPORT_DIMENSIONS_RE = re.compile(r"(?<!\d)(\d{2,5})\s*[x×]\s*(\d{2,5})(?!\d)", re.IGNORECASE)
+_SYNTHETIC_PREFIX_RE = re.compile(r"(?i)^\s*(?:fixture|synthetic|testdata)(?:-|:|/|$)")
+_SYNTHETIC_EVIDENCE_FIELDS = {
+    "evidence_ref", "readback_evidence_ref", "source_ref", "content_ref", "product_version",
+    "build_version", "device_or_browser", "browser_version", "network_profile", "path", "row_id",
+    "auto_switch_result", "content_category", "registration_evidence_ref", "write_readback_evidence",
+}
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 @dataclass(frozen=True)
@@ -133,7 +215,366 @@ def load_ledger(path: Path | str = DEFAULT_LEDGER) -> dict[str, Any]:
         raise ValueError(f"invalid JSON in acceptance ledger: {ledger_path}: {exc}") from exc
     if not isinstance(ledger, dict):
         raise ValueError("acceptance ledger root must be a JSON object")
+    if _looks_like_acceptance_ledger(ledger) and _contains_synthetic_data(ledger):
+        raise ValueError("fixture or synthetic acceptance data is not importable outside --self-test")
     return ledger
+
+
+def _looks_like_acceptance_ledger(value: dict[str, Any]) -> bool:
+    return any(key in value for key in ("acceptance_runs", "browser_runs", "longrun_runs", "media_samples"))
+
+
+def _contains_synthetic_data(value: Any, key: str = "") -> bool:
+    if isinstance(value, dict):
+        if value.get("self_test_mode") is True or value.get("synthetic_data") is True:
+            return True
+        for child_key, child in value.items():
+            normalized_key = str(child_key).lower()
+            if normalized_key in {"fixture", "synthetic", "testdata", "fixture_only"} and child not in (False, None, ""):
+                return True
+            if normalized_key in _SYNTHETIC_EVIDENCE_FIELDS and isinstance(child, str) and _SYNTHETIC_PREFIX_RE.match(child):
+                return True
+            if _contains_synthetic_data(child, normalized_key):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_contains_synthetic_data(child, key) for child in value)
+    return isinstance(value, str) and key in _SYNTHETIC_EVIDENCE_FIELDS and bool(_SYNTHETIC_PREFIX_RE.match(value))
+
+
+def _check_canonical_rows(ledger: dict[str, Any], blockers: list[str]) -> None:
+    all_ids: dict[str, str] = {}
+    for collection, expected_ids in CANONICAL_ROW_IDS.items():
+        rows = ledger.get(collection)
+        if not isinstance(rows, list):
+            blockers.append(f"{collection}: canonical required row collection is missing")
+            continue
+        observed: set[str] = set()
+        duplicates: set[str] = set()
+        required_flags: dict[str, bool] = {}
+        domains: set[str] = set()
+        browser_workflows: set[tuple[str, str, str]] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_id = row.get("id")
+            if isinstance(row_id, str) and row_id:
+                if row_id in observed:
+                    duplicates.add(row_id)
+                if row_id in all_ids and all_ids[row_id] != collection:
+                    blockers.append(f"{collection}: duplicate row ID {row_id} also appears in {all_ids[row_id]}")
+                else:
+                    all_ids[row_id] = collection
+                observed.add(row_id)
+                required_flags[row_id] = row.get("required") is True
+            product = row.get("product")
+            if isinstance(product, str):
+                domains.add(product)
+            if collection == "browser_runs" and all(isinstance(row.get(field), str) for field in ("product", "feature", "viewport")):
+                key = (row["product"], row["feature"], row["viewport"])
+                if key in browser_workflows:
+                    blockers.append(f"browser_runs: duplicate workflow domain {key!r}")
+                browser_workflows.add(key)
+        for duplicate in sorted(duplicates):
+            blockers.append(f"{collection}: duplicate row ID {duplicate}")
+        for missing in sorted(expected_ids - observed):
+            blockers.append(f"{collection}: canonical required row ID {missing} is missing")
+        for improperly_optional in sorted(REQUIRED_ROW_IDS.get(collection, set()) & observed):
+            if not required_flags.get(improperly_optional, False):
+                blockers.append(f"{collection}: canonical required row {improperly_optional} cannot be marked optional")
+        for domain in sorted(REQUIRED_PRODUCT_DOMAINS.get(collection, set()) - domains):
+            blockers.append(f"{collection}: required product domain {domain} is missing")
+
+    media_samples = ledger.get("media_samples")
+    if isinstance(media_samples, list):
+        observed_playback_ids: set[str] = set()
+        duplicate_playback_ids: set[str] = set()
+        duplicate_playback_domains: set[tuple[str, str, str]] = set()
+        for sample in media_samples:
+            if not isinstance(sample, dict) or not isinstance(sample.get("runs"), list):
+                continue
+            sample_id = sample.get("id")
+            seen_domains: set[tuple[str, Any]] = set()
+            for run in sample["runs"]:
+                if not isinstance(run, dict):
+                    continue
+                row_id = run.get("id")
+                if isinstance(row_id, str) and row_id:
+                    if row_id in observed_playback_ids:
+                        duplicate_playback_ids.add(row_id)
+                    if row_id in all_ids:
+                        blockers.append(f"media_samples: duplicate row ID {row_id} also appears in {all_ids[row_id]}")
+                    else:
+                        all_ids[row_id] = "media_samples playback"
+                    observed_playback_ids.add(row_id)
+                    if row.get("required") is not True:
+                        blockers.append(f"media_samples: canonical required playback row {row_id} cannot be marked optional")
+                domain = (str(run.get("product")), str(run.get("duration_minutes")))
+                if domain in seen_domains:
+                    duplicate_playback_domains.add((str(sample_id), domain[0], domain[1]))
+                seen_domains.add(domain)
+        for duplicate in sorted(duplicate_playback_ids):
+            blockers.append(f"media_samples: duplicate playback row ID {duplicate}")
+        for duplicate_sample, duplicate_product, duplicate_duration in sorted(duplicate_playback_domains):
+            blockers.append(f"media {duplicate_sample}: duplicate playback domain {duplicate_product} {duplicate_duration}m")
+        for missing in sorted(REQUIRED_MEDIA_PLAYBACK_ROW_IDS - observed_playback_ids):
+            blockers.append(f"media_samples: canonical required playback row ID {missing} is missing")
+
+    deployment = ledger.get("deployment_evidence")
+    if not isinstance(deployment, dict):
+        blockers.append("deployment_evidence: canonical required deployment rows are missing")
+    else:
+        for missing in sorted(REQUIRED_DEPLOYMENT_ROW_IDS - set(deployment)):
+            blockers.append(f"deployment_evidence: canonical required row {missing} is missing")
+        for required_id in REQUIRED_DEPLOYMENT_ROW_IDS & set(deployment):
+            if not isinstance(deployment[required_id], dict) or deployment[required_id].get("required") is not True:
+                blockers.append(f"deployment_evidence: canonical required row {required_id} cannot be marked optional")
+        for extra in sorted(set(deployment) - REQUIRED_DEPLOYMENT_ROW_IDS):
+            if isinstance(deployment[extra], dict) and deployment[extra].get("required"):
+                blockers.append(f"deployment_evidence: unknown required deployment row {extra}")
+
+
+def _local_artifact_path(raw_path: Any, artifact_root: Path) -> Path | None:
+    if not isinstance(raw_path, str) or not raw_path.strip() or not _is_safe_reference(raw_path):
+        return None
+    root = artifact_root.resolve()
+    path = _clean_path(raw_path, artifact_root)
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return None
+    return path
+
+
+def _viewport_dimensions(viewport: Any) -> set[tuple[int, int]]:
+    if not isinstance(viewport, str):
+        return set()
+    return {
+        (int(match.group(1)), int(match.group(2)))
+        for match in _VIEWPORT_DIMENSIONS_RE.finditer(viewport)
+    }
+
+
+def _png_dimensions(image_path: Path) -> tuple[int, int] | None:
+    try:
+        data = image_path.read_bytes()
+    except OSError:
+        return None
+    if not data.startswith(_PNG_SIGNATURE):
+        return None
+    offset = len(_PNG_SIGNATURE)
+    width = height = bit_depth = color_type = None
+    idat = bytearray()
+    saw_iend = False
+    saw_idat = False
+    while offset + 12 <= len(data):
+        length = struct.unpack_from(">I", data, offset)[0]
+        offset += 4
+        kind = data[offset:offset + 4]
+        offset += 4
+        if length > len(data) - offset - 4:
+            return None
+        payload = data[offset:offset + length]
+        offset += length
+        recorded_crc = struct.unpack_from(">I", data, offset)[0]
+        offset += 4
+        if zlib.crc32(kind + payload) & 0xFFFFFFFF != recorded_crc:
+            return None
+        if kind == b"IHDR":
+            if width is not None or length != 13:
+                return None
+            width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(">IIBBBBB", payload)
+            if compression != 0 or filtering != 0 or interlace != 0:
+                return None
+        elif kind == b"IDAT":
+            if width is None or saw_iend:
+                return None
+            saw_idat = True
+            idat.extend(payload)
+        elif kind == b"IEND":
+            if length != 0 or not saw_idat:
+                return None
+            saw_iend = True
+            break
+    if not saw_iend or offset != len(data) or width is None or height is None:
+        return None
+    if width <= 0 or height <= 0 or width * height > 60_000_000 or bit_depth != 8:
+        return None
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type)
+    if channels is None:
+        return None
+    expected_length = (width * channels + 1) * height
+    try:
+        decoder = zlib.decompressobj()
+        decoded = decoder.decompress(bytes(idat), expected_length + 1)
+    except zlib.error:
+        return None
+    if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail or len(decoded) != expected_length:
+        return None
+    stride = width * channels + 1
+    if any(decoded[row * stride] > 4 for row in range(height)):
+        return None
+    return width, height
+
+
+def _check_bound_evidence(
+    row: dict[str, Any],
+    label: str,
+    blockers: list[str],
+    artifact_root: Path,
+    *,
+    require_screenshots: bool = False,
+    require_measurements: bool = False,
+) -> dict[str, Any] | None:
+    if _SELF_TEST_ACTIVE.get() and _contains_synthetic_data(row):
+        return None
+    evidence_path = _local_artifact_path(row.get("evidence_ref"), artifact_root)
+    if evidence_path is None or not evidence_path.is_file():
+        blockers.append(f"{label}: evidence file does not exist under the artifact root")
+        return None
+    try:
+        manifest = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        blockers.append(f"{label}: evidence file must be valid UTF-8 JSON")
+        return None
+    if not isinstance(manifest, dict):
+        blockers.append(f"{label}: evidence manifest must be a JSON object")
+        return None
+    if not _SELF_TEST_ACTIVE.get() and _contains_synthetic_data(manifest):
+        blockers.append(f"{label}: fixture or synthetic evidence manifest is prohibited")
+    for field in ("id", "product_version", "build_version"):
+        expected = row.get(field)
+        manifest_field = "row_id" if field == "id" else field
+        if not expected or manifest.get(manifest_field) != expected:
+            blockers.append(f"{label}: evidence does not bind to row/build version ({manifest_field})")
+    if row.get("viewport") and manifest.get("viewport") != row.get("viewport"):
+        blockers.append(f"{label}: evidence viewport does not bind to the row")
+
+    if require_screenshots:
+        expected_paths = row.get("screenshot_paths") if isinstance(row.get("screenshot_paths"), list) else []
+        manifest_shots = manifest.get("screenshots")
+        if not isinstance(manifest_shots, list):
+            blockers.append(f"{label}: evidence manifest is missing screenshot bindings")
+            return manifest
+        expected_by_path: dict[str, tuple[str, tuple[int, int]]] = {}
+        root_resolved = artifact_root.resolve()
+        for screenshot in expected_paths:
+            screenshot_path = _local_artifact_path(screenshot, artifact_root)
+            if screenshot_path is None or not screenshot_path.is_file():
+                continue
+            dimensions = _png_dimensions(screenshot_path)
+            if dimensions:
+                expected_by_path[screenshot_path.relative_to(root_resolved).as_posix()] = (
+                    hashlib.sha256(screenshot_path.read_bytes()).hexdigest(), dimensions
+                )
+        manifest_by_path: dict[str, dict[str, Any]] = {}
+        for screenshot in manifest_shots:
+            if not isinstance(screenshot, dict):
+                continue
+            path = _local_artifact_path(screenshot.get("path"), artifact_root)
+            if path is None:
+                continue
+            manifest_by_path[path.relative_to(root_resolved).as_posix()] = screenshot
+        if set(manifest_by_path) != set(expected_by_path):
+            blockers.append(f"{label}: evidence screenshots do not bind to the row's screenshot paths")
+        for screenshot_path, (digest, dimensions) in expected_by_path.items():
+            item = manifest_by_path.get(screenshot_path, {})
+            if item.get("sha256") != digest or item.get("width") != dimensions[0] or item.get("height") != dimensions[1]:
+                blockers.append(f"{label}: evidence screenshot hash/dimensions do not bind to the captured image")
+
+    if require_measurements:
+        measurements = manifest.get("measurements")
+        if not isinstance(measurements, dict):
+            blockers.append(f"{label}: evidence manifest is missing measured playback fields")
+        else:
+            for field in (
+                "attempts", "first_frame_ms", "rebuffer_count", "auto_switch_result", "survival_minutes",
+                "measurement_started_at", "measurement_ended_at",
+            ):
+                if measurements.get(field) != row.get(field):
+                    blockers.append(f"{label}: evidence measurement {field} does not match the row")
+    return manifest
+
+
+def _check_referenced_synthetic_evidence(ledger: dict[str, Any], artifact_root: Path, blockers: list[str]) -> None:
+    if _SELF_TEST_ACTIVE.get():
+        return
+    row_collections = (
+        "acceptance_runs", "browser_runs", "longrun_runs", "network_profiles",
+        "performance_metrics", "service_runs",
+    )
+    rows: list[dict[str, Any]] = []
+    for collection in row_collections:
+        section = ledger.get(collection)
+        if isinstance(section, list):
+            rows.extend(row for row in section if isinstance(row, dict))
+    samples = ledger.get("media_samples")
+    if isinstance(samples, list):
+        for sample in samples:
+            if not isinstance(sample, dict):
+                continue
+            rows.append(sample)
+            nested = sample.get("runs")
+            if isinstance(nested, list):
+                rows.extend(row for row in nested if isinstance(row, dict))
+    deployment = ledger.get("deployment_evidence")
+    if isinstance(deployment, dict):
+        rows.extend(row for row in deployment.values() if isinstance(row, dict))
+    staging_identity = ledger.get("staging_environment_registry")
+    if isinstance(staging_identity, dict):
+        rows.append(staging_identity)
+
+    checked: set[Path] = set()
+    for row in rows:
+        label = row.get("id") or row.get("feature") or "acceptance row"
+        for field in ("evidence_ref", "readback_evidence_ref", "registration_evidence_ref", "write_readback_evidence"):
+            path = _local_artifact_path(row.get(field), artifact_root)
+            if path is None or not path.is_file() or path.suffix.lower() != ".json" or path in checked:
+                continue
+            checked.add(path)
+            try:
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if _contains_synthetic_data(manifest):
+                blockers.append(f"{label}: referenced {field} contains fixture or synthetic evidence")
+
+
+def _is_production_reference(value: Any) -> bool:
+    return isinstance(value, str) and bool(re.search(r"(?i)(?:^|[/_.:-])prod(?:uction)?(?:$|[/_.:-])", value.strip()))
+
+
+def _check_staging_identity(ledger: dict[str, Any], blockers: list[str], artifact_root: Path) -> dict[str, Any] | None:
+    identity = ledger.get("staging_environment_registry")
+    if not isinstance(identity, dict):
+        blockers.append("staging identity must be registered as isolated staging; production is prohibited")
+        return None
+    reference = identity.get("environment_ref")
+    if identity.get("registered") is not True or identity.get("status") != "PASS":
+        blockers.append("staging identity must be registered and verified before any write acceptance")
+    if identity.get("environment_type") != "isolated_staging":
+        blockers.append("staging identity must have environment_type=isolated_staging; production is prohibited")
+    if not identity.get("id") or not _is_safe_reference(reference) or _is_production_reference(reference):
+        blockers.append("staging identity must have a safe non-production environment reference")
+    if identity.get("registered") is True and identity.get("status") == "PASS" and not _SELF_TEST_ACTIVE.get():
+        registration_path = _local_artifact_path(identity.get("registration_evidence_ref"), artifact_root)
+        if registration_path is None or not registration_path.is_file():
+            blockers.append("staging identity registration evidence file is missing")
+        else:
+            try:
+                registration = json.loads(registration_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                registration = None
+            if isinstance(registration, dict) and _contains_synthetic_data(registration):
+                blockers.append("staging identity registration evidence contains fixture or synthetic data")
+            if not isinstance(registration, dict) or any(registration.get(field) != expected for field, expected in (
+                ("identity_id", identity.get("id")),
+                ("environment_type", "isolated_staging"),
+                ("environment_ref", reference),
+                ("registered", True),
+            )):
+                blockers.append("staging identity registration evidence does not bind to the registered isolated environment")
+    return identity
 
 
 def redact_sensitive(value: Any, key: str = "") -> Any:
@@ -244,6 +685,8 @@ def _check_run_row(
     artifact_root: Path,
     *,
     browser_run: bool = False,
+    staging_identity: dict[str, Any] | None = None,
+    require_measurements: bool = False,
 ) -> None:
     status = _row_status(row, label, blockers)
     if not row.get("required") or status == "N/A":
@@ -273,15 +716,15 @@ def _check_run_row(
     if row.get("product") == "admin":
         if "隔离 staging" not in str(row.get("data_scope") or ""):
             blockers.append(f"{label}: admin workflow is not constrained to isolated staging")
-        if not str(row.get("staging_environment_ref") or "").strip():
-            blockers.append(f"{label}: isolated staging environment reference is missing")
+        _check_row_staging_identity(row, staging_identity, label, blockers)
     if row.get("write_readback_required"):
         if row.get("readback_status") != "PASS":
             blockers.append(f"{label}: staging write readback status is {row.get('readback_status') or 'missing'}")
-        if not str(row.get("staging_environment_ref") or "").strip():
-            blockers.append(f"{label}: isolated staging environment reference is missing")
-        if not str(row.get("readback_evidence_ref") or "").strip():
-            blockers.append(f"{label}: staging readback evidence is missing")
+        _check_row_staging_identity(row, staging_identity, label, blockers)
+        if row.get("readback_status") == "PASS":
+            readback_row = dict(row)
+            readback_row["evidence_ref"] = row.get("readback_evidence_ref")
+            _check_bound_evidence(readback_row, f"{label} readback", blockers, artifact_root)
 
     if not _is_safe_reference(row.get("evidence_ref")):
         blockers.append(f"{label}: missing evidence_ref")
@@ -293,16 +736,100 @@ def _check_run_row(
         if not isinstance(screenshot_paths, list) or not screenshot_paths:
             blockers.append(f"{label}: required screenshot is missing")
         else:
+            expected_dimensions = _viewport_dimensions(row.get("viewport"))
+            if not expected_dimensions:
+                blockers.append(f"{label}: viewport must declare screenshot pixel dimensions")
+            if expected_dimensions and len(screenshot_paths) != len(expected_dimensions):
+                blockers.append(f"{label}: requires one screenshot for each target viewport {sorted(expected_dimensions)}")
+            observed_dimensions: set[tuple[int, int]] = set()
             for screenshot in screenshot_paths:
                 if not isinstance(screenshot, str) or not screenshot.strip():
                     blockers.append(f"{label}: screenshot path is empty")
                     continue
-                screenshot_path = _clean_path(screenshot, artifact_root)
-                if not screenshot_path.is_file() or screenshot_path.stat().st_size <= 0:
-                    blockers.append(f"{label}: screenshot file does not exist or is empty")
-                    break
+                screenshot_path = _local_artifact_path(screenshot, artifact_root)
+                if screenshot_path is None or not screenshot_path.is_file() or screenshot_path.stat().st_size <= 0:
+                    blockers.append(f"{label}: screenshot file does not exist under the artifact root or is empty")
+                    continue
+                dimensions = _png_dimensions(screenshot_path)
+                if dimensions is None:
+                    blockers.append(f"{label}: screenshot is not a valid PNG image")
+                    continue
+                observed_dimensions.add(dimensions)
+                if expected_dimensions and dimensions not in expected_dimensions:
+                    target = " or ".join(f"{width}x{height}" for width, height in sorted(expected_dimensions))
+                    blockers.append(f"{label}: screenshot dimensions {dimensions[0]}x{dimensions[1]} do not match viewport {target}")
+            if expected_dimensions and observed_dimensions != expected_dimensions:
+                blockers.append(f"{label}: screenshots do not cover every target viewport {sorted(expected_dimensions)}")
             if row.get("screenshot_reviewed") is not True:
                 blockers.append(f"{label}: screenshot content/viewport review is missing")
+        if status == "PASS":
+            _check_bound_evidence(
+                row,
+                label,
+                blockers,
+                artifact_root,
+                require_screenshots=True,
+                require_measurements=require_measurements,
+            )
+    elif status == "PASS":
+        _check_bound_evidence(row, label, blockers, artifact_root, require_measurements=require_measurements)
+
+
+def _check_row_staging_identity(
+    row: dict[str, Any],
+    identity: dict[str, Any] | None,
+    label: str,
+    blockers: list[str],
+) -> None:
+    reference = row.get("staging_environment_ref")
+    if not isinstance(identity, dict) or identity.get("registered") is not True or identity.get("status") != "PASS":
+        blockers.append(f"{label}: registered isolated staging identity is required; production is prohibited")
+        return
+    if identity.get("environment_type") != "isolated_staging":
+        blockers.append(f"{label}: staging identity is not isolated staging; production is prohibited")
+    if not _is_safe_reference(reference) or reference != identity.get("environment_ref") or _is_production_reference(reference):
+        blockers.append(f"{label}: staging environment reference does not match the registered isolated staging identity")
+
+
+def _measurement_text_is_real(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    normalized = value.strip().lower()
+    return not any(token in normalized for token in ("fixture", "synthetic", "pending", "not-verified", "unknown", "n/a"))
+
+
+def _parse_measurement_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _check_two_hour_measurements(row: dict[str, Any], label: str, blockers: list[str]) -> None:
+    survival = row.get("survival_minutes")
+    if not _is_number(survival) or survival < 120:
+        blockers.append(f"{label}: survival_minutes must be measured at 120 minutes or more")
+    first_frame = row.get("first_frame_ms")
+    if not _is_number(first_frame) or first_frame <= 0:
+        blockers.append(f"{label}: first_frame_ms must be a positive measured value")
+    rebuffer_count = row.get("rebuffer_count")
+    if not _is_number(rebuffer_count) or rebuffer_count < 0:
+        blockers.append(f"{label}: rebuffer_count must be a recorded non-negative value")
+    if not _measurement_text_is_real(row.get("auto_switch_result")):
+        blockers.append(f"{label}: auto_switch_result must contain a real measured outcome")
+    started = _parse_measurement_time(row.get("measurement_started_at"))
+    ended = _parse_measurement_time(row.get("measurement_ended_at"))
+    if started is None or ended is None or ended < started:
+        blockers.append(f"{label}: measurement timestamps are missing or invalid for the 120-minute run")
+        return
+    elapsed_minutes = (ended - started).total_seconds() / 60
+    if elapsed_minutes < 120:
+        blockers.append(f"{label}: measured playback window is shorter than 120 minutes")
+    if _is_number(survival) and survival > elapsed_minutes + 1:
+        blockers.append(f"{label}: survival_minutes exceeds the measured playback window")
 
 
 def _eligible_sample(sample: dict[str, Any]) -> bool:
@@ -334,9 +861,9 @@ def _eligible_sample(sample: dict[str, Any]) -> bool:
                 return False
             if not _is_number(run.get("attempts")) or run["attempts"] < 1:
                 return False
-            if not _is_number(run.get("first_frame_ms")) or not _is_number(run.get("rebuffer_count")):
+            if not _is_number(run.get("first_frame_ms")) or run["first_frame_ms"] <= 0 or not _is_number(run.get("rebuffer_count")) or run["rebuffer_count"] < 0:
                 return False
-            if not str(run.get("auto_switch_result") or "").strip():
+            if not _measurement_text_is_real(run.get("auto_switch_result")):
                 return False
             if not _is_number(run.get("survival_minutes")) or run["survival_minutes"] < duration:
                 return False
@@ -483,7 +1010,62 @@ def _check_metrics(ledger: dict[str, Any], blockers: list[str]) -> None:
                 blockers.append(f"{label}: direct/relay counts do not equal sample_count")
 
 
-def _check_deployment(ledger: dict[str, Any], blockers: list[str]) -> None:
+def _check_services(
+    ledger: dict[str, Any],
+    blockers: list[str],
+    artifact_root: Path,
+    staging_identity: dict[str, Any] | None,
+) -> None:
+    rows = ledger.get("service_runs")
+    if not isinstance(rows, list):
+        blockers.append("service_runs: required importer security service rows are missing")
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            blockers.append("service_runs: malformed service row")
+            continue
+        label = f"service {row.get('id', '<missing id>')}"
+        status = _row_status(row, label, blockers)
+        if not row.get("required") or status != "PASS":
+            continue
+        for field in ("product_version", "build_version"):
+            if not str(row.get(field) or "").strip():
+                blockers.append(f"{label}: missing {field}")
+        if not _is_number(row.get("attempts")) or row["attempts"] < 1:
+            blockers.append(f"{label}: attempts must be at least 1")
+        _check_row_staging_identity(row, staging_identity, label, blockers)
+        manifest = _check_bound_evidence(row, label, blockers, artifact_root)
+        checks = row.get("checks")
+        if not isinstance(checks, dict):
+            blockers.append(f"{label}: required service security checks are missing")
+            continue
+        required_checks = {
+            "importer-least-privilege": {
+                "required_insert_allowed", "privileged_read_denied", "unauthorized_write_denied", "credential_scope_reviewed",
+            },
+            "importer-signature-validation": {
+                "valid_signature_accepted", "tampered_signature_rejected", "payload_tamper_rejected", "rejected_batch_mutations",
+            },
+        }.get(row.get("id"), set())
+        for check in sorted(required_checks):
+            value = checks.get(check)
+            if check == "rejected_batch_mutations":
+                if not _is_number(value) or value != 0:
+                    blockers.append(f"{label}: {check} must be a measured zero")
+            elif value is not True:
+                blockers.append(f"{label}: {check} must be verified true")
+        if manifest is not None:
+            expected_environment = row.get("staging_environment_ref")
+            if manifest.get("environment_ref") != expected_environment:
+                blockers.append(f"{label}: evidence does not bind to the staging environment")
+
+
+def _check_deployment(
+    ledger: dict[str, Any],
+    blockers: list[str],
+    staging_identity: dict[str, Any] | None = None,
+    artifact_root: Path | None = None,
+) -> None:
     evidence = ledger.get("deployment_evidence")
     if not isinstance(evidence, dict):
         blockers.append("deployment: required deployment evidence is missing")
@@ -503,6 +1085,32 @@ def _check_deployment(ledger: dict[str, Any], blockers: list[str]) -> None:
                     blockers.append(f"{label}: environment is not confirmed as isolated staging")
                 if not item.get("environment_ref") or not item.get("write_readback_evidence"):
                     blockers.append(f"{label}: staging write/readback evidence is missing")
+                if (
+                    not isinstance(staging_identity, dict)
+                    or item.get("environment_id") != staging_identity.get("id")
+                    or item.get("environment_ref") != staging_identity.get("environment_ref")
+                    or item.get("environment_type") != "isolated_staging"
+                    or _is_production_reference(item.get("environment_ref"))
+                ):
+                    blockers.append(f"{label}: deployment identity does not match registered isolated staging")
+                if artifact_root is not None and not _SELF_TEST_ACTIVE.get():
+                    readback_path = _local_artifact_path(item.get("write_readback_evidence"), artifact_root)
+                    if readback_path is None or not readback_path.is_file():
+                        blockers.append(f"{label}: staging write/readback evidence file is missing")
+                    else:
+                        try:
+                            readback = json.loads(readback_path.read_text(encoding="utf-8"))
+                        except (OSError, UnicodeError, json.JSONDecodeError):
+                            readback = None
+                        if isinstance(readback, dict) and _contains_synthetic_data(readback):
+                            blockers.append(f"{label}: fixture or synthetic staging readback evidence is prohibited")
+                        if not isinstance(readback, dict) or any(readback.get(field) != expected for field, expected in (
+                            ("environment_id", item.get("environment_id")),
+                            ("environment_ref", item.get("environment_ref")),
+                            ("environment_type", "isolated_staging"),
+                            ("readback_status", "PASS"),
+                        )):
+                            blockers.append(f"{label}: readback evidence does not bind to isolated staging")
             elif evidence_id == "vps_egress":
                 if not item.get("enabled_source_inventory_ref") or not item.get("sources_tested"):
                     blockers.append(f"{label}: enabled-source inventory or tested-source list is missing")
@@ -563,6 +1171,11 @@ def evaluate_gate(ledger: dict[str, Any], artifact_root: Path | str | None = Non
     """Return a release decision; every required row and evidence gate must pass."""
     blockers: list[str] = []
     root = Path(artifact_root) if artifact_root is not None else ROOT
+    if _looks_like_acceptance_ledger(ledger) and _contains_synthetic_data(ledger) and not _SELF_TEST_ACTIVE.get():
+        blockers.append("fixture or synthetic evidence is restricted to non-persistable --self-test mode")
+    _check_referenced_synthetic_evidence(ledger, root, blockers)
+    _check_canonical_rows(ledger, blockers)
+    staging_identity = _check_staging_identity(ledger, blockers, root)
     for collection in ("acceptance_runs", "browser_runs"):
         rows = ledger.get(collection)
         if not isinstance(rows, list) or not rows:
@@ -573,7 +1186,14 @@ def evaluate_gate(ledger: dict[str, Any], artifact_root: Path | str | None = Non
                 blockers.append(f"{collection}: malformed acceptance row")
                 continue
             label = f"{row.get('product', collection)} {row.get('feature', row.get('id', '<missing id>'))}"
-            _check_run_row(row, label, blockers, root, browser_run=collection == "browser_runs")
+            _check_run_row(
+                row,
+                label,
+                blockers,
+                root,
+                browser_run=collection == "browser_runs",
+                staging_identity=staging_identity,
+            )
     longrun_rows = ledger.get("longrun_runs")
     if not isinstance(longrun_rows, list) or not longrun_rows:
         blockers.append("longrun_runs: representative two-hour playback rows are missing")
@@ -600,12 +1220,22 @@ def evaluate_gate(ledger: dict[str, Any], artifact_root: Path | str | None = Non
                     blockers.append(f"{label}: sample_id {sample_id!r} does not reference a completed real-media sample")
                 elif row.get("content_category") != sample.get("kind"):
                     blockers.append(f"{label}: content_category must match sample_id {sample_id!r}")
-            _check_run_row(row, label, blockers, root)
+            _check_run_row(
+                row,
+                label,
+                blockers,
+                root,
+                staging_identity=staging_identity,
+                require_measurements=row.get("duration_minutes") == 120,
+            )
+            if row.get("required") and row.get("status") == "PASS" and row.get("duration_minutes") == 120:
+                _check_two_hour_measurements(row, label, blockers)
     _check_browser_coverage(ledger, blockers)
     _check_media(ledger, blockers, root)
     _check_network(ledger, blockers)
     _check_metrics(ledger, blockers)
-    _check_deployment(ledger, blockers)
+    _check_services(ledger, blockers, root, staging_identity)
+    _check_deployment(ledger, blockers, staging_identity, root)
 
     # A missing or malformed section is itself a blocker, not an implicit pass.
     if not isinstance(ledger.get("media_coverage_targets"), dict):
@@ -617,15 +1247,33 @@ def evaluate_gate(ledger: dict[str, Any], artifact_root: Path | str | None = Non
     blockers = list(dict.fromkeys(blockers))
     if not blockers:
         return GateResult(allowed=True, blockers=[], status="PASS")
-    has_failure = any(
-        isinstance(row, dict) and row.get("status") == "FAIL"
-        for section in ("acceptance_runs", "browser_runs", "longrun_runs", "media_samples", "network_profiles", "performance_metrics")
-        for row in ledger.get(section, [])
-    )
+    has_failure = _has_current_failure(ledger)
     cloudbase = ledger.get("deployment_evidence", {}).get("cloudbase_runtime_requests", {})
     if isinstance(cloudbase, dict) and isinstance(cloudbase.get("observed_requests"), (int, float)) and cloudbase["observed_requests"] > 0:
         has_failure = True
     return GateResult(allowed=False, blockers=blockers, status="FAIL" if has_failure else "NOT-VERIFIED")
+
+
+def _has_current_failure(ledger: dict[str, Any]) -> bool:
+    for section in (
+        "acceptance_runs", "browser_runs", "longrun_runs", "media_samples",
+        "network_profiles", "performance_metrics", "service_runs",
+    ):
+        rows = ledger.get(section)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict) and row.get("status") == "FAIL":
+                return True
+            if section == "media_samples" and isinstance(row, dict):
+                nested = row.get("runs")
+                if isinstance(nested, list) and any(isinstance(run, dict) and run.get("status") == "FAIL" for run in nested):
+                    return True
+    deployment = ledger.get("deployment_evidence")
+    return isinstance(deployment, dict) and any(
+        isinstance(row, dict) and row.get("status") == "FAIL"
+        for row in deployment.values()
+    )
 
 
 def _md(value: Any) -> str:
@@ -643,13 +1291,24 @@ def _markdown_table(headers: list[str], rows: list[list[Any]]) -> list[str]:
     return lines
 
 
-def render_report(ledger: dict[str, Any], gate: GateResult | None = None) -> str:
+def render_report(
+    ledger: dict[str, Any],
+    gate: GateResult | None = None,
+    artifact_root: Path | str | None = None,
+) -> str:
     """Render a traceable report after redacting the complete input tree."""
+    if _looks_like_acceptance_ledger(ledger) and _contains_synthetic_data(ledger):
+        raise ValueError("fixture or synthetic acceptance data cannot be included in a normal report")
+    root = Path(artifact_root) if artifact_root is not None else ROOT
+    synthetic_reference_blockers: list[str] = []
+    _check_referenced_synthetic_evidence(ledger, root, synthetic_reference_blockers)
+    if synthetic_reference_blockers:
+        raise ValueError("fixture or synthetic evidence cannot be included in a normal report")
     clean = redact_sensitive(ledger)
-    gate = gate or evaluate_gate(clean)
+    gate = gate or evaluate_gate(clean, artifact_root=root)
     total_required = sum(
         1
-        for section in ("acceptance_runs", "browser_runs", "longrun_runs", "media_samples", "network_profiles", "performance_metrics")
+        for section in ("acceptance_runs", "browser_runs", "longrun_runs", "media_samples", "network_profiles", "performance_metrics", "service_runs")
         for row in clean.get(section, [])
         if row.get("required")
     )
@@ -692,7 +1351,7 @@ def render_report(ledger: dict[str, Any], gate: GateResult | None = None) -> str
         "python tools/qa/run_acceptance.py --record-result <result.json> --ledger tools/qa/media_matrix.json",
         "```",
         "",
-        "先按每条 JSON 行中的 `manual_steps` 和 `expected_results` 在 Chrome staging 实测，再保存结构化版本/视口/网络/首帧/缓冲/截图/错误日志结果。PASS 必须有已加载目标页面的非空截图、人工内容检查、当前产品/构建/浏览器版本及证据引用；视口必须匹配 row ID。后台写操作另外需要隔离 staging 环境引用和逐项读回状态/证据。结果导入不会解除其他未验证行的门禁。",
+        "先按每条 JSON 行中的 `manual_steps` 和 `expected_results` 在 Chrome staging 实测，再保存结构化版本/视口/网络/首帧/缓冲/截图/错误日志结果。PASS 必须有有效 PNG、逐视口尺寸、人工内容检查、当前产品/构建/浏览器版本及本地 JSON 证据清单；清单需绑定 row ID、版本、构建、截图路径、SHA-256 与尺寸。后台写操作另外需要已登记的 isolated-staging 身份引用和逐项读回证据；production 引用会被拒绝。结果导入不会解除其他未验证行的门禁。",
         "",
     ])
     browser_rows = [
@@ -749,6 +1408,13 @@ def render_report(ledger: dict[str, Any], gate: GateResult | None = None) -> str
     ]
     lines.extend(_markdown_table(["产品", "指标", "目标", "实测", "样本数", "状态", "证据"], metric_rows))
 
+    lines.extend(["", "## 导入安全服务验证", ""])
+    service_rows = [
+        [row.get("id"), row.get("feature"), row.get("status"), row.get("product_version"), row.get("build_version"), row.get("staging_environment_ref"), row.get("checks"), row.get("evidence_ref")]
+        for row in clean.get("service_runs", [])
+    ]
+    lines.extend(_markdown_table(["服务行", "检查", "状态", "产品版本", "构建版本", "Staging", "实测断言", "证据"], service_rows))
+
     lines.extend(["", "## 自建环境证据", ""])
     deployment_rows = []
     for name, item in clean.get("deployment_evidence", {}).items():
@@ -795,10 +1461,38 @@ def _fixture_value_for_metric(item: dict[str, Any]) -> Any:
     return expected
 
 
+def _write_fixture_png(path: Path, width: int, height: int) -> None:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+
+    scanline = b"\x00" + b"\x24\x48\x6c" * width
+    image = _PNG_SIGNATURE
+    image += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    image += chunk(b"IDAT", zlib.compress(scanline * height))
+    image += chunk(b"IEND", b"")
+    path.write_bytes(image)
+
+
+def _fixture_screenshot_paths(temp_root: Path, row: dict[str, Any]) -> list[str]:
+    dimensions = _viewport_dimensions(row.get("viewport"))
+    paths = []
+    for width, height in sorted(dimensions):
+        path = temp_root / f"fixture-{width}x{height}.png"
+        if not path.exists():
+            _write_fixture_png(path, width, height)
+        paths.append(str(path))
+    return paths
+
+
 def _prepare_fixture_ledger(temp_root: Path) -> dict[str, Any]:
     fixture = copy.deepcopy(load_ledger())
-    screenshot = temp_root / "fixture-screen.png"
-    screenshot.write_bytes(b"fixture-only-not-a-product-screenshot")
+    fixture["self_test_mode"] = True
+    fixture["staging_environment_registry"].update({
+        "registered": True,
+        "status": "PASS",
+        "environment_ref": "fixture-staging",
+        "registration_evidence_ref": "fixture://evidence/staging-registration",
+    })
 
     for section in ("acceptance_runs", "browser_runs"):
         for row in fixture[section]:
@@ -814,14 +1508,14 @@ def _prepare_fixture_ledger(temp_root: Path) -> dict[str, Any]:
                 "attempts": 1,
                 "first_frame_ms": 1000,
                 "rebuffer_count": 0,
-                "auto_switch_result": "fixture-only observation",
+                "auto_switch_result": "0 switches; uninterrupted source",
                 "survival_minutes": 30,
                 "error_log_result": "NONE (fixture only)",
                 "evidence_ref": "fixture://evidence/acceptance",
                 "browser_version": "fixture-browser" if row.get("product") in {"web", "admin"} else None,
             })
             if row.get("screenshot_required"):
-                row["screenshot_paths"] = [str(screenshot)]
+                row["screenshot_paths"] = _fixture_screenshot_paths(temp_root, row)
                 row["screenshot_reviewed"] = True
             if row.get("product") == "admin":
                 row["data_scope"] = "隔离 staging；fixture-only。"
@@ -841,10 +1535,15 @@ def _prepare_fixture_ledger(temp_root: Path) -> dict[str, Any]:
             "network_profile": "fixture-network",
             "content_category": "fixture-content",
             "attempts": 1,
+            "first_frame_ms": 1000,
+            "rebuffer_count": 0,
+            "auto_switch_result": "0 switches; uninterrupted source",
             "survival_minutes": 120,
+            "measurement_started_at": "2026-09-24T10:00:00Z",
+            "measurement_ended_at": "2026-09-24T12:00:00Z",
             "error_log_result": "NONE (fixture only)",
             "evidence_ref": "fixture://evidence/120m",
-            "screenshot_paths": [str(screenshot)],
+            "screenshot_paths": _fixture_screenshot_paths(temp_root, row),
             "screenshot_reviewed": True,
             "sample_id": {
                 "android_tv": "sample-movie-01",
@@ -873,26 +1572,27 @@ def _prepare_fixture_ledger(temp_root: Path) -> dict[str, Any]:
         })
         for run in sample["runs"]:
             product = run["product"]
+            viewport = {
+                "android_tv": "1920x1080 landscape",
+                "android_mobile": "1080x2400 portrait",
+                "web": "1440x900",
+            }[product]
             run.update({
                 "status": "PASS",
                 "product_version": "fixture-version",
                 "build_version": "fixture-build",
                 "device_or_browser": "fixture-device",
                 "browser_version": "fixture-browser" if product == "web" else None,
-                "viewport": {
-                    "android_tv": "1920x1080 landscape",
-                    "android_mobile": "1080x2400 portrait",
-                    "web": "1440x900",
-                }[product],
+                "viewport": viewport,
                 "network_profile": "fixture-network",
                 "content_category": sample["kind"],
                 "attempts": 1,
                 "first_frame_ms": 1000,
                 "rebuffer_count": 0,
-                "auto_switch_result": "not triggered; fixture only",
+                "auto_switch_result": "0 switches; uninterrupted source",
                 "survival_minutes": run["duration_minutes"],
                 "error_log_result": "NONE (fixture only)",
-                "screenshot_paths": [str(screenshot)],
+                "screenshot_paths": _fixture_screenshot_paths(temp_root, {**run, "viewport": viewport}),
                 "screenshot_reviewed": True,
                 "evidence_ref": f"fixture://evidence/{run['duration_minutes']}m",
             })
@@ -921,6 +1621,7 @@ def _prepare_fixture_ledger(temp_root: Path) -> dict[str, Any]:
     deployment["isolated_staging"].update({
         "status": "PASS",
         "environment_type": "isolated_staging",
+        "environment_id": "acceptance-staging",
         "environment_ref": "fixture-staging",
         "write_readback_evidence": "fixture://evidence/staging-readback",
         "evidence_ref": "fixture://evidence/staging",
@@ -947,10 +1648,33 @@ def _prepare_fixture_ledger(temp_root: Path) -> dict[str, Any]:
         "status": "PASS",
         "evidence_ref": "fixture://evidence/object-contract",
     })
+    for row in fixture["service_runs"]:
+        row.update({
+            "status": "PASS",
+            "product_version": "fixture-version",
+            "build_version": "fixture-build",
+            "attempts": 1,
+            "staging_environment_ref": "fixture-staging",
+            "evidence_ref": "fixture://evidence/service",
+        })
+        if row["id"] == "importer-least-privilege":
+            row["checks"] = {
+                "required_insert_allowed": True,
+                "privileged_read_denied": True,
+                "unauthorized_write_denied": True,
+                "credential_scope_reviewed": True,
+            }
+        else:
+            row["checks"] = {
+                "valid_signature_accepted": True,
+                "tampered_signature_rejected": True,
+                "payload_tamper_rejected": True,
+                "rejected_batch_mutations": 0,
+            }
     return fixture
 
 
-def run_self_test() -> None:
+def _run_self_test_body() -> None:
     """Exercise gate states and redaction using generated local fixtures only."""
     with tempfile.TemporaryDirectory(prefix="mytv-acceptance-fixture-") as temporary:
         temp_root = Path(temporary)
@@ -986,6 +1710,15 @@ def run_self_test() -> None:
             raise AssertionError("privacy filtering changed the acceptance state")
 
 
+def run_self_test() -> None:
+    """Run the fixture-only test under a temporary, non-persistable context."""
+    token = _SELF_TEST_ACTIVE.set(True)
+    try:
+        _run_self_test_body()
+    finally:
+        _SELF_TEST_ACTIVE.reset(token)
+
+
 def apply_run_result(
     ledger: dict[str, Any],
     row_id: str,
@@ -995,6 +1728,8 @@ def apply_run_result(
     """Record one real/manual browser run without accepting mismatched or incomplete PASS evidence."""
     if not isinstance(result, dict):
         raise ValueError("run result must be a JSON object")
+    if _contains_synthetic_data(result):
+        raise ValueError("fixture or synthetic run results are accepted only by --self-test and cannot be imported")
     unknown = set(result) - RUN_RESULT_FIELDS
     if unknown:
         raise ValueError(f"unsupported result fields: {', '.join(sorted(unknown))}")
@@ -1018,6 +1753,14 @@ def apply_run_result(
 
     safe_result = redact_sensitive(result)
     root = Path(artifact_root) if artifact_root is not None else ROOT
+    evidence_path = _local_artifact_path(safe_result.get("evidence_ref"), root)
+    if evidence_path is not None and evidence_path.is_file() and evidence_path.suffix.lower() == ".json":
+        try:
+            evidence_document = json.loads(evidence_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            evidence_document = None
+        if evidence_document is not None and _contains_synthetic_data(evidence_document):
+            raise ValueError("fixture or synthetic evidence cannot be imported through a normal result")
     screenshots = safe_result.get("screenshot_paths")
     if screenshots is not None:
         if not isinstance(screenshots, list):
@@ -1046,7 +1789,14 @@ def apply_run_result(
     })
     if status == "PASS":
         local_blockers: list[str] = []
-        _check_run_row(candidate, f"{candidate.get('product')} {candidate.get('feature')}", local_blockers, root, browser_run=True)
+        _check_run_row(
+            candidate,
+            f"{candidate.get('product')} {candidate.get('feature')}",
+            local_blockers,
+            root,
+            browser_run=True,
+            staging_identity=ledger.get("staging_environment_registry"),
+        )
         if local_blockers:
             raise ValueError("PASS result is incomplete: " + "; ".join(local_blockers))
     row.clear()
@@ -1056,6 +1806,8 @@ def apply_run_result(
 
 def write_ledger(path: Path | str, ledger: dict[str, Any]) -> None:
     """Atomically save the ledger after a recursive privacy pass."""
+    if _contains_synthetic_data(ledger):
+        raise ValueError("fixture or synthetic acceptance data cannot be persisted")
     ledger_path = Path(path)
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     cleaned = redact_sensitive(ledger)
@@ -1102,7 +1854,8 @@ def render_browser_steps(ledger: dict[str, Any], row_id: str) -> str:
     lines.extend([
         "",
         "After the real browser run, capture a screenshot of the loaded target page and submit a structured result with `--record-result`.",
-        "For staging write operations, include the isolated environment reference plus `readback_status=PASS` and readback evidence.",
+        "The evidence manifest must exist under the artifact root and bind `row_id`, `product_version`, `build_version`, `viewport`, screenshot paths, SHA-256 hashes, and pixel dimensions.",
+        "For staging write operations, the registered isolated-staging identity and readback evidence must match the manifest; production references are rejected.",
         "",
     ])
     return "\n".join(lines)
@@ -1163,7 +1916,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     gate = evaluate_gate(ledger, artifact_root=args.artifact_root)
-    report = render_report(ledger, gate)
+    report = render_report(ledger, gate, artifact_root=args.artifact_root)
     if args.report:
         report_path = args.report if args.report.is_absolute() else ROOT / args.report
         report_path.parent.mkdir(parents=True, exist_ok=True)

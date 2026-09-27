@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
+import struct
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 import pytest
@@ -27,6 +30,73 @@ def load_runner():
 def load_matrix() -> dict:
     assert MATRIX_PATH.is_file(), "acceptance matrix is not implemented yet"
     return json.loads(MATRIX_PATH.read_text(encoding="utf-8"))
+
+
+def write_png(path: Path, width: int, height: int) -> Path:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    row = b"\x00" + (b"\x24\x48\x6c" * width)
+    pixels = zlib.compress(row * height)
+    image = b"\x89PNG\r\n\x1a\n"
+    image += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    image += chunk(b"IDAT", pixels)
+    image += chunk(b"IEND", b"")
+    path.write_bytes(image)
+    return path
+
+
+def attach_passing_browser_result(tmp_path: Path, row: dict, *, image_size=(1440, 900)) -> Path:
+    image = write_png(tmp_path / "browser.png", *image_size)
+    screenshot = {
+        "path": image.name,
+        "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+        "width": image_size[0],
+        "height": image_size[1],
+    }
+    row.update({
+        "status": "PASS",
+        "product_version": "2.6.0",
+        "build_version": "build-20260924.1",
+        "device_or_browser": "Chrome desktop",
+        "browser_version": "Chrome 140",
+        "viewport": "1440x900",
+        "network_profile": "stable-wifi",
+        "content_category": "catalog",
+        "attempts": 1,
+        "error_log_result": "NONE",
+        "screenshot_paths": [image.name],
+        "screenshot_reviewed": True,
+    })
+    evidence_path = tmp_path / "browser-evidence.json"
+    evidence_path.write_text(json.dumps({
+        "row_id": row["id"],
+        "product_version": row["product_version"],
+        "build_version": row["build_version"],
+        "viewport": row["viewport"],
+        "screenshots": [screenshot],
+    }), encoding="utf-8")
+    row["evidence_ref"] = evidence_path.name
+    return evidence_path
+
+
+def fill_longrun_measurements(row: dict, *, survival=120, started="2026-09-24T10:00:00Z", ended="2026-09-24T12:00:00Z") -> None:
+    row.update({
+        "status": "PASS",
+        "product_version": "2.6.0",
+        "build_version": "build-20260924.1",
+        "device_or_browser": "Android TV test device",
+        "network_profile": "stable-wifi",
+        "content_category": "movie",
+        "attempts": 1,
+        "first_frame_ms": 430,
+        "rebuffer_count": 0,
+        "auto_switch_result": "0 switches; uninterrupted source",
+        "survival_minutes": survival,
+        "measurement_started_at": started,
+        "measurement_ended_at": ended,
+        "error_log_result": "NONE",
+    })
 
 
 def test_media_inventory_uses_unverified_slots_without_invented_sources():
@@ -215,7 +285,9 @@ def test_representative_two_hour_playback_is_a_required_acceptance_row():
 def test_two_hour_runs_must_reference_a_completed_real_media_sample(tmp_path):
     runner = load_runner()
     fixture = runner._prepare_fixture_ledger(tmp_path)
-    assert runner.evaluate_gate(fixture, artifact_root=tmp_path).allowed
+    fixture_result = runner.evaluate_gate(fixture, artifact_root=tmp_path)
+    assert not fixture_result.allowed
+    assert any("fixture or synthetic" in blocker.lower() for blocker in fixture_result.blockers)
 
     fixture["longrun_runs"][0]["sample_id"] = "unknown-sample"
     result = runner.evaluate_gate(fixture, artifact_root=tmp_path)
@@ -297,16 +369,28 @@ def test_apply_browser_result_records_evidence_and_rejects_wrong_viewport(tmp_pa
     ledger = load_matrix()
     row = next(row for row in ledger["browser_runs"] if row["id"] == "web-01-desktop")
     screenshot = tmp_path / "web-home.png"
-    screenshot.write_bytes(b"fixture-screen")
+    write_png(screenshot, 1440, 900)
+    (tmp_path / "web-home-evidence.json").write_text(json.dumps({
+        "row_id": row["id"],
+        "product_version": "2.6.0",
+        "build_version": "build-20260924.1",
+        "viewport": "1440x900",
+        "screenshots": [{
+            "path": "web-home.png",
+            "sha256": hashlib.sha256(screenshot.read_bytes()).hexdigest(),
+            "width": 1440,
+            "height": 900,
+        }],
+    }), encoding="utf-8")
     result = {
         "status": "PASS",
-        "product_version": "fixture-version",
-        "build_version": "fixture-build",
+        "product_version": "2.6.0",
+        "build_version": "build-20260924.1",
         "device_or_browser": "Chrome desktop",
-        "browser_version": "fixture-browser-version",
+        "browser_version": "Chrome 140",
         "viewport": "1440x900",
         "network_profile": "stable-wifi",
-        "content_category": "fixture-catalog",
+        "content_category": "catalog",
         "attempts": 1,
         "first_frame_ms": None,
         "rebuffer_count": None,
@@ -315,7 +399,7 @@ def test_apply_browser_result_records_evidence_and_rejects_wrong_viewport(tmp_pa
         "error_log_result": "NONE",
         "screenshot_paths": [str(screenshot)],
         "screenshot_reviewed": True,
-        "evidence_ref": "artifacts/acceptance/fixture/web-home.json",
+        "evidence_ref": "web-home-evidence.json",
     }
     runner.apply_run_result(ledger, row["id"], result, artifact_root=tmp_path)
     assert row["status"] == "PASS"
@@ -344,23 +428,35 @@ def test_show_steps_displays_manual_web_instructions_without_claiming_acceptance
 def test_record_result_command_persists_one_browser_row_and_keeps_global_gate_blocked(tmp_path):
     ledger_path = tmp_path / "media_matrix.json"
     ledger_path.write_text(MATRIX_PATH.read_text(encoding="utf-8"), encoding="utf-8")
-    (tmp_path / "web-home.png").write_bytes(b"fixture-screen")
+    screenshot = write_png(tmp_path / "web-home.png", 1440, 900)
+    (tmp_path / "web-home-evidence.json").write_text(json.dumps({
+        "row_id": "web-01-desktop",
+        "product_version": "2.6.0",
+        "build_version": "build-20260924.1",
+        "viewport": "1440x900",
+        "screenshots": [{
+            "path": "web-home.png",
+            "sha256": hashlib.sha256(screenshot.read_bytes()).hexdigest(),
+            "width": 1440,
+            "height": 900,
+        }],
+    }), encoding="utf-8")
     result_path = tmp_path / "web-home-result.json"
     result_path.write_text(json.dumps({
         "row_id": "web-01-desktop",
         "status": "PASS",
-        "product_version": "fixture-version",
-        "build_version": "fixture-build",
+        "product_version": "2.6.0",
+        "build_version": "build-20260924.1",
         "device_or_browser": "Chrome desktop",
-        "browser_version": "fixture-browser-version",
+        "browser_version": "Chrome 140",
         "viewport": "1440x900",
         "network_profile": "stable-wifi",
-        "content_category": "fixture-catalog",
+        "content_category": "catalog",
         "attempts": 1,
         "error_log_result": "NONE",
         "screenshot_paths": ["web-home.png"],
         "screenshot_reviewed": True,
-        "evidence_ref": "acceptance/web-home-result.json",
+        "evidence_ref": "web-home-evidence.json",
     }, ensure_ascii=False), encoding="utf-8")
     completed = subprocess.run(
         [
@@ -496,3 +592,286 @@ def test_self_test_uses_fixtures_and_never_claims_real_product_acceptance():
     assert "fixture-only" in output.lower()
     assert "real product acceptance: pass" not in output.lower()
     assert "real Web/admin browser" not in output
+
+
+@pytest.mark.parametrize(("collection", "row_id"), [
+    ("acceptance_runs", "tv-01"),
+    ("browser_runs", "web-01-desktop"),
+    ("longrun_runs", "web-representative-120m"),
+    ("media_samples", "sample-movie-01"),
+    ("network_profiles", "stable-wifi"),
+    ("performance_metrics", "metadata-api-p95"),
+    ("service_runs", "importer-least-privilege"),
+])
+def test_gate_rejects_deleted_canonical_required_row(collection, row_id, tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    ledger[collection] = [row for row in ledger[collection] if row.get("id") != row_id]
+
+    result = runner.evaluate_gate(ledger, artifact_root=tmp_path)
+
+    assert not result.allowed
+    assert any("canonical" in blocker.lower() and row_id in blocker for blocker in result.blockers)
+
+
+def test_gate_rejects_duplicate_row_ids_and_missing_required_domains(tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    ledger["browser_runs"].append(dict(ledger["browser_runs"][0]))
+    ledger["acceptance_runs"] = [row for row in ledger["acceptance_runs"] if row["product"] != "selfhosted"]
+
+    result = runner.evaluate_gate(ledger, artifact_root=tmp_path)
+
+    assert any("duplicate" in blocker.lower() and "web-01-desktop" in blocker for blocker in result.blockers)
+    assert any("domain" in blocker.lower() and "selfhosted" in blocker for blocker in result.blockers)
+
+
+def test_canonical_required_row_cannot_be_disabled_with_required_false(tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    required_row = next(row for row in ledger["browser_runs"] if row["id"] == "web-01-desktop")
+    required_row["required"] = False
+    ledger["deployment_evidence"]["isolated_staging"]["required"] = False
+
+    result = runner.evaluate_gate(ledger, artifact_root=tmp_path)
+
+    assert any("web-01-desktop cannot be marked optional" in blocker for blocker in result.blockers)
+    assert any("isolated_staging cannot be marked optional" in blocker for blocker in result.blockers)
+
+
+def test_two_hour_run_requires_full_survival_and_measured_timestamps(tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    row = ledger["longrun_runs"][0]
+    fill_longrun_measurements(row, survival=119, ended="2026-09-24T11:59:00Z")
+
+    result = runner.evaluate_gate(ledger, artifact_root=tmp_path)
+
+    assert any("survival_minutes" in blocker and "120" in blocker for blocker in result.blockers)
+    assert any("measured" in blocker.lower() and "120" in blocker for blocker in result.blockers)
+
+
+@pytest.mark.parametrize(("field", "value", "expected"), [
+    ("first_frame_ms", None, "first_frame_ms"),
+    ("first_frame_ms", 0, "first_frame_ms"),
+    ("attempts", 0, "attempts"),
+    ("auto_switch_result", "", "auto_switch_result"),
+    ("product_version", "fixture-version", "synthetic"),
+])
+def test_two_hour_run_rejects_missing_zero_or_synthetic_measurements(field, value, expected, tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    row = ledger["longrun_runs"][0]
+    fill_longrun_measurements(row)
+    row[field] = value
+
+    result = runner.evaluate_gate(ledger, artifact_root=tmp_path)
+
+    assert any(expected.lower() in blocker.lower() for blocker in result.blockers)
+
+
+@pytest.mark.parametrize(("image_size", "image_bytes", "expected"), [
+    ((1440, 900), b"not-an-image", "valid png image"),
+    ((1280, 720), None, "1440x900"),
+])
+def test_browser_screenshot_must_be_valid_image_with_target_viewport(image_size, image_bytes, expected, tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    row = next(row for row in ledger["browser_runs"] if row["id"] == "web-01-desktop")
+    attach_passing_browser_result(tmp_path, row, image_size=image_size)
+    if image_bytes is not None:
+        (tmp_path / "browser.png").write_bytes(image_bytes)
+
+    result = runner.evaluate_gate(ledger, artifact_root=tmp_path)
+
+    assert any(expected.lower() in blocker.lower() for blocker in result.blockers)
+
+
+@pytest.mark.parametrize("binding", ["wrong-row", "wrong-build", "missing-file"])
+def test_pass_evidence_must_exist_and_bind_to_row_and_build(binding, tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    row = next(row for row in ledger["browser_runs"] if row["id"] == "web-01-desktop")
+    evidence_path = attach_passing_browser_result(tmp_path, row)
+    if binding == "missing-file":
+        row["evidence_ref"] = "missing-evidence.json"
+    else:
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["row_id" if binding == "wrong-row" else "build_version"] = "other-row" if binding == "wrong-row" else "other-build"
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    result = runner.evaluate_gate(ledger, artifact_root=tmp_path)
+
+    assert any("evidence" in blocker.lower() and ("bind" in blocker.lower() or "exist" in blocker.lower()) for blocker in result.blockers)
+
+
+def test_admin_write_requires_registered_isolated_staging_identity_not_production(tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    row = next(row for row in ledger["browser_runs"] if row.get("write_readback_required"))
+    row.update({
+        "status": "PASS",
+        "product_version": "2.6.0",
+        "build_version": "build-20260924.1",
+        "device_or_browser": "Chrome desktop",
+        "browser_version": "Chrome 140",
+        "network_profile": "stable-wifi",
+        "content_category": "import",
+        "attempts": 1,
+        "error_log_result": "NONE",
+        "evidence_ref": "missing.json",
+        "screenshot_paths": [],
+        "screenshot_reviewed": True,
+        "staging_environment_ref": "production://primary",
+        "readback_status": "PASS",
+        "readback_evidence_ref": "missing-readback.json",
+    })
+    ledger["staging_environment_registry"] = {
+        "id": "production-primary",
+        "registered": True,
+        "environment_type": "production",
+        "environment_ref": "production://primary",
+    }
+
+    result = runner.evaluate_gate(ledger, artifact_root=tmp_path)
+
+    assert any("staging" in blocker.lower() and ("registered" in blocker.lower() or "production" in blocker.lower()) for blocker in result.blockers)
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_staging_registry_requires_bound_registration_evidence(matching, tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    ledger["staging_environment_registry"].update({
+        "registered": True,
+        "status": "PASS",
+        "environment_ref": "staging:acceptance-2026-09-27",
+        "registration_evidence_ref": "staging-registration.json",
+    })
+    (tmp_path / "staging-registration.json").write_text(json.dumps({
+        "identity_id": "acceptance-staging",
+        "environment_type": "isolated_staging",
+        "environment_ref": "staging:acceptance-2026-09-27" if matching else "staging:other",
+        "registered": True,
+    }), encoding="utf-8")
+
+    result = runner.evaluate_gate(ledger, artifact_root=tmp_path)
+
+    staging_blockers = [blocker for blocker in result.blockers if "staging identity" in blocker.lower()]
+    assert bool(staging_blockers) is not matching
+
+
+def test_fixture_ledger_cannot_pass_import_or_report_outside_self_test(tmp_path):
+    runner = load_runner()
+    fixture = runner._prepare_fixture_ledger(tmp_path)
+
+    result = runner.evaluate_gate(fixture, artifact_root=tmp_path)
+    assert not result.allowed
+    with pytest.raises(ValueError, match="fixture|synthetic|self-test"):
+        runner.render_report(fixture)
+    with pytest.raises(ValueError, match="fixture|synthetic|self-test"):
+        runner.write_ledger(tmp_path / "must-not-write.json", fixture)
+    fixture_path = tmp_path / "fixture-ledger.json"
+    fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+    with pytest.raises(ValueError, match="fixture|synthetic|self-test"):
+        runner.load_ledger(fixture_path)
+    with pytest.raises(ValueError, match="fixture|synthetic|self-test"):
+        runner.apply_run_result(fixture, "web-01-desktop", {"status": "PASS", "product_version": "fixture-version"}, artifact_root=tmp_path)
+
+
+def test_synthetic_evidence_file_is_rejected_from_normal_gate_and_report(tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    row = next(row for row in ledger["browser_runs"] if row["id"] == "web-01-desktop")
+    row["evidence_ref"] = "evidence.json"
+    (tmp_path / "evidence.json").write_text(json.dumps({
+        "row_id": row["id"],
+        "screenshots": [{"path": "fixture-screen.png"}],
+    }), encoding="utf-8")
+
+    result = runner.evaluate_gate(ledger, artifact_root=tmp_path)
+
+    assert any("fixture or synthetic evidence" in blocker.lower() for blocker in result.blockers)
+    with pytest.raises(ValueError, match="fixture|synthetic"):
+        runner.render_report(ledger, artifact_root=tmp_path)
+
+
+def test_blank_required_result_fields_cannot_pass(tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    row = next(row for row in ledger["browser_runs"] if row["id"] == "web-01-desktop")
+    row.update({"status": "PASS", "product_version": "", "build_version": "", "attempts": 0, "evidence_ref": ""})
+
+    result = runner.evaluate_gate(ledger, artifact_root=tmp_path)
+
+    assert not result.allowed
+    assert any("missing product_version" in blocker for blocker in result.blockers)
+    assert any("missing build_version" in blocker for blocker in result.blockers)
+    assert any("attempts must be at least 1" in blocker for blocker in result.blockers)
+    assert any("evidence_ref" in blocker for blocker in result.blockers)
+
+
+def test_importer_service_rows_require_positive_security_assertions(tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    row = next(row for row in ledger["service_runs"] if row["id"] == "importer-least-privilege")
+    row.update({
+        "status": "PASS",
+        "product_version": "2.6.0",
+        "build_version": "build-20260924.1",
+        "attempts": 1,
+        "staging_environment_ref": "staging:acceptance-2026-09-24",
+        "evidence_ref": "service-evidence.json",
+        "checks": {
+            "required_insert_allowed": True,
+            "privileged_read_denied": False,
+            "unauthorized_write_denied": True,
+            "credential_scope_reviewed": True,
+        },
+    })
+    ledger["staging_environment_registry"].update({
+        "registered": True,
+        "status": "PASS",
+        "environment_ref": "staging:acceptance-2026-09-24",
+    })
+
+    result = runner.evaluate_gate(ledger, artifact_root=tmp_path)
+
+    assert any("privileged_read_denied must be verified true" in blocker for blocker in result.blockers)
+    assert any("evidence file does not exist" in blocker for blocker in result.blockers)
+
+
+@pytest.mark.parametrize("failure_location", ["deployment", "nested_playback"])
+def test_aggregate_fail_includes_deployment_and_nested_playback_rows(failure_location, tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    if failure_location == "deployment":
+        ledger["deployment_evidence"]["object_storage_contract"]["status"] = "FAIL"
+    else:
+        ledger["media_samples"][0]["runs"][0]["status"] = "FAIL"
+
+    result = runner.evaluate_gate(ledger, artifact_root=tmp_path)
+
+    assert result.status == "FAIL"
+
+
+def test_importer_security_has_service_rows_and_ui_count_workflows_remain(tmp_path):
+    ledger = load_matrix()
+    service_rows = {row["id"]: row for row in ledger["service_runs"]}
+    assert {"importer-least-privilege", "importer-signature-validation"} <= service_rows.keys()
+    assert all(row["required"] is True and row["status"] == "NOT-VERIFIED" for row in service_rows.values())
+    browser_features = {row["feature"] for row in ledger["browser_runs"] if row["product"] == "admin"}
+    assert "重复批次幂等和实际插入数与 UI 报告一致" in browser_features
+    assert "热更与 APK 分片上传/版本清单/哈希/下载" in browser_features
+    assert all(
+        "390x844" in row["expected_screenshot"]
+        for row in ledger["browser_runs"]
+        if row["viewport"] == "390x844"
+    )
+
+
+def test_mobile_rotation_requires_both_portrait_and_landscape_viewports():
+    ledger = load_matrix()
+    row = next(row for row in ledger["acceptance_runs"] if row["id"] == "mobile-rotation")
+    assert "1080x2400" in row["viewport"]
+    assert "2400x1080" in row["viewport"]

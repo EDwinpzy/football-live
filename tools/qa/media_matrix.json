@@ -5170,7 +5170,7 @@
       "build_version": null,
       "device_or_browser": null,
       "browser_version": null,
-      "viewport": "1080x2400 portrait and rotated landscape",
+      "viewport": "1080x2400 portrait; 2400x1080 landscape",
       "network_profile": null,
       "content_category": null,
       "attempts": null,
@@ -5183,7 +5183,7 @@
       "screenshot_required": true,
       "screenshot_paths": [],
       "screenshot_reviewed": false,
-      "expected_screenshot": "已加载页面旋转前后，关键内容与播放器状态可见。",
+      "expected_screenshot": "旋转前后分别截图；1080x2400 竖屏与 2400x1080 横屏均显示已加载页面和播放器状态。",
       "evidence_ref": null,
       "capability_note": null,
       "data_scope": null
@@ -7525,7 +7525,7 @@
       "screenshot_required": true,
       "screenshot_paths": [],
       "screenshot_reviewed": false,
-      "expected_screenshot": "后台真实 staging 页面与数据已加载；1440x900 视口截图显示目标页面/操作结果。",
+      "expected_screenshot": "后台真实 staging 页面与数据已加载；390x844 视口截图显示目标页面/操作结果。",
       "evidence_ref": null,
       "capability_note": null,
       "data_scope": "隔离 staging；所有有写入的操作逐项读回；禁止生产数据。",
@@ -7613,7 +7613,7 @@
       "screenshot_required": true,
       "screenshot_paths": [],
       "screenshot_reviewed": false,
-      "expected_screenshot": "后台真实 staging 页面与数据已加载；1440x900 视口截图显示目标页面/操作结果。",
+      "expected_screenshot": "后台真实 staging 页面与数据已加载；390x844 视口截图显示目标页面/操作结果。",
       "evidence_ref": null,
       "capability_note": null,
       "data_scope": "隔离 staging；所有有写入的操作逐项读回；禁止生产数据。",
@@ -7702,7 +7702,7 @@
       "screenshot_required": true,
       "screenshot_paths": [],
       "screenshot_reviewed": false,
-      "expected_screenshot": "后台真实 staging 页面与数据已加载；1440x900 视口截图显示目标页面/操作结果。",
+      "expected_screenshot": "后台真实 staging 页面与数据已加载；390x844 视口截图显示目标页面/操作结果。",
       "evidence_ref": null,
       "capability_note": null,
       "data_scope": "隔离 staging；所有有写入的操作逐项读回；禁止生产数据。",
@@ -8217,7 +8217,8 @@
       "status": "NOT-VERIFIED",
       "environment_ref": null,
       "write_readback_evidence": null,
-      "environment_type": null
+      "environment_type": null,
+      "environment_id": "acceptance-staging"
     },
     "vps_egress": {
       "required": true,
@@ -8323,7 +8324,9 @@
       "evidence_ref": null,
       "capability_note": null,
       "data_scope": "已授权真实媒体样本；按代表性组合执行。",
-      "sample_id": null
+      "sample_id": null,
+      "measurement_started_at": null,
+      "measurement_ended_at": null
     },
     {
       "id": "android_mobile-representative-120m",
@@ -8353,7 +8356,9 @@
       "evidence_ref": null,
       "capability_note": null,
       "data_scope": "已授权真实媒体样本；按代表性组合执行。",
-      "sample_id": null
+      "sample_id": null,
+      "measurement_started_at": null,
+      "measurement_ended_at": null
     },
     {
       "id": "web-representative-120m",
@@ -8383,7 +8388,9 @@
       "evidence_ref": null,
       "capability_note": null,
       "data_scope": "已授权真实媒体样本；按代表性组合执行。",
-      "sample_id": null
+      "sample_id": null,
+      "measurement_started_at": null,
+      "measurement_ended_at": null
     }
   ],
   "browser_recording_contract": {
@@ -8417,5 +8424,51 @@
       "sensitive fields are redacted before writing; history stores allowed fields only, not screenshot bytes or raw log contents.",
       "admin write PASS additionally requires an isolated staging environment reference, readback_status=PASS, and readback evidence."
     ]
-  }
+  },
+  "staging_environment_registry": {
+    "id": "acceptance-staging",
+    "registered": false,
+    "status": "NOT-VERIFIED",
+    "environment_type": "isolated_staging",
+    "environment_ref": null,
+    "registration_evidence_ref": null
+  },
+  "service_runs": [
+    {
+      "id": "importer-least-privilege",
+      "service": "activation_importer",
+      "feature": "importer least-privilege boundary",
+      "required": true,
+      "status": "NOT-VERIFIED",
+      "product_version": null,
+      "build_version": null,
+      "attempts": null,
+      "staging_environment_ref": null,
+      "checks": {
+        "required_insert_allowed": null,
+        "privileged_read_denied": null,
+        "unauthorized_write_denied": null,
+        "credential_scope_reviewed": null
+      },
+      "evidence_ref": null
+    },
+    {
+      "id": "importer-signature-validation",
+      "service": "activation_importer",
+      "feature": "importer signature and tamper rejection",
+      "required": true,
+      "status": "NOT-VERIFIED",
+      "product_version": null,
+      "build_version": null,
+      "attempts": null,
+      "staging_environment_ref": null,
+      "checks": {
+        "valid_signature_accepted": null,
+        "tampered_signature_rejected": null,
+        "payload_tamper_rejected": null,
+        "rejected_batch_mutations": null
+      },
+      "evidence_ref": null
+    }
+  ]
 }
