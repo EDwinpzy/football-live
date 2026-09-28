@@ -69,6 +69,9 @@ created_at, sold_at, updated_at, activated_at, expire_at, redeemed_at, redeemed_
 
 ## 四、结论：现在关停的影响面
 
+> **2026-09-28 复核更正**：本节及第五节的「待办」已全部完成，数据迁移早已落地。
+> 详见文末「七、迁移完成复核」。下面的原始判断保留作为过程记录，**不代表当前状态**。
+
 1. **卡密数据仅 102 张、其中已激活 4 张**，迁移工作量很小。
 2. **`activate` 已因 `upgrade_required` 实质不可用**——也就是说线上激活路径**当下已经断了**，
    不是「关停会打断」而是「本来就断着」。这降低了立即关停的破坏性。
@@ -84,6 +87,62 @@ created_at, sold_at, updated_at, activated_at, expire_at, redeemed_at, redeemed_
    已通过 `import_licenses.py --dry-run` 校验（本次新增该 dry-run 能力）。
 4. 自建激活接口能识别存量 `ticket` 签名后，再切换客户端 `API_BASE_URL`。
 5. 观察 1–2 周确认无异常，最后关停 CloudBase 环境。
+
+## 七、迁移完成复核（2026-09-28，实测）
+
+直接 SSH 登录自建 VPS 核查，**推翻**了本文档此前「数据尚未迁移、线上是旧版栈」的判断。
+那个判断源于探测 URL 用错（详见下），并非真实故障。
+
+### 7.1 服务健康，无需重装
+
+10 个容器全部 up 4 天+，`postgres` / `web-api` / `health` 均 healthy。
+内部 8443 与外部 35208 逐端点探测一致。三个「404」全是**探测方式错误**，不是故障：
+
+| 探测 | 404 原因 | 正确探测 | 结果 |
+|---|---|---|---|
+| `/v1/storages/object/hotupdate/` | `storage_service.py:37` 拒绝空 key | `…/hotupdate/backend-hu23.zip` | **200，40,763,541 字节** |
+| `/admin` | 后台在根路径，代码从未实现 `/admin` 前缀 | `/` | **200，175,863 字节** |
+| `/hotupdate` | 裸路径无 handler，需子路径 | `/hotupdate/manifest` | **200** |
+
+`/hotupdate/check`、`/hotupdate/announce`、`/iptv/status`、`/metadata/health` 均 200。
+对象目录 `/srv/mytv/objects/hotupdate/` 有 160MB 数据（4 个后端包、APK 更新、直播、metadata）。
+
+### 7.2 数据早已迁完，且线上比 CloudBase 更新
+
+自建 PostgreSQL 精确 `count(*)` 对比 CloudBase 导出（`artifacts/cloudbase-export-20260928/`）：
+
+| 表 | CloudBase | 自建线上 | 说明 |
+|---|---|---|---|
+| `licenses` | 102 | **102** | 一致 |
+| `iptv_channel` | 77 | **77** | 一致 |
+| `iptv_line` | 127 | **127** | 一致 |
+| `iptv_group` | 8 | **8** | 一致 |
+| `iptv_config` | 1 | **1** | 一致 |
+| `announcements` | 19 | **19** | 一致 |
+| `hotupdate_pkg` | 2 | **4** | 线上多 2 |
+| `activate_log` | 165 | **200** | 线上多 35（真实激活流量） |
+| `hotupdate_log` | 2 | **15** | 线上多 13 |
+
+**已激活卡数 7 > CloudBase 的 4**，说明迁移后自建站仍在正常受理激活。
+迁移完成于 2026-09-24 前后，本文第五节 1~4 步均已执行完毕。
+
+### 7.3 签名体系一致，存量票全部验签通过
+
+这是「存量用户能否续期」的唯一决定性验证：
+
+1. **私钥一致**：`/srv/mytv/secrets/license/private_key.pem` 与本机
+   `tools/keys/private_key.pem` 的 PEM body SHA-256 均为
+   `bb9886e99981b20d9ee583fb5cc02866` —— 同一把 P-256 密钥，APK 内置公钥必然验得过。
+2. **全量验签**：在 VPS 上用该私钥导出公钥，对库中 102 张卡的 `ticket`
+   按 `tools/license_gen.py` 的 canonical 串（`v|code|plan|days|issued|nonce`）
+   逐张 ECDSA-SHA256 验签，结果
+   `{"total":102,"verified_ok":102,"failed":0}`。
+3. 102 张卡 `ticket` 均非空，`status` 全为 `active`，`expire_at` 无过期。
+
+### 7.4 剩余唯一待办
+
+**关停 CloudBase 环境**。数据、签名、服务三项前置条件已全部满足且有余量
+（自建站多出的 35 次激活证明它已成为实际主站）。此操作不可恢复，执行前需用户确认。
 
 ## 六、本次新增的工具能力
 

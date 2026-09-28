@@ -2,7 +2,7 @@
 
 This directory contains the self-hosted My TV stack. Only Nginx publishes host ports: provider NAT maps external HTTPS `35208` to internal `8443`, and external health port `25182` to internal `8080`. Do not change security groups or NAT mappings. The health port exposes only `/health`; application traffic uses HTTPS on port `35208`.
 
-The file API allows only the `hotupdate` bucket. Its HTTPS object route is `/v1/storages/object/{bucket}/{key}` and supports `GET`, `HEAD`, and single byte ranges. Upload and deletion require a valid service JWT. Admin pages and business APIs are exposed only through Nginx over the configured HTTPS NAT port. The Admin UI is available at `/` and `/admin/`; `/admin` redirects to `/admin/`, and both entries reach the same static assets and API handlers.
+The file API allows only the `hotupdate` bucket. Its HTTPS object route is `/v1/storages/object/{bucket}/{key}` and supports `GET`, `HEAD`, and single byte ranges. Upload and deletion require a valid service JWT. Admin pages and business APIs are exposed only through Nginx over the configured HTTPS NAT port. The Admin UI is served at the site root `/` (`tools/admin_server.py`); there is no `/admin` path prefix, so probing `/admin` returns 404 by design.
 
 The self-hosted admin runs the existing IPTV source rebuild daily at 06:30 Asia/Shanghai. Scheduled rebuilds, manual publishes, rollbacks, and mode changes share a database lease with a five-minute expiry and 30-second renewal. If the lease RPC is unavailable, publication fails closed; a crashed process releases the lease automatically after expiry.
 

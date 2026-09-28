@@ -24,9 +24,10 @@ img_cache/
 .video_agent/
 .learnings/
 .worktrees/
-.workbuddy/
 tools/keys/
 *.whl
+# 网页版构建产物（deploy/selfhosted/Dockerfile.web 内生成，不入库）
+tools/web-dist/
 # otv-admin 的签名依赖 vendor/（由 tools/vendor/*.whl 解包生成，11MB 二进制，不入库）
 cloudfunctions/otv-admin/vendor/
 
