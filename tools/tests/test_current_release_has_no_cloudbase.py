@@ -125,6 +125,56 @@ def test_web_proxy_keeps_the_internal_metadata_api_endpoint():
     assert "OTV_METADATA_API_URL: http://metadata-api:8094" in compose
 
 
+def test_every_cloudbase_default_in_web_proxy_is_overridden_by_the_selfhosted_stack():
+    """proxy.py 的每个 CloudBase 默认值都必须被自建栈显式覆盖。
+
+    `test_current_release_and_apk_runtime_config_has_no_cloudbase_paths` 把
+    compose/.env.example/proxy_runner 都纳入了 CloudBase 检查，**唯独漏了 proxy.py**，
+    而它至今还有 4 处 CloudBase 兜底地址（通用中继、APK 更新对象存储、卡密激活、
+    IPTV 直播列表）。
+
+    目前这 4 处在自建栈下都不会被用到：要么 compose 配了内网地址，要么被
+    `OTV_CLOUD_RELAY=0` 关掉。但它们是「万一漏配就静默回落到已退役云端」的隐患
+    默认值——自建栈少配一个环境变量，激活请求就会悄悄打到要下线的 CloudBase 上，
+    而且日志看起来完全正常。
+
+    本测试不要求删掉这些默认值（设备/本地形态仍可能需要），而是要求
+    **自建栈必须显式覆盖每一处**，把「依赖默认值」变成「不可能发生」。
+    """
+    compose = (ROOT / "deploy/selfhosted/compose.yaml").read_text(encoding="utf-8")
+
+    # 每处默认值都必须在 compose 里有对应的内网覆盖。
+    required_overrides = {
+        "OTV_LICENSE_ENDPOINT": "http://business-api:8082/activate",
+        "OTV_APK_UPDATE_OBJECT_BASE": "http://storage:8092/v1/storages/object/hotupdate",
+        "OTV_IPTV_LATEST_URL": "http://business-api:8082/iptv/latest",
+    }
+    for key, expected in required_overrides.items():
+        assert f"{key}: {expected}" in compose, (
+            f"compose.yaml 缺少 {key}={expected}；"
+            f"漏配会让 proxy.py 回落到已退役的 CloudBase 默认地址"
+        )
+
+    # 通用中继默认是开（"1"），自建栈必须显式关掉。
+    assert 'OTV_CLOUD_RELAY: "0"' in compose, (
+        "compose.yaml 必须显式设置 OTV_CLOUD_RELAY=0，"
+        "否则 proxy.py 的 CLOUD_RELAY_ENABLED 默认值为 true，"
+        "会把比赛/直播请求中继到已退役的 CloudBase。"
+    )
+    assert 'OTV_VOD_CLOUD_FALLBACK: "0"' in compose, (
+        "compose.yaml 必须显式设置 OTV_VOD_CLOUD_FALLBACK=0，"
+        "否则片源回退会沿用通用中继开关并请求已退役的 CloudBase。"
+    )
+
+    # proxy.py 确实还有这些默认值——本测试是防回归的护栏，不是描述现状。
+    # 若将来有人彻底删掉这些默认值，应同步更新本测试的意图说明。
+    web_proxy = (ROOT / "tools/backend-src/proxy.py").read_text(encoding="utf-8")
+    assert web_proxy.count("service.tcloudbase.com") > 0, (
+        "proxy.py 里已无 CloudBase 默认地址；若这是有意清理，"
+        "请把本测试改为直接断言 proxy.py 不含任何 CloudBase 地址。"
+    )
+
+
 def test_one_time_migration_helpers_are_not_mounted_into_runtime_containers():
     compose = (ROOT / "deploy/selfhosted/compose.yaml").read_text(encoding="utf-8")
     admin_dockerfile = (ROOT / "deploy/selfhosted/Dockerfile.admin").read_text(encoding="utf-8")
