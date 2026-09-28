@@ -9,17 +9,22 @@
    同片再查给全量且不重复触网。
 """
 import pathlib
+import socket
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import concurrent.futures
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 
 BACKEND = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 
 import vod_sources  # noqa: E402
+import source_dns  # noqa: E402
 
 
 SUBJECT = {"title": "肖申克的救赎", "year": "1994", "category": "movie", "season": 0}
@@ -200,6 +205,344 @@ class BreakerRoutingTest(RacingTestCase):
         registry = self._registry(["s1", "s2"], stats=stats)
         lines = registry.resolve_subject(dict(SUBJECT))
         self.assertEqual({line["source_id"] for line in lines}, {"s1", "s2"})
+
+
+class FastResolverPoolTest(unittest.TestCase):
+    def test_title_match_score_is_added_separately_from_line_quality_score(self):
+        source = _source("s1")
+        registry = vod_sources.SourceRegistry([source])
+        original = vod_sources.MacCmsAdapter
+
+        class MatchedAdapter:
+            def __init__(self, _source):
+                pass
+
+            def search(self, subject):
+                return [{"id": "content-1", "title": subject["title"],
+                         "year": "1994", "category": "movie", "season": 0}]
+
+            def detail(self, _candidate):
+                return [{"id": "s1:content-1", "source_id": "s1", "source_name": "s1",
+                         "score": 97, "episodes": [{"index": 0, "name": "Episode 1",
+                                                      "url": "https://media.example/1.m3u8"}]}]
+
+        vod_sources.MacCmsAdapter = MatchedAdapter
+        try:
+            _source_obj, lines, error, _elapsed = registry._search_one(
+                source, {"title": "肖申克的救赎", "year": "1994", "category": "movie", "season": 0})
+        finally:
+            vod_sources.MacCmsAdapter = original
+
+        self.assertIsNone(error)
+        self.assertEqual(lines[0]["match_score"], 100)
+        self.assertEqual(lines[0]["score"], 97)
+
+    def test_health_order_is_cached_for_five_minutes(self):
+        class RecordingStats:
+            def __init__(self):
+                self.sort_calls = 0
+
+            def is_circuit_open(self, _source_id, now=None):
+                return False
+
+            def sort_sources(self, sources):
+                self.sort_calls += 1
+                return list(reversed(sources))
+
+        now = [10.0]
+        stats = RecordingStats()
+        registry = vod_sources.SourceRegistry(
+            [_source("s1"), _source("s2"), _source("s3")],
+            stats=stats, clock=lambda: now[0])
+
+        first = registry.resolver_source_order()
+        second = registry.resolver_source_order()
+        now[0] += 301
+        third = registry.resolver_source_order()
+
+        self.assertEqual([item.id for item in first], ["s3", "s2", "s1"])
+        self.assertEqual([item.id for item in second], ["s3", "s2", "s1"])
+        self.assertEqual([item.id for item in third], ["s3", "s2", "s1"])
+        self.assertEqual(stats.sort_calls, 2)
+
+    def test_open_circuit_is_filtered_fresh_without_rebuilding_health_order(self):
+        class RecordingStats:
+            def __init__(self):
+                self.sort_calls = 0
+                self.open_source = None
+
+            def is_circuit_open(self, source_id, now=None):
+                return source_id == self.open_source
+
+            def sort_sources(self, sources):
+                self.sort_calls += 1
+                return list(reversed(sources))
+
+        stats = RecordingStats()
+        registry = vod_sources.SourceRegistry(
+            [_source("s1"), _source("s2"), _source("s3")], stats=stats)
+        first = registry.resolver_source_order()
+        stats.open_source = "s2"
+        during_cooldown = registry.resolver_source_order()
+        stats.open_source = None
+        after_cooldown = registry.resolver_source_order()
+
+        self.assertEqual([item.id for item in first], ["s3", "s2", "s1"])
+        self.assertEqual([item.id for item in during_cooldown], ["s3", "s1"])
+        self.assertEqual([item.id for item in after_cooldown], ["s3", "s2", "s1"])
+        self.assertEqual(stats.sort_calls, 1)
+
+    def test_close_cancels_queued_bounded_resolver_searches(self):
+        registry = vod_sources.SourceRegistry(
+            [_source("s%d" % index) for index in range(6)])
+        release = threading.Event()
+        started = {"s%d" % index: threading.Event() for index in range(6)}
+
+        def blocked_search(source, _subject):
+            started[source.id].set()
+            release.wait()
+            return source, [], None, 100
+
+        registry._search_one = blocked_search
+        try:
+            active = registry.submit_fast_searches(dict(SUBJECT))
+            self.assertTrue(all(started["s%d" % index].wait(1) for index in range(3)))
+            queued = registry.submit_fast_searches(dict(SUBJECT))
+            registry.close()
+
+            self.assertEqual(len(active), 3)
+            self.assertEqual(len(queued), 3)
+            self.assertTrue(all(future.cancelled() for future in queued))
+        finally:
+            release.set()
+            close = getattr(registry, "close", None)
+            if close:
+                close()
+            for future in locals().get("active", ()):
+                try:
+                    future.result(timeout=1)
+                except concurrent.futures.CancelledError:
+                    pass
+
+    def test_private_addresses_are_rejected_before_any_socket_is_opened(self):
+        """F-6 (split out): loopback is a security outcome, not a timeout outcome."""
+        seen = []
+
+        class RecordingSocket:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def settimeout(self, _timeout):
+                pass
+
+            def connect(self, _address):
+                seen.append("connect")
+
+            def close(self):
+                pass
+
+        def loopback(host, port, *args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                     "", ("127.0.0.1", port))]
+
+        with patch("socket.getaddrinfo", side_effect=loopback), \
+                patch("source_dns.socket.socket", side_effect=RecordingSocket):
+            with self.assertRaises(OSError) as caught:
+                source_dns._bounded_create_connection(("local.test", 80), timeout=1)
+        self.assertIsInstance(caught.exception, OSError)
+        self.assertEqual(seen, [], "no socket may be created for a private address")
+
+    def test_timed_out_searches_self_release_bounded_pool_slots(self):
+        """F-6: the per-source deadline must be what ends the job.
+
+        The old version pointed the client at a loopback ``ThreadingHTTPServer``
+        and only patched ``_validate_public_url``. The loopback address was
+        rejected during the DNS safety check, so the assertions passed whether
+        or not the deadline existed. Here DNS answers with a public address and
+        ``socket.socket`` is stubbed, so the connection really is attempted and
+        only the per-source deadline can end the search.
+        """
+        delay_seconds = 0.3
+
+        class SlowResponseHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                time.sleep(delay_seconds)
+                body = b'{"code":1,"list":[]}'
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except OSError:
+                    pass  # The client has already timed out and closed its socket.
+
+            def log_message(self, _format, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), SlowResponseHandler)
+        server.daemon_threads = True
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        api_url = "http://public-source.test:%d/api.php/provide/vod/" % server.server_port
+
+        connect_attempts = [0]
+        connect_lock = threading.Lock()
+
+        class SlowSocket:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def settimeout(self, timeout):
+                self._timeout = delay_seconds if timeout is None else float(timeout)
+
+            def connect(self, address):
+                with connect_lock:
+                    connect_attempts[0] += 1
+                # Model a connect that hangs for the server delay. A real socket
+                # aborts it once its own timeout expires, so the connect can
+                # only finish if the caller left a timeout longer than the
+                # delay -- i.e. only if the per-source deadline did NOT apply.
+                timeout = self._timeout
+                end = time.monotonic() + delay_seconds
+                while True:
+                    remaining = end - time.monotonic()
+                    if remaining <= 0:
+                        return
+                    if timeout is not None and remaining > timeout:
+                        time.sleep(max(0.0, timeout))
+                        raise socket.timeout("timed out")
+                    time.sleep(min(0.005, remaining))
+
+            def close(self):
+                pass
+
+        def public_dns(_host, port, *args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                     "", ("93.184.216.34", port))]
+
+        registry = vod_sources.SourceRegistry(
+            [vod_sources.VodSource(
+                "s%d" % index, "s%d" % index, "http://public-source.test", api_url,
+                "macms_json") for index in range(6)])
+        try:
+            with patch.object(vod_sources, "FAST_SOURCE_JOB_TIMEOUT_SECONDS", 0.08, create=True), \
+                    patch("socket.getaddrinfo", side_effect=public_dns), \
+                    patch("source_dns.socket.socket", side_effect=SlowSocket):
+                started = time.monotonic()
+                first = registry.submit_fast_searches(dict(SUBJECT))
+                first_results = [future.result(timeout=2) for future in first]
+                wall = time.monotonic() - started
+
+                self.assertEqual(len(first), 3)
+                self.assertTrue(all(result[2] is not None for result in first_results))
+                self.assertLess(max(result[3] for result in first_results), 200)
+                self.assertLess(wall, 0.3, "the deadline must end the job before the delay")
+                self.assertGreaterEqual(
+                    connect_attempts[0], 1,
+                    "the request must reach connect(), otherwise this test again "
+                    "only proves the private-address guard")
+
+                callbacks_finished = threading.Event()
+                remaining_callbacks = [len(first)]
+                callback_lock = threading.Lock()
+
+                def note_slot_released(_future):
+                    with callback_lock:
+                        remaining_callbacks[0] -= 1
+                        if remaining_callbacks[0] == 0:
+                            callbacks_finished.set()
+
+                for future in first:
+                    future.add_done_callback(note_slot_released)
+                self.assertTrue(callbacks_finished.wait(2))
+
+                recovered = registry.submit_fast_searches(dict(SUBJECT))
+                self.assertEqual(len(recovered), 3)
+                recovered_results = [future.result(timeout=2) for future in recovered]
+                self.assertTrue(all(result[2] is not None for result in recovered_results))
+        finally:
+            registry.close()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=1)
+
+    def test_hhkan_fast_search_passes_timeout_and_body_limit_to_fetch(self):
+        import hhkan
+
+        source = vod_sources.VodSource(
+            "hhkan-test", "hhkan-test", "https://hhkan.example",
+            "https://hhkan.example/api", "hhkan")
+        registry = vod_sources.SourceRegistry([source])
+        observed = []
+        token_observed = []
+
+        def slow_page(path, timeout=None, max_bytes=None):
+            observed.append((path, timeout, max_bytes))
+            time.sleep(0.02)
+            raise TimeoutError("source request timed out")
+
+        def search_token(timeout=None, max_bytes=None):
+            token_observed.append((timeout, max_bytes))
+            return "test-token"
+
+        with patch.object(vod_sources, "FAST_SOURCE_JOB_TIMEOUT_SECONDS", 0.1, create=True), \
+                patch.object(hhkan, "get_page", side_effect=slow_page), \
+                patch.object(hhkan, "get_search_token", side_effect=search_token):
+            try:
+                futures = registry.submit_fast_searches(dict(SUBJECT))
+                _source_result, _lines, error, elapsed_ms = futures[0].result(timeout=1)
+            finally:
+                registry.close()
+
+        self.assertIsNotNone(error)
+        self.assertLess(elapsed_ms, 500)
+        self.assertEqual(len(observed), 1)
+        self.assertGreater(observed[0][1], 0)
+        self.assertLessEqual(observed[0][1], 0.1)
+        self.assertGreater(observed[0][2], 0)
+        self.assertEqual(len(token_observed), 1)
+        self.assertGreater(token_observed[0][0], 0)
+        self.assertLessEqual(token_observed[0][0], 0.1)
+        self.assertGreater(token_observed[0][1], 0)
+
+    def test_stalled_dns_does_not_hold_fast_source_workers(self):
+        import socket
+        import hhkan
+
+        def stalled_getaddrinfo(_host, _port, *args, **kwargs):
+            time.sleep(0.4)
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                     "", ("8.8.8.8", 443))]
+
+        for adapter_type, site_url, api_url in (
+                ("macms_json", "https://source.test", "https://source.test/api/"),
+                ("hhkan", "https://www.hhkan0.com", "")):
+            with self.subTest(adapter_type=adapter_type):
+                registry = vod_sources.SourceRegistry([
+                    vod_sources.VodSource("source", "source", site_url, api_url,
+                                          adapter_type)])
+                try:
+                    with patch.object(vod_sources, "FAST_SOURCE_JOB_TIMEOUT_SECONDS", 0.08), \
+                            patch("socket.getaddrinfo", side_effect=stalled_getaddrinfo), \
+                            patch.object(hhkan, "_token_cache", None):
+                        future = registry.submit_fast_searches(dict(SUBJECT))[0]
+                        result = future.result(timeout=1)
+                        self.assertIsNotNone(result[2])
+                        self.assertLess(result[3], 250)
+
+                        retry = ()
+                        deadline = time.monotonic() + 0.5
+                        while time.monotonic() < deadline and not retry:
+                            retry = registry.submit_fast_searches(dict(SUBJECT))
+                            if not retry:
+                                time.sleep(0.01)
+                        self.assertEqual(len(retry), 1)
+                        retry_result = retry[0].result(timeout=1)
+                        self.assertIsNotNone(retry_result[2])
+                        self.assertLess(retry_result[3], 250)
+                finally:
+                    registry.close()
 
 
 if __name__ == "__main__":

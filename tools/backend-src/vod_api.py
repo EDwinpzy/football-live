@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import copy
 
+import vod_resolver
+
 
 class VodService:
     def __init__(self, catalog, registry, resolve_sources=None, resolve_play=None,
-                 fallback_sources=()):
+                 fallback_sources=(), resolver=None):
         self.catalog = catalog
         self.registry = registry
+        self.resolver = resolver
         self._resolve_sources = resolve_sources or registry.resolve_subject
         self._resolve_sources_waits_for_all = resolve_sources is None
         self._resolve_play = resolve_play
@@ -112,6 +115,20 @@ class VodService:
         if self.registry.history:
             self.registry.history.record(line_id, True)
         return result
+
+    def resolve(self, mytv_id, episode=1):
+        """Return the URL-free resolver contract for a canonical My TV ID."""
+        if self.resolver is None:
+            return vod_resolver.ResolveResult(
+                status="TEMPORARILY_UNAVAILABLE",
+                mytv_id=int(mytv_id),
+                episode=int(episode),
+                resolve_version=None,
+                preferred=None,
+                backups=(),
+                cache={"kind": "miss", "age_ms": 0},
+            ).to_public_dict()
+        return self.resolver.resolve(mytv_id=mytv_id, episode=episode).to_public_dict()
 
     def source_status(self):
         return {"version": self.registry.version, "sources": [

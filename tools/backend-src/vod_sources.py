@@ -16,6 +16,8 @@ import concurrent.futures
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import source_dns
+
 
 DEFAULT_PATH = Path(__file__).with_name("vod_sources.default.json")
 RUNTIME_PATH = Path(__file__).with_name("vod_sources.runtime.json")
@@ -53,12 +55,70 @@ PROBE_MAX_WORKERS = 18
 PROBE_TIMEOUT_SECONDS = 4
 PROBE_EARLY_EXIT_ALIVE = 3
 PROBE_EARLY_GRACE = 0.8
+FAST_RESOLVER_MAX_SOURCES = 3
+FAST_RESOLVER_MAX_WORKERS = 3
+FAST_RESOLVER_MAX_IN_FLIGHT = 6
+FAST_SOURCE_HEALTH_TTL_SECONDS = 300
+FAST_SOURCE_SOFT_TIMEOUT_SECONDS = 0.700
+FAST_RESOLVER_BUDGET_SECONDS = 1.500
+FAST_SOURCE_JOB_TIMEOUT_SECONDS = 1.500
+SOURCE_RESPONSE_MAX_BYTES = 512 * 1024
+HHKAN_SOURCE_RESPONSE_MAX_BYTES = 512 * 1024
 """源质量画像 + 熔断：连续 BREAKER_CONSEC_FAILS 次搜索失败 → 冷却
 BREAKER_COOLDOWN_SECONDS 秒内跳过该源（冷却到期自动放行试探，成功即复位）；
 延迟用半衰期 STATS_EMA_HALFLIFE_SECONDS 的 EMA，老数据自动失权。"""
 BREAKER_CONSEC_FAILS = 3
 BREAKER_COOLDOWN_SECONDS = 1800
 STATS_EMA_HALFLIFE_SECONDS = 7 * 86400
+
+_SOURCE_JOB_CONTEXT = threading.local()
+
+
+def _active_source_deadline():
+    return getattr(_SOURCE_JOB_CONTEXT, "deadline", None)
+
+
+def _remaining_source_timeout(deadline=None):
+    deadline = _active_source_deadline() if deadline is None else deadline
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    # Leave a small scheduling margin so the propagated timeout never exceeds
+    # the absolute deadline due to float rounding and call overhead.
+    if remaining <= 0.000001:
+        raise TimeoutError("source request deadline exceeded")
+    return remaining - 0.000001
+
+
+def _set_response_socket_timeout(response, timeout):
+    """Keep each streamed read within the source job's absolute deadline."""
+    fp = getattr(response, "fp", None)
+    raw = getattr(fp, "raw", None)
+    sock = getattr(raw, "_sock", None)
+    if sock is not None and timeout is not None:
+        sock.settimeout(max(0.001, timeout))
+
+
+def _read_response_body(response, max_bytes, deadline=None):
+    """Read a bounded body in small chunks, refreshing the socket's remaining timeout."""
+    if max_bytes is None and deadline is None:
+        return response.read()
+
+    chunks = []
+    received = 0
+    # Keep the read size bounded even when callers ask for an unlimited body.
+    while max_bytes is None or received < max_bytes:
+        remaining = _remaining_source_timeout(deadline) if deadline is not None else None
+        _set_response_socket_timeout(response, remaining)
+        read_size = 16 * 1024 if max_bytes is None else min(16 * 1024, max_bytes - received)
+        if read_size <= 0:
+            break
+        chunk = response.read(read_size)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        received += len(chunk)
+    return b"".join(chunks)
 
 
 class UnsafeSourceUrl(ValueError):
@@ -76,8 +136,18 @@ class VodSource:
     revision: int = 1
 
 
+class FastSearchSubmission(tuple):
+    """Tuple-compatible fast-search submission with transient overload status."""
+
+    def __new__(cls, futures=(), overloaded=False):
+        instance = super().__new__(cls, futures)
+        instance.overloaded = bool(overloaded)
+        return instance
+
+
 class SourceRegistry:
-    def __init__(self, sources=(), version=1, history=None, probe=None, stats=None):
+    def __init__(self, sources=(), version=1, history=None, probe=None, stats=None,
+                 clock=time.monotonic):
         self.sources = tuple(sources)
         self.version = int(version)
         self.history = history
@@ -85,6 +155,16 @@ class SourceRegistry:
         self.stats = stats
         self._resolve_cache = {}
         self._cache_lock = threading.Lock()
+        self._resolver_clock = clock
+        self._resolver_pool_lock = threading.RLock()
+        self._resolver_closed = False
+        self._resolver_health_at = None
+        self._resolver_health_order = ()
+        self._fast_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=FAST_RESOLVER_MAX_WORKERS, thread_name_prefix="vod-fast")
+        self._fast_slots = threading.BoundedSemaphore(FAST_RESOLVER_MAX_IN_FLIGHT)
+        self._fast_running_lock = threading.Lock()
+        self._fast_running = 0
 
     @classmethod
     def from_dict(cls, payload):
@@ -120,6 +200,103 @@ class SourceRegistry:
 
     def to_dict(self):
         return {"schema": 1, "version": self.version, "sources": [asdict(source) for source in self.sources]}
+
+    def resolver_source_order(self):
+        """Return the enabled, non-circuit-open sources in a five-minute health order."""
+        now = self._resolver_clock()
+        with self._resolver_pool_lock:
+            if (self._resolver_health_at is not None and
+                    now - self._resolver_health_at < FAST_SOURCE_HEALTH_TTL_SECONDS):
+                ordered = self._resolver_health_order
+            else:
+                ordered = None
+
+        if ordered is None:
+            enabled = [source for source in self.sources if source.enabled]
+            ordered = self.stats.sort_sources(enabled) if self.stats else enabled
+            with self._resolver_pool_lock:
+                if not self._resolver_closed:
+                    self._resolver_health_at = now
+                    self._resolver_health_order = tuple(ordered)
+
+        # The ranking can be reused for five minutes, while circuit state remains live.
+        stats = self.stats
+        return [source for source in ordered
+                if source.enabled and (not stats or not stats.is_circuit_open(source.id))]
+
+    def submit_fast_searches(self, subject, max_sources=FAST_RESOLVER_MAX_SOURCES):
+        """Submit at most three fast-path source searches to a bounded shared pool.
+
+        The returned futures carry the existing ``(source, lines, error, elapsed_ms)``
+        result. Callers may stop waiting after their request budget; outstanding work
+        remains in this same bounded pool and must not create per-request executors.
+        """
+        try:
+            limit = max(0, min(FAST_RESOLVER_MAX_SOURCES, int(max_sources)))
+        except (TypeError, ValueError, OverflowError):
+            limit = FAST_RESOLVER_MAX_SOURCES
+        if limit == 0:
+            return FastSearchSubmission()
+
+        futures = []
+        overloaded = False
+        for source in self.resolver_source_order()[:limit]:
+            if not self._fast_slots.acquire(blocking=False):
+                overloaded = True
+                break
+            with self._resolver_pool_lock:
+                if self._resolver_closed:
+                    self._fast_slots.release()
+                    overloaded = True
+                    break
+                try:
+                    future = self._fast_executor.submit(
+                        self._search_fast_one, source, copy.deepcopy(subject))
+                except RuntimeError:
+                    self._fast_slots.release()
+                    overloaded = True
+                    break
+                except BaseException:
+                    self._fast_slots.release()
+                    for submitted in futures:
+                        submitted.cancel()
+                    raise
+            # In-flight slots (6) outnumber workers (3), so claiming a slot says
+            # nothing about whether this job can start now. A submission that
+            # can only queue is work the caller will most likely time out on;
+            # the caller must treat that as "busy", never as "this source has no
+            # lines" (which would earn a 15s negative cache entry).
+            with self._fast_running_lock:
+                workers_busy = self._fast_running >= FAST_RESOLVER_MAX_WORKERS
+            if workers_busy:
+                overloaded = True
+            future.add_done_callback(self._release_fast_slot)
+            future.add_done_callback(self._record_fast_search)
+            futures.append(future)
+        return FastSearchSubmission(futures, overloaded=overloaded)
+
+    def _release_fast_slot(self, _future):
+        self._fast_slots.release()
+
+    def _record_fast_search(self, future):
+        if not self.stats:
+            return
+        try:
+            source, _group, error, elapsed = future.result()
+        except Exception:
+            return
+        try:
+            self.stats.record_search(source.id, error is None, elapsed)
+        except Exception:
+            return
+
+    def close(self):
+        """Stop accepting resolver work and cancel searches that have not started."""
+        with self._resolver_pool_lock:
+            if self._resolver_closed:
+                return
+            self._resolver_closed = True
+        self._fast_executor.shutdown(wait=False, cancel_futures=True)
 
     def resolve_subject(self, subject, wait_for_all=False):
         """Search enabled adapters and return only confident, normalized lines.
@@ -209,15 +386,46 @@ class SourceRegistry:
             with self._cache_lock:
                 self._resolve_cache.pop(cache_key, None)
 
+    def _search_fast_one(self, source, subject):
+        deadline = time.monotonic() + max(0.0, float(FAST_SOURCE_JOB_TIMEOUT_SECONDS))
+        previous_deadline = _active_source_deadline()
+        previous_dns_deadline = source_dns.set_deadline(deadline)
+        _SOURCE_JOB_CONTEXT.deadline = deadline
+        with self._fast_running_lock:
+            self._fast_running += 1
+        try:
+            return self._search_one(source, subject)
+        finally:
+            with self._fast_running_lock:
+                self._fast_running -= 1
+            if previous_deadline is None:
+                try:
+                    del _SOURCE_JOB_CONTEXT.deadline
+                except AttributeError:
+                    pass
+            else:
+                _SOURCE_JOB_CONTEXT.deadline = previous_deadline
+            source_dns.restore_deadline(previous_dns_deadline)
+
     def _search_one(self, source, subject):
         started = time.monotonic()
+        deadline = _active_source_deadline()
         try:
             adapter = HhkanAdapter(source) if source.adapter_type == "hhkan" else MacCmsAdapter(source)
             candidates = adapter.search(subject)
+            if deadline is not None:
+                _remaining_source_timeout(deadline)
             best = max(candidates, key=lambda item: match_score(subject, item), default=None)
-            if not best or match_score(subject, best) < AUTO_MATCH_THRESHOLD:
+            confidence = match_score(subject, best) if best else 0
+            if not best or confidence < AUTO_MATCH_THRESHOLD:
                 return source, [], None, _elapsed_ms(started)
-            return source, adapter.detail(best), None, _elapsed_ms(started)
+            lines = adapter.detail(best)
+            if deadline is not None:
+                _remaining_source_timeout(deadline)
+            for line in lines:
+                if isinstance(line, dict):
+                    line["match_score"] = confidence
+            return source, lines, None, _elapsed_ms(started)
         except Exception as exc:  # noqa: BLE001 - 单源失败不拖累整批，但要记下来
             return source, [], str(exc)[:120], _elapsed_ms(started)
 
@@ -604,7 +812,12 @@ def _validate_public_url(url, resolve_dns=False):
     except ValueError:
         if resolve_dns:
             try:
-                addresses = {row[4][0] for row in socket.getaddrinfo(hostname, parsed.port or 443)}
+                dns_timeout = (_remaining_source_timeout()
+                               if _active_source_deadline() is not None else None)
+                addresses = {
+                    row[4][0] for row in source_dns.getaddrinfo(
+                        hostname, parsed.port or 443, timeout=dns_timeout)
+                }
             except socket.gaierror as exc:
                 raise UnsafeSourceUrl("影视源域名无法解析") from exc
             if not addresses:
@@ -621,20 +834,39 @@ def _validate_public_url(url, resolve_dns=False):
     return url
 
 
+class _PublicSourceHTTPHandler(source_dns.BoundedHTTPHandler):
+    def http_open(self, request):
+        _validate_public_url(request.full_url, resolve_dns=True)
+        return super().http_open(request)
+
+
+class _PublicSourceHTTPSHandler(source_dns.BoundedHTTPSHandler):
+    def https_open(self, request):
+        _validate_public_url(request.full_url, resolve_dns=True)
+        return super().https_open(request)
+
+
+_SOURCE_URL_OPENER = urllib.request.build_opener(
+    _PublicSourceHTTPHandler, _PublicSourceHTTPSHandler)
+
+
 def _default_fetch(url):
     _validate_public_url(url, resolve_dns=True)
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json, application/xml, text/html"})
-    with urllib.request.urlopen(request, timeout=8) as response:
+    deadline = _active_source_deadline()
+    timeout = min(8.0, _remaining_source_timeout(deadline)) if deadline is not None else 8
+    with _SOURCE_URL_OPENER.open(request, timeout=timeout) as response:
         final_url = response.geturl()
         _validate_public_url(final_url, resolve_dns=True)
-        return {"final_url": final_url, "content_type": response.headers.get_content_type(), "body": response.read(512 * 1024).decode("utf-8", "replace")}
+        body = _read_response_body(response, SOURCE_RESPONSE_MAX_BYTES, deadline)
+        return {"final_url": final_url, "content_type": response.headers.get_content_type(), "body": body.decode("utf-8", "replace")}
 
 
 def _probe_fetch(url):
     _validate_public_url(url, resolve_dns=True)
     started = time.monotonic()
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/vnd.apple.mpegurl,*/*"})
-    with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT_SECONDS) as response:
+    with _SOURCE_URL_OPENER.open(request, timeout=PROBE_TIMEOUT_SECONDS) as response:
         _validate_public_url(response.geturl(), resolve_dns=True)
         body = response.read(256 * 1024).decode("utf-8", "replace")
     return {"elapsed_ms": int((time.monotonic() - started) * 1000), "body": body}
@@ -652,6 +884,11 @@ def probe_stream(url, fetch=None):
         heights = [int(value) for value in re.findall(r"RESOLUTION=\d+x(\d+)", body, re.I)]
         return {"alive": True, "latency_ms": int(result.get("elapsed_ms") or 0),
                 "height": max(heights, default=0)}
+    except source_dns.DNSCapacityError:
+        # Our own lookup pool was full. The source was never actually asked, so
+        # this line stays unprobed (sorted last) rather than being written off
+        # as dead -- "we ran out of budget" is not a verdict on the source.
+        return {"alive": None, "latency_ms": None, "height": 0}
     except Exception:
         return {"alive": False, "latency_ms": None, "height": 0}
 
@@ -790,12 +1027,28 @@ class HhkanAdapter:
             import hhkan as module
         self.module = module
 
+    def _get_search_token(self):
+        deadline = _active_source_deadline()
+        if deadline is None:
+            return self.module.get_search_token()
+        return self.module.get_search_token(
+            timeout=_remaining_source_timeout(deadline),
+            max_bytes=HHKAN_SOURCE_RESPONSE_MAX_BYTES)
+
+    def _get_page(self, path):
+        deadline = _active_source_deadline()
+        if deadline is None:
+            return self.module.get_page(path)
+        return self.module.get_page(
+            path, timeout=_remaining_source_timeout(deadline),
+            max_bytes=HHKAN_SOURCE_RESPONSE_MAX_BYTES)
+
     def search(self, subject):
         title = str(subject.get("title") or "").strip()
-        token = self.module.get_search_token()
+        token = self._get_search_token()
         path = "/search?t=%s&k=%s&p=1" % (
             urllib.parse.quote(token), urllib.parse.quote(title))
-        html = self.module.get_page(path)
+        html = self._get_page(path)
         candidates = []
         for match in re.finditer(r'href=["\']/detail/(\d+)\.html["\'][^>]*>(.*?)</a>', html, re.I | re.S):
             block = match.group(2)
@@ -807,7 +1060,7 @@ class HhkanAdapter:
 
     def detail(self, candidate):
         vid = int(candidate.get("id") or 0)
-        detail = self.module.parse_detail(self.module.get_page("/detail/%d.html" % vid), vid=vid)
+        detail = self.module.parse_detail(self._get_page("/detail/%d.html" % vid), vid=vid)
         lines = []
         for index, raw in enumerate(detail.get("sources") or []):
             episodes = []

@@ -14,6 +14,8 @@ import time
 import urllib.parse
 import urllib.request
 
+import source_dns
+
 BASE = "https://www.hhkan0.com"
 # 同站镜像域（2026-08-15 验证 hhkan1.com 存活，同一套 cdndefend）：主域失效自动回退
 DOMAINS = ["www.hhkan0.com", "www.hhkan1.com"]
@@ -37,7 +39,7 @@ _domain_i = [0]  # 当前生效域下标（多域回退）
 
 # ---------------------------------------------------------------- 反爬破解
 
-def _solve_challenge(html: str) -> str:
+def _solve_challenge(html: str, deadline: float = None) -> str:
     """从 cdndefend 挑战页解析常量并计算通过 cookie（SHA1 PoW）。
 
     挑战逻辑（2026-08-15 起为动态规则，全量从 JS 实时提取，站点改参数也能适配）：
@@ -66,6 +68,8 @@ def _solve_challenge(html: str) -> str:
 
     i = 0
     while True:
+        if deadline is not None and i % 1024 == 0 and time.monotonic() >= deadline:
+            raise TimeoutError("hhkan source request deadline exceeded")
         d = hashlib.sha1((const + str(i)).encode()).digest()
         if d[n1] == t0 and d[n1 + off] == t1:
             return f"{name}{const}{i}"
@@ -84,18 +88,19 @@ def _host_of(url: str) -> str:
     return (netloc.rsplit("@", 1)[-1].split(":")[0] or "").lower()
 
 
-def _check_url_safety(url: str) -> None:
+def _check_url_safety(url: str, timeout: float = None) -> None:
     """仅 https + 白名单域；解析 IP 落在私网/环回/保留段直接拒绝。"""
     scheme = urllib.parse.urlparse(url).scheme
     host = _host_of(url)
     if scheme != "https" or host not in _ALLOWED_HOSTS:
         raise ValueError("blocked url host: %s" % host)
     try:
-        import socket
-        for info in socket.getaddrinfo(host, 443):
+        for info in source_dns.getaddrinfo(host, 443, timeout=timeout):
             ip = info[4][0]
             if _private_ip.match(ip) or ip == "::1":
                 raise ValueError("blocked private ip: %s" % ip)
+    except TimeoutError:
+        raise
     except ValueError:
         raise
     except Exception:
@@ -112,15 +117,67 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_safe_opener = urllib.request.build_opener(_SafeRedirectHandler)
+class _SafeBoundedHTTPHandler(source_dns.BoundedHTTPHandler):
+    def http_open(self, req):
+        _check_url_safety(req.full_url, timeout=getattr(req, "timeout", None))
+        return super().http_open(req)
+
+
+class _SafeBoundedHTTPSHandler(source_dns.BoundedHTTPSHandler):
+    def https_open(self, req):
+        _check_url_safety(req.full_url, timeout=getattr(req, "timeout", None))
+        return super().https_open(req)
+
+
+_safe_opener = urllib.request.build_opener(
+    _SafeRedirectHandler, _SafeBoundedHTTPHandler, _SafeBoundedHTTPSHandler)
 
 
 def _safe_urlopen(req, timeout):
-    _check_url_safety(req.full_url if hasattr(req, "full_url") else str(req))
     return _safe_opener.open(req, timeout=timeout)
 
 
-def _fetch(url: str, referer: str = None) -> str:
+def _remaining_timeout(deadline):
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("hhkan source request deadline exceeded")
+    return remaining
+
+
+def _set_response_socket_timeout(response, timeout):
+    fp = getattr(response, "fp", None)
+    raw = getattr(fp, "raw", None)
+    sock = getattr(raw, "_sock", None)
+    if sock is not None and timeout is not None:
+        sock.settimeout(max(0.001, timeout))
+
+
+def _read_response_body(response, max_bytes=None, deadline=None):
+    if max_bytes is None and deadline is None:
+        return response.read()
+
+    chunks = []
+    received = 0
+    while max_bytes is None or received <= max_bytes:
+        remaining = _remaining_timeout(deadline)
+        _set_response_socket_timeout(response, remaining)
+        read_size = 16 * 1024 if max_bytes is None else min(16 * 1024, max_bytes + 1 - received)
+        if read_size <= 0:
+            break
+        chunk = response.read(read_size)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        received += len(chunk)
+        if max_bytes is not None and received > max_bytes:
+            raise ValueError("hhkan response exceeds byte limit")
+    return b"".join(chunks)
+
+
+def _fetch(url: str, referer: str = None, timeout: float = None,
+           max_bytes: int = None) -> str:
     """带 cookie 抓取：挑战页自动重算 cookie 重试；网络失败自动切镜像域。
     429（源站限流，2026-08-29 实测逐键前缀搜索会触发）指数退避 1s/2s/4s 重试。"""
     global _cookie, BASE
@@ -130,7 +187,9 @@ def _fetch(url: str, referer: str = None) -> str:
     target_path = urllib.parse.urlunsplit(("", "", target.path or "/", target.query, target.fragment))
     explicit_referer = referer
     backoff_429 = 0
+    deadline = time.monotonic() + max(0.0, float(timeout)) if timeout is not None else None
     for attempt in range(len(DOMAINS) * 2 + 6):
+        remaining = _remaining_timeout(deadline)
         active_base = "https://" + DOMAINS[_domain_i[0]]
         request_url = urllib.parse.urljoin(active_base + "/", target_path.lstrip("/"))
         request_referer = explicit_referer or (active_base + "/")
@@ -139,8 +198,19 @@ def _fetch(url: str, referer: str = None) -> str:
             headers["Cookie"] = _cookie
         req = urllib.request.Request(request_url, headers=headers)
         try:
-            resp = _safe_urlopen(req, 25)
-            body = resp.read().decode("utf-8", "ignore")
+            previous_dns_deadline = (
+                source_dns.set_deadline(deadline) if deadline is not None else None)
+            try:
+                resp = _safe_urlopen(req, 25 if remaining is None else remaining)
+            finally:
+                if deadline is not None:
+                    source_dns.restore_deadline(previous_dns_deadline)
+            try:
+                body = _read_response_body(resp, max_bytes, deadline).decode("utf-8", "ignore")
+            finally:
+                close = getattr(resp, "close", None)
+                if callable(close):
+                    close()
         except urllib.error.HTTPError as e:
             if e.code in (403, 850, 701):
                 # 收到挑战（或 403/701）：现场求解并带新 cookie 重试（同域）。
@@ -148,16 +218,27 @@ def _fetch(url: str, referer: str = None) -> str:
                 # MuMu 抓包定位；旧代码只认 403/850 → 探针误判源站死亡 →
                 # 设备被翻进 macCMS 降级模式，hhkan 影片全部「不存在」）。
                 with _lock:
-                    _cookie = _solve_challenge(e.read().decode("utf-8", "ignore"))
+                    _cookie = _solve_challenge(
+                        _read_response_body(e, max_bytes, deadline).decode("utf-8", "ignore"),
+                        deadline=deadline)
+                _remaining_timeout(deadline)
                 continue
             if e.code == 429 and backoff_429 < 4:
                 # 源站限流：退避 1.5s/3s/6s/10s 后重试（sleep 在锁外，不阻塞其他线程的挑战求解）
                 backoff_429 += 1
-                time.sleep((1 << backoff_429) * 0.75)
+                delay = (1 << backoff_429) * 0.75
+                remaining_after_response = _remaining_timeout(deadline)
+                if remaining_after_response is not None:
+                    time.sleep(min(delay, remaining_after_response))
+                    _remaining_timeout(deadline)
+                else:
+                    time.sleep(delay)
                 continue
             raise
-        except Exception:
+        except Exception as exc:
             # 网络失败（超时/断连/域名失效）：切换镜像域后重试
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("hhkan source request deadline exceeded") from exc
             with _lock:
                 _domain_i[0] = (_domain_i[0] + 1) % len(DOMAINS)
                 BASE = "https://" + DOMAINS[_domain_i[0]]
@@ -165,14 +246,17 @@ def _fetch(url: str, referer: str = None) -> str:
             continue
         if "cdndefend" in body[:2000]:
             with _lock:
-                _cookie = _solve_challenge(body)
+                _cookie = _solve_challenge(body, deadline=deadline)
+            _remaining_timeout(deadline)
             continue
         return body
     raise RuntimeError("抓取失败：全部镜像域不可用")
 
 
-def get_page(path: str) -> str:
-    return _fetch(BASE + path)
+def get_page(path: str, timeout: float = None, max_bytes: int = None) -> str:
+    if timeout is None and max_bytes is None:
+        return _fetch(BASE + path)
+    return _fetch(BASE + path, timeout=timeout, max_bytes=max_bytes)
 
 
 # 固定第三方数据源白名单（7m 即时比分，用于足球直播比分补全）
@@ -263,12 +347,15 @@ _TOKEN_TTL = 600.0
 _token_cache = None  # (token, 过期时间戳)
 
 
-def get_search_token() -> str:
+def get_search_token(timeout: float = None, max_bytes: int = None) -> str:
     """搜索表单里的 token（全站一致，从首页提取；10 分钟 TTL 缓存）。"""
     global _token_cache
     if _token_cache and _token_cache[1] > time.time():
         return _token_cache[0]
-    html = get_page("/")
+    if timeout is None and max_bytes is None:
+        html = get_page("/")
+    else:
+        html = get_page("/", timeout=timeout, max_bytes=max_bytes)
     m = re.search(r'name="t" value="([^"]+)"', html)
     if not m:
         raise RuntimeError("无法获取搜索 token")
