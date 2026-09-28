@@ -15,10 +15,16 @@ SET LOCAL otv.license_importer_smoke_code = :'smoke_code';
 INSERT INTO public.licenses (code, plan, days, ticket, note)
 VALUES (:'smoke_code', 'monthly', 30, '{"smoke": true}'::jsonb, 'role smoke test')
 ON CONFLICT (code) DO NOTHING
-RETURNING code AS inserted_code
-\gset first_
-\if :{?first_inserted_code}
-\else
+;
+-- \gset raises "no rows returned" on an empty result, so asserting via
+-- RETURNING is fragile. Count the row the importer role actually wrote.
+-- license_importer only holds SELECT (code) on licenses, so the assertion
+-- must not read any other column.
+SELECT count(*) AS inserted_rows
+FROM public.licenses
+WHERE code = :'smoke_code'
+\gset
+\if :inserted_rows = '0'
 \echo license_importer insert privilege smoke test failed
 \quit 3
 \endif
@@ -26,19 +32,25 @@ RETURNING code AS inserted_code
 INSERT INTO public.licenses (code, plan, days, ticket, note)
 VALUES (:'smoke_code', 'monthly', 30, '{"smoke": true}'::jsonb, 'duplicate smoke test')
 ON CONFLICT (code) DO NOTHING
-RETURNING code AS inserted_code
-\gset duplicate_
-\if :{?duplicate_inserted_code}
+-- The duplicate insert must affect no rows. \gset is unusable here: it raises
+-- "no rows returned for \gset" on an empty result, which is exactly the
+-- outcome this asserts. The role can only read the code column, so this
+-- compares the total row count for that code instead of filtering on note.
+;
+SELECT count(*) AS duplicate_rows FROM public.licenses WHERE code = :'smoke_code'
+\gset
+-- Exactly one row means the first insert stands and the duplicate was dropped.
+\if :duplicate_rows <> '1'
 \echo license_importer duplicate import smoke test failed
 \quit 3
 \endif
 
-SELECT code AS found_code
+-- count(*) always returns exactly one row, so \gset cannot fail here.
+SELECT count(*) AS found_rows
 FROM public.licenses
 WHERE code = :'smoke_code'
 \gset
-\if :{?found_code}
-\else
+\if :found_rows = '0'
 \echo license_importer code-only read smoke test failed
 \quit 3
 \endif

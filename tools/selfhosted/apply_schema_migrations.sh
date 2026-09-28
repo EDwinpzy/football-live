@@ -50,6 +50,7 @@ selfhosted/iptv_publish_lock.sql
 selfhosted/base_schema.sql
 selfhosted/license_importer_role.sql
 selfhosted/license_importer_smoke.psql
+selfhosted/rpc_grants_repair.sql
 selfhosted/migrations/license_restore_v1.sql
 license_v2_migration.sql
 license_note_migration.sql
@@ -194,6 +195,11 @@ run_psql_file() {
         -f "$1" >"$output_file" 2>&1; then
         return 0
     fi
+    # Surface the real psql error. Without this the container only printed a
+    # generic "schema migration failed" line, which cost a full debugging round
+    # trip every time a migration broke in production.
+    printf '%s\n' "schema migration failed; psql output follows:" >&2
+    grep -v '^NOTICE:' "$output_file" >&2 || true
     printf '%s\n' "schema migration failed; dependent API services will remain stopped" >&2
     return 1
 }

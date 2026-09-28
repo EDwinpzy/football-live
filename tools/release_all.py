@@ -91,6 +91,23 @@ def selfhosted_deploy_command(root=ROOT):
     ]
 
 
+def selfhosted_nginx_reload_command(root=ROOT):
+    """nginx.conf 是 bind mount，改它不会让 nginx 进程重读配置。
+
+    与 schema-migrations 同源的问题：容器一直活着，配置已经变了但旧配置
+    仍在生效。实际踩过一次 —— /admin/ 路由已写进 nginx.conf，线上却仍然
+    404，因为 nginx 从 2026-09-23 起就没 reload 过。
+    """
+    return selfhosted_compose_base(root) + [
+        "exec",
+        "-T",
+        "nginx",
+        "nginx",
+        "-s",
+        "reload",
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build local deliverables; deploy with --deploy")
     parser.add_argument("--deploy", action="store_true",
@@ -127,9 +144,15 @@ def main():
             )
         if not run(selfhosted_deploy_command(ROOT), deploy_dir):
             raise SystemExit("self-hosted Docker Compose deployment failed")
+        # nginx.conf 以 bind mount 方式挂载：文件变了但进程不会自动重读，
+        # 新增的 location 路由会静默不生效。
+        if not run(selfhosted_nginx_reload_command(ROOT), deploy_dir):
+            print("[WARN] nginx reload 失败，请手动执行："
+                  "docker compose exec nginx nginx -s reload", file=sys.stderr)
         print("\n[OK] 本地 Web 静态资源与 App 后端包已构建\n"
               "[OK] schema-migrations 已重跑并成功\n"
-              "[OK] 已调用自建 Docker Compose 部署入口")
+              "[OK] 已调用自建 Docker Compose 部署入口\n"
+              "[OK] nginx 已 reload")
     else:
         print("\n[OK] 本地 Web 静态资源与 App 后端包已构建\n"
               "[PAUSED] 未执行部署")

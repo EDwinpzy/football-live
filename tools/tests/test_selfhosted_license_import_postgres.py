@@ -76,11 +76,13 @@ def test_legacy_claim_inspects_the_function_body_instead_of_the_signature():
     assert "activate_code_supports_restore" in migration_sql
     # The signature may remain as a schema-completeness check, but the restore
     # decision must come from the probe result, not from that signature.
-    assert "SELECT pg_temp.activate_code_supports_restore() AS legacy_supports_restore \\gset" in migration_sql
+    # The probe result is read as text on purpose: \gset on a boolean expands
+    # to the bare literal t/f, which is not a valid SQL expression.
+    assert "AS legacy_supports_restore_text \\gset" in migration_sql
 
     # A legacy database that fails the probe must not be recorded as migrated;
     # its ledger row is withheld so the pending path installs the function.
-    assert "WHERE :legacy_supports_restore" in migration_sql
+    assert "WHERE :'legacy_supports_restore_text' = 'true'" in migration_sql
     assert "version <> 'license_restore_v1.sql'" in migration_sql
 
 

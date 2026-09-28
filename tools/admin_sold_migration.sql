@@ -154,3 +154,17 @@ begin
   return json_build_object('total', total, 'rows', v_out);
 end;
 $function$;
+
+-- PostgREST checks table-level EXECUTE before the function body ever runs, so
+-- the auth.uid() whitelist inside these functions is not sufficient on its
+-- own. Without these grants the admin console gets
+-- "permission denied for function admin_licenses" and the card list page
+-- stays empty. Both admin_licenses overloads must be granted.
+grant execute on function
+  public.admin_licenses(text, text, text, integer, integer),
+  public.admin_licenses(text, text, text, integer, integer, text, text)
+  to authenticated;
+grant execute on function public.admin_mark_sold(text, boolean) to authenticated;
+grant execute on function public.admin_stats() to authenticated;
+
+notify pgrst, 'reload schema';

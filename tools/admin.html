@@ -1512,7 +1512,7 @@ function renderHuList() {
       <td><b>v${r.hot_version_code}</b></td>
       <td class="lbl" title="${esc(r.hot_version_name || "-")}"><span class="u">${esc(r.hot_version_name || "-")}</span></td>
       <td>${huMb(r.file_size)}</td>
-      <td title="${esc(r.sha256)}">${esc(r.sha256.slice(0, 12))}…</td>
+      <td title="${esc(r.sha256 || "")}">${r.sha256 ? esc(r.sha256.slice(0, 12)) + "…" : "—"}</td>
       <td>${r.status === "published" ? '<span class="st ok">● 已发布</span>'
         : r.status === "scheduled" ? `<span class="st warn">◌ 定时</span> <span class="dim mono">${esc(fmtT(r.publish_at))}</span>`
         : '<span class="st warn">○ 下线</span>'}

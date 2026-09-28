@@ -785,11 +785,31 @@ def h_update_note(d: dict) -> dict:
 
 
 def h_logs(d: dict) -> dict:
+    """激活流水：读自建库的 activate_log 导出函数。
+
+    历史实现调的是 CloudBase 的 admin_logs(p_code, p_limit)，切到自建栈后
+    该函数并不存在，PostgREST 会直接返回
+    "Could not find the function public.admin_logs(...)"，后台"激活流水"页永远
+    报错。自建栈对应的是 admin_license_v2_log_export(p_limit, p_offset)。
+    它不接受按码过滤，所以这里导出后在服务端按 code 过滤，保持前端
+    "按码过滤"输入框的既有语义。
+    """
     try:
         limit = max(1, min(int(d.get("limit") or 100), 500))
     except (TypeError, ValueError):
         return {"error": "bad_limit"}
-    return rpc("admin_logs", {"p_code": (d.get("code") or "").strip() or None, "p_limit": limit})
+    code = (d.get("code") or "").strip().upper()
+    out = rpc("admin_license_v2_log_export", {"p_limit": limit, "p_offset": 0})
+    if not isinstance(out, dict):
+        # rpc() normalizes HTTP failures to {"error": ...}, so a non-dict body
+        # means something upstream returned an unexpected shape. Always hand
+        # the console a dict it can read .error / .rows off.
+        return {"error": "bad_rpc_response"}
+    if code:
+        rows = [r for r in (out.get("rows") or [])
+                if code in str(r.get("code") or "").upper()]
+        out = dict(out, total=len(rows), rows=rows)
+    return out
 
 
 def h_hu_list(d: dict) -> dict:
@@ -1811,9 +1831,13 @@ def h_vod_source_test(d: dict) -> dict:
             "找到候选但未通过自动匹配" if preview else "未取得可播放地址")
         return {"grade": vod_test_grade(score), "score": score,
                 "summary": "%s，匹配度 %d，响应 %dms" % (summary_state, match, elapsed),
-                "matched": matched, "preview_url": preview}
+                # The console stores this value in its latency column and sorts
+                # by it. Omitting it made every source look like 0ms, so the
+                # fastest-source ordering put them all first.
+                "matched": matched, "preview_url": preview, "latency_ms": elapsed}
     except Exception as exc:  # noqa: BLE001
-        return {"grade": "不可用", "score": 0, "summary": str(exc)[:160], "matched": False, "preview_url": ""}
+        return {"grade": "不可用", "score": 0, "summary": str(exc)[:160], "matched": False,
+                "preview_url": "", "latency_ms": None}
 
 
 def h_vod_source_publish(_d: dict) -> dict:

@@ -69,6 +69,7 @@ services:
       - ../../tools/selfhosted/base_schema.sql:/app/tools/selfhosted/base_schema.sql:ro
       - ../../tools/selfhosted/license_importer_role.sql:/app/tools/selfhosted/license_importer_role.sql:ro
       - ../../tools/selfhosted/license_importer_smoke.psql:/app/tools/selfhosted/license_importer_smoke.psql:ro
+      - ../../tools/selfhosted/rpc_grants_repair.sql:/app/tools/selfhosted/rpc_grants_repair.sql:ro
       - ../../tools/selfhosted/migrations/license_restore_v1.sql:/app/tools/selfhosted/migrations/license_restore_v1.sql:ro
       - ../../tools/license_v2_migration.sql:/app/tools/license_v2_migration.sql:ro
       - ../../tools/license_note_migration.sql:/app/tools/license_note_migration.sql:ro

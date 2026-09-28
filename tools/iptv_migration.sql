@@ -447,3 +447,34 @@ begin
   if not found then raise exception 'not_found'; end if;
   return json_build_object('ret', 0);
 end $$;
+
+-- PostgREST rejects an RPC call with "permission denied for function ..." when
+-- the connecting role lacks EXECUTE, before the function body (and its
+-- auth.uid() whitelist) ever runs. These grants are therefore required for the
+-- console's TV-source pages; without them every iptv_admin_* call fails.
+-- Signatures are the identity forms reported by pg_get_function_identity_arguments.
+grant execute on function
+  public.iptv_admin_list(),
+  public.iptv_admin_export(),
+  public.iptv_admin_get_mode(),
+  public.iptv_admin_group_list(),
+  public.iptv_admin_versions(integer),
+  public.iptv_admin_logs(integer),
+  public.iptv_admin_rollback_begin(integer),
+  public.iptv_admin_publish_begin(text),
+  public.iptv_admin_set_mode(text),
+  public.iptv_admin_delete_channel(bigint),
+  public.iptv_admin_batch(jsonb),
+  public.iptv_admin_import(jsonb, text),
+  public.iptv_admin_group_create(text),
+  public.iptv_admin_group_rename(bigint, text),
+  public.iptv_admin_group_delete(bigint, text),
+  public.iptv_admin_group_move(bigint, integer),
+  public.iptv_admin_upsert_channel(bigint, text, text, text, integer, boolean, text, jsonb),
+  public.iptv_admin_publish_confirm(integer, text, text, bigint, integer, integer, text)
+  to authenticated;
+
+-- Internal audit trail written by the functions above; not called over HTTP.
+grant execute on function public.iptv_log(text, text) to authenticated;
+
+notify pgrst, 'reload schema';

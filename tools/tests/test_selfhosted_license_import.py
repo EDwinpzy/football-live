@@ -251,7 +251,7 @@ def test_legacy_claim_uses_the_function_body_not_the_signature():
         "to_regprocedure('public.activate_code(text,text,text,integer,text,text)') IS NOT NULL)"
     )
     assert signature_entry in migration_sql
-    restore_decision = migration_sql.split("pg_temp.activate_code_supports_restore() AS legacy_supports_restore", 1)[0]
+    restore_decision = migration_sql.split("AS legacy_supports_restore_text", 1)[0]
     decision_block = restore_decision.rsplit("DO $validate_legacy_schema$", 1)
     if len(decision_block) == 2:
         # The signature entry lives in the completeness list, never as the
@@ -260,7 +260,7 @@ def test_legacy_claim_uses_the_function_body_not_the_signature():
 
     # Unsupported restore must leave the ledger row empty so the pending path
     # installs it, rather than hard-failing or silently claiming it.
-    assert "WHERE :legacy_supports_restore" in migration_sql
+    assert "WHERE :'legacy_supports_restore_text' = 'true'" in migration_sql
     assert "OR version <> 'license_restore_v1.sql'" in migration_sql
 
 

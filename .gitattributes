@@ -1,0 +1,28 @@
+# 本仓库的 shell / psql 脚本在 Linux 容器里由 /bin/sh 直接执行。
+# Windows 上编辑或传输很容易把 LF 变成 CRLF，结果是容器启动即报
+# "set: line 2: illegal option -"。这里统一钉死行尾，避免逐个排查。
+* text=auto
+
+*.sh    text eol=lf
+*.psql  text eol=lf
+*.sql   text eol=lf
+*.py    text eol=lf
+*.mjs   text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+
+# 二进制资源不做行尾转换
+*.apk   binary
+*.aab   binary
+*.zip   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.so    binary
+*.whl   binary
+*.pem   binary
+*.keystore binary

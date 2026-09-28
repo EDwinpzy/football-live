@@ -133,5 +133,24 @@ def test_missing_script_fails_before_running_anything(release_module, tmp_path, 
     assert calls == [], f"存在性检查失败时不应执行任何命令：{calls}"
 
 
+def test_deploy_reloads_nginx_so_new_routes_take_effect(gate_only, monkeypatch):
+    """nginx.conf 以 bind mount 挂载，``up -d --build`` 不会让它重读配置。
+
+    新增的 location（比如 /admin/）会静默不生效：文件是对的、容器在跑、
+    线上却还是旧行为。发布流程必须在 up 之后显式 reload。
+    """
+    runner = FakeRunner()
+    run_release(gate_only, runner, deploy=True)
+
+    rendered = [c for c, _cwd in runner.calls]
+    reload_index = next(
+        (i for i, c in enumerate(rendered) if "nginx" in c and "reload" in c), None)
+    assert reload_index is not None, f"发布流程没有 reload nginx：{calls}"
+    up_index = next(i for i, c in enumerate(rendered) if " up " in f" {c} ")
+    assert reload_index > up_index, "reload 必须发生在 up 之后，否则新容器还没起来"
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-q"]))
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

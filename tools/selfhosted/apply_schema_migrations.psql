@@ -74,6 +74,15 @@ DO $validate_legacy_schema$
 DECLARE
     v_missing text;
 BEGIN
+    -- The IPTV publish lease (public.iptv_publish_lock +
+    -- public.iptv_admin_publish_lock) is deliberately NOT listed below.
+    -- It ships inside the db_bootstrap bundle via \ir, and a production
+    -- database can legitimately reach this point without it: the ledger is
+    -- empty and the lease was never created there. Demanding it here would
+    -- deadlock the upgrade — the probe would refuse to run the very migration
+    -- that installs the missing object. Its SQL is idempotent
+    -- (CREATE TABLE IF NOT EXISTS / CREATE OR REPLACE), so letting the
+    -- pending path install it below is both safe and the intended repair.
     SELECT string_agg(required.object_name, ', ' ORDER BY required.object_name)
     INTO v_missing
     FROM (VALUES
@@ -91,7 +100,6 @@ BEGIN
         ('table public.iptv_config', to_regclass('public.iptv_config') IS NOT NULL),
         ('table public.iptv_group', to_regclass('public.iptv_group') IS NOT NULL),
         ('table public.iptv_line', to_regclass('public.iptv_line') IS NOT NULL),
-        ('table public.iptv_publish_lock', to_regclass('public.iptv_publish_lock') IS NOT NULL),
         ('table public.iptv_version', to_regclass('public.iptv_version') IS NOT NULL),
         ('table public.licenses', to_regclass('public.licenses') IS NOT NULL),
         ('table public.vod_source_drafts', to_regclass('public.vod_source_drafts') IS NOT NULL),
@@ -106,7 +114,6 @@ BEGIN
         ('function public.announcement_latest()', to_regprocedure('public.announcement_latest()') IS NOT NULL),
         ('function public.hotupdate_check(integer,integer)', to_regprocedure('public.hotupdate_check(integer,integer)') IS NOT NULL),
         ('function public.iptv_admin_list()', to_regprocedure('public.iptv_admin_list()') IS NOT NULL),
-        ('function public.iptv_admin_publish_lock(text,text)', to_regprocedure('public.iptv_admin_publish_lock(text,text)') IS NOT NULL),
         ('function public.vod_source_admin_list()', to_regprocedure('public.vod_source_admin_list()') IS NOT NULL),
         ('function public.vod_source_public_check(bigint)', to_regprocedure('public.vod_source_public_check(bigint)') IS NOT NULL)
     ) AS required(object_name, is_present)
@@ -125,7 +132,12 @@ $validate_legacy_schema$;
 -- predates it can still be upgraded by executing that single file. Claiming it
 -- as already applied here is exactly the bug this probe prevents: it would
 -- record the digest and leave /activate action=restore broken forever.
-SELECT pg_temp.activate_code_supports_restore() AS legacy_supports_restore \gset
+-- Read the probe into a psql variable as TEXT, not boolean: \gset on a
+-- boolean column expands to the bare literals t/f, and any later SQL use of
+-- that expansion is a syntax error ("WHERE f" / 'column "f" does not exist').
+-- Comparing to the text 'true' keeps the expansion a valid string literal.
+SELECT CASE WHEN pg_temp.activate_code_supports_restore()
+            THEN 'true' ELSE 'false' END AS legacy_supports_restore_text \gset
 
 -- This complete legacy signature means the historical migration set already
 -- ran. Record its current digests without replaying data-changing SQL. When
@@ -134,7 +146,7 @@ SELECT pg_temp.activate_code_supports_restore() AS legacy_supports_restore \gset
 INSERT INTO public.schema_migrations (version, sql_sha256)
 SELECT version, sql_sha256
 FROM pg_temp.expected_schema_migration_hashes
-WHERE :legacy_supports_restore
+WHERE :'legacy_supports_restore_text' = 'true'
    OR version <> 'license_restore_v1.sql'
 ON CONFLICT (version) DO NOTHING;
     \endif
@@ -271,5 +283,12 @@ ON CONFLICT (version) DO UPDATE
 SET applied_at = EXCLUDED.applied_at,
     sql_sha256 = EXCLUDED.sql_sha256;
 COMMIT;
+
+-- Same idea for RPC grants: idempotent GRANT/REVOKE, re-run every deployment
+-- so a database that predates the grants, or one that lost them, is repaired.
+-- This is deliberately not ledger-gated — the whole point is to fix an
+-- already-migrated database whose original migration file was applied before
+-- the GRANT statements existed.
+\ir rpc_grants_repair.sql
 
 \ir license_importer_smoke.psql
