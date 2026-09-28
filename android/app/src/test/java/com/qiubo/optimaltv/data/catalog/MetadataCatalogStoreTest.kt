@@ -1,12 +1,20 @@
 package com.qiubo.optimaltv.data.catalog
 
 import android.database.sqlite.SQLiteDatabase
+import androidx.room.Room
+import com.qiubo.optimaltv.data.db.AppDb
+import com.qiubo.optimaltv.data.db.FavoriteEntity
+import com.qiubo.optimaltv.data.db.HistoryEntity
+import com.qiubo.optimaltv.data.db.ProgressEntity
 import com.qiubo.optimaltv.data.model.CatalogMedia
 import com.qiubo.optimaltv.data.source.VodApiSource
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.ServerSocket
 import java.net.Socket
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -16,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -179,6 +188,42 @@ class MetadataCatalogStoreTest {
         val result = store.refreshIfNeeded(force = true)
 
         assertTrue(result is CatalogRefreshResult.Failed)
+        assertArrayEquals(oldBytes, store.currentDatabaseFile.readBytes())
+        assertEquals("旧目录", store.findByMyTvId("10000013")?.title)
+    }
+
+    @Test
+    fun `文件系统不支持原子替换时失败并保留旧目录`() = runBlocking {
+        val rejectAtomicMove = java.util.concurrent.atomic.AtomicBoolean(false)
+        val store = newStore(atomicMove = { source, target ->
+            if (rejectAtomicMove.get()) throw java.nio.file.AtomicMoveNotSupportedException(source.toString(), target.toString(), "test")
+            Files.move(source, target, ATOMIC_MOVE, REPLACE_EXISTING)
+            Unit
+        })
+        publishFull("2026092401", catalogDatabase("2026092401", title = "旧目录"))
+        assertTrue(store.refreshIfNeeded() is CatalogRefreshResult.Installed)
+        val oldBytes = store.currentDatabaseFile.readBytes()
+        rejectAtomicMove.set(true)
+        publishFull("2026092402", catalogDatabase("2026092402", title = "新目录"))
+
+        assertTrue(store.refreshIfNeeded(force = true) is CatalogRefreshResult.Failed)
+        assertArrayEquals(oldBytes, store.currentDatabaseFile.readBytes())
+        assertEquals("旧目录", store.findByMyTvId("10000013")?.title)
+    }
+
+    @Test
+    fun `父目录同步失败时回滚并保留旧目录`() = runBlocking {
+        val rejectSync = java.util.concurrent.atomic.AtomicBoolean(false)
+        val store = newStore(syncParentDirectory = {
+            if (rejectSync.get()) throw java.io.IOException("simulated directory fsync failure")
+        })
+        publishFull("2026092401", catalogDatabase("2026092401", title = "旧目录"))
+        assertTrue(store.refreshIfNeeded() is CatalogRefreshResult.Installed)
+        val oldBytes = store.currentDatabaseFile.readBytes()
+        rejectSync.set(true)
+        publishFull("2026092402", catalogDatabase("2026092402", title = "新目录"))
+
+        assertTrue(store.refreshIfNeeded(force = true) is CatalogRefreshResult.Failed)
         assertArrayEquals(oldBytes, store.currentDatabaseFile.readBytes())
         assertEquals("旧目录", store.findByMyTvId("10000013")?.title)
     }
@@ -402,30 +447,168 @@ class MetadataCatalogStoreTest {
     }
 
     @Test
+    fun `有效空目录不会回退到 APK 种子`() = runBlocking {
+        val store = newStore(seedCatalogJson = """{"items":[{"mytv_id":"10000077","t":"APK seed"}]}""")
+        publishFull("2026092401", catalogDatabase("2026092401", includeMedia = false))
+
+        assertTrue(store.refreshIfNeeded() is CatalogRefreshResult.Installed)
+
+        assertTrue(store.hasInstalledDatabase())
+        assertTrue(store.browsePage(pageSize = 1).items.isEmpty())
+        assertTrue(store.search("APK seed").isEmpty())
+        assertNull(store.findByMyTvId("10000077"))
+        assertNull(store.findByLegacyDoubanId("10000077"))
+    }
+
+    @Test
+    fun `缺少数据库时种子仍支持筛选和分页`() = runBlocking {
+        val seed = """{"items":[{"mytv_id":"10000077","t":"不匹配影片","c":"movie","ar":"美国","y":"2020","genres":["科幻"]},{"mytv_id":"10000078","t":"匹配影片","c":"movie","ar":"中国大陆","y":"2024","genres":["剧情"]}]}"""
+        val store = newStore(seedCatalogJson = seed)
+
+        val filters = store.filterOptions("movie")
+        val page = store.browsePage("movie", genre = "剧情", region = "中国大陆", year = "2024", pageSize = 48)
+
+        assertTrue(filters.regions.containsAll(listOf("美国", "中国大陆")))
+        assertEquals(1, page.total)
+        assertEquals(listOf("10000078"), page.items.map(CatalogMedia::mytvId))
+    }
+
+    @Test
+    fun `本地目录筛选分页只返回请求页并提供总数`() = runBlocking {
+        val store = installStore("2026092401")
+
+        val page = store.browsePage(mediaType = "movie", region = "中国大陆", page = 1, pageSize = 1)
+
+        assertEquals(1, page.total)
+        assertEquals(1, page.items.size)
+        assertEquals("10000013", page.items.single().mytvId)
+    }
+
+    @Test
+    fun `最低评分按数值比较而不是文本比较`() = runBlocking {
+        val store = installStore("2026092401")
+
+        val hits = store.browsePage(mediaType = "movie", minimumRating = 9.0)
+        val misses = store.browsePage(mediaType = "movie", minimumRating = 9.7)
+
+        assertEquals(listOf("10000013"), hits.items.map(CatalogMedia::mytvId))
+        assertTrue(misses.items.isEmpty())
+    }
+
+    @Test
+    fun `评分排序把高分条目排在前面`() = runBlocking {
+        val store = installStore("2026092401", extraRatingRows = true)
+
+        val sorted = store.browsePage(mediaType = "movie", sort = "rating", pageSize = 10)
+
+        assertEquals(listOf("10000013", "10000014"), sorted.items.map(CatalogMedia::mytvId))
+    }
+
+    @Test
+    fun `分页在数值阈值下仍按页返回正确条目`() = runBlocking {
+        val store = installStore("2026092401", extraRatingRows = true)
+
+        val first = store.browsePage(mediaType = "movie", sort = "rating", page = 1, pageSize = 1)
+        val second = store.browsePage(mediaType = "movie", sort = "rating", page = 2, pageSize = 1)
+
+        assertEquals(listOf("10000013"), first.items.map(CatalogMedia::mytvId))
+        assertEquals(listOf("10000014"), second.items.map(CatalogMedia::mytvId))
+    }
+
+    @Test
+    fun `种子目录也按评分阈值筛选`() = runBlocking {
+        val seed = """{"items":[
+            {"mytv_id":"10000077","t":"高分影片","c":"movie","y":"2024","r":9.4},
+            {"mytv_id":"10000078","t":"低分影片","c":"movie","y":"2023","r":7.1}
+        ]}"""
+        val store = newStore(seedCatalogJson = seed)
+
+        val hits = store.browsePage(mediaType = "movie", minimumRating = 9.0)
+        val misses = store.browsePage(mediaType = "movie", minimumRating = 9.5)
+
+        assertEquals(listOf("10000077"), hits.items.map(CatalogMedia::mytvId))
+        assertTrue(misses.items.isEmpty())
+    }
+
+    @Test
+    fun `内存目录覆盖全量条目而不是只保留一百二十条`() = runBlocking {
+        val store = installStore("2026092401", rowCount = 150)
+
+        val rows = store.previewRows()
+
+        assertTrue("内存目录必须覆盖 120 名之外的条目", rows.size >= 150)
+        assertEquals("10000143", rows.firstOrNull { it.mytvId == "10000143" }?.mytvId)
+    }
+
+    @Test
+    fun `大目录预览分页和筛选使用有界查询`() = runBlocking {
+        for (rowCount in listOf(10_000, 50_000)) {
+            val store = newStore()
+            publishFull("2026092401", catalogDatabase("2026092401", rowCount = rowCount))
+            assertTrue(store.refreshIfNeeded() is CatalogRefreshResult.Installed)
+
+            // 内存目录覆盖真实目录规模（上限 2000），超大文件只驻留上限条数。
+            val previewMs = measureMillis {
+                assertEquals(minOf(rowCount, 2_000), store.previewRows().size)
+            }
+            val pageMs = measureMillis {
+                val page = store.browsePage("movie", genre = "剧情", region = "中国大陆", pageSize = 48)
+                assertEquals(rowCount, page.total)
+                assertEquals(48, page.items.size)
+            }
+            val filtersMs = measureMillis {
+                val filters = store.filterOptions("movie")
+                assertTrue(filters.genres.contains("剧情"))
+                assertTrue(filters.regions.contains("中国大陆"))
+                assertTrue(filters.years.isNotEmpty())
+            }
+            println("catalog-benchmark rows=$rowCount previewMs=$previewMs pageMs=$pageMs filtersMs=$filtersMs")
+        }
+    }
+
+    @Test
     fun `替换目录不触碰 Room 收藏历史和进度记录`() = runBlocking {
         publishFull("2026092401", catalogDatabase("2026092401", title = "旧目录"))
         val store = newStore()
         store.refreshIfNeeded()
         val userDatabase = File(temporaryFolder.root, "user-data.sqlite")
-        createUserData(userDatabase)
-        val before = userRows(userDatabase)
+        val room = Room.databaseBuilder(
+            org.robolectric.RuntimeEnvironment.getApplication(), AppDb::class.java, userDatabase.absolutePath,
+        ).allowMainThreadQueries().build()
+        try {
+            val dao = room.vodDao()
+            dao.addFavorite(FavoriteEntity("douban:1291546", "霸王别姬", "poster", 1L))
+            dao.upsertHistory(HistoryEntity("douban:1291546", "霸王别姬", "poster", 3, 5000L, 9000L, 2L))
+            dao.upsertProgress(ProgressEntity("douban:1291546-e3", "douban:1291546", 3, 5000L, 9000L, 3L))
+            val before = listOf(dao.favoritesFlow().first(), dao.getHistory("douban:1291546"), dao.getProgress("douban:1291546-e3"))
 
-        publishFull("2026092402", catalogDatabase("2026092402", title = "更新目录"))
-        assertTrue(store.refreshIfNeeded(force = true) is CatalogRefreshResult.Installed)
+            publishFull("2026092402", catalogDatabase("2026092402", title = "更新目录"))
+            assertTrue(store.refreshIfNeeded(force = true) is CatalogRefreshResult.Installed)
 
-        assertEquals(before, userRows(userDatabase))
-        assertTrue(before["favorite"]?.firstOrNull().orEmpty().startsWith("douban:1291546|"))
-        assertTrue(before["history"]?.firstOrNull().orEmpty().startsWith("douban:1291546|"))
-        assertTrue(before["progress"]?.firstOrNull().orEmpty().startsWith("douban:1291546|"))
+            assertEquals(before, listOf(dao.favoritesFlow().first(), dao.getHistory("douban:1291546"), dao.getProgress("douban:1291546-e3")))
+        } finally {
+            room.close()
+        }
     }
 
     private fun installStore(
         version: String,
         createFts: Boolean = true,
         updatedAt: Long = 0L,
+        extraRatingRows: Boolean = false,
+        rowCount: Int = 1,
     ): MetadataCatalogStore {
         val store = newStore()
-        publishFull(version, catalogDatabase(version, createFts = createFts, updatedAt = updatedAt))
+        publishFull(
+            version,
+            catalogDatabase(
+                version,
+                createFts = createFts,
+                updatedAt = updatedAt,
+                extraRatingRows = extraRatingRows,
+                rowCount = rowCount,
+            ),
+        )
         runBlocking { store.refreshIfNeeded() }
         return store
     }
@@ -433,6 +616,8 @@ class MetadataCatalogStoreTest {
     private fun newStore(
         seedCatalogJson: String = "",
         integrityCheck: ((SQLiteDatabase) -> String)? = null,
+        atomicMove: ((java.nio.file.Path, java.nio.file.Path) -> Unit)? = null,
+        syncParentDirectory: ((java.nio.file.Path) -> Unit)? = null,
     ): MetadataCatalogStore = MetadataCatalogStore(
         File(temporaryFolder.root, "store-${System.nanoTime()}"),
         okhttp3.OkHttpClient(),
@@ -442,7 +627,13 @@ class MetadataCatalogStoreTest {
                 if (cursor.moveToFirst()) cursor.getString(0) else ""
             }
         },
-    ) { seedCatalogJson }
+        atomicMove = atomicMove ?: { source, target ->
+            Files.move(source, target, ATOMIC_MOVE, REPLACE_EXISTING)
+            Unit
+        },
+        syncParentDirectory = syncParentDirectory ?: {},
+        seedCatalogJson = { seedCatalogJson },
+    )
 
     private fun publishFull(
         version: String,
@@ -510,6 +701,9 @@ class MetadataCatalogStoreTest {
         schemaVersion: String = "3",
         createFts: Boolean = true,
         updatedAt: Long = 0L,
+        includeMedia: Boolean = true,
+        rowCount: Int = 1,
+        extraRatingRows: Boolean = false,
     ): ByteArray {
         val file = File(temporaryFolder.root, "fixture-${System.nanoTime()}.sqlite")
         val db = SQLiteDatabase.openOrCreateDatabase(file, null)
@@ -517,33 +711,61 @@ class MetadataCatalogStoreTest {
         db.execSQL("INSERT INTO meta VALUES ('schema_version', ?)", arrayOf(schemaVersion))
         db.execSQL("INSERT INTO meta VALUES ('data_version', ?)", arrayOf(version))
         db.execSQL("CREATE TABLE media (id INTEGER PRIMARY KEY, media_type TEXT, title TEXT, original_title TEXT, year INTEGER, runtime INTEGER, overview TEXT, status TEXT, language TEXT, country TEXT, release_date TEXT, episodes INTEGER, season INTEGER, popularity REAL, created_at INTEGER, updated_at INTEGER)")
-        db.execSQL("INSERT INTO media VALUES (10000013, 'movie', ?, 'Farewell My Concubine', 1993, 171, '京剧演员的故事', 'released', 'zh', '中国大陆', '1993-01-01', NULL, NULL, 9.0, 0, ?)", arrayOf<Any>(title, updatedAt))
+        if (includeMedia) db.execSQL("INSERT INTO media VALUES (10000013, 'movie', ?, 'Farewell My Concubine', 1993, 171, '京剧演员的故事', 'released', 'zh', '中国大陆', '1993-01-01', NULL, NULL, 9.0, 0, ?)", arrayOf<Any>(title, updatedAt))
         db.execSQL("CREATE TABLE external_id (media_id INTEGER, provider TEXT, external_id TEXT, PRIMARY KEY(provider, external_id))")
-        db.execSQL("INSERT INTO external_id VALUES (10000013, 'douban', '1291546')")
+        if (includeMedia) db.execSQL("INSERT INTO external_id VALUES (10000013, 'douban', '1291546')")
         db.execSQL("CREATE TABLE media_title (id INTEGER PRIMARY KEY, media_id INTEGER, title TEXT, language TEXT, title_type TEXT, normalized TEXT, pinyin TEXT, pinyin_alts TEXT, pinyin_initials TEXT, pinyin_initials_alts TEXT)")
-        db.execSQL("INSERT INTO media_title VALUES (1, 10000013, ?, 'zh', 'primary', '霸王别姬', 'bawangbieji', '', 'bwbj', '')", arrayOf(title))
+        if (includeMedia) db.execSQL("INSERT INTO media_title VALUES (1, 10000013, ?, 'zh', 'primary', '霸王别姬', 'bawangbieji', '', 'bwbj', '')", arrayOf(title))
         db.execSQL("CREATE TABLE person (id INTEGER PRIMARY KEY, name TEXT NOT NULL, original_name TEXT, profile_url TEXT)")
-        db.execSQL("INSERT INTO person VALUES (1, '陈凯歌', NULL, NULL)")
+        if (includeMedia) db.execSQL("INSERT INTO person VALUES (1, '陈凯歌', NULL, NULL)")
         db.execSQL("CREATE TABLE credit (media_id INTEGER, person_id INTEGER, department TEXT, role TEXT, character_name TEXT, credit_order INTEGER, PRIMARY KEY(media_id, person_id, department, role))")
-        db.execSQL("INSERT INTO credit VALUES (10000013, 1, 'directing', 'director', NULL, 1)")
+        if (includeMedia) db.execSQL("INSERT INTO credit VALUES (10000013, 1, 'directing', 'director', NULL, 1)")
         db.execSQL("CREATE TABLE genre (id INTEGER PRIMARY KEY, name TEXT UNIQUE)")
-        db.execSQL("INSERT INTO genre VALUES (1, '剧情')")
+        if (includeMedia) db.execSQL("INSERT INTO genre VALUES (1, '剧情')")
         db.execSQL("CREATE TABLE media_genre (media_id INTEGER, genre_id INTEGER, PRIMARY KEY(media_id, genre_id))")
-        db.execSQL("INSERT INTO media_genre VALUES (10000013, 1)")
+        if (includeMedia) db.execSQL("INSERT INTO media_genre VALUES (10000013, 1)")
         db.execSQL("CREATE TABLE region (id INTEGER PRIMARY KEY, name TEXT UNIQUE)")
-        db.execSQL("INSERT INTO region VALUES (1, '中国大陆')")
+        if (includeMedia) db.execSQL("INSERT INTO region VALUES (1, '中国大陆')")
         db.execSQL("CREATE TABLE media_region (media_id INTEGER, region_id INTEGER, PRIMARY KEY(media_id, region_id))")
-        db.execSQL("INSERT INTO media_region VALUES (10000013, 1)")
+        if (includeMedia) db.execSQL("INSERT INTO media_region VALUES (10000013, 1)")
         db.execSQL("CREATE TABLE rating (media_id INTEGER, provider TEXT, score REAL, vote_count INTEGER, updated_at INTEGER, PRIMARY KEY(media_id, provider))")
-        db.execSQL("INSERT INTO rating VALUES (10000013, 'douban', 9.6, 1000, 0)")
+        if (includeMedia) db.execSQL("INSERT INTO rating VALUES (10000013, 'douban', 9.6, 1000, 0)")
+        if (includeMedia && extraRatingRows) {
+            db.execSQL(
+                "INSERT INTO media VALUES (10000014, 'movie', '低分外传', '', 1994, 100, '', 'released', 'zh', '中国大陆', '', NULL, NULL, 4.0, 0, 0)"
+            )
+            db.execSQL("INSERT INTO rating VALUES (10000014, 'douban', 5.5, 100, 0)")
+        }
         db.execSQL("CREATE TABLE image (id INTEGER PRIMARY KEY, media_id INTEGER, image_type TEXT, original_url TEXT, cached_url TEXT, width INTEGER, height INTEGER, UNIQUE(media_id, image_type))")
-        db.execSQL("INSERT INTO image VALUES (1, 10000013, 'poster', 'https://img.example/poster.jpg', NULL, 300, 450)")
+        if (includeMedia) db.execSQL("INSERT INTO image VALUES (1, 10000013, 'poster', 'https://img.example/poster.jpg', NULL, 300, 450)")
         db.execSQL("CREATE TABLE search_doc (media_id INTEGER PRIMARY KEY, title_norm TEXT, aliases_norm TEXT, pinyin TEXT, pinyin_alts TEXT, initials TEXT, initials_alts TEXT, people_norm TEXT, people_pinyin TEXT, genres_norm TEXT, popularity REAL, year INTEGER)")
-        db.execSQL("INSERT INTO search_doc VALUES (10000013, ?, '', 'bawangbieji', '', 'bwbj', '', '陈凯歌', 'chenkaige', '剧情', 9.0, 1993)", arrayOf(title))
+        if (includeMedia) db.execSQL("INSERT INTO search_doc VALUES (10000013, ?, '', 'bawangbieji', '', 'bwbj', '', '陈凯歌', 'chenkaige', '剧情', 9.0, 1993)", arrayOf(title))
         if (createFts) {
             runCatching {
                 db.execSQL("CREATE VIRTUAL TABLE search_fts USING fts5(media_id UNINDEXED, title, aliases, pinyin, initials, people, genres, prefix='2 3 4')")
-                db.execSQL("INSERT INTO search_fts VALUES ('10000013', ?, '', 'bawangbieji', 'bwbj', 'chenkaige', '剧情')", arrayOf(title))
+                if (includeMedia) db.execSQL("INSERT INTO search_fts VALUES ('10000013', ?, '', 'bawangbieji', 'bwbj', 'chenkaige', '剧情')", arrayOf(title))
+            }
+        }
+        if (includeMedia && rowCount > 1) {
+            db.execSQL("CREATE INDEX idx_external_media ON external_id(media_id)")
+            db.execSQL("CREATE INDEX idx_genre_media ON media_genre(media_id, genre_id)")
+            db.execSQL("CREATE INDEX idx_region_media ON media_region(media_id, region_id)")
+            db.execSQL("CREATE INDEX idx_rating_media ON rating(media_id, provider)")
+            db.beginTransaction()
+            try {
+                for (offset in 1 until rowCount) {
+                    val id = 10000013L + offset
+                    val itemTitle = "样本影片$offset"
+                    val itemYear = 1980 + offset % 47
+                    val popularity = (rowCount - offset).toDouble()
+                    db.execSQL("INSERT INTO media VALUES (?, 'movie', ?, '', ?, 100, '', 'released', 'zh', '中国大陆', '', NULL, NULL, ?, 0, 0)", arrayOf(id, itemTitle, itemYear, popularity))
+                    db.execSQL("INSERT INTO media_genre VALUES (?, 1)", arrayOf(id))
+                    db.execSQL("INSERT INTO media_region VALUES (?, 1)", arrayOf(id))
+                    db.execSQL("INSERT INTO search_doc VALUES (?, ?, '', '', '', '', '', '', '', '剧情', ?, ?)", arrayOf(id, itemTitle, popularity, itemYear))
+                }
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
             }
         }
         db.close()
@@ -551,30 +773,6 @@ class MetadataCatalogStoreTest {
     }
 
     private fun emptyDatabase(version: String): ByteArray = catalogDatabase(version)
-
-    private fun createUserData(file: File) {
-        val db = SQLiteDatabase.openOrCreateDatabase(file, null)
-        db.execSQL("CREATE TABLE favorite (id TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        db.execSQL("CREATE TABLE history (id TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        db.execSQL("CREATE TABLE progress (id TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        db.execSQL("INSERT INTO favorite VALUES ('douban:1291546', 'favorite')")
-        db.execSQL("INSERT INTO history VALUES ('douban:1291546', '2026-09-24')")
-        db.execSQL("INSERT INTO progress VALUES ('douban:1291546', 'episode=3;position=5000')")
-        db.close()
-    }
-
-    private fun userRows(file: File): Map<String, List<String>> {
-        val db = SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY)
-        return try {
-            listOf("favorite", "history", "progress").associateWith { table ->
-                db.rawQuery("SELECT id, value FROM $table ORDER BY id", null).use { cursor ->
-                    buildList { while (cursor.moveToNext()) add(cursor.getString(0) + "|" + cursor.getString(1)) }
-                }
-            }
-        } finally {
-            db.close()
-        }
-    }
 
     private fun integrityCheck(file: File): String {
         val db = SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY)
@@ -585,6 +783,12 @@ class MetadataCatalogStoreTest {
         } finally {
             db.close()
         }
+    }
+
+    private suspend fun measureMillis(block: suspend () -> Unit): Long {
+        val started = System.nanoTime()
+        block()
+        return (System.nanoTime() - started) / 1_000_000L
     }
 
     private fun count(path: String): Int = requestCounts[path]?.get() ?: 0

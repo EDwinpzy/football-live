@@ -10,6 +10,9 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.channels.FileChannel
+import java.nio.file.StandardOpenOption.READ
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.security.DigestInputStream
@@ -35,6 +38,9 @@ sealed interface CatalogRefreshResult {
     data class Failed(val reason: String) : CatalogRefreshResult
 }
 
+data class CatalogBrowseResult(val items: List<CatalogMedia>, val total: Int)
+data class CatalogFilterOptions(val genres: List<String>, val regions: List<String>, val years: List<String>)
+
 /**
  * Owns the replaceable, read-only metadata database. Room remains the source of truth for user data.
  * The constructor accepting a directory and seed supplier is internal so JVM tests can isolate files.
@@ -49,6 +55,10 @@ class MetadataCatalogStore internal constructor(
         }
     },
     private val seedCatalogJson: () -> String,
+    private val atomicMove: (Path, Path) -> Unit = { source, target -> Files.move(source, target, ATOMIC_MOVE, REPLACE_EXISTING) },
+    private val syncParentDirectory: (Path) -> Unit = { parent ->
+        if (File.separatorChar != '\\') FileChannel.open(parent, READ).use { it.force(true) }
+    },
 ) {
     constructor(context: Context, client: OkHttpClient, apiOrigin: String) : this(
         directory = File(context.filesDir, DIRECTORY_NAME),
@@ -88,29 +98,212 @@ class MetadataCatalogStore internal constructor(
             .isSuccess
     }
 
-    suspend fun all(): List<CatalogMedia> = withContext(Dispatchers.IO) {
+    /** Filter and page inside SQLite so browse requests never materialize the full catalogue. */
+    suspend fun browsePage(
+        mediaType: String = "",
+        genre: String = "",
+        region: String = "",
+        year: String = "",
+        minimumRating: Double? = null,
+        sort: String = "hot",
+        page: Int = 1,
+        pageSize: Int = 48,
+    ): CatalogBrowseResult = withContext(Dispatchers.IO) {
+        val key = mediaType.trim().lowercase(Locale.ROOT)
+        val categoryTypes = when (key) {
+            "movie" -> listOf("movie", "film")
+            "tv" -> listOf("tv", "series", "tv_series", "show")
+            "anime" -> listOf("anime", "animation")
+            "variety" -> listOf("variety")
+            "short" -> listOf("short")
+            else -> emptyList()
+        }
+        val where = ArrayList<String>()
+        val args = ArrayList<String>()
+        if (categoryTypes.isNotEmpty()) {
+            where += "lower(m.media_type) IN (${categoryTypes.joinToString(",") { "?" }})"
+            args += categoryTypes
+        }
+        if (genre.isNotBlank()) {
+            where += "EXISTS (SELECT 1 FROM media_genre mg JOIN genre g ON g.id = mg.genre_id WHERE mg.media_id = m.id AND g.name = ?)"
+            args += genre
+        }
+        if (region.isNotBlank()) {
+            where += "EXISTS (SELECT 1 FROM media_region mr JOIN region r ON r.id = mr.region_id WHERE mr.media_id = m.id AND r.name LIKE ? ESCAPE '\\')"
+            args += "%${region.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")}%"
+        }
+        if (year.isNotBlank()) {
+            where += "CAST(m.year AS TEXT) = ?"
+            args += year
+        }
+        if (minimumRating != null) {
+            // Cast back to REAL: a TEXT-bound threshold compares greater than every
+            // numeric score in SQLite, so the >= predicate would never match.
+            where += "CAST(COALESCE((SELECT score FROM rating WHERE media_id = m.id ORDER BY CASE WHEN provider = 'douban' THEN 0 ELSE 1 END LIMIT 1), 0) AS REAL) >= CAST(? AS REAL)"
+            args += minimumRating.toString()
+        }
+        val whereSql = where.takeIf(List<String>::isNotEmpty)?.joinToString(" AND ", prefix = " WHERE ").orEmpty()
+        val countArgs = args.toTypedArray()
+        val safePageSize = pageSize.coerceIn(1, 100)
+        val offset = (page.coerceAtLeast(1) - 1).toLong() * safePageSize
+        val orderSql = when (sort.lowercase(Locale.ROOT)) {
+            "new", "2" -> "m.year DESC, m.id DESC"
+            "rating", "1" -> "COALESCE((SELECT score FROM rating WHERE media_id = m.id ORDER BY CASE WHEN provider = 'douban' THEN 0 ELSE 1 END LIMIT 1), 0) DESC, m.id DESC"
+            else -> "m.popularity DESC, m.id DESC"
+        }
+        val result: CatalogBrowseResult? = runCatching {
+            if (!currentFile.isFile) null else openReadOnly(currentFile).use { db ->
+                val total = db.rawQuery("SELECT COUNT(*) FROM media m$whereSql", countArgs).use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getInt(0) else 0
+                }
+                val queryArgs = countArgs + arrayOf(safePageSize.toString(), offset.toString())
+                val ids = db.rawQuery(
+                    "SELECT m.id FROM media m$whereSql ORDER BY $orderSql LIMIT CAST(? AS INTEGER) OFFSET CAST(? AS INTEGER)",
+                    queryArgs,
+                ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.getLong(0)) } }
+                CatalogBrowseResult(if (ids.isEmpty()) emptyList() else readMedia(db, ids), total)
+            }
+        }.onFailure { fullRecoveryRequired.set(true) }.getOrNull()
+        result ?: run {
+            val seed = readSeedCatalog().asSequence()
+                .filter { categoryTypes.isEmpty() || it.mediaType.trim().lowercase(Locale.ROOT) in categoryTypes }
+                .filter { genre.isBlank() || genre in it.genres }
+                .filter { region.isBlank() || it.regions.any { value -> value.contains(region, ignoreCase = true) } }
+                .filter { year.isBlank() || year == it.year }
+                .filter { minimumRating == null || it.rating >= minimumRating }
+                .toList()
+            val sorted = when (sort.lowercase(Locale.ROOT)) {
+                "new", "2" -> seed.sortedWith(compareByDescending<CatalogMedia> { it.year.toIntOrNull() ?: 0 }.thenByDescending { it.mytvId })
+                "rating", "1" -> seed.sortedWith(compareByDescending<CatalogMedia> { it.rating }.thenByDescending { it.mytvId })
+                else -> seed.sortedWith(compareByDescending<CatalogMedia> { it.popularity }.thenByDescending { it.mytvId })
+            }
+            val start = offset.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            CatalogBrowseResult(sorted.drop(start).take(safePageSize), sorted.size)
+        }
+    }
+
+    suspend fun filterOptions(mediaType: String): CatalogFilterOptions = withContext(Dispatchers.IO) {
+        val categoryTypes = categoryTypes(mediaType)
         runCatching {
-            if (currentFile.isFile) openReadOnly(currentFile).use { db -> readMedia(db, limit = Int.MAX_VALUE) }
-            else emptyList()
-        }.onFailure { fullRecoveryRequired.set(true) }
-            .getOrDefault(emptyList()).ifEmpty { readSeedCatalog() }
+            if (!currentFile.isFile) null else openReadOnly(currentFile).use { db ->
+                val where = if (categoryTypes.isEmpty()) "" else
+                    " WHERE lower(m.media_type) IN (${categoryTypes.joinToString(",") { "?" }})"
+                val args = categoryTypes.toTypedArray()
+                fun values(sql: String): List<String> = db.rawQuery(sql, args).use { cursor ->
+                    buildList { while (cursor.moveToNext()) cursor.getString(0)?.takeIf(String::isNotBlank)?.let(::add) }
+                }
+                val yearWhere = if (where.isBlank()) " WHERE m.year IS NOT NULL" else "$where AND m.year IS NOT NULL"
+                CatalogFilterOptions(
+                    genres = values("SELECT DISTINCT g.name FROM genre g JOIN media_genre mg ON mg.genre_id = g.id JOIN media m ON m.id = mg.media_id$where ORDER BY g.name"),
+                    regions = values("SELECT DISTINCT r.name FROM region r JOIN media_region mr ON mr.region_id = r.id JOIN media m ON m.id = mr.media_id$where ORDER BY r.name"),
+                    years = values("SELECT DISTINCT CAST(m.year AS TEXT) FROM media m$yearWhere ORDER BY m.year DESC"),
+                )
+            }
+        }.onFailure { fullRecoveryRequired.set(true) }.getOrNull() ?: run {
+            val wanted = categoryTypes.map(String::lowercase).toSet()
+            val seed = readSeedCatalog().filter { wanted.isEmpty() || it.mediaType.lowercase() in wanted }
+            CatalogFilterOptions(
+                genres = seed.flatMap(CatalogMedia::genres).distinct().sorted(),
+                regions = seed.flatMap(CatalogMedia::regions).distinct().sorted(),
+                years = seed.map(CatalogMedia::year).filter(String::isNotBlank).distinct().sortedDescending(),
+            )
+        }
+    }
+
+    suspend fun categoryKeys(): List<String> = withContext(Dispatchers.IO) {
+        val result = runCatching {
+            if (!currentFile.isFile) null else openReadOnly(currentFile).use { db ->
+                db.rawQuery(
+                    """
+                    SELECT CASE
+                        WHEN lower(media_type) IN ('tv', 'series', 'tv_series', 'show') THEN 'tv'
+                        WHEN lower(media_type) IN ('anime', 'animation') THEN 'anime'
+                        WHEN lower(media_type) IN ('variety', 'short') THEN lower(media_type)
+                        ELSE 'movie'
+                    END AS category
+                    FROM media
+                    GROUP BY category
+                    ORDER BY MAX(popularity) DESC
+                    """.trimIndent(),
+                    null,
+                ).use { cursor -> buildList<String> { while (cursor.moveToNext()) add(cursor.getString(0)) } }
+            }
+        }.onFailure { fullRecoveryRequired.set(true) }.getOrNull()
+        result ?: readSeedCatalog().map { categoryKeyForMediaType(it.mediaType) }.distinct()
+    }
+
+    suspend fun topRows(mediaType: String, sort: String = "hot", limit: Int = 24): List<CatalogMedia> = withContext(Dispatchers.IO) {
+        val types = categoryTypes(mediaType)
+        runCatching {
+            if (!currentFile.isFile) null else openReadOnly(currentFile).use { db ->
+                val where = if (types.isEmpty()) "" else " WHERE lower(m.media_type) IN (${types.joinToString(",") { "?" }})"
+                val order = when (sort.lowercase(Locale.ROOT)) {
+                    "new" -> "m.year DESC, m.id DESC"
+                    "updated" -> "m.updated_at DESC, m.id DESC"
+                    "rating" -> "COALESCE((SELECT score FROM rating WHERE media_id = m.id ORDER BY CASE WHEN provider = 'douban' THEN 0 ELSE 1 END LIMIT 1), 0) DESC, m.id DESC"
+                    else -> "m.popularity DESC, m.id DESC"
+                }
+                val ids = db.rawQuery(
+                    "SELECT m.id FROM media m$where ORDER BY $order LIMIT ?",
+                    types.toTypedArray() + arrayOf(limit.coerceIn(1, 100).toString()),
+                ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.getLong(0)) } }
+                if (ids.isEmpty()) emptyList() else readMedia(db, ids)
+            }
+        }.onFailure { fullRecoveryRequired.set(true) }.getOrNull() ?: readSeedCatalog()
+            .filter { types.isEmpty() || it.mediaType.lowercase() in types }
+            .sortedWith(when (sort.lowercase(Locale.ROOT)) {
+                "new" -> compareByDescending<CatalogMedia> { it.year.toIntOrNull() ?: 0 }
+                "updated" -> compareByDescending(CatalogMedia::updatedAt)
+                "rating" -> compareByDescending(CatalogMedia::rating)
+                else -> compareByDescending(CatalogMedia::popularity)
+            })
+            .take(limit.coerceIn(1, 100))
+    }
+
+    /**
+     * Rows materialised into the in-memory catalogue. [CatalogSnapshotPolicy] bounds the on-disk
+     * snapshot, but the in-memory catalogue must stay full: `itemById`, `siblings` and `byCategory`
+     * read from memory only, so a bounded preview makes everything past the cutoff unresolvable
+     * (player's `itemById(...)?.categoryId`, search category jumps, first-screen hero preload).
+     * `readMedia` is a single indexed query and the baseline loaded the whole catalogue here too.
+     */
+    suspend fun previewRows(limit: Int = MAX_IN_MEMORY_ROWS): List<CatalogMedia> = withContext(Dispatchers.IO) {
+        val cap = limit.coerceIn(1, MAX_IN_MEMORY_ROWS)
+        runCatching {
+            if (!currentFile.isFile) null else openReadOnly(currentFile).use { db -> readMedia(db, limit = cap) }
+        }.onFailure { fullRecoveryRequired.set(true) }.getOrNull() ?: readSeedCatalog().take(cap)
+    }
+
+    private fun categoryTypes(mediaType: String): List<String> = when (mediaType.trim().lowercase(Locale.ROOT)) {
+        "movie" -> listOf("movie", "film")
+        "tv" -> listOf("tv", "series", "tv_series", "show")
+        "anime" -> listOf("anime", "animation")
+        "variety" -> listOf("variety")
+        "short" -> listOf("short")
+        else -> emptyList()
+    }
+
+    private fun categoryKeyForMediaType(mediaType: String): String = when (mediaType.trim().lowercase(Locale.ROOT)) {
+        "tv", "series", "tv_series", "show" -> "tv"
+        "anime", "animation" -> "anime"
+        "variety", "short" -> mediaType.trim().lowercase(Locale.ROOT)
+        else -> "movie"
     }
 
     suspend fun findByMyTvId(mytvId: String): CatalogMedia? = withContext(Dispatchers.IO) {
         val id = mytvId.trim().toLongOrNull()?.takeIf { it > 0 } ?: return@withContext null
-        val local = runCatching {
-            if (!currentFile.isFile) null
-            else openReadOnly(currentFile).use { db -> readMedia(db, ids = listOf(id)).firstOrNull() }
-        }.onFailure { fullRecoveryRequired.set(true) }.getOrNull()
-        local ?: readSeedCatalog().firstOrNull { it.mytvId == id.toString() }
+        if (!currentFile.isFile) return@withContext readSeedCatalog().firstOrNull { it.mytvId == id.toString() }
+        runCatching { openReadOnly(currentFile).use { db -> readMedia(db, ids = listOf(id)).firstOrNull() } }
+            .onFailure { fullRecoveryRequired.set(true) }
+            .getOrElse { readSeedCatalog().firstOrNull { it.mytvId == id.toString() } }
     }
 
     suspend fun findByLegacyDoubanId(doubanId: String): CatalogMedia? = withContext(Dispatchers.IO) {
         val wanted = doubanId.trim().removePrefix("douban:").takeIf(String::isNotBlank)
             ?: return@withContext null
-        val local = runCatching {
-            if (!currentFile.isFile) null
-            else openReadOnly(currentFile).use { db ->
+        if (!currentFile.isFile) return@withContext readSeedCatalog().firstOrNull { it.externalIds["douban"] == wanted }
+        runCatching {
+            openReadOnly(currentFile).use { db ->
                 db.rawQuery(
                     "SELECT media_id FROM external_id WHERE provider = 'douban' AND external_id = ? LIMIT 1",
                     arrayOf(wanted),
@@ -118,8 +311,8 @@ class MetadataCatalogStore internal constructor(
                     if (cursor.moveToFirst()) readMedia(db, ids = listOf(cursor.getLong(0))).firstOrNull() else null
                 }
             }
-        }.onFailure { fullRecoveryRequired.set(true) }.getOrNull()
-        local ?: readSeedCatalog().firstOrNull { it.externalIds["douban"] == wanted }
+        }.onFailure { fullRecoveryRequired.set(true) }
+            .getOrElse { readSeedCatalog().firstOrNull { it.externalIds["douban"] == wanted } }
     }
 
     suspend fun search(query: String, limit: Int = DEFAULT_SEARCH_LIMIT): List<CatalogMedia> = withContext(Dispatchers.IO) {
@@ -130,7 +323,7 @@ class MetadataCatalogStore internal constructor(
             if (!currentFile.isFile) emptyList()
             else openReadOnly(currentFile).use { db -> searchDatabase(db, query, normalized, safeLimit) }
         }.onFailure { fullRecoveryRequired.set(true) }.getOrDefault(emptyList())
-        if (local.isNotEmpty()) local
+        if (currentFile.isFile && !fullRecoveryRequired.get()) local
         else readSeedCatalog().asSequence()
             .filter { media -> media.searchTerms.any { it.contains(normalized, ignoreCase = true) } }
             .take(safeLimit)
@@ -483,8 +676,24 @@ class MetadataCatalogStore internal constructor(
         val textIds = if (ftsIds.isNotEmpty()) ftsIds else searchLikeIds(db, query, limit)
         val exactYearIds = searchYearIds(db, query, limit)
         val regionIds = searchRegionIds(db, query, limit)
-        val ids = (exactYearIds + regionIds + textIds).distinct().take(limit)
-        return if (ids.isEmpty()) emptyList() else readMedia(db, ids = ids)
+        val candidateIds = (textIds + exactYearIds + regionIds).distinct().take(limit)
+        if (candidateIds.isEmpty()) return emptyList()
+        val placeholders = candidateIds.joinToString(",") { "?" }
+        val candidateOrder = candidateIds.mapIndexed { index, id -> "WHEN $id THEN $index" }.joinToString(" ")
+        val escapedQuery = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val orderedIds = db.rawQuery(
+            """
+            SELECT media_id FROM search_doc
+            WHERE media_id IN ($placeholders)
+            ORDER BY CASE WHEN title_norm = ? THEN 0
+                          WHEN title_norm LIKE ? ESCAPE '\' THEN 1
+                          ELSE 2 END,
+                     CASE media_id $candidateOrder ELSE ${candidateIds.size} END
+            LIMIT ?
+            """.trimIndent(),
+            candidateIds.map(Long::toString).toTypedArray() + arrayOf(query, "${escapedQuery}%", limit.toString()),
+        ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.getLong(0)) } }
+        return if (orderedIds.isEmpty()) emptyList() else readMedia(db, ids = orderedIds)
     }
 
     private fun searchYearIds(db: SQLiteDatabase, query: String, limit: Int): List<Long> {
@@ -539,7 +748,8 @@ class MetadataCatalogStore internal constructor(
 
     private fun readMedia(db: SQLiteDatabase, ids: List<Long>? = null, limit: Int = Int.MAX_VALUE): List<CatalogMedia> {
         val selection = if (ids == null) "" else " WHERE m.id IN (${ids.joinToString(",") { "?" }})"
-        val sortAndLimit = if (ids == null) " ORDER BY m.popularity DESC, m.id DESC LIMIT $limit" else ""
+        val sortAndLimit = if (ids == null) " ORDER BY m.popularity DESC, m.id DESC LIMIT $limit" else
+            " ORDER BY CASE m.id ${ids.mapIndexed { index, id -> "WHEN $id THEN $index" }.joinToString(" ")} ELSE ${ids.size} END"
         val args = ids?.map(Long::toString)?.toTypedArray()
         val sql = """
             SELECT m.id, m.media_type, m.title, m.original_title, m.year, m.overview, m.popularity, m.updated_at,
@@ -635,10 +845,31 @@ class MetadataCatalogStore internal constructor(
     private fun atomicReplace(staged: File) {
         require(staged.isFile && staged.length() > 0) { "staged catalog is empty" }
         val target = currentFile.toPath()
+        val backup = File(directory, "${DATABASE_NAME}.previous")
+        backup.delete()
+        if (currentFile.isFile) copyAndSync(currentFile, backup)
+        var installed = false
+        var keepBackup = false
         try {
-            Files.move(staged.toPath(), target, ATOMIC_MOVE, REPLACE_EXISTING)
-        } catch (_: AtomicMoveNotSupportedException) {
-            Files.move(staged.toPath(), target, REPLACE_EXISTING)
+            atomicMove(staged.toPath(), target)
+            installed = true
+            syncParentDirectory(directory.toPath())
+        } catch (error: Exception) {
+            if (installed) {
+                try {
+                    if (backup.isFile) atomicMove(backup.toPath(), target) else target.toFile().delete()
+                    syncParentDirectory(directory.toPath())
+                } catch (restoreError: Exception) {
+                    keepBackup = true
+                    error.addSuppressed(restoreError)
+                }
+            }
+            if (error is AtomicMoveNotSupportedException) {
+                throw IllegalStateException("atomic catalog replacement is not supported; previous catalog retained", error)
+            }
+            throw error
+        } finally {
+            if (!keepBackup) backup.delete()
         }
     }
 
@@ -703,6 +934,11 @@ class MetadataCatalogStore internal constructor(
         const val SUPPORTED_SCHEMA = 3
         const val DEFAULT_SEARCH_LIMIT = 60
         const val MAX_SEARCH_LIMIT = 100
+        /**
+         * Upper bound for the in-memory catalogue. Generous enough that the real catalogue
+         * (~565 rows) stays fully resident, while still refusing to materialise a pathological file.
+         */
+        const val MAX_IN_MEMORY_ROWS = 2_000
         const val SEPARATOR = "\u001f"
         const val EXTERNAL_SEPARATOR = '\u001e'
         const val MAX_COMPRESSED_BYTES = 64L * 1024 * 1024
