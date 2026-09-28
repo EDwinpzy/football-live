@@ -28,7 +28,12 @@ import vod_sources  # noqa: E402
 
 
 PLAYLIST = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=1280x720\nseg.ts\n"
-DNS_LATENCY_SECONDS = 0.05
+# The capacity regression only shows up once a lookup outlasts the time it takes
+# to fill every slot. With 18 concurrent probes (36 lookups) against the pre-fix
+# 8-slot pool, a 50ms lookup still fit; 300ms reproduces the reported "8 of 18
+# lines dead" exactly, because the pool drains and the remaining probes are
+# rejected before they ever start.
+DNS_LATENCY_SECONDS = 0.3
 
 
 class _FakeSocket:
