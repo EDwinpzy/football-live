@@ -347,5 +347,21 @@ console.log("== a misconfigured endpoint degrades silently ==");
   ok("a rejecting endpoint does not throw into the player", threw === null, String(threw));
 }
 
+console.log("== playback failure moves to an untried film line ==");
+{
+  const start = app.indexOf("function chooseNextVodLine(");
+  const end = app.indexOf("\n}", start) + 2;
+  const ctx = vm.createContext({ Set, Array, String });
+  vm.runInContext(app.slice(start, end) + "\n;globalThis.choose = chooseNextVodLine;", ctx);
+  const lines = [
+    { id: "dead", episodes: [{ pid: "dead", vid: 0 }] },
+    { id: "good", episodes: [{ pid: "good", vid: 0 }] },
+  ];
+  const first = ctx.choose({ playRef: { pid: "dead", vid: 0 }, epIdx: 0 }, lines);
+  ok("untried line selected", first?.playRef.pid === "good");
+  const exhausted = ctx.choose({ playRef: { pid: "good", vid: 0 }, epIdx: 0, failedLineIds: ["dead"] }, lines);
+  ok("already failed line is not retried", exhausted === null);
+}
+
 console.log(failures ? "\nFAILURES: " + failures : "\nAll harness checks passed.");
 process.exit(failures ? 1 : 0);

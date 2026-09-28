@@ -8,6 +8,7 @@
 """
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,9 @@ GRADLE_MODULES = {
 }
 RELEASE_URL = "https://tv.example.com"
 MIGRATION_ORIGIN = "https://103.236.97.137:35208"
+# 迁移 CA（CN=My TV Migration CA）PEM 去空白后的 sha256。两端必须一致；
+# 换证书就要重新评估 IP 入口的信任面，所以锁死在这里。
+MIGRATION_CA_SHA256 = "f94b7724a6183c6d3d6bbca1d10f8d597c1e3977236bd272df4b8ae923df3624"
 
 GATE_BEGIN = "OTV-RELEASE-ORIGIN-GATE-BEGIN"
 GATE_END = "OTV-RELEASE-ORIGIN-GATE-END"
@@ -108,7 +112,7 @@ def _java_exe():
     return which("java")
 
 
-def run_gate(module, url, release=True):
+def run_gate(module, url, release=True, allow_ip_release=None):
     """用真实 Groovy 引擎跑一遍仓库里那段门槛代码，返回 (是否接受, 说明)。"""
     lib = _groovy_lib()
     java = _java_exe()
@@ -116,6 +120,8 @@ def run_gate(module, url, release=True):
         pytest.skip("本机没有可用的 Groovy/JRE，跳过行为腿（静态腿仍然执行）")
     # 逐条 put，避免把 Python dict 直接 repr 进 Groovy（单引号会被当成字符串定界符）。
     props = [("apiBaseUrl", url)] if url is not None else []
+    if allow_ip_release is not None:
+        props.append(("allowIpReleaseOrigin", str(allow_ip_release).lower()))
     tasks = ["assembleRelease"] if release else ["assembleDebug"]
     gate = _extract_gate(module)
     props_assignments = "\n".join(
@@ -132,6 +138,7 @@ def run_gate(module, url, release=True):
     script = prelude + "\n" + HARNESS_EPILOGUE.format(gate=gate)
     env = dict(os.environ)
     env.pop("OTV_RELEASE_API_BASE_URL", None)
+    env.pop("OTV_ALLOW_IP_RELEASE_ORIGIN", None)
     # Windows 控制台默认 GBK，Groovy 打印的中文报错会解码失败。
     env["JAVA_TOOL_OPTIONS"] = "-Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8"
     result = subprocess.run(
@@ -192,10 +199,72 @@ def test_release_rejects_query_and_fragment(name, module):
 
 @pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
 def test_release_rejects_migration_ca_test_origin(name, module):
+    """不加 opt-in 时，迁移 IP 入口仍然必须被正式包拒绝（默认行为不变）。"""
     for bad in (MIGRATION_ORIGIN, MIGRATION_ORIGIN + "/"):
         accepted, reason = run_gate(module, bad)
         assert not accepted, f"{name} 竟然接受了迁移 CA 测试入口 {bad}"
         assert "迁移 CA" in reason, reason
+        assert "allowIpReleaseOrigin" in reason, "拒绝文案要告诉发布者怎么显式 opt-in"
+
+
+@pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
+def test_release_accepts_migration_origin_only_with_explicit_opt_in(name, module):
+    """显式 opt-in + 恰好等于迁移 origin → 正式包允许这个自建 VPS IP 入口。"""
+    for good in (MIGRATION_ORIGIN, MIGRATION_ORIGIN + "/"):
+        accepted, resolved = run_gate(module, good, allow_ip_release=True)
+        assert accepted, f"{name} 带 -PallowIpReleaseOrigin=true 仍拒绝了 {good}：{resolved}"
+        assert resolved == MIGRATION_ORIGIN, resolved
+
+
+@pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
+def test_opt_in_does_not_unlock_other_ip_literals(name, module):
+    """opt-in 只解锁那一个迁移 origin，绝不放行任意 IP 字面量。"""
+    for bad in ("https://192.168.1.10:35208", "https://203.0.113.7:443"):
+        accepted, reason = run_gate(module, bad, allow_ip_release=True)
+        assert not accepted, f"{name} 的 opt-in 竟然放行了别的 IP {bad}"
+        assert "IP" in reason, reason
+
+
+@pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
+def test_opt_in_flag_alone_does_not_bypass_https_or_path_checks(name, module):
+    """opt-in 不能顺手放过 http / 路径 / userinfo / query 等其它门槛。"""
+    for bad, marker in (("http://103.236.97.137:35208", "https"),
+                        ("https://103.236.97.137:35208/api/", "路径")):
+        accepted, reason = run_gate(module, bad, allow_ip_release=True)
+        assert not accepted, f"{name} 的 opt-in 放过了 {bad}"
+        assert marker in reason, reason
+
+
+@pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
+def test_opt_in_rejects_migration_origin_with_any_path_suffix(name, module):
+    """opt-in 只放行纯 origin；带任意路径后缀的迁移 origin 一律拒绝。
+
+    回归点：早期实现把 opt-in 分支和 startsWith 判断合在一起，
+    结果 -PallowIpReleaseOrigin=true 会顺带放行 https://<ip>:<port>/api/ 之类的前缀。
+    """
+    for bad in (MIGRATION_ORIGIN + "/api/", MIGRATION_ORIGIN + "/activate",
+                MIGRATION_ORIGIN + "/whatever/deep/path"):
+        accepted, reason = run_gate(module, bad, allow_ip_release=True)
+        assert not accepted, f"{name} 的 opt-in 竟然放行了带路径的迁移入口 {bad}"
+        assert "不得包含路径" in reason, reason
+
+
+@pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
+def test_opt_in_rejects_migration_origin_with_credentials_or_query(name, module):
+    """带 userinfo / query / fragment 的迁移 origin 同样不得被 opt-in 放行。"""
+    cases = ("https://user:secret@103.236.97.137:35208",
+             MIGRATION_ORIGIN + "?token=1",
+             MIGRATION_ORIGIN + "#top")
+    for bad in cases:
+        accepted, reason = run_gate(module, bad, allow_ip_release=True)
+        assert not accepted, f"{name} 的 opt-in 放过了带修饰的迁移入口 {bad}"
+
+@pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
+def test_opt_in_keeps_working_for_normal_domain(name, module):
+    """opt-in 打开时，正式域名依旧照常通过（开关是加法不是替换）。"""
+    accepted, resolved = run_gate(module, RELEASE_URL, allow_ip_release=True)
+    assert accepted, f"{name} 带 opt-in 反而拒绝了合法正式域名：{resolved}"
+    assert resolved == RELEASE_URL, resolved
 
 
 @pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
@@ -231,7 +300,9 @@ def test_tv_and_mobile_share_the_same_release_gate_rules():
     assert tv == mobile, "TV 与移动版的 Release 入口门槛代码块出现分叉"
     markers = ["拒绝迁移 CA / IP 测试入口", "Release 入口不得包含 userinfo",
                "Release 入口不得包含 query", "Release 入口不得使用 IP 字面量",
-               "Release 入口不得包含路径"]
+               "Release 入口不得包含路径",
+               # opt-in 通道：开关名与解锁条件两端必须一致，否则发布口径会分叉。
+               "allowIpReleaseOrigin", "OTV_ALLOW_IP_RELEASE_ORIGIN", "otvIpReleaseOptIn"]
     for marker in markers:
         assert marker in tv, f"门槛缺少拒绝条件：{marker}"
 
@@ -246,25 +317,111 @@ def test_release_has_no_ip_default_fallback(name, module):
     assert "OTV_RELEASE_API_BASE_URL" in gate, "正式域名必须能从统一环境变量读到"
     release_branch = gate.split("if (otvReleaseRequested)", 1)[1]
     assert MIGRATION_ORIGIN not in release_branch.split("} else {", 1)[0]
+    # opt-in 只能是「放行已传入的那一个值」，不能变成 Release 的兜底默认值。
+    opt_in = gate.split("def otvIpReleaseOptIn", 1)[1].split("def ", 1)[0]
+    assert "true" in opt_in.lower() and "false" not in opt_in.lower(), \
+        f"{name} 的 opt-in 判定必须显式等于字符串 'true'，缺省即关闭"
+    fallback = gate.split("} else {", 1)[1]
+    assert "otvIpReleaseOptIn" not in fallback, \
+        f"{name} 的 Debug 兜底分支不应被 opt-in 影响"
 
 
 @pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
-def test_release_network_security_config_does_not_trust_migration_ca(name, module):
-    """Release 打包的网络安全配置只信任 system CA。"""
+def test_main_network_security_config_does_not_trust_migration_ca(name, module):
+    """main 兜底配置只信任 system CA —— 不加 opt-in 时所有构建类型都用它。"""
     release_config = module / "src" / "main" / "res" / "xml" / "network_security_config.xml"
     text = release_config.read_text(encoding="utf-8")
-    # 注释里可以说明迁移 CA 已迁到 debug，但配置本身不得再引用它。
+    # 注释里可以说明迁移 CA 只在 debug / opt-in release 覆盖里，但配置本身不得再引用它。
     effective = re.sub(r"<!--.*?-->", "", text, flags=re.S)
     assert "mytv_migration_ca" not in effective, \
-        f"{name} 的 Release 网络安全配置仍然信任迁移 CA"
+        f"{name} 的 main 网络安全配置仍然信任迁移 CA"
     assert "103.236.97.137" not in effective, \
-        f"{name} 的 Release 网络安全配置仍然为 IP 测试入口开口"
+        f"{name} 的 main 网络安全配置仍然为 IP 入口开口"
     assert '<certificates src="system" />' in text
     root = ElementTree.parse(release_config).getroot()
     assert root.findall("domain-config") == [], \
-        f"{name} 的 Release 配置不应再为迁移 CA 保留 domain-config"
+        f"{name} 的 main 配置不应为迁移 CA 保留 domain-config"
     # 本机 HTTP 内嵌后端与直播流仍要放行，不能为了堵 CA 把 cleartext 关掉。
     assert root.find("base-config").attrib.get("cleartextTrafficPermitted") == "true"
+
+
+@pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
+def test_release_override_trusts_migration_ca_only_for_the_vps_ip(name, module):
+    """opt-in 挂载的 IP 覆盖只为自建 VPS 那个 IP 信任迁移 CA，不做全量信任。"""
+    config = module / "src" / "ipRelease" / "res" / "xml" / "network_security_config.xml"
+    assert config.is_file(), f"{name} 缺少 IP 入口的网络安全配置覆盖（IP 入口会 TLS 失败）"
+    root = ElementTree.parse(config).getroot()
+    base = root.find("base-config")
+    assert base is not None
+    # 其余域名仍走系统 CA：base-config 不得把迁移 CA 加进全局信任锚。
+    base_anchors = [item.attrib.get("src") for item in base.findall("trust-anchors/certificates")]
+    assert base_anchors == ["system"], f"{name} 的 Release base-config 信任锚应只有 system：{base_anchors}"
+    # 本机 HTTP 内嵌后端与直播流仍要放行。
+    assert base.attrib.get("cleartextTrafficPermitted") == "true"
+
+    # 只有迁移 origin 那一个 host 走迁移 CA，且不允许子域。
+    host_configs = [block for block in root.findall("domain-config")
+                    if block.findtext("domain") == "103.236.97.137"]
+    assert len(host_configs) == 1, f"{name} 的 Release 覆盖必须恰好为 VPS IP 保留一段 domain-config"
+    host_config = host_configs[0]
+    assert host_config.attrib.get("cleartextTrafficPermitted") == "false"
+    domain = host_config.find("domain")
+    assert domain.attrib.get("includeSubdomains") == "false", \
+        f"{name} 的 IP 信任范围不得扩散到子域"
+    anchors = [item.attrib.get("src") for item in host_config.findall("trust-anchors/certificates")]
+    assert anchors == ["@raw/mytv_migration_ca"], \
+        f"{name} 的 IP 段信任锚应是迁移 CA：{anchors}"
+    # 覆盖里除这一个 IP 外不得再出现别的 domain-config（避免悄悄扩面）。
+    others = [block.findtext("domain") for block in root.findall("domain-config")
+              if block.findtext("domain") != "103.236.97.137"]
+    assert not others, f"{name} 的 Release 覆盖出现了额外域名：{others}"
+
+
+@pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
+def test_both_modules_ship_the_same_migration_ca_pem(name, module):
+    """两端打包的迁移 CA 必须逐字节一致 —— IP 入口信任的是同一张证书。"""
+    pem = module / "src" / "main" / "res" / "raw" / "mytv_migration_ca.pem"
+    assert pem.is_file(), f"{name} 缺少迁移 CA 资源，IP 入口无法完成 TLS 校验"
+    text = pem.read_text(encoding="utf-8")
+    assert "BEGIN CERTIFICATE" in text and "END CERTIFICATE" in text, f"{name} 的 CA 文件不是 PEM"
+    # 主体/有效期固定：CN=My TV Migration CA，签发 2026-09-23，到期 2036-09-20。
+    digest = hashlib.sha256(re.sub(r"\s+", "", text).encode("ascii")).hexdigest()
+    assert digest == MIGRATION_CA_SHA256, \
+        f"{name} 的迁移 CA 内容变了（{digest}），两端信任的证书不再一致，需重新评估 IP 入口"
+
+
+@pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
+def test_release_override_is_referenced_by_the_manifest_indirection(name, module):
+    """IP 覆盖与 main/debug 同名，靠 manifest 的 @xml 间接引用 + 变体优先级才生效。"""
+    manifest = module / "src" / "main" / "AndroidManifest.xml"
+    assert 'android:networkSecurityConfig="@xml/network_security_config"' in \
+        manifest.read_text(encoding="utf-8"), \
+        f"{name} 的 manifest 必须指向 @xml/network_security_config，source set 覆盖才会生效"
+    # main/debug/ipRelease 三个目录下的文件名必须一致，否则覆盖会退化成新增资源而非替换。
+    for variant in ("main", "debug", "ipRelease"):
+        path = module / "src" / variant / "res" / "xml" / "network_security_config.xml"
+        assert path.is_file(), f"{name} 缺少 {variant} 网络安全配置"
+        assert ElementTree.parse(path).getroot().tag == "network-security-config", \
+            f"{name} 的 {variant} 配置根节点不对"
+
+
+@pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
+def test_ip_override_dir_is_only_wired_when_opted_in(name, module):
+    """关键回归点：IP 覆盖目录必须由 opt-in 条件挂载，不得常驻 release 变体。
+
+    如果这里改成静态 src/release 覆盖，那么「用正式域名发布、不传开关」的包里
+    也会打进私有 CA 信任锚 —— 门槛形同虚设。
+    """
+    source = module.joinpath("build.gradle").read_text(encoding="utf-8")
+    assert "sourceSets.release.res.srcDir 'src/ipRelease/res'" in source, \
+        f"{name} 必须用条件 sourceSet 挂载 IP 覆盖"
+    wiring = source.split("sourceSets.release.res.srcDir", 1)[0]
+    assert "if (otvIpReleaseOptIn)" in wiring.rsplit("android {", 1)[-1], \
+        f"{name} 的 IP 覆盖挂载必须位于 if (otvIpReleaseOptIn) 之内"
+    # 不允许再有常驻的 src/release 覆盖（那会绕过 opt-in 直接把私有 CA 打进所有正式包）。
+    stray = module / "src" / "release" / "res" / "xml" / "network_security_config.xml"
+    assert not stray.exists(), \
+        f"{name} 存在常驻 src/release 覆盖，会让未 opt-in 的正式包也信任迁移 CA"
 
 
 @pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
@@ -275,10 +432,6 @@ def test_debug_network_security_config_still_trusts_migration_ca(name, module):
     text = debug_config.read_text(encoding="utf-8")
     assert "@raw/mytv_migration_ca" in text
     assert "103.236.97.137" in text
-    manifest = module / "src" / "main" / "AndroidManifest.xml"
-    assert 'android:networkSecurityConfig="@xml/network_security_config"' in \
-        manifest.read_text(encoding="utf-8"), \
-        f"{name} 的 manifest 必须继续指向同名资源，Debug 覆盖才会生效"
 
 
 @pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))

@@ -15,14 +15,30 @@ def apkVersionNameOverride = project.findProperty('apkVersionName')
 // （或环境变量 OTV_RELEASE_API_BASE_URL），缺省立即 fail fast。
 // 入口只接受纯 origin（结尾斜杠会被 normalize 去掉），端点由 /activate、/hotupdate
 // 等固定路径拼接而成，所以任何路径都视为错误输入。
-// 迁移 CA + IP 测试入口只允许 Debug 本机联调，正式包一律拒绝。
+// 迁移 CA + IP 入口：默认仍只允许 Debug 本机联调，正式包一律拒绝。
+// 无正式域名的自建 VPS（103.236.97.137:35208）要出正式包，必须显式双重 opt-in：
+//   -PallowIpReleaseOrigin=true（或环境变量 OTV_ALLOW_IP_RELEASE_ORIGIN=true）
+// 且 apiBaseUrl 恰好等于该迁移 origin。此时才把 src/ipRelease/res 挂进 release 变体，
+// 由同名资源为这一个 IP 信任迁移 CA（@raw/mytv_migration_ca），其余域名仍只信任系统 CA。
 def otvMigrationTestOrigin = 'https://103.236.97.137:35208'
+// 显式 opt-in 才允许 IP 入口进正式包；缺省 false 时行为与旧门槛完全一致。
+def otvIpReleaseOptIn = ((project.findProperty('allowIpReleaseOrigin') ?:
+        System.getenv('OTV_ALLOW_IP_RELEASE_ORIGIN'))?.toString()?.trim()?.toLowerCase() == 'true')
 def otvApiOriginProblem = { String otvUrl ->
     if (!otvUrl) {
         return '未显式传入正式 API 入口：Release 必须使用 -PapiBaseUrl=https://<正式域名>（或环境变量 OTV_RELEASE_API_BASE_URL）'
     }
-    if (otvUrl == otvMigrationTestOrigin || otvUrl.startsWith(otvMigrationTestOrigin + '/')) {
-        return "拒绝迁移 CA / IP 测试入口：${otvUrl}（正式包必须使用已验收的正式域名与公共 CA 证书）"
+    if (otvUrl == otvMigrationTestOrigin || otvUrl == otvMigrationTestOrigin + '/') {
+        if (!otvIpReleaseOptIn) {
+            return "拒绝迁移 CA / IP 测试入口：${otvUrl}（正式包必须使用已验收的正式域名与公共 CA 证书；" +
+                    '仅在无正式域名、明确接受自建 VPS 入口时才加 -PallowIpReleaseOrigin=true）'
+        }
+        return null
+    }
+    if (otvUrl.startsWith(otvMigrationTestOrigin + '/')) {
+        // 带路径的迁移 origin 不是纯 origin，一律按「不得包含路径」处理；
+        // opt-in 不豁免这一条，避免把 IP 入口变成任意路径前缀。
+        return "Release 入口不得包含路径：${otvUrl}（IP 入口的 opt-in 只放行纯 origin ${otvMigrationTestOrigin}）"
     }
     def otvUri
     try {
@@ -47,7 +63,7 @@ def otvApiOriginProblem = { String otvUrl ->
         return "Release 入口缺少 host：${otvUrl}"
     }
     if (otvHost ==~ /\d{1,3}(\.\d{1,3}){3}/ || otvHost.contains(':')) {
-        return "Release 入口不得使用 IP 字面量：${otvUrl}（IP + 迁移 CA 只允许 Debug 本机联调）"
+        return "Release 入口不得使用 IP 字面量：${otvUrl}（除已 opt-in 的自建 VPS ${otvMigrationTestOrigin} 外，IP 只允许 Debug 本机联调）"
     }
     if (!(otvHost ==~ /(?i)(?!-)[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})*\.[a-z]{2,}$/)) {
         return "Release 入口必须使用已备案的正式域名：${otvUrl}"
@@ -82,6 +98,12 @@ android {
     namespace 'com.qiubo.optimaltv'
     compileSdk 35
     testOptions { unitTests.includeAndroidResources = true }
+
+    // 无正式域名的 IP 入口：只有显式 opt-in 时，才把迁移 CA 信任配置挂进 release 变体。
+    // 不传开关时这个目录完全不参与资源合并，正式域名发布包因此不会打进私有 CA 信任锚。
+    if (otvIpReleaseOptIn) {
+        sourceSets.release.res.srcDir 'src/ipRelease/res'
+    }
 
     defaultConfig {
         // v1.19 版本重规划（2026-09-03）：只保留原公测版一条线，命名「TV 版」。

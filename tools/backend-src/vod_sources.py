@@ -688,7 +688,16 @@ def _search_terms(subject):
 def _titles(item):
     values = [item.get("title"), item.get("original_title")]
     values.extend(item.get("aliases") or [])
-    return {normalize_title(value) for value in values if normalize_title(value)}
+    titles = {normalize_title(value) for value in values if normalize_title(value)}
+    # Some MacCMS catalogs append an English translation after the Chinese
+    # title (e.g. "肖申克的救赎 The Shawshank Redemption"). Treat only that
+    # bounded bilingual suffix as an alias; arbitrary prefixes are unsafe.
+    for value in values:
+        parts = re.split(r"\s+", str(value or "").strip(), maxsplit=1)
+        if (len(parts) == 2 and re.fullmatch(r"[\u4e00-\u9fff]+", parts[0])
+                and re.fullmatch(r"[A-Za-z][A-Za-z .:'’&!-]*", parts[1])):
+            titles.add(normalize_title(parts[0]))
+    return titles
 
 
 def _year(value):

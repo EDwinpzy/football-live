@@ -75,6 +75,13 @@ class VodSourcesTest(unittest.TestCase):
         candidate = {"title": "蜘蛛侠英雄无归", "year": "2021", "category": "movie", "season": 0}
         self.assertGreaterEqual(vod_sources.match_score(subject, candidate), vod_sources.AUTO_MATCH_THRESHOLD)
 
+    def test_bilingual_source_title_matches_exact_chinese_title(self):
+        subject = {"title": "肖申克的救赎", "year": "1994", "category": "movie"}
+        candidate = {"title": "肖申克的救赎 The Shawshank Redemption", "year": "1994", "category": "movie"}
+        self.assertGreaterEqual(vod_sources.match_score(subject, candidate), vod_sources.AUTO_MATCH_THRESHOLD)
+        candidate["title"] = "肖申克的救赎 2 The Shawshank Redemption"
+        self.assertEqual(vod_sources.match_score(subject, candidate), 0)
+
     def test_rank_prefers_quality_latency_and_reliability(self):
         ranked = vod_sources.rank_lines([
             {"id": "slow-1080", "height": 1080, "latency_ms": 5000, "alive": True},

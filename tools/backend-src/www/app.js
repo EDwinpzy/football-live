@@ -2986,7 +2986,18 @@ async function resolveVodAndPlay(ctx) {
     pushHistory({ id: ctx.vid, title: ctx.title, cover: ctx.cover || "", epIndex: ctx.epIdx || 0 });
     if ("mediaSession" in navigator)
       navigator.mediaSession.metadata = new MediaMetadata({ title: ctx.title, artist: ctx.epName || "" });
-  } catch (e) { playerFatal(e); }
+  } catch (e) {
+    const next = chooseNextVodLine(ctx, detail && detail.sources);
+    if (next) {
+      ctx.failedLineIds = [...(ctx.failedLineIds || []), String(ctx.playRef.pid)];
+      ctx.playRef = next.playRef;
+      ctx.linePinned = true;
+      dLineIdx = next.index;
+      resolveVodAndPlay(ctx);
+      return;
+    }
+    playerFatal(e);
+  }
 }
 
 /* App bootLive：首选源（=上次手动选择的源，localStorage 记忆；无记忆回退 bb）快路径
@@ -3159,14 +3170,16 @@ async function recoverPlayback(reason, expectedGen) {
     attempt: attempt + 1, error_class: classifyTelemetryError(new Error(reason)),
     kind: "recovery",
   });
-  if (attempt >= MAX_RECOVERY_ATTEMPTS) {
+  const recoveryLimit = pv.ctx.kind === "vod" && detail
+    ? Math.max(MAX_RECOVERY_ATTEMPTS, detail.sources.length + 2) : MAX_RECOVERY_ATTEMPTS;
+  if (attempt >= recoveryLimit) {
     pv.recovering = false;
     playerFatal("播放持续卡顿，自动恢复已达上限");
     return;
   }
   const ctx = pv.ctx;
   const resume = ctx.kind === "vod" && pv.video ? Math.max(0, pv.video.currentTime - 2) : 0;
-  hint(`正在恢复播放（${attempt + 1}/${MAX_RECOVERY_ATTEMPTS}）`);
+  hint(`正在恢复播放（${attempt + 1}/${recoveryLimit}）`);
   try {
     if (ctx.kind === "live") {
       if (attempt === 1 && pv.sources.length > 1) pv.srcIdx = (pv.srcIdx + 1) % pv.sources.length;
@@ -3175,6 +3188,24 @@ async function recoverPlayback(reason, expectedGen) {
       attachPlayer(relay(url), 0);
       renderSrcPicker();
       return;
+    }
+    if (attempt >= 2) {
+      const next = chooseNextVodLine(ctx, detail && detail.sources);
+      if (next) {
+        ctx.failedLineIds = [...(ctx.failedLineIds || []), String(ctx.playRef.pid)];
+        ctx.playRef = next.playRef;
+        ctx.linePinned = true;
+        dLineIdx = next.index;
+        bustResolvedPlay(ctx);
+        const switched = await resolvePlayCached(ctx.vid, next.playRef.pid, next.playRef.vid);
+        const urls = (switched.sources || []).filter(x => x && x.url && x.alive !== false).map(x => x.url);
+        if (!urls.length) throw new Error("下一线路没有播放地址");
+        pv.sources = urls; pv.srcIdx = 0;
+        pv.recovering = false;
+        renderMorePanel();
+        vodAttach(urls[0], resume);
+        return;
+      }
     }
     if (attempt === 0 || attempt === 1) {
       bustResolvedPlay(ctx);
@@ -3192,6 +3223,20 @@ async function recoverPlayback(reason, expectedGen) {
     pv.recovering = false;
     recoverPlayback(reason + ": " + e.message, pv.recoveryGen);
   }
+}
+
+function chooseNextVodLine(ctx, lines) {
+  if (!ctx || !ctx.playRef || !Array.isArray(lines)) return null;
+  const tried = new Set([String(ctx.playRef.pid), ...(ctx.failedLineIds || []).map(String)]);
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    if (!line || tried.has(String(line.id))) continue;
+    const episodes = line.episodes || [];
+    const ep = episodes[ctx.epIdx] || episodes[0];
+    if (ep && ep.pid != null && ep.vid != null)
+      return { index, playRef: { pid: ep.pid, vid: ep.vid } };
+  }
+  return null;
 }
 
 function nextSource() {

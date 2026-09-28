@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- IP 入口专用覆盖（无正式域名时）：只由 build.gradle 在
+     -PallowIpReleaseOrigin=true（或 OTV_ALLOW_IP_RELEASE_ORIGIN=true）时
+     通过 sourceSets.release.res.srcDir 挂进 release 变体；不传开关就根本不参与合并，
+     所以走正式域名的发布包不会打进这张私有 CA 信任锚。
+     挂载后本文件按 release > main 的优先级替换 main 的同名资源：
+     迁移 CA 只覆盖 103.236.97.137 这一个 IP（不含子域），其余域名仍走 base-config 的系统 CA。
+     CA 资源：@raw/mytv_migration_ca（CN=My TV Migration CA，两端逐字节一致）。 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="false">103.236.97.137</domain>
+        <trust-anchors>
+            <certificates src="@raw/mytv_migration_ca" />
+        </trust-anchors>
+    </domain-config>
+</network-security-config>

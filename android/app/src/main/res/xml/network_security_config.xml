@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 正式包只信任系统 CA。迁移 CA（mytv_migration_ca）仅供本机 Debug 联调，
-     由 src/debug/res/xml/network_security_config.xml 覆盖，不得进入 Release。 -->
+<!-- main 兜底：只信任系统 CA，默认（无 opt-in）时所有构建类型都用这份。
+     Debug 由 src/debug 覆盖；Release 仅在显式 -PallowIpReleaseOrigin=true
+     （无正式域名、自建 VPS IP 入口）时，才由 build.gradle 把 src/ipRelease 挂进变体
+     并以同名资源覆盖本文件，加入迁移 CA 的 IP domain-config。 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
