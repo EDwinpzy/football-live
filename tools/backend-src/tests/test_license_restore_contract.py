@@ -7,7 +7,12 @@ from tools.selfhosted.api_service import BusinessApi
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 TV = ROOT / "android/app/src/main/java/com/qiubo/optimaltv/license/LicenseManager.kt"
 MOBILE = ROOT / "internal/mobile/app/src/main/java/com/qiubo/optimaltv/license/LicenseManager.kt"
-API_SQL = ROOT / "tools/license_v2_migration.sql"
+# Restore lives in its own migration. A database predating the ledger already
+# has the v2 activate_code signature, so keeping restore inside
+# license_v2_migration.sql would let the migrator record it as applied without
+# ever executing the branch.
+API_SQL = ROOT / "tools/selfhosted/migrations/license_restore_v1.sql"
+LEGACY_V2_SQL = ROOT / "tools/license_v2_migration.sql"
 
 
 class LicenseRestoreContractTest(unittest.TestCase):
@@ -69,6 +74,17 @@ class LicenseRestoreContractTest(unittest.TestCase):
         self.assertNotIn("devices :=", branch)
         self.assertNotIn("expire_at =", branch)
         self.assertNotIn("activated_at =", branch)
+
+    def test_restore_is_not_carried_only_by_license_v2_migration(self):
+        legacy = LEGACY_V2_SQL.read_text(encoding="utf-8").lower()
+        self.assertNotIn(
+            "v_action = 'restore'", legacy,
+            "restore must live in its own migration; a legacy database already has the v2 "
+            "activate_code signature and would skip a restore hidden inside this file",
+        )
+        # The marker is what the migrator probes in the installed function body.
+        # self.api_sql is already lowercased in setUpClass.
+        self.assertIn("otv-restore-marker-begin", self.api_sql.lower())
 
     def test_both_app_trees_identical(self):
         self.assertEqual(self.client, self.mobile, "两工程不一致，请跑 tools/sync_shared.py")

@@ -64,9 +64,31 @@ GRANT USAGE ON SCHEMA public TO license_importer;
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM license_importer;
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM license_importer;
 REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM license_importer;
+-- SECURITY DEFINER functions receive EXECUTE for PUBLIC by default on older
+-- databases. Remove that ambient grant globally; explicit anon/authenticated
+-- grants below and in the migrations remain intact.
+REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
 REVOKE ALL PRIVILEGES ON TABLE public.licenses FROM license_importer;
 GRANT INSERT (code, plan, days, ticket, note), SELECT (code)
     ON TABLE public.licenses TO license_importer;
+
+-- Re-establish the documented client RPC boundary after removing legacy
+-- PUBLIC grants. PostgREST roles are explicit database roles, not PUBLIC.
+GRANT EXECUTE ON FUNCTION public.activate_code(text, text, text, integer, text, text)
+    TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.hotupdate_check(integer, integer)
+    TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.hotupdate_report(text, integer, integer, integer, text, text)
+    TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.announcement_latest()
+    TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.vod_source_public_check(bigint)
+    TO anon, authenticated;
+
+-- Ensure the signed-in admin role keeps its privileged RPCs while anon and
+-- the importer remain excluded from the management surface.
+GRANT EXECUTE ON FUNCTION public.admin_mark_sold(text, boolean), public.admin_stats()
+    TO authenticated;
 
 DO $validate_importer_privileges$
 DECLARE
@@ -127,6 +149,46 @@ BEGIN
           )
     ) THEN
         RAISE EXCEPTION 'license_importer has privileges on another public relation';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_proc proc
+        JOIN pg_catalog.pg_namespace nsp ON nsp.oid = proc.pronamespace
+        WHERE nsp.nspname = 'public'
+          AND has_function_privilege('license_importer', proc.oid, 'EXECUTE')
+    ) THEN
+        RAISE EXCEPTION 'license_importer has execute privileges on public functions';
+    END IF;
+
+    IF NOT has_function_privilege(
+        'anon', 'public.activate_code(text,text,text,integer,text,text)', 'EXECUTE'
+    ) OR NOT has_function_privilege(
+        'anon', 'public.hotupdate_check(integer,integer)', 'EXECUTE'
+    ) OR NOT has_function_privilege(
+        'anon', 'public.hotupdate_report(text,integer,integer,integer,text,text)', 'EXECUTE'
+    ) OR NOT has_function_privilege(
+        'anon', 'public.announcement_latest()', 'EXECUTE'
+    ) OR NOT has_function_privilege(
+        'anon', 'public.vod_source_public_check(bigint)', 'EXECUTE'
+    ) THEN
+        RAISE EXCEPTION 'anon is missing an explicitly granted client RPC';
+    END IF;
+
+    IF NOT has_function_privilege(
+        'authenticated', 'public.admin_mark_sold(text,boolean)', 'EXECUTE'
+    ) OR NOT has_function_privilege(
+        'authenticated', 'public.admin_stats()', 'EXECUTE'
+    ) THEN
+        RAISE EXCEPTION 'authenticated is missing required admin RPC privileges';
+    END IF;
+
+    IF has_function_privilege(
+        'anon', 'public.admin_mark_sold(text,boolean)', 'EXECUTE'
+    ) OR has_function_privilege(
+        'license_importer', 'public.admin_mark_sold(text,boolean)', 'EXECUTE'
+    ) THEN
+        RAISE EXCEPTION 'an unauthenticated importer can execute an admin RPC';
     END IF;
 
     IF EXISTS (

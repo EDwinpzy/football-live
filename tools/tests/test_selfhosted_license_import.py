@@ -2,6 +2,7 @@ import base64
 import csv
 import importlib
 import json
+import re
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -11,6 +12,11 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 
 ROOT = Path(__file__).resolve().parents[2]
+MIGRATION_RUNNER = ROOT / "tools" / "selfhosted" / "apply_schema_migrations.sh"
+MIGRATION_SQL = ROOT / "tools" / "selfhosted" / "apply_schema_migrations.psql"
+RESTORE_MIGRATION = ROOT / "tools" / "selfhosted" / "migrations" / "license_restore_v1.sql"
+LICENSE_V2_MIGRATION = ROOT / "tools" / "license_v2_migration.sql"
+COMPOSE_FILE = ROOT / "deploy" / "selfhosted" / "compose.yaml"
 
 
 def _import_tool():
@@ -185,3 +191,133 @@ def test_importer_rejects_csv_ticket_mismatch_before_database_write(tmp_path, mo
 
     assert not connection.committed
     assert connection.cursor_value.rows == []
+
+
+def test_migration_runner_copies_and_hashes_the_restore_migration():
+    runner = MIGRATION_RUNNER.read_text(encoding="utf-8")
+
+    assert "selfhosted/migrations/license_restore_v1.sql" in runner, (
+        "the runner must stage the restore migration into its sandbox"
+    )
+    assert 'migration_hash_license_restore=$(sha256_file "$migration_root/tools/selfhosted/migrations/license_restore_v1.sql")' in runner
+    assert '-v "license_restore_sha256=$migration_hash_license_restore"' in runner
+
+    # psql variables are interpolated verbatim, so every value must stay hex.
+    hashes = re.findall(r'migration_hash_\w+=?=\$\(sha256(?:sum|_file)', runner)
+    assert hashes
+    assert "printf '%s' \"$hash_value\"" in runner, (
+        "hashes are passed to psql as text and must not carry a filename suffix"
+    )
+    assert 'case "$hash_value" in' in runner
+    assert "*[!0123456789abcdef]*|''" in runner
+
+
+def test_migration_driver_registers_and_runs_the_restore_migration_once():
+    migration_sql = MIGRATION_SQL.read_text(encoding="utf-8")
+
+    assert "('license_restore_v1.sql', :'license_restore_sha256')" in migration_sql, (
+        "restore must be hashed into the expected-migration table"
+    )
+    assert migration_sql.count("\\ir migrations/license_restore_v1.sql") == 1, (
+        "the restore migration must be executed exactly once"
+    )
+    assert "VALUES ('license_restore_v1.sql', :'license_restore_sha256')" in migration_sql
+
+    # Its ledger row is written in the same transaction that runs the SQL.
+    block = migration_sql.split("\\ir migrations/license_restore_v1.sql", 1)[1]
+    head, _, tail = block.partition("COMMIT;")
+    assert "INSERT INTO public.schema_migrations" in head
+    assert "license_restore_v1.sql" in head
+    assert tail.lstrip().startswith("\\endif"), (
+        "the restore transaction must close before the next migration begins"
+    )
+    assert "admin_sold_migration.sql" not in head, (
+        "no other migration may share the restore transaction"
+    )
+
+
+def test_legacy_claim_uses_the_function_body_not_the_signature():
+    migration_sql = MIGRATION_SQL.read_text(encoding="utf-8")
+
+    assert "pg_catalog.pg_get_functiondef(proc.oid)" in migration_sql
+    assert "OTV-RESTORE-MARKER-BEGIN" in migration_sql
+    assert "pg_temp.activate_code_supports_restore()" in migration_sql
+
+    # The signature survives only as a schema-completeness check. It is
+    # identical before and after restore, so it must not appear in the
+    # restore-support decision, which reads the installed body instead.
+    signature_entry = (
+        "('function public.activate_code(text,text,text,integer,text,text)', "
+        "to_regprocedure('public.activate_code(text,text,text,integer,text,text)') IS NOT NULL)"
+    )
+    assert signature_entry in migration_sql
+    restore_decision = migration_sql.split("pg_temp.activate_code_supports_restore() AS legacy_supports_restore", 1)[0]
+    decision_block = restore_decision.rsplit("DO $validate_legacy_schema$", 1)
+    if len(decision_block) == 2:
+        # The signature entry lives in the completeness list, never as the
+        # restore gate; the gate is the separate probe result.
+        assert "activate_code_supports_restore" not in decision_block[1].split("WHERE", 1)[0]
+
+    # Unsupported restore must leave the ledger row empty so the pending path
+    # installs it, rather than hard-failing or silently claiming it.
+    assert "WHERE :legacy_supports_restore" in migration_sql
+    assert "OR version <> 'license_restore_v1.sql'" in migration_sql
+
+
+def test_restore_lives_outside_license_v2_so_legacy_claims_cannot_skip_it():
+    restore_sql = RESTORE_MIGRATION.read_text(encoding="utf-8")
+    license_v2 = LICENSE_V2_MIGRATION.read_text(encoding="utf-8")
+
+    assert "OTV-RESTORE-MARKER-BEGIN" in restore_sql
+    assert "'restore'" in restore_sql, "the installed body must accept the restore action"
+    assert "OTV-RESTORE-MARKER-BEGIN" not in license_v2
+    assert "v_action = 'restore'" not in license_v2, (
+        "license_v2_migration.sql must not be the sole carrier of restore support"
+    )
+
+    # The marker must be inside the function body, because the migrator probes
+    # the installed source rather than the file on disk.
+    assert "OTV-RESTORE-MARKER-BEGIN" in restore_sql.split("$function$")[1]
+
+
+def test_restore_migration_replaces_the_function_and_keeps_its_privileges():
+    restore_sql = RESTORE_MIGRATION.read_text(encoding="utf-8")
+
+    assert "create or replace function public.activate_code(" in restore_sql.lower()
+    assert "security definer" in restore_sql
+    assert "set search_path to 'public'" in restore_sql
+    assert (
+        "revoke all on function public.activate_code(text,text,text,integer,text,text) from public"
+        in restore_sql
+    )
+    assert (
+        "grant execute on function public.activate_code(text,text,text,integer,text,text) "
+        "to anon, authenticated" in restore_sql
+    )
+
+
+def test_compose_schema_migrations_service_is_safe_for_explicit_run():
+    compose = COMPOSE_FILE.read_text(encoding="utf-8")
+    service = compose.split("  schema-migrations:", 1)[1].split("\n  auth:", 1)[0]
+
+    # `docker compose run --rm schema-migrations` must not depend on the
+    # one-shot container being recreated by a later `up`.
+    assert 'restart: "no"' in service
+    assert "OTV_LICENSE_IMPORT_PASSWORD_FILE" not in service, (
+        "the importer password must arrive through a file, never the environment"
+    )
+    assert "LICENSE_IMPORTER_PASSWORD_FILE: /run/secrets/license-importer-db-password" in service
+    assert "license-importer-db-password" in service
+
+    # The new migration must be visible inside the container, otherwise the
+    # runner fails to stage it.
+    assert (
+        "../../tools/selfhosted/migrations/license_restore_v1.sql:"
+        "/app/tools/selfhosted/migrations/license_restore_v1.sql:ro" in service
+    )
+
+    # It waits for the database rather than for any API service.
+    assert "postgres:" in service
+    assert "condition: service_healthy" in service
+    for other in ("postgrest:", "business-api:", "admin:", "web-api:"):
+        assert other not in service, f"schema-migrations must not depend on {other}"

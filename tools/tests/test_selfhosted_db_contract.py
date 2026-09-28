@@ -117,7 +117,32 @@ class SelfHostedDatabaseContractTests(unittest.TestCase):
             r"WHERE version = '([^']+\.sql)'",
             (ROOT / "tools" / "selfhosted" / "apply_schema_migrations.psql").read_text(encoding="utf-8"),
         )
-        self.assertEqual(tuple(runtime_versions), ("db_bootstrap.sql", "base_schema.sql", *MIGRATION_ORDER))
+        # The self-hosted ledger runs one extra entry that the CloudBase cutover
+        # bundle deliberately omits: restore lives in its own migration so a
+        # legacy database cannot claim it as already applied.
+        self.assertEqual(
+            tuple(runtime_versions),
+            (
+                "db_bootstrap.sql",
+                "base_schema.sql",
+                "license_v2_migration.sql",
+                "license_note_migration.sql",
+                "license_restore_v1.sql",
+                "admin_sold_migration.sql",
+                "hotupdate_migration.sql",
+                "announcement_migration.sql",
+                "iptv_migration.sql",
+                "vod_sources_migration.sql",
+                "pg_cu_optimization_migration.sql",
+            ),
+        )
+        self.assertEqual(
+            tuple(version for version in runtime_versions if version not in MIGRATION_ORDER),
+            ("db_bootstrap.sql", "base_schema.sql", "license_restore_v1.sql"),
+        )
+        # Restore is a self-hosted ledger entry only; it must not be pulled into
+        # the CloudBase import bundle, which replays MIGRATION_ORDER only.
+        self.assertNotIn("license_restore_v1.sql", MIGRATION_ORDER)
 
     def test_reconciliation_report_contains_only_counts_and_sequence_state(self):
         report = build_reconciliation_report(

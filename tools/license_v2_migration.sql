@@ -25,8 +25,7 @@ security definer
 set search_path to 'public'
 as $function$
 declare
-  v_code text := case when lower(trim(coalesce(p_action, ''))) = 'restore'
-                      then '' else upper(trim(coalesce(p_code, ''))) end;
+  v_code text := upper(trim(coalesce(p_code, '')));
   v_device text := lower(trim(coalesce(p_device, '')));
   v_action text := lower(trim(coalesce(p_action, '')));
   v_current_code text := upper(trim(coalesce(p_current_code, '')));
@@ -41,44 +40,11 @@ begin
       values (nullif(v_code, ''), nullif(v_device, ''), p_ip, 'protocol_upgrade_required');
     return json_build_object('ret', 426, 'msg', 'upgrade_required');
   end if;
-  if v_device !~ '^[a-f0-9]{64}$'
-     or v_action not in ('activate', 'verify', 'renew', 'restore') then
+  if v_code !~ '^OTV-[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}$'
+     or v_device !~ '^[a-f0-9]{64}$'
+     or v_action not in ('activate', 'verify', 'renew') then
     insert into activate_log(code, device_id, ip, result)
       values (nullif(v_code, ''), nullif(v_device, ''), p_ip, 'bad_request');
-    return json_build_object('ret', 400, 'msg', 'bad_request');
-  end if;
-
-  if v_action = 'restore' then
-    select l.* into v_card
-      from public.licenses l
-      where l.status = 'active'
-        and l.activated_at is not null
-        and (l.expire_at is null or l.expire_at > v_now)
-        and l.redeemed_at is null
-        and l.redeemed_to is null
-        and coalesce(l.devices, '[]'::jsonb) ? v_device
-      order by l.activated_at desc, l.updated_at desc, l.code desc
-      limit 1;
-    if v_card.code is null then
-      insert into activate_log(code, device_id, ip, result)
-        values (null, v_device, p_ip, 'restore_not_found');
-      return json_build_object('ret', 404, 'msg', 'restore_not_found');
-    end if;
-    insert into activate_log(code, device_id, ip, result)
-      values (v_card.code, v_device, p_ip, 'restore_ok');
-    return json_build_object(
-      'ret', 0,
-      'ticket', v_card.ticket,
-      'licenseCode', v_card.code,
-      'activatedAt', v_card.activated_at,
-      'expireAt', v_card.expire_at,
-      'serverNow', v_now
-    );
-  end if;
-
-  if v_code !~ '^OTV-[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}$' then
-    insert into activate_log(code, device_id, ip, result)
-      values (nullif(v_code, ''), v_device, p_ip, 'bad_request');
     return json_build_object('ret', 400, 'msg', 'bad_request');
   end if;
 
