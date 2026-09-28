@@ -16,6 +16,8 @@ import concurrent.futures
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import source_dns
+
 
 DEFAULT_PATH = Path(__file__).with_name("vod_sources.default.json")
 RUNTIME_PATH = Path(__file__).with_name("vod_sources.runtime.json")
@@ -134,6 +136,15 @@ class VodSource:
     revision: int = 1
 
 
+class FastSearchSubmission(tuple):
+    """Tuple-compatible fast-search submission with transient overload status."""
+
+    def __new__(cls, futures=(), overloaded=False):
+        instance = super().__new__(cls, futures)
+        instance.overloaded = bool(overloaded)
+        return instance
+
+
 class SourceRegistry:
     def __init__(self, sources=(), version=1, history=None, probe=None, stats=None,
                  clock=time.monotonic):
@@ -152,6 +163,8 @@ class SourceRegistry:
         self._fast_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=FAST_RESOLVER_MAX_WORKERS, thread_name_prefix="vod-fast")
         self._fast_slots = threading.BoundedSemaphore(FAST_RESOLVER_MAX_IN_FLIGHT)
+        self._fast_running_lock = threading.Lock()
+        self._fast_running = 0
 
     @classmethod
     def from_dict(cls, payload):
@@ -223,31 +236,44 @@ class SourceRegistry:
         except (TypeError, ValueError, OverflowError):
             limit = FAST_RESOLVER_MAX_SOURCES
         if limit == 0:
-            return ()
+            return FastSearchSubmission()
 
         futures = []
+        overloaded = False
         for source in self.resolver_source_order()[:limit]:
             if not self._fast_slots.acquire(blocking=False):
+                overloaded = True
                 break
             with self._resolver_pool_lock:
                 if self._resolver_closed:
                     self._fast_slots.release()
+                    overloaded = True
                     break
                 try:
                     future = self._fast_executor.submit(
                         self._search_fast_one, source, copy.deepcopy(subject))
                 except RuntimeError:
                     self._fast_slots.release()
+                    overloaded = True
                     break
                 except BaseException:
                     self._fast_slots.release()
                     for submitted in futures:
                         submitted.cancel()
                     raise
+            # In-flight slots (6) outnumber workers (3), so claiming a slot says
+            # nothing about whether this job can start now. A submission that
+            # can only queue is work the caller will most likely time out on;
+            # the caller must treat that as "busy", never as "this source has no
+            # lines" (which would earn a 15s negative cache entry).
+            with self._fast_running_lock:
+                workers_busy = self._fast_running >= FAST_RESOLVER_MAX_WORKERS
+            if workers_busy:
+                overloaded = True
             future.add_done_callback(self._release_fast_slot)
             future.add_done_callback(self._record_fast_search)
             futures.append(future)
-        return tuple(futures)
+        return FastSearchSubmission(futures, overloaded=overloaded)
 
     def _release_fast_slot(self, _future):
         self._fast_slots.release()
@@ -363,10 +389,15 @@ class SourceRegistry:
     def _search_fast_one(self, source, subject):
         deadline = time.monotonic() + max(0.0, float(FAST_SOURCE_JOB_TIMEOUT_SECONDS))
         previous_deadline = _active_source_deadline()
+        previous_dns_deadline = source_dns.set_deadline(deadline)
         _SOURCE_JOB_CONTEXT.deadline = deadline
+        with self._fast_running_lock:
+            self._fast_running += 1
         try:
             return self._search_one(source, subject)
         finally:
+            with self._fast_running_lock:
+                self._fast_running -= 1
             if previous_deadline is None:
                 try:
                     del _SOURCE_JOB_CONTEXT.deadline
@@ -374,6 +405,7 @@ class SourceRegistry:
                     pass
             else:
                 _SOURCE_JOB_CONTEXT.deadline = previous_deadline
+            source_dns.restore_deadline(previous_dns_deadline)
 
     def _search_one(self, source, subject):
         started = time.monotonic()
@@ -780,7 +812,12 @@ def _validate_public_url(url, resolve_dns=False):
     except ValueError:
         if resolve_dns:
             try:
-                addresses = {row[4][0] for row in socket.getaddrinfo(hostname, parsed.port or 443)}
+                dns_timeout = (_remaining_source_timeout()
+                               if _active_source_deadline() is not None else None)
+                addresses = {
+                    row[4][0] for row in source_dns.getaddrinfo(
+                        hostname, parsed.port or 443, timeout=dns_timeout)
+                }
             except socket.gaierror as exc:
                 raise UnsafeSourceUrl("影视源域名无法解析") from exc
             if not addresses:
@@ -797,12 +834,28 @@ def _validate_public_url(url, resolve_dns=False):
     return url
 
 
+class _PublicSourceHTTPHandler(source_dns.BoundedHTTPHandler):
+    def http_open(self, request):
+        _validate_public_url(request.full_url, resolve_dns=True)
+        return super().http_open(request)
+
+
+class _PublicSourceHTTPSHandler(source_dns.BoundedHTTPSHandler):
+    def https_open(self, request):
+        _validate_public_url(request.full_url, resolve_dns=True)
+        return super().https_open(request)
+
+
+_SOURCE_URL_OPENER = urllib.request.build_opener(
+    _PublicSourceHTTPHandler, _PublicSourceHTTPSHandler)
+
+
 def _default_fetch(url):
     _validate_public_url(url, resolve_dns=True)
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json, application/xml, text/html"})
     deadline = _active_source_deadline()
     timeout = min(8.0, _remaining_source_timeout(deadline)) if deadline is not None else 8
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with _SOURCE_URL_OPENER.open(request, timeout=timeout) as response:
         final_url = response.geturl()
         _validate_public_url(final_url, resolve_dns=True)
         body = _read_response_body(response, SOURCE_RESPONSE_MAX_BYTES, deadline)
@@ -813,7 +866,7 @@ def _probe_fetch(url):
     _validate_public_url(url, resolve_dns=True)
     started = time.monotonic()
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/vnd.apple.mpegurl,*/*"})
-    with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT_SECONDS) as response:
+    with _SOURCE_URL_OPENER.open(request, timeout=PROBE_TIMEOUT_SECONDS) as response:
         _validate_public_url(response.geturl(), resolve_dns=True)
         body = response.read(256 * 1024).decode("utf-8", "replace")
     return {"elapsed_ms": int((time.monotonic() - started) * 1000), "body": body}
@@ -831,6 +884,11 @@ def probe_stream(url, fetch=None):
         heights = [int(value) for value in re.findall(r"RESOLUTION=\d+x(\d+)", body, re.I)]
         return {"alive": True, "latency_ms": int(result.get("elapsed_ms") or 0),
                 "height": max(heights, default=0)}
+    except source_dns.DNSCapacityError:
+        # Our own lookup pool was full. The source was never actually asked, so
+        # this line stays unprobed (sorted last) rather than being written off
+        # as dead -- "we ran out of budget" is not a verdict on the source.
+        return {"alive": None, "latency_ms": None, "height": 0}
     except Exception:
         return {"alive": False, "latency_ms": None, "height": 0}
 

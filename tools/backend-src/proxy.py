@@ -129,6 +129,7 @@ _VOD_REMOTE_CONFIG_URL = os.environ.get("OTV_VOD_SOURCE_CONFIG_URL", "").strip()
 _VOD_REMOTE_CONFIG_LOCK = threading.Lock()
 _VOD_REMOTE_CONFIG_STATE = {"last_attempt": 0.0, "registry": None}
 _VOD_REMOTE_CONFIG_TTL = 30.0
+_STATIC_CONTENT_HASH_RE = re.compile(r"(?:^|[/._-])[0-9a-f]{8,64}(?=$|[/._-])", re.I)
 
 
 def _shutdown_vod_service():
@@ -221,18 +222,34 @@ def _get_vod_service():
                 catalog.warm_index()
     # 管理端发布的配置由 App 原子写入运行目录；请求到来时热替换，无需重启 App。
     current = remote_registry or vod_sources.SourceRegistry.load_current()
-    if hasattr(VOD_SERVICE, "registry") and (
-            (remote_registry is not None and current.version != VOD_SERVICE.registry.version) or
-            current.version > VOD_SERVICE.registry.version):
-        previous = VOD_SERVICE.registry
-        current.history = VOD_SERVICE.registry.history
-        current.stats = VOD_SERVICE.registry.stats
-        VOD_SERVICE.registry = current
-        VOD_SERVICE._resolve_sources = current.resolve_subject
-        if getattr(VOD_SERVICE, "resolver", None) is not None:
-            VOD_SERVICE.resolver.registry = current
-            VOD_SERVICE.resolver.invalidate_source_configuration()
-        close = getattr(previous, "close", None)
+    previous = None
+    discarded = None
+    with _VOD_SERVICE_LOCK:
+        service = VOD_SERVICE
+        if hasattr(service, "registry") and (
+                (remote_registry is not None and current.version != service.registry.version) or
+                current.version > service.registry.version):
+            previous = service.registry
+            current.history = previous.history
+            current.stats = previous.stats
+            resolver = getattr(service, "resolver", None)
+            if resolver is not None:
+                # Lock order is service lock -> resolver cache lock. Resolver code
+                # never calls back into _get_vod_service while holding its cache lock.
+                resolver.replace_registry(current)
+            service.registry = current
+            service._resolve_sources = current.resolve_subject
+        elif hasattr(service, "registry") and current is not service.registry:
+            # load_current/remote refresh may have produced a distinct object
+            # with the already-active version. It was not adopted, so retire
+            # its executor after leaving the service lock.
+            discarded = current
+
+    # Closing a registry can acquire its own pool lock; do it after both service
+    # pointers and the resolver snapshot have been committed and the service lock
+    # has been released.
+    for registry in (previous, discarded):
+        close = getattr(registry, "close", None)
         if callable(close):
             close()
     return VOD_SERVICE
@@ -3574,6 +3591,7 @@ class Handler(SimpleHTTPRequestHandler):
         return True
 
     def do_GET(self):
+        self._static_response = False
         parsed = urlparse(self.path)
         if self._apk_update_manifest(parsed):
             return
@@ -4050,7 +4068,13 @@ class Handler(SimpleHTTPRequestHandler):
         except (ValueError, LookupError) as exc:
             payload, status = {"ok": False, "error": str(exc)}, 400
         except Exception as exc:
-            payload, status = {"ok": False, "error": "vod unavailable", "detail": str(exc)[:120]}, 503
+            # The exception text carries internal topology (metadata-api host and
+            # port, upstream URLs, cookies). Log it server-side, never echo it to
+            # an anonymous caller.
+            print("[%s] /vod api error: %s" % (
+                time.strftime("%H:%M:%S"),
+                re.sub(r"[\r\n\t]+", " ", str(exc))[:200]))
+            payload, status = {"ok": False, "error": "vod unavailable"}, 503
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -4506,6 +4530,7 @@ class Handler(SimpleHTTPRequestHandler):
     def send_response(self, code, message=None):
         # 每个响应开始时重置 Cache-Control 追踪（keep-alive 下同一连接复用 handler）
         self._cc_sent = False
+        self._response_code = code
         super().send_response(code, message)
 
     def send_header(self, keyword, value):
@@ -4517,25 +4542,32 @@ class Handler(SimpleHTTPRequestHandler):
         super().send_header(keyword, value)
 
     def end_headers(self):
-        """静态文件默认禁用缓存（开发期改前端后刷新立即可见）；API 分支已自定
-        Cache-Control（分片 max-age=10 / 队标 max-age=86400 / 清单 no-store）则
-        尊重分支设置，不再重复发送。
-        v1.22（2026-09-05 需求⑫ 网页版加载提速）：静态分支按扩展名给缓存——
-        海报/图标等不可变资源 24h，app.js/style.css 5min，html 仍 no-store
-        （发布即生效）。"""
+        """HTML 与错误静态响应不缓存；带内容哈希的资源可永久缓存。
+
+        无哈希静态资源最多缓存 5 分钟，部署期间旧哈希文件由运行时保留，
+        因此已加载页面仍能取回其引用的 JS/CSS。
+        API 分支已自定 Cache-Control（分片 max-age=10 / 队标 max-age=86400 / 清单
+        no-store）时，尊重分支设置，不再重复发送。
+        """
         if not getattr(self, "_cc_sent", False):
             cc = "no-store"
             if getattr(self, "_static_response", False):
                 try:
-                    low_all = self.path.lower()
-                    low = low_all.split("?", 1)[0]
-                    versioned = "v=" in low_all
-                    if re.search(r"\.(jpe?g|png|webp|gif|ico|webmanifest)$", low):
-                        # v1.25：带 ?v= 版本号的资源视为不可变（发布即换版本号，
-                        # 浏览器可长存；未版本化的维持 24h）
-                        cc = "public, max-age=31536000, immutable" if versioned else "public, max-age=86400"
-                    elif re.search(r"\.(js|css)$", low):
-                        cc = "public, max-age=31536000, immutable" if versioned else "public, max-age=300"
+                    request_target = self.path.lower()
+                    path = urlparse(request_target).path
+                    # 前端用 ?v=<版本号> 而不是路径哈希做发布失效（app.js?v=134）。
+                    # 少了这一条，www 树里每个文件都会掉到 5min。
+                    versioned = "v=" in request_target.split("?", 1)[-1]
+                    status = getattr(self, "_response_code", 200)
+                    if status < 400 and not path.endswith(".html"):
+                        if _STATIC_CONTENT_HASH_RE.search(path) or (
+                                versioned and path.endswith((".js", ".css"))):
+                            cc = "public, max-age=31536000, immutable"
+                        elif re.search(
+                                r"\.(jpe?g|png|webp|gif|ico|webmanifest)$", path):
+                            cc = "public, max-age=86400"
+                        elif re.search(r"\.(js|css)$", path):
+                            cc = "public, max-age=300"
                 except Exception:
                     pass
             self.send_header("Cache-Control", cc)
@@ -4564,7 +4596,11 @@ class Handler(SimpleHTTPRequestHandler):
                 status = next((str(value) for value in args
                                if isinstance(value, str) and re.fullmatch(r"[1-5][0-9]{2}", value)),
                               "unknown")
-            method = str(getattr(self, "command", "GET") or "GET").upper()
+            # The method comes from the raw request line. Keep letters only so a
+            # crafted line such as "GE\x1b]0;PWNED\x07T" cannot inject terminal
+            # escape sequences (or a fake log line) into stdout.
+            method = (re.sub(r"[^A-Za-z]", "", str(getattr(self, "command", "") or ""))
+                      .upper()[:12] or "GET")
             print("[%s] \"%s /vod/resolve/:mytv_id\" %s" % (
                 time.strftime("%H:%M:%S"), method, status))
             return

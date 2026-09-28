@@ -197,6 +197,64 @@ class ResolverFastPathCacheTest(unittest.TestCase):
         self.assertIsNone(after_source_retirement.preferred)
         self.assertEqual(after_source_retirement.backups, ())
 
+    def test_registry_swap_and_cache_invalidation_are_atomic(self):
+        old_registry = _registry(("source-1",))
+        old_registry._search_one = lambda source, _subject: (
+            source, [_line(content_id="old-content")], None, 10)
+        resolver, _index = self.make_resolver(index=MutableIndex(entry=None))
+        resolver.registry = old_registry
+        first = resolver.resolve(MYTV_ID, episode=1)
+        self.assertEqual(first.preferred.content_id, "old-content")
+
+        new_registry = _registry(("source-1",))
+        new_registry._search_one = lambda source, _subject: (
+            source, [_line(content_id="new-content")], None, 10)
+        invalidation_entered = threading.Event()
+        continue_invalidation = threading.Event()
+        replacement_done = threading.Event()
+        swap_errors = []
+        original_invalidate_locked = resolver._invalidate_source_configuration_locked
+
+        def paused_invalidation_locked():
+            invalidation_entered.set()
+            continue_invalidation.wait()
+            original_invalidate_locked()
+
+        resolver._invalidate_source_configuration_locked = paused_invalidation_locked
+
+        def replace_registry():
+            try:
+                previous = resolver.replace_registry(new_registry)
+                previous.close()
+            except BaseException as exc:
+                swap_errors.append(exc)
+            finally:
+                replacement_done.set()
+
+        swap = threading.Thread(target=replace_registry)
+        swap.start()
+        resolve_result = []
+        resolve_done = threading.Event()
+        try:
+            self.assertTrue(invalidation_entered.wait(1))
+            resolve = threading.Thread(target=lambda: (
+                resolve_result.append(resolver.resolve(MYTV_ID, episode=1)),
+                resolve_done.set()))
+            resolve.start()
+            self.assertFalse(resolve_done.wait(0.05))
+        finally:
+            continue_invalidation.set()
+            swap.join(timeout=1)
+            resolve.join(timeout=1)
+            new_registry.close()
+
+        self.assertTrue(replacement_done.is_set())
+        self.assertEqual(swap_errors, [])
+        self.assertTrue(old_registry._resolver_closed)
+        self.assertEqual(len(resolve_result), 1)
+        self.assertEqual(resolve_result[0].status, "MATCHED")
+        self.assertEqual(resolve_result[0].preferred.content_id, "new-content")
+
     def test_source_configuration_change_invalidates_same_id_cached_content(self):
         old_registry = _registry(("source-1",))
         old_registry._search_one = lambda source, _subject: (
@@ -208,8 +266,7 @@ class ResolverFastPathCacheTest(unittest.TestCase):
             source, [_line(content_id="new-content")], None, 10)
         try:
             first = resolver.resolve(MYTV_ID, episode=1)
-            resolver.registry = new_registry
-            resolver.invalidate_source_configuration()
+            resolver.replace_registry(new_registry)
             second = resolver.resolve(MYTV_ID, episode=1)
         finally:
             for registry in (old_registry, new_registry):
@@ -248,6 +305,104 @@ class ResolverFastPathCacheTest(unittest.TestCase):
         self.assertEqual(cached.cache["kind"], "failure")
         self.assertEqual(retried.status, "TEMPORARILY_UNAVAILABLE")
         self.assertEqual(calls, ["source-1", "source-1"])
+
+    def test_saturated_source_pool_does_not_cache_negative_and_retries_after_recovery(self):
+        registry = _registry(("source-1",))
+        release = threading.Event()
+        started = threading.Event()
+        calls = [0]
+        calls_lock = threading.Lock()
+
+        def controlled_search(source, _subject):
+            with calls_lock:
+                calls[0] += 1
+                invocation = calls[0]
+            if invocation <= vod_sources.FAST_RESOLVER_MAX_IN_FLIGHT:
+                if invocation == vod_sources.FAST_RESOLVER_MAX_WORKERS:
+                    started.set()
+                release.wait()
+                return source, [], None, 10
+            return source, [_line()], None, 10
+
+        registry._search_one = controlled_search
+        resolver, _index = self.make_resolver(index=MutableIndex(entry=None))
+        resolver.registry = registry
+        occupied = []
+        cache_key = (MYTV_ID, 1, "index-v1")
+        try:
+            for _ in range(vod_sources.FAST_RESOLVER_MAX_IN_FLIGHT):
+                occupied.extend(registry.submit_fast_searches({"title": "早春晴朗"}))
+            self.assertTrue(started.wait(1))
+
+            overloaded = resolver.resolve(MYTV_ID, episode=1)
+
+            self.assertEqual(overloaded.status, "TEMPORARILY_UNAVAILABLE")
+            self.assertNotIn(cache_key, resolver._failure_cache)
+            release.set()
+            for future in occupied:
+                future.result(timeout=2)
+
+            recovered = resolver.resolve(MYTV_ID, episode=1)
+        finally:
+            release.set()
+            registry.close()
+
+        self.assertEqual(recovered.status, "MATCHED")
+        self.assertEqual(recovered.preferred.source_id, "source-1")
+        self.assertEqual(calls[0], vod_sources.FAST_RESOLVER_MAX_IN_FLIGHT + 1)
+
+    def test_queued_fast_search_does_not_write_a_negative_cache_entry(self):
+        """F-2: work that merely waited in the queue is not a negative result.
+
+        The shared fast pool has fewer workers than in-flight slots, so a second
+        request can claim a slot, queue behind running work and time out inside
+        the 1.5s budget without the source ever having been asked. Caching that
+        as "this source has no lines" keeps the title dead for 15s after the
+        pool drains.
+        """
+        registry = _registry(("source-1",))
+        release = threading.Event()
+        workers_busy = threading.Event()
+        calls = [0]
+        calls_lock = threading.Lock()
+
+        def queued_search(source, _subject):
+            with calls_lock:
+                calls[0] += 1
+                invocation = calls[0]
+            if invocation <= vod_sources.FAST_RESOLVER_MAX_WORKERS:
+                if invocation == vod_sources.FAST_RESOLVER_MAX_WORKERS:
+                    workers_busy.set()
+                release.wait(3)
+                return source, [], None, 10
+            # Well under FAST_RESOLVE_BUDGET_SECONDS, so it answers as soon as a
+            # worker actually starts running it.
+            time.sleep(vod_sources.FAST_RESOLVER_BUDGET_SECONDS * 0.6)
+            return source, [_line()], None, 10
+
+        registry._search_one = queued_search
+        resolver, _index = self.make_resolver(index=MutableIndex(entry=None))
+        resolver.registry = registry
+        cache_key = (MYTV_ID, 1, "index-v1")
+        occupied = []
+        try:
+            for _ in range(vod_sources.FAST_RESOLVER_MAX_WORKERS):
+                occupied.extend(registry.submit_fast_searches({"title": "早春晴朗"}))
+            self.assertTrue(workers_busy.wait(1))
+
+            queued = resolver.resolve(MYTV_ID, episode=1)
+
+            self.assertEqual(queued.status, "TEMPORARILY_UNAVAILABLE")
+            self.assertIsNone(queued.preferred)
+            self.assertNotIn(cache_key, resolver._failure_cache)
+        finally:
+            release.set()
+            for future in occupied:
+                try:
+                    future.result(timeout=2)
+                except concurrent.futures.CancelledError:
+                    pass
+            registry.close()
 
     def test_stale_index_never_serves_cached_playable_candidates(self):
         index = MutableIndex({"resolved_at": NOW, "lines": [_line()]})

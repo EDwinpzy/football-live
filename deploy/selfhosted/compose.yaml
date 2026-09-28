@@ -178,10 +178,16 @@ services:
       OTV_APK_UPDATE_OBJECT_BASE: http://storage:8092/v1/storages/object/hotupdate
       OTV_IPTV_LATEST_URL: http://business-api:8082/iptv/latest
       OTV_VOD_SOURCE_CONFIG_URL: http://business-api:8082/internal/vod-sources
+      # 2026-09-28：/vod/resolve 依赖 metadata-api 查 My TV ID 详情。未注入这个 origin 时
+      # MetadataClient 读不到地址，每次 detail() 都抛 MetadataUnavailable，接口恒定返回
+      # TEMPORARILY_UNAVAILABLE（部署阻断，不是片源问题）。
+      OTV_METADATA_API_URL: http://metadata-api:8094
     depends_on:
       business-api:
         condition: service_started
       storage:
+        condition: service_started
+      metadata-api:
         condition: service_started
     expose:
       - "8090"

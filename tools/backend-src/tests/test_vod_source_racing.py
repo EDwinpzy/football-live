@@ -9,6 +9,7 @@
    同片再查给全量且不重复触网。
 """
 import pathlib
+import socket
 import sys
 import tempfile
 import threading
@@ -23,6 +24,7 @@ BACKEND = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 
 import vod_sources  # noqa: E402
+import source_dns  # noqa: E402
 
 
 SUBJECT = {"title": "肖申克的救赎", "year": "1994", "category": "movie", "season": 0}
@@ -322,7 +324,44 @@ class FastResolverPoolTest(unittest.TestCase):
                 except concurrent.futures.CancelledError:
                     pass
 
+    def test_private_addresses_are_rejected_before_any_socket_is_opened(self):
+        """F-6 (split out): loopback is a security outcome, not a timeout outcome."""
+        seen = []
+
+        class RecordingSocket:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def settimeout(self, _timeout):
+                pass
+
+            def connect(self, _address):
+                seen.append("connect")
+
+            def close(self):
+                pass
+
+        def loopback(host, port, *args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                     "", ("127.0.0.1", port))]
+
+        with patch("socket.getaddrinfo", side_effect=loopback), \
+                patch("source_dns.socket.socket", side_effect=RecordingSocket):
+            with self.assertRaises(OSError) as caught:
+                source_dns._bounded_create_connection(("local.test", 80), timeout=1)
+        self.assertIsInstance(caught.exception, OSError)
+        self.assertEqual(seen, [], "no socket may be created for a private address")
+
     def test_timed_out_searches_self_release_bounded_pool_slots(self):
+        """F-6: the per-source deadline must be what ends the job.
+
+        The old version pointed the client at a loopback ``ThreadingHTTPServer``
+        and only patched ``_validate_public_url``. The loopback address was
+        rejected during the DNS safety check, so the assertions passed whether
+        or not the deadline existed. Here DNS answers with a public address and
+        ``socket.socket`` is stubbed, so the connection really is attempted and
+        only the per-source deadline can end the search.
+        """
         delay_seconds = 0.3
 
         class SlowResponseHandler(BaseHTTPRequestHandler):
@@ -345,21 +384,64 @@ class FastResolverPoolTest(unittest.TestCase):
         server.daemon_threads = True
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
-        api_url = "http://127.0.0.1:%d/api.php/provide/vod/" % server.server_port
+        api_url = "http://public-source.test:%d/api.php/provide/vod/" % server.server_port
+
+        connect_attempts = [0]
+        connect_lock = threading.Lock()
+
+        class SlowSocket:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def settimeout(self, timeout):
+                self._timeout = delay_seconds if timeout is None else float(timeout)
+
+            def connect(self, address):
+                with connect_lock:
+                    connect_attempts[0] += 1
+                # Model a connect that hangs for the server delay. A real socket
+                # aborts it once its own timeout expires, so the connect can
+                # only finish if the caller left a timeout longer than the
+                # delay -- i.e. only if the per-source deadline did NOT apply.
+                timeout = self._timeout
+                end = time.monotonic() + delay_seconds
+                while True:
+                    remaining = end - time.monotonic()
+                    if remaining <= 0:
+                        return
+                    if timeout is not None and remaining > timeout:
+                        time.sleep(max(0.0, timeout))
+                        raise socket.timeout("timed out")
+                    time.sleep(min(0.005, remaining))
+
+            def close(self):
+                pass
+
+        def public_dns(_host, port, *args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                     "", ("93.184.216.34", port))]
+
         registry = vod_sources.SourceRegistry(
             [vod_sources.VodSource(
-                "s%d" % index, "s%d" % index, "http://127.0.0.1", api_url,
+                "s%d" % index, "s%d" % index, "http://public-source.test", api_url,
                 "macms_json") for index in range(6)])
         try:
             with patch.object(vod_sources, "FAST_SOURCE_JOB_TIMEOUT_SECONDS", 0.08, create=True), \
-                    patch.object(vod_sources, "_validate_public_url",
-                                 side_effect=lambda url, resolve_dns=False: url):
+                    patch("socket.getaddrinfo", side_effect=public_dns), \
+                    patch("source_dns.socket.socket", side_effect=SlowSocket):
+                started = time.monotonic()
                 first = registry.submit_fast_searches(dict(SUBJECT))
                 first_results = [future.result(timeout=2) for future in first]
+                wall = time.monotonic() - started
 
                 self.assertEqual(len(first), 3)
                 self.assertTrue(all(result[2] is not None for result in first_results))
-                self.assertLess(max(result[3] for result in first_results), 500)
+                self.assertLess(max(result[3] for result in first_results), 200)
+                self.assertLess(wall, 0.3, "the deadline must end the job before the delay")
+                self.assertGreaterEqual(
+                    connect_attempts[0], 1,
+                    "the request must reach connect(), otherwise this test again "
+                    "only proves the private-address guard")
 
                 callbacks_finished = threading.Event()
                 remaining_callbacks = [len(first)]
@@ -423,6 +505,44 @@ class FastResolverPoolTest(unittest.TestCase):
         self.assertGreater(token_observed[0][0], 0)
         self.assertLessEqual(token_observed[0][0], 0.1)
         self.assertGreater(token_observed[0][1], 0)
+
+    def test_stalled_dns_does_not_hold_fast_source_workers(self):
+        import socket
+        import hhkan
+
+        def stalled_getaddrinfo(_host, _port, *args, **kwargs):
+            time.sleep(0.4)
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                     "", ("8.8.8.8", 443))]
+
+        for adapter_type, site_url, api_url in (
+                ("macms_json", "https://source.test", "https://source.test/api/"),
+                ("hhkan", "https://www.hhkan0.com", "")):
+            with self.subTest(adapter_type=adapter_type):
+                registry = vod_sources.SourceRegistry([
+                    vod_sources.VodSource("source", "source", site_url, api_url,
+                                          adapter_type)])
+                try:
+                    with patch.object(vod_sources, "FAST_SOURCE_JOB_TIMEOUT_SECONDS", 0.08), \
+                            patch("socket.getaddrinfo", side_effect=stalled_getaddrinfo), \
+                            patch.object(hhkan, "_token_cache", None):
+                        future = registry.submit_fast_searches(dict(SUBJECT))[0]
+                        result = future.result(timeout=1)
+                        self.assertIsNotNone(result[2])
+                        self.assertLess(result[3], 250)
+
+                        retry = ()
+                        deadline = time.monotonic() + 0.5
+                        while time.monotonic() < deadline and not retry:
+                            retry = registry.submit_fast_searches(dict(SUBJECT))
+                            if not retry:
+                                time.sleep(0.01)
+                        self.assertEqual(len(retry), 1)
+                        retry_result = retry[0].result(timeout=1)
+                        self.assertIsNotNone(retry_result[2])
+                        self.assertLess(retry_result[3], 250)
+                finally:
+                    registry.close()
 
 
 if __name__ == "__main__":
