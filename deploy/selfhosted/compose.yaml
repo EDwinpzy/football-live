@@ -49,6 +49,48 @@ services:
     networks:
       - backend
 
+  schema-migrations:
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
+    restart: "no"
+    entrypoint: ["/bin/sh", "/app/tools/selfhosted/apply_schema_migrations.sh"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-optimal_tv}
+      POSTGREST_DB_PASSWORD: ${POSTGREST_DB_PASSWORD:?set POSTGREST_DB_PASSWORD}
+      LICENSE_IMPORTER_PASSWORD_FILE: /run/secrets/license-importer-db-password
+    volumes:
+      - ../../tools/selfhosted/apply_schema_migrations.sh:/app/tools/selfhosted/apply_schema_migrations.sh:ro
+      - ../../tools/selfhosted/apply_schema_migrations.psql:/app/tools/selfhosted/apply_schema_migrations.psql:ro
+      - ../../tools/selfhosted/db_bootstrap.sql:/app/tools/selfhosted/db_bootstrap.sql:ro
+      - ../../tools/selfhosted/iptv_publish_lock.sql:/app/tools/selfhosted/iptv_publish_lock.sql:ro
+      - ../../tools/selfhosted/base_schema.sql:/app/tools/selfhosted/base_schema.sql:ro
+      - ../../tools/selfhosted/license_importer_role.sql:/app/tools/selfhosted/license_importer_role.sql:ro
+      - ../../tools/selfhosted/license_importer_smoke.psql:/app/tools/selfhosted/license_importer_smoke.psql:ro
+      - ../../tools/selfhosted/migrations/license_restore_v1.sql:/app/tools/selfhosted/migrations/license_restore_v1.sql:ro
+      - ../../tools/license_v2_migration.sql:/app/tools/license_v2_migration.sql:ro
+      - ../../tools/license_note_migration.sql:/app/tools/license_note_migration.sql:ro
+      - ../../tools/admin_sold_migration.sql:/app/tools/admin_sold_migration.sql:ro
+      - ../../tools/hotupdate_migration.sql:/app/tools/hotupdate_migration.sql:ro
+      - ../../tools/announcement_migration.sql:/app/tools/announcement_migration.sql:ro
+      - ../../tools/iptv_migration.sql:/app/tools/iptv_migration.sql:ro
+      - ../../tools/vod_sources_migration.sql:/app/tools/vod_sources_migration.sql:ro
+      - ../../tools/pg_cu_optimization_migration.sql:/app/tools/pg_cu_optimization_migration.sql:ro
+      - ${LICENSE_IMPORT_PASSWORD_HOST_PATH:-/srv/mytv/secrets/license-importer-db-password}:/run/secrets/license-importer-db-password:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 96m
+    logging:
+      driver: json-file
+      options:
+        max-size: 1m
+        max-file: "2"
+    networks:
+      - backend
+
   auth:
     image: python:3.12-alpine
     restart: unless-stopped
@@ -115,6 +157,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema-migrations:
+        condition: service_completed_successfully
     expose:
       - "3000"
     mem_limit: 192m
@@ -164,25 +208,20 @@ services:
     environment:
       PORT: "8090"
       OTV_BIND: 0.0.0.0
-      OTV_CLOUD_RELAY: "0"
-      # 2026-09-24：自建 VPS 出口连不上片源站 API（实测 18 个采集站全 curl 000，Cloudflare/
-      # 海外 IP 全超时），服务器侧匹配必然为空。主兜底改为「本机解析好的静态索引」：文件由
-      # tools/build_vod_line_index.py 生成后 scp 到 /srv/mytv/objects/hotupdate/vod-lines.json，
-      # 这里按对象桶地址读取，不依赖任何外部服务。
       OTV_VOD_LINE_INDEX_URL: http://storage:8092/v1/storages/object/hotupdate/vod-lines.json
       OTV_VOD_LINE_INDEX_MAX_AGE_DAYS: "30"
-      # 旧的 CloudBase 回源链路降级为可选最后一环；自建栈默认关闭（对方环境 2026-10-09 到期）。
-      OTV_VOD_CLOUD_FALLBACK: "0"
       OTV_HHKAN_SNAPSHOT_FIRST: "1"
       OTV_LICENSE_ENDPOINT: http://business-api:8082/activate
       OTV_APK_UPDATE_OBJECT_BASE: http://storage:8092/v1/storages/object/hotupdate
       OTV_IPTV_LATEST_URL: http://business-api:8082/iptv/latest
-      OTV_VOD_SOURCE_CONFIG_URL: http://business-api:8082/internal/vod-sources
-      # 2026-09-28：/vod/resolve 依赖 metadata-api 查 My TV ID 详情。未注入这个 origin 时
-      # MetadataClient 读不到地址，每次 detail() 都抛 MetadataUnavailable，接口恒定返回
-      # TEMPORARILY_UNAVAILABLE（部署阻断，不是片源问题）。
       OTV_METADATA_API_URL: http://metadata-api:8094
+      OTV_VOD_SOURCE_CONFIG_URL: http://business-api:8082/internal/vod-sources
       OTV_WEB_ASSET_ARCHIVE: /var/lib/mytv/web-assets
+      # CloudBase is retired: the relay and the vod source fallback stay off.
+      # CLOUD_RELAY_ENABLED in proxy.py defaults to "1" when the variable is absent,
+      # so this must be set explicitly rather than merely omitted.
+      OTV_CLOUD_RELAY: "0"
+      OTV_VOD_CLOUD_FALLBACK: "0"
     depends_on:
       business-api:
         condition: service_started
@@ -217,10 +256,12 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8791"
-      OTV_CLOUD: "1"
       OTV_SELFHOSTED_MODE: "1"
       OTV_IPTV_SCHEDULER_ENABLED: "1"
       OTV_IPTV_DAILY_TIME: "06:30"
+      OTV_LICENSE_IMPORT_DB: ${POSTGRES_DB:-optimal_tv}
+      OTV_LICENSE_IMPORT_USER: license_importer
+      OTV_LICENSE_IMPORT_PASSWORD_FILE: /run/secrets/license-importer-db-password
       OTV_ADMIN_CREDENTIALS_FILE: /run/secrets/admin-credentials.json
       OTV_ADMIN_SECRET_FILE: /run/secrets/admin-session-secret
       OTV_AUTH_CREDENTIALS_FILE: /run/secrets/admin-api-credentials.json
@@ -238,14 +279,17 @@ services:
       - ../../tools/admin_server.py:/app/tools/admin_server.py:ro
       - ../../tools/admin.html:/app/tools/admin.html:ro
       - ../../tools/apk_update.py:/app/tools/apk_update.py:ro
-      - ../../tools/db_import.py:/app/tools/db_import.py:ro
       - ../../tools/license_gen.py:/app/tools/license_gen.py:ro
-      - ../../tools/selfhosted:/app/tools/selfhosted:ro
+      - ../../tools/selfhosted/admin_config.py:/app/tools/selfhosted/admin_config.py:ro
+      - ../../tools/selfhosted/runtime_client.py:/app/tools/selfhosted/runtime_client.py:ro
+      - ../../tools/selfhosted/scheduler.py:/app/tools/selfhosted/scheduler.py:ro
+      - ../../tools/selfhosted/import_licenses.py:/app/tools/selfhosted/import_licenses.py:ro
       - ../../tools/backend-src:/app/tools/backend-src:ro
       - ${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}/admin-credentials.json:/run/secrets/admin-credentials.json:ro
       - ${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}/admin-session-secret:/run/secrets/admin-session-secret:ro
       - ${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}/admin-api-credentials.json:/run/secrets/admin-api-credentials.json:ro
       - ${LICENSE_SECRETS_HOST_PATH:-/srv/mytv/secrets/license}:/run/secrets/license:ro
+      - ${LICENSE_IMPORT_PASSWORD_HOST_PATH:-/srv/mytv/secrets/license-importer-db-password}:/run/secrets/license-importer-db-password:ro
     depends_on:
       postgrest:
         condition: service_started
@@ -281,8 +325,8 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
     volumes:
       - ../../tools/publish_apk_update.py:/app/tools/publish_apk_update.py:ro
-      - ../../tools/db_import.py:/app/tools/db_import.py:ro
       - ../../tools/apk_update.py:/app/tools/apk_update.py:ro
+      - ../../tools/selfhosted/runtime_client.py:/app/tools/selfhosted/runtime_client.py:ro
       - ${RELEASE_APK_HOST_PATH:-./releases}:/releases:ro
       - ${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}/admin-api-credentials.json:/run/secrets/admin-api-credentials.json:ro
     depends_on:

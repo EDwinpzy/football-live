@@ -1,0 +1,81 @@
+\set ON_ERROR_STOP on
+
+SELECT 'OTV-' || substr(v_code, 1, 5) || '-' || substr(v_code, 6, 5) AS smoke_code
+FROM (
+    SELECT translate(
+        upper(md5(clock_timestamp()::text || random()::text)), '01', '23'
+    ) AS v_code
+) generated
+\gset
+
+BEGIN;
+SET LOCAL ROLE license_importer;
+SET LOCAL otv.license_importer_smoke_code = :'smoke_code';
+
+INSERT INTO public.licenses (code, plan, days, ticket, note)
+VALUES (:'smoke_code', 'monthly', 30, '{"smoke": true}'::jsonb, 'role smoke test')
+ON CONFLICT (code) DO NOTHING
+RETURNING code AS inserted_code
+\gset first_
+\if :{?first_inserted_code}
+\else
+\echo license_importer insert privilege smoke test failed
+\quit 3
+\endif
+
+INSERT INTO public.licenses (code, plan, days, ticket, note)
+VALUES (:'smoke_code', 'monthly', 30, '{"smoke": true}'::jsonb, 'duplicate smoke test')
+ON CONFLICT (code) DO NOTHING
+RETURNING code AS inserted_code
+\gset duplicate_
+\if :{?duplicate_inserted_code}
+\echo license_importer duplicate import smoke test failed
+\quit 3
+\endif
+
+SELECT code AS found_code
+FROM public.licenses
+WHERE code = :'smoke_code'
+\gset
+\if :{?found_code}
+\else
+\echo license_importer code-only read smoke test failed
+\quit 3
+\endif
+
+DO $test_prohibited_read$
+DECLARE
+    v_denied boolean := false;
+BEGIN
+    BEGIN
+        PERFORM ticket
+        FROM public.licenses
+        WHERE code = current_setting('otv.license_importer_smoke_code');
+    EXCEPTION WHEN insufficient_privilege THEN
+        v_denied := true;
+    END;
+    IF NOT v_denied THEN
+        RAISE EXCEPTION 'license_importer unexpectedly read license details';
+    END IF;
+END
+$test_prohibited_read$;
+
+DO $test_prohibited_update$
+DECLARE
+    v_denied boolean := false;
+BEGIN
+    BEGIN
+        UPDATE public.licenses
+        SET note = note
+        WHERE code = current_setting('otv.license_importer_smoke_code');
+    EXCEPTION WHEN insufficient_privilege THEN
+        v_denied := true;
+    END;
+    IF NOT v_denied THEN
+        RAISE EXCEPTION 'license_importer unexpectedly updated a license';
+    END IF;
+END
+$test_prohibited_update$;
+
+RESET ROLE;
+ROLLBACK;

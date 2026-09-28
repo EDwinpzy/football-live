@@ -1,6 +1,0 @@
-{
-  "name": "iptv-rebuild",
-  "version": "1.0.0",
-  "description": "OptimalTV v1.19 电视源每日校验推送（电视#9）——定时测活剔死、按测速排序写公开桶",
-  "main": "index.py"
-}

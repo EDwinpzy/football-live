@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.db_import import load_auth_credentials, load_endpoint_config
+from tools.selfhosted.runtime_client import load_auth_credentials, load_endpoint_config
 
 
 class SelfHostedAdminConfigTests(unittest.TestCase):
@@ -24,6 +24,11 @@ class SelfHostedAdminConfigTests(unittest.TestCase):
             config.check_url("https://appletv.example.tcloudbasegateway.com/v1/rdb/rest/rpc/activate_code")
         with self.assertRaisesRegex(ValueError, "allowlist"):
             config.check_url("http://169.254.169.254/latest/meta-data")
+
+    def test_runtime_never_falls_back_to_a_cloud_endpoint(self):
+        config = load_endpoint_config({"OTV_SELFHOSTED_MODE": "0"})
+        self.assertEqual(config.rest_base, "http://postgrest:3000")
+        self.assertTrue(config.self_hosted)
 
 
     def test_public_download_urls_use_the_new_origin_and_private_uploads_use_storage_service(self):

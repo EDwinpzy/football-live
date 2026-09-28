@@ -236,10 +236,10 @@ class BusinessApi:
             device_id = _js_string(body.get("deviceId", "")).strip().lower()
             if protocol != 2:
                 return _json_response({"ret": 426, "msg": "upgrade_required"})
-            if action not in ("activate", "verify", "renew"):
+            if action not in ("activate", "verify", "renew", "restore"):
                 return _json_response({"ret": 400, "msg": "bad_action"})
             code_pattern = r"OTV-[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}"
-            if not re.fullmatch(code_pattern, code):
+            if action != "restore" and not re.fullmatch(code_pattern, code):
                 return _json_response({"ret": 400, "msg": "bad_code"})
             if not re.fullmatch(r"[a-f0-9]{64}", device_id):
                 return _json_response({"ret": 400, "msg": "bad_device"})
@@ -249,7 +249,7 @@ class BusinessApi:
             payload = {
                 "p_protocol": protocol,
                 "p_action": action,
-                "p_code": code,
+                "p_code": None if action == "restore" else code,
                 "p_device": device_id,
                 "p_current_code": current_code if action == "renew" else None,
                 "p_ip": forwarded_for or None,

@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
-"""发布 APK 应用内更新清单（本机直传对象桶，不经云函数）。
+"""Publish APK in-app update manifests to the self-hosted object service.
 
-为什么不能走后台接口：后台的 apk_update_commit 要在**一次请求**里把全部分片读回内存、
-再整体回传对象桶。云函数 60s 超时下这个动作对 >100MB 的 APK 必然失败——2026-09-21
-实测 165MB 的 TV 包：40 个分片全部上传成功，commit 被杀，APK 对象与清单都没落地，
-分片残留在 apk-update/uploads/ 下。这也解释了为什么「APK 应用内更新」功能做完之后
-线上 apk-update/*.json 一直是 404：清单从来没成功发布过。
-
-本脚本用与 release_all.py / db_import.py 相同的 svc_import 凭据直传同一个桶，
-客户端下载地址与清单结构完全不变。
+Large APKs are split into bounded-size objects so upload and download requests have predictable
+memory use. The published manifest retains the client-compatible structure.
 
 用法：
   python tools/publish_apk_update.py --channel tv \
@@ -36,7 +30,7 @@ ROOT = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "backend-src"))
 
-import db_import  # noqa: E402
+from selfhosted import runtime_client  # noqa: E402
 from apk_update import (  # noqa: E402
     PART_MAX_BYTES,
     build_manifest,
@@ -51,38 +45,38 @@ BUCKET = "hotupdate"
 PREFIX = "apk-update"
 def obj_url(key: str) -> str:
     """Public download URL written into the manifest."""
-    return db_import.ENDPOINTS.public_object_url(BUCKET, key)
+    return runtime_client.ENDPOINTS.public_object_url(BUCKET, key)
 
 
 def upload_object_url(key: str) -> str:
     """Private storage API URL used by the publisher for uploads and reads."""
-    return db_import.ENDPOINTS.storage_object_url(key)
+    return runtime_client.ENDPOINTS.storage_object_url(key)
 
 
 def manifest_url(manifest_name: str) -> str:
     if manifest_name in ("tv", "mobile"):
-        return db_import.ENDPOINTS.public_web_url(f"apk-update/{manifest_name}.json")
+        return runtime_client.ENDPOINTS.public_web_url(f"apk-update/{manifest_name}.json")
     return obj_url(f"{PREFIX}/{manifest_name}.json")
 
 
 def put_object(key: str, raw: bytes, ctype: str, token: str) -> None:
     url = upload_object_url(key) + "?x-upsert=true"
-    db_import.check_url(url)
-    req = urllib.request.Request(url, data=raw, method=db_import.ENDPOINTS.storage_upload_method, headers={
+    runtime_client.check_url(url)
+    req = urllib.request.Request(url, data=raw, method=runtime_client.ENDPOINTS.storage_upload_method, headers={
         "Content-Type": ctype,
         "Authorization": "Bearer " + token,
         "x-upsert": "true",
     })
-    with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=900) as r:
+    with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=900) as r:
         r.read()
 
 
 def get_object(key: str) -> bytes | None:
     url = upload_object_url(key)
-    db_import.check_url(url)
+    runtime_client.check_url(url)
     req = urllib.request.Request(url, method="GET")
     try:
-        with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=120) as r:
+        with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=120) as r:
             return r.read(1024 * 1024)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
@@ -174,7 +168,7 @@ def main() -> None:
         print("[dry-run] 未写入任何对象")
         return
 
-    token = db_import.signin()
+    token = runtime_client.signin()
     if parts_desc:
         for index, (key, blob) in enumerate(zip(part_keys, part_blobs), start=1):
             print(f"上传分片 {index}/{len(part_blobs)}…")

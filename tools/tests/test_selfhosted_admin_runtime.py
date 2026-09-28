@@ -87,6 +87,20 @@ class SelfHostedAdminRuntimeTests(unittest.TestCase):
             postgres_volumes,
         )
 
+    def test_admin_gets_only_the_license_importer_database_credentials(self):
+        compose = yaml.safe_load((ROOT.parent / "deploy" / "selfhosted" / "compose.yaml").read_text(encoding="utf-8"))
+        admin = compose["services"]["admin"]
+        environment = admin["environment"]
+        for key in ("PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "POSTGRES_USER", "POSTGRES_PASSWORD"):
+            self.assertNotIn(key, environment, f"Admin must not receive PostgreSQL bootstrap credential {key}")
+        self.assertEqual(environment["OTV_LICENSE_IMPORT_DB"], "${POSTGRES_DB:-optimal_tv}")
+        self.assertEqual(environment["OTV_LICENSE_IMPORT_USER"], "license_importer")
+        self.assertEqual(environment["OTV_LICENSE_IMPORT_PASSWORD_FILE"], "/run/secrets/license-importer-db-password")
+        self.assertIn(
+            "${LICENSE_IMPORT_PASSWORD_HOST_PATH:-/srv/mytv/secrets/license-importer-db-password}:/run/secrets/license-importer-db-password:ro",
+            admin["volumes"],
+        )
+
     def test_admin_image_does_not_copy_runtime_private_keys(self):
         dockerfile = (ROOT.parent / "deploy" / "selfhosted" / "Dockerfile.admin").read_text(encoding="utf-8")
         self.assertIn("tools/admin_server.py", dockerfile)
@@ -94,6 +108,13 @@ class SelfHostedAdminRuntimeTests(unittest.TestCase):
         self.assertIn("tools/apk_update.py", dockerfile)
         self.assertIn("tools/selfhosted/admin_config.py", dockerfile)
         self.assertIsNone(re.search(r"(?m)^COPY .*tools/keys", dockerfile))
+
+    def test_admin_identity_labels_describe_the_self_hosted_importer(self):
+        html = (ROOT / "admin.html").read_text(encoding="utf-8")
+        self.assertNotIn("云端 appletv-", html)
+        self.assertNotIn("云端身份 svc_import", html)
+        self.assertIn("自建实例 · 登录会话 12h", html)
+        self.assertIn("license_importer", html)
 
 
 if __name__ == "__main__":

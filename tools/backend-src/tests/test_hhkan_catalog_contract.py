@@ -202,10 +202,10 @@ class HhkanCatalogContractTest(unittest.TestCase):
         for expression in forbidden:
             self.assertNotIn(expression, routes, expression)
 
-    def test_cloud_function_starts_snapshot_first_but_keeps_recovery_probe(self):
-        build = (ROOT / "tools/build_web_function.py").read_text(encoding="utf-8")
+    def test_selfhosted_web_starts_snapshot_first_but_keeps_recovery_probe(self):
+        compose = (ROOT / "deploy/selfhosted/compose.yaml").read_text(encoding="utf-8")
         backend = (BACKEND / "proxy.py").read_text(encoding="utf-8")
-        self.assertIn("OTV_HHKAN_SNAPSHOT_FIRST=1", build)
+        self.assertIn('OTV_HHKAN_SNAPSHOT_FIRST: "1"', compose)
         self.assertIn('os.environ.get("OTV_HHKAN_SNAPSHOT_FIRST") == "1"', backend)
         self.assertIn('_HHKAN_ORIGIN_CIRCUIT_TTL = 300.0', backend)
 

@@ -1,0 +1,275 @@
+\set ON_ERROR_STOP on
+
+SELECT to_regclass('public.licenses') IS NOT NULL AS legacy_schema \gset
+
+CREATE TABLE IF NOT EXISTS public.schema_migrations (
+    version text PRIMARY KEY,
+    applied_at timestamptz NOT NULL DEFAULT now(),
+    sql_sha256 text
+);
+ALTER TABLE public.schema_migrations
+    ADD COLUMN IF NOT EXISTS sql_sha256 text;
+
+CREATE TEMP TABLE expected_schema_migration_hashes (
+    version text PRIMARY KEY,
+    sql_sha256 text NOT NULL
+) ON COMMIT PRESERVE ROWS;
+
+INSERT INTO pg_temp.expected_schema_migration_hashes (version, sql_sha256) VALUES
+    ('db_bootstrap.sql', :'db_bootstrap_sha256'),
+    ('base_schema.sql', :'base_schema_sha256'),
+    ('license_v2_migration.sql', :'license_v2_sha256'),
+    ('license_note_migration.sql', :'license_note_sha256'),
+    ('license_restore_v1.sql', :'license_restore_sha256'),
+    ('admin_sold_migration.sql', :'admin_sold_sha256'),
+    ('hotupdate_migration.sql', :'hotupdate_sha256'),
+    ('announcement_migration.sql', :'announcement_sha256'),
+    ('iptv_migration.sql', :'iptv_sha256'),
+    ('vod_sources_migration.sql', :'vod_sources_sha256'),
+    ('pg_cu_optimization_migration.sql', :'pg_cu_optimization_sha256');
+
+-- A previous self-hosted release used a filename-only ledger. Adopt its
+-- recorded rows once, then require the exact SQL digest on every later run.
+UPDATE public.schema_migrations recorded
+SET sql_sha256 = expected.sql_sha256
+FROM pg_temp.expected_schema_migration_hashes expected
+WHERE recorded.version = expected.version
+  AND recorded.sql_sha256 IS NULL;
+
+SELECT NOT EXISTS (
+    SELECT 1
+    FROM public.schema_migrations recorded
+    JOIN pg_temp.expected_schema_migration_hashes expected USING (version)
+    WHERE recorded.sql_sha256 IS DISTINCT FROM expected.sql_sha256
+) AS migration_hashes_match \gset
+\if :migration_hashes_match
+\else
+\echo schema migration failed: a recorded migration SQL hash changed
+\quit 3
+\endif
+
+SELECT NOT EXISTS (SELECT 1 FROM public.schema_migrations) AS ledger_empty \gset
+\if :ledger_empty
+    \if :legacy_schema
+-- A legacy database already carries the v2 activate_code signature, so the
+-- signature proves nothing about restore support. Inspect the installed body
+-- for the restore marker instead. This probe is temporary on purpose: a
+-- database that fails the check must not keep a helper behind.
+CREATE OR REPLACE FUNCTION pg_temp.activate_code_supports_restore()
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $probe$
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_proc proc
+        JOIN pg_catalog.pg_namespace nsp ON nsp.oid = proc.pronamespace
+        WHERE nsp.nspname = 'public'
+          AND proc.proname = 'activate_code'
+          AND proc.pronargs = 6
+          AND pg_catalog.pg_get_functiondef(proc.oid) LIKE '%OTV-RESTORE-MARKER-BEGIN%'
+    )
+$probe$;
+DO $validate_legacy_schema$
+DECLARE
+    v_missing text;
+BEGIN
+    SELECT string_agg(required.object_name, ', ' ORDER BY required.object_name)
+    INTO v_missing
+    FROM (VALUES
+        ('role anon', EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'anon')),
+        ('role authenticated', EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'authenticated')),
+        ('role authenticator', EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'authenticator')),
+        ('schema auth', to_regnamespace('auth') IS NOT NULL),
+        ('function auth.uid()', to_regprocedure('auth.uid()') IS NOT NULL),
+        ('table public.activate_log', to_regclass('public.activate_log') IS NOT NULL),
+        ('table public.announcements', to_regclass('public.announcements') IS NOT NULL),
+        ('table public.hotupdate_log', to_regclass('public.hotupdate_log') IS NOT NULL),
+        ('table public.hotupdate_pkg', to_regclass('public.hotupdate_pkg') IS NOT NULL),
+        ('table public.iptv_admin_log', to_regclass('public.iptv_admin_log') IS NOT NULL),
+        ('table public.iptv_channel', to_regclass('public.iptv_channel') IS NOT NULL),
+        ('table public.iptv_config', to_regclass('public.iptv_config') IS NOT NULL),
+        ('table public.iptv_group', to_regclass('public.iptv_group') IS NOT NULL),
+        ('table public.iptv_line', to_regclass('public.iptv_line') IS NOT NULL),
+        ('table public.iptv_publish_lock', to_regclass('public.iptv_publish_lock') IS NOT NULL),
+        ('table public.iptv_version', to_regclass('public.iptv_version') IS NOT NULL),
+        ('table public.licenses', to_regclass('public.licenses') IS NOT NULL),
+        ('table public.vod_source_drafts', to_regclass('public.vod_source_drafts') IS NOT NULL),
+        ('table public.vod_source_versions', to_regclass('public.vod_source_versions') IS NOT NULL),
+        -- Completeness only. This signature is identical before and after the
+        -- restore change, so it must never gate restore support; that decision
+        -- is made by pg_temp.activate_code_supports_restore() below.
+        ('function public.activate_code(text,text,text,integer,text,text)', to_regprocedure('public.activate_code(text,text,text,integer,text,text)') IS NOT NULL),
+        ('function public.admin_mark_sold(text,boolean)', to_regprocedure('public.admin_mark_sold(text,boolean)') IS NOT NULL),
+        ('function public.admin_stats()', to_regprocedure('public.admin_stats()') IS NOT NULL),
+        ('function public.admin_update_note(text,text)', to_regprocedure('public.admin_update_note(text,text)') IS NOT NULL),
+        ('function public.announcement_latest()', to_regprocedure('public.announcement_latest()') IS NOT NULL),
+        ('function public.hotupdate_check(integer,integer)', to_regprocedure('public.hotupdate_check(integer,integer)') IS NOT NULL),
+        ('function public.iptv_admin_list()', to_regprocedure('public.iptv_admin_list()') IS NOT NULL),
+        ('function public.iptv_admin_publish_lock(text,text)', to_regprocedure('public.iptv_admin_publish_lock(text,text)') IS NOT NULL),
+        ('function public.vod_source_admin_list()', to_regprocedure('public.vod_source_admin_list()') IS NOT NULL),
+        ('function public.vod_source_public_check(bigint)', to_regprocedure('public.vod_source_public_check(bigint)') IS NOT NULL)
+    ) AS required(object_name, is_present)
+    WHERE NOT required.is_present;
+
+    IF v_missing IS NOT NULL THEN
+        RAISE EXCEPTION
+            'existing database has no migration ledger and is not a complete known legacy schema (%); refusing to replay historical migrations',
+            v_missing;
+    END IF;
+END
+$validate_legacy_schema$;
+
+-- Restore support is deliberately NOT part of the hard-fail list above. Its
+-- migration is a pure idempotent CREATE OR REPLACE, so a legacy database that
+-- predates it can still be upgraded by executing that single file. Claiming it
+-- as already applied here is exactly the bug this probe prevents: it would
+-- record the digest and leave /activate action=restore broken forever.
+SELECT pg_temp.activate_code_supports_restore() AS legacy_supports_restore \gset
+
+-- This complete legacy signature means the historical migration set already
+-- ran. Record its current digests without replaying data-changing SQL. When
+-- restore support is absent, leave its ledger row empty so the normal pending
+-- path below installs it.
+INSERT INTO public.schema_migrations (version, sql_sha256)
+SELECT version, sql_sha256
+FROM pg_temp.expected_schema_migration_hashes
+WHERE :legacy_supports_restore
+   OR version <> 'license_restore_v1.sql'
+ON CONFLICT (version) DO NOTHING;
+    \endif
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'db_bootstrap.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir db_bootstrap.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('db_bootstrap.sql', :'db_bootstrap_sha256');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'base_schema.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir base_schema.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('base_schema.sql', :'base_schema_sha256');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'license_v2_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../license_v2_migration.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('license_v2_migration.sql', :'license_v2_sha256');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'license_note_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../license_note_migration.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('license_note_migration.sql', :'license_note_sha256');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'license_restore_v1.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir migrations/license_restore_v1.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('license_restore_v1.sql', :'license_restore_sha256');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'admin_sold_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../admin_sold_migration.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('admin_sold_migration.sql', :'admin_sold_sha256');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'hotupdate_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../hotupdate_migration.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('hotupdate_migration.sql', :'hotupdate_sha256');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'announcement_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../announcement_migration.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('announcement_migration.sql', :'announcement_sha256');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'iptv_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../iptv_migration.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('iptv_migration.sql', :'iptv_sha256');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'vod_sources_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../vod_sources_migration.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('vod_sources_migration.sql', :'vod_sources_sha256');
+COMMIT;
+\endif
+
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'pg_cu_optimization_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../pg_cu_optimization_migration.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('pg_cu_optimization_migration.sql', :'pg_cu_optimization_sha256');
+COMMIT;
+\endif
+
+-- Reconcile the importer role every deployment so password rotation and grant
+-- drift are repaired before PostgREST or the admin API can start.
+BEGIN;
+\ir license_importer_role.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('license_importer_role_v1', :'license_importer_role_sha256')
+ON CONFLICT (version) DO UPDATE
+SET applied_at = EXCLUDED.applied_at,
+    sql_sha256 = EXCLUDED.sql_sha256;
+COMMIT;
+
+\ir license_importer_smoke.psql

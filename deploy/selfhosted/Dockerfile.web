@@ -26,8 +26,8 @@ COPY tools/selfhosted/web_asset_archive.py tools/selfhosted/web_entrypoint.py /a
 COPY tools/backend-src/decrypt_stream.js /app/
 COPY tools/backend-src/svg_icon_cache/ /app/svg_icon_cache/
 COPY tools/backend-src/transparent_icon_cache/ /app/transparent_icon_cache/
-COPY cloudfunctions/otv-web/vendor/ /app/vendor/
 COPY --from=web-assets /build/web-dist/ /app/www/
+COPY tools/backend-src/vendor/ /app/vendor/
 
 # The pinned QuickJS extension was built for CPython 3.11. Normalize its
 # filename for the loader in this Python 3.12 image.

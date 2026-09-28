@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
-"""My TV 卡密后台管理系统（v1.20：登录门禁 + IPTV 电视源动态管理 + 云端部署）
+"""My TV self-hosted admin dashboard for licenses, APK updates, IPTV, and announcements.
 
-两种运行形态（同一份代码）：
-  本地  python tools/admin_server.py
-        → 自动打开浏览器 http://127.0.0.1:8791（仅本机可访问）
-  云端  Docker 容器 / 腾讯云 CloudBase 云托管（外网 HTTPS 访问）
-        环境变量：PORT=8080（容器平台注入）
-                  OTV_ADMIN_USER / OTV_ADMIN_PASS   登录门禁账号（云端必设）
-                  OTV_AUTH_USER / OTV_AUTH_PASS     svc_import 服务账号（云端必设）
-                  OTV_PRIV_KEY                      卡密签发私钥 PEM（云端可选：
-                                                    不设则「补货」禁用，仍可本地补货）
-                  OTV_ADMIN_SECRET                  会话签名密钥（云端建议设；不设则
-                                                    由 ADMIN_USER/ADMIN_PASS 派生固定值）
+Run locally with `python tools/admin_server.py`, or in the self-hosted Compose service.
+Container deployment must provide admin/API credentials and a session secret through
+runtime environment variables or mounted secret files.
 
-登录门禁（v1.20 需求：移到腾讯云 + 外网访问 + 登录门禁）：
+登录门禁：
   - GET / 页面内置登录浮层；POST /api/login 校验账号密码 → 下发 HMAC 签名的
     HttpOnly 会话 Cookie（12h 有效；密钥固定，多实例/重启后仍有效）
   - 除 /api/login、静态资源外全部接口须带有效 Cookie；登录失败限速（5 次/60s 锁定）
@@ -22,7 +14,7 @@
   总览    各套餐库存 + 近 24h 激活动作 + 通道状态
   卡密    搜索/筛选、出售/封禁/解绑、复制
   日志    activate_log 审计记录按码过滤
-  补货    license_gen.py 私钥签发 → 自动入库 → cards.csv（云端未注入私钥时禁用）
+  补货    license_gen.py 私钥签发 → 自建 PostgreSQL 入库 → cards.csv
   热更新  发布/上下线/删除热更包、设备上报日志（v1.18）
   APK 更新  TV/移动版 APK 分片上传、SHA-256 校验、稳定 update.json 发布
   公告    运营公告发布/下线（v1.20）
@@ -33,12 +25,10 @@
           发布即切「托管模式」（每日 iptv-rebuild 自动推流暂停，防覆盖）。
 
 安全边界：
-  - 本地形态仅绑定 127.0.0.1；云端形态由容器平台提供 HTTPS + 登录门禁把关；
-  - 云端凭据走环境变量（svc signin 2h token 内存缓存），管理 RPC 在数据库侧
-    白名单校验 auth.uid()（仅 svc_import 可执行）；
-  - M3U 导入 URL / 上游同步出站走 _safe_fetch（仅 https + 公网 IP + ≤3 跳重定向，
-    与 iptv-rebuild 云函数同款 SSRF 防护）；
-  - 私钥默认不上云（OTV_PRIV_KEY 未设时补货页提示在本地执行）。
+  - 本地形态仅绑定 127.0.0.1；自建容器只监听 Compose 内网，由 Nginx/HTTPS 入口暴露；
+  - 自建管理 API 使用短期访问票据，数据库 RPC 按 auth.uid() 白名单校验；
+  - M3U 导入 URL / 上游同步出站走 _safe_fetch（仅 https + 公网 IP + ≤3 跳重定向）；
+  - 卡密私钥只从运行时文件或环境变量读取，不写入仓库或镜像。
 """
 import hashlib
 import hmac
@@ -65,7 +55,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "backend-src"))
-import db_import  # noqa: E402  复用 signin/URL 白名单（凭据读 keys/svc_import_*.txt 或 env）
+from selfhosted import runtime_client  # noqa: E402
 from selfhosted.admin_config import load_admin_credentials, load_session_secret  # noqa: E402
 import hhkan  # noqa: E402
 import vod_sources  # noqa: E402
@@ -79,15 +69,16 @@ from apk_update import (  # noqa: E402
 )
 
 PORT = int(os.environ.get("PORT") or 8791)
-CLOUD = bool(os.environ.get("PORT")) or os.environ.get("OTV_CLOUD") == "1"
+CONTAINER_MODE = bool(os.environ.get("PORT")) or os.environ.get("OTV_CONTAINER_MODE") == "1"
 SELFHOSTED = os.environ.get("OTV_SELFHOSTED_MODE") == "1"
 HTML_PATH = ROOT / "admin.html"
-# 品牌字标：本地 = Android 工程 res 只读引用；云端（HTTP 云函数/容器）= 同目录捆绑文件
+# 品牌字标：优先读取同目录资源，本地开发时回退到 Android 工程文件。
 _LOGO_LOCAL = ROOT / "my_tv_logo.png"
 _LOGO_REPO = ROOT.parent / "android" / "app" / "src" / "main" / "res" / "drawable" / "my_tv_logo.png"
 LOGO_PATH = _LOGO_LOCAL if _LOGO_LOCAL.exists() else _LOGO_REPO
 
 # ---------------- 登录门禁（v1.20） ----------------
+# Nginx keeps the direct `/` entry and also strips `/admin/` before proxying it here.
 
 _ADMIN_CREDENTIALS = load_admin_credentials(os.environ)
 ADMIN_USER = (_ADMIN_CREDENTIALS[0] if _ADMIN_CREDENTIALS else None) or os.environ.get("OTV_ADMIN_USER") or "admin"
@@ -113,7 +104,7 @@ def _resolve_admin_pass() -> str:
 
 
 ADMIN_PASS = _ADMIN_CREDENTIALS[1] if _ADMIN_CREDENTIALS else _resolve_admin_pass()
-# 补货产物目录：云端 /var/user 只读，用 OTV_OUT_DIR 指到 /tmp（与 license_gen.py 同一开关）
+# 补货产物目录：容器使用临时目录，本地开发默认写入 tools/out。
 OUT_ROOT = Path(os.environ.get("OTV_OUT_DIR") or (ROOT / "out"))
 # 会话签名密钥：优先 env；缺省时由登录凭据派生**固定**值。
 # 不能退回随机值——云函数多实例/冷启动各自随机会让 Cookie 时验时不验
@@ -175,41 +166,15 @@ def note_login(peer: str, ok: bool) -> None:
         _login_guard[peer] = (fails, lock_until)
 
 
-# ---------------- 云端凭据注入（env → keys/ 文件，供 db_import/license_gen 子进程复用） ----------------
-
-def _inject_env_creds() -> None:
-    # 云端（HTTP 云函数）文件系统只读——写入失败静默跳过，凭据经 db_import 的
-    # 环境变量分支生效；容器形态可写则落文件（供 license_gen/db_import 子进程复用）
-    try:
-        user = os.environ.get("OTV_AUTH_USER")
-        pw = os.environ.get("OTV_AUTH_PASS")
-        if user and pw:
-            kd = ROOT / "keys"
-            kd.mkdir(parents=True, exist_ok=True)
-            for name, val in (("svc_import_user.txt", user), ("svc_import_pass.txt", pw)):
-                f = kd / name
-                if not f.exists():
-                    f.write_text(val, encoding="utf-8")
-        pk = os.environ.get("OTV_PRIV_KEY")
-        if pk:
-            f = ROOT / "keys" / "private_key.pem"
-            if not f.exists():
-                f.write_text(pk.replace("\\n", "\n"), encoding="utf-8")
-    except OSError:
-        pass
-
-
-_inject_env_creds()
-
 _tok = {"v": None, "exp": 0.0}
 _tok_lock = threading.Lock()
 
 
-def cloud_token() -> str:
+def api_token() -> str:
     with _tok_lock:
         if _tok["v"] and time.time() < _tok["exp"] - 120:
             return _tok["v"]
-        t = db_import.signin()
+        t = runtime_client.signin()
         _tok["v"] = t
         _tok["exp"] = time.time() + 6600  # token 有效 2h，提前 10 分钟续
         return _tok["v"]
@@ -217,13 +182,13 @@ def cloud_token() -> str:
 
 def rpc(name: str, payload: dict) -> dict:
     _assert_iptv_publish_lease()
-    url = db_import.REST_BASE + "/rpc/" + name
-    db_import.check_url(url)
+    url = runtime_client.REST_BASE + "/rpc/" + name
+    runtime_client.check_url(url)
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"), method="POST",
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + cloud_token()})
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_token()})
     try:
-        with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=30) as r:
+        with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=30) as r:
             return json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         # PostgREST 错误形态是 {"code","message",...}（无 "error" 键）——归一化，
@@ -231,7 +196,7 @@ def rpc(name: str, payload: dict) -> dict:
         try:
             out = json.loads(e.read().decode("utf-8"))
         except Exception:  # noqa: BLE001
-            return {"error": f"云端返回 HTTP {e.code}"}
+            return {"error": f"自建服务返回 HTTP {e.code}"}
         if isinstance(out, dict) and "error" not in out:
             return {"error": out.get("message") or out.get("hint") or f"HTTP {e.code} {out.get('code', '')}"}
         return out
@@ -242,26 +207,23 @@ def rpc(name: str, payload: dict) -> dict:
 # ---------------- v1.18 热更新管理（公测版） ----------------
 
 HU_BUCKET = "hotupdate"
-HU_ENDPOINT = db_import.HOTUPDATE_ENDPOINT
+HU_ENDPOINT = runtime_client.HOTUPDATE_ENDPOINT
 # 与 APK HotUpdateManager / hotupdate_admin_upsert RPC 的校验口径一致
 HU_REQUIRED_ENTRIES = (
     "proxy.py", "hhkan.py", "scraper.py", "team_backdrop.py", "decrypt_stream.js",
     "douban_catalog.py", "douban_snapshot.json", "media_index.py", "pinyin_map.json", "vod_api.py",
-    "vod_sources.py", "vod_sources.default.json",
+    "vod_sources.py", "vod_sources.default.json", "metadata_client.py", "vod_resolver.py",
 )
 HU_MAX_BYTES = 220 * 1024 * 1024
 # 显式指定热更版本号的上限（防手滑输入天文数字把设备端比较逻辑顶掉）
 HU_MAX_VERSION = 10_000_000
 
 # ---------------- APK 应用内更新（与 APK_UPDATE_URL 对接） ----------------
-# APK 与 update.json 共用已配置的 CloudBase 公开桶，但使用独立前缀，避免
-# 与 python-backend.zip 热更对象混淆。清单由网页函数 /web/apk-update/*.json
-# 代理读取，APK 本体直接使用下方对象 URL 下载。
+# APK 与 update.json 保存在自建对象存储的独立路径中；清单由本地 Web API 提供。
 APK_MAX_BYTES = 300 * 1024 * 1024
-# CloudBase 对象存储的**平台级**单对象硬上限（100 MiB，随套餐固定，改桶配置无法抬高）。
-# 大于该值的包不能落在单个对象里：走 tools/publish_apk_update.py 分片发布。
+# 单对象控制在 100 MiB 内，超出时使用分片发布，避免单次上传/下载占用过多内存。
 APK_OBJECT_MAX_BYTES = 100 * 1024 * 1024
-APK_OBJECT_HINT = ("对象桶单对象上限 100 MiB：请改用 python tools/publish_apk_update.py "
+APK_OBJECT_HINT = ("单对象上限 100 MiB：请改用 python tools/publish_apk_update.py "
                    "分片发布（客户端按序下载各分片后仍校验整包 SHA-256 与签名）")
 APK_UPLOAD_CHUNK_MAX = 4 * 1024 * 1024
 APK_UPLOAD_DIRECT_MAX = 5 * 1024 * 1024
@@ -271,33 +233,33 @@ APK_CERT_ENV = "OTV_APK_CERT_SHA256"
 
 
 def obj_url(key: str) -> str:
-    return db_import.ENDPOINTS.public_object_url(HU_BUCKET, key)
+    return runtime_client.ENDPOINTS.public_object_url(HU_BUCKET, key)
 
 
 def _apk_obj_url(key: str) -> str:
     """APK 下载链接指向公网 HTTPS 对象地址；上传使用私有 storage 服务地址。"""
-    return db_import.ENDPOINTS.public_object_url(HU_BUCKET, key)
+    return runtime_client.ENDPOINTS.public_object_url(HU_BUCKET, key)
 
 
 def pg_put(key: str, raw: bytes, ctype: str) -> None:
     _assert_iptv_publish_lease()
-    url = db_import.ENDPOINTS.storage_object_url(key) + "?x-upsert=true"
-    db_import.check_url(url)
-    req = urllib.request.Request(url, data=raw, method=db_import.ENDPOINTS.storage_upload_method, headers={
+    url = runtime_client.ENDPOINTS.storage_object_url(key) + "?x-upsert=true"
+    runtime_client.check_url(url)
+    req = urllib.request.Request(url, data=raw, method=runtime_client.ENDPOINTS.storage_upload_method, headers={
         "Content-Type": ctype,
-        "Authorization": "Bearer " + cloud_token(),
+        "Authorization": "Bearer " + api_token(),
         "x-upsert": "true",
     })
-    with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=600) as r:
+    with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=600) as r:
         r.read()
 
 
 def pg_get_public(key: str, max_bytes: int = 32 * 1024 * 1024):
     """读公开桶对象（匿名 GET，与客户端拉取同一路径）"""
-    url = db_import.ENDPOINTS.storage_object_url(key)
-    db_import.check_url(url)
+    url = runtime_client.ENDPOINTS.storage_object_url(key)
+    runtime_client.check_url(url)
     req = urllib.request.Request(url, method="GET")
-    with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=120) as r:
+    with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=120) as r:
         return r.read(max_bytes)
 
 
@@ -414,7 +376,7 @@ def _apk_publish(raw: bytes, meta: dict) -> dict:
         "sha256": sha,
         "key": key,
         "apkUrl": apk_url,
-        "manifestUrl": db_import.ENDPOINTS.public_web_url(f"apk-update/{meta['channel']}.json"),
+        "manifestUrl": runtime_client.ENDPOINTS.public_web_url(f"apk-update/{meta['channel']}.json"),
         "manifest": manifest,
     }
 
@@ -561,7 +523,7 @@ RESET_SCOPES = {
         # 又不想为此加一条新的破坏性 SQL 函数，所以这一页如实说明、不给可点的按钮。
         "unsupported": "影视源的两张表（vod_source_versions / vod_source_drafts）只对数据库内部函数开放，"
                        "后台服务账号无权读写，因此无法从后台清空这一页的版本记录。"
-                       "要清空请在 CloudBase 控制台用 SQL 处理（例如 truncate vod_source_versions）。",
+                       "该历史表只追加审计记录；此页面不提供清理入口。",
     },
 }
 
@@ -572,22 +534,22 @@ RESET_BACKUP_PAGE = 1000
 def _rest(table: str, query: str = "", method: str = "GET", body: bytes | None = None,
           headers: dict | None = None, timeout: int = 120):
     """PostgREST 直连（表级）。返回 (status, bytes, headers)。"""
-    url = db_import.REST_BASE + "/" + table + (("?" + query) if query else "")
-    db_import.check_url(url)
-    h = {"Accept": "application/json", "Authorization": "Bearer " + cloud_token()}
+    url = runtime_client.REST_BASE + "/" + table + (("?" + query) if query else "")
+    runtime_client.check_url(url)
+    h = {"Accept": "application/json", "Authorization": "Bearer " + api_token()}
     if body is not None:
         h["Content-Type"] = "application/json"
     h.update(headers or {})
     req = urllib.request.Request(url, data=body, method=method, headers=h)
     try:
-        with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=timeout) as r:
+        with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=timeout) as r:
             return r.status, r.read(RESET_BACKUP_MAX_BYTES + 1), dict(r.headers)
     except urllib.error.HTTPError as e:
         return e.code, e.read(2048), dict(e.headers or {})
 
 
 def _hdr(headers: dict, name: str, default: str = "") -> str:
-    """取值不区分大小写：CloudBase 网关走 HTTP/2，响应头名会被统一小写。"""
+    """Return a response header without depending on the client's header casing."""
     want = name.lower()
     for k, v in (headers or {}).items():
         if str(k).lower() == want:
@@ -703,7 +665,7 @@ def reset_apply(scope: str, password: str, confirm: str) -> dict:
     backup = {
         "schema": 1, "scope": scope, "label": spec["label"],
         "capturedAt": datetime.now(timezone.utc).isoformat(),
-        "environment": db_import.ENDPOINTS.environment_name,
+        "environment": runtime_client.ENDPOINTS.environment_name,
         "rows": backup_rows,
     }
     raw = json.dumps(backup, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -872,10 +834,10 @@ def h_hu_delete(d: dict) -> dict:
         return out
     # 元数据已删 → 桶内对象顺手清理（失败不影响结果，孤立对象无害）
     try:
-        req = urllib.request.Request(db_import.ENDPOINTS.storage_object_url(f"backend-hu{version}.zip"),
+        req = urllib.request.Request(runtime_client.ENDPOINTS.storage_object_url(f"backend-hu{version}.zip"),
                                      method="DELETE",
-                                     headers={"Authorization": "Bearer " + cloud_token()})
-        with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=60):
+                                     headers={"Authorization": "Bearer " + api_token()})
+        with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=60):
             pass
     except Exception:  # noqa: BLE001
         pass
@@ -959,10 +921,7 @@ def h_hu_upload(qs: dict, raw: bytes) -> dict:
     """发布热更包（小包直传路径，≤HU_DIRECT_MAX）：浏览器直传 zip 字节 → 校验 → 发布。
 
     元数据字段走 query string（Content-Type 是 zip 原始字节，非 JSON）。
-    大包走分片链路（h_hu_upload_chunk + h_hu_upload_commit）：CloudBase HTTP 网关
-    请求体上限实测 ~6MB（>6MB 返回 406 空响应体，前端 r.json() 报
-    "Unexpected end of JSON input"——2026-09-07 需求④根因），python-backend.zip
-    已 36MB+，必须分片。"""
+    大包走分片链路（h_hu_upload_chunk + h_hu_upload_commit），避免单次请求占用过多内存。"""
     try:
         version = int((qs.get("version") or ["0"])[0] or 0)
     except ValueError:
@@ -1008,12 +967,12 @@ def _hu_obj_delete(key: str) -> None:
     """尽力清理暂存分片（DELETE 不被支持时静默跳过——残留小对象无害）"""
     # 删除走私有 storage API：自托管模式下公开对象地址是 VPS 的 HTTPS origin，
     # 不在 check_url 白名单内，用公开地址删除会在这里抛异常（2026-09-24 线上 502）。
-    url = db_import.ENDPOINTS.storage_object_url(key)
-    db_import.check_url(url)
+    url = runtime_client.ENDPOINTS.storage_object_url(key)
+    runtime_client.check_url(url)
     req = urllib.request.Request(url, method="DELETE",
-                                 headers={"Authorization": "Bearer " + cloud_token()})
+                                 headers={"Authorization": "Bearer " + api_token()})
     try:
-        with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=60) as r:
+        with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=60) as r:
             r.read()
     except Exception:  # noqa: BLE001
         pass
@@ -1028,8 +987,7 @@ def h_hu_upload_commit(qs: dict) -> dict:
     try:
         total = int((qs.get("total") or ["0"])[0])
         size = int((qs.get("size") or ["0"])[0])
-        # 显式版本号（切换云端基座时的版本连续性：库里最高 v17、设备已到 v21，
-        # 自动 max+1 只会拿到 v18 被设备忽略）；缺省仍走 max+1 自动分配。
+        # 显式版本号保持站点与设备端版本连续；缺省仍走 max+1 自动分配。
         explicit = int((qs.get("version") or ["0"])[0] or 0)
     except ValueError:
         return {"error": "bad_total_or_size"}
@@ -1071,13 +1029,13 @@ def h_hu_health(_d: dict) -> dict:
     """热更端点连通探测：合法 deviceId + apkVersion=0 → 函数参数层拒绝（ret=400 bad_apk），
     证明 网关/云函数/signin/RPC 全链路活着且不入库；ret=0+blackout=true = 端点活着但处于
     紧急停更（OTV_HU_OFF=1），界面显示 BLACKOUT: ON 而非异常。"""
-    db_import.check_url(HU_ENDPOINT + "/check")
+    runtime_client.check_url(HU_ENDPOINT + "/check")
     body = json.dumps({"deviceId": "healthcheck0000", "apkVersion": 0, "hotVersion": 0}).encode("utf-8")
     req = urllib.request.Request(HU_ENDPOINT + "/check", data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
     t0 = time.time()
     try:
-        with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=8) as r:
+        with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=8) as r:
             out = json.loads(r.read().decode("utf-8"))
         alive = out.get("ret") == 400 or (out.get("ret") == 0 and out.get("blackout") is True)
         return {"ok": alive, "blackout": bool(out.get("blackout")), "ret": out.get("ret"),
@@ -1108,18 +1066,25 @@ def h_gen(d: dict) -> dict:
         return {"error": "无法解析批次目录:\n" + gen.stdout[-300:]}
     batch = m.group(1)
     imp = subprocess.run(
-        [sys.executable, str(ROOT / "db_import.py"), str(OUT_ROOT / batch)],
+        [sys.executable, str(ROOT / "selfhosted" / "import_licenses.py"), str(OUT_ROOT / batch)],
         capture_output=True, text=True, cwd=ROOT)
     if imp.returncode != 0:
-        return {"error": f"批次 {batch} 已签发但入库失败（可手动重跑 db_import.py）:\n"
+        return {"error": f"批次 {batch} 已签发但入库失败（可手动重跑 selfhosted/import_licenses.py）:\n"
                          + (imp.stderr or imp.stdout)[-400:]}
+    result_match = re.fullmatch(
+        r"Inserted (\d+) of (\d+) validated license tickets into self-hosted PostgreSQL\.",
+        imp.stdout.strip(),
+    )
+    if not result_match:
+        return {"error": "无法解析卡密导入结果:\n" + imp.stdout[-300:]}
+    inserted, validated = map(int, result_match.groups())
     csv_path = OUT_ROOT / batch / "cards.csv"
     try:
         csv_text = csv_path.read_text(encoding="utf-8")
     except OSError:
         csv_text = ""
-    # 云端形态没有本机文件系统：连文本一起回传，前端给「下载 cards.csv」入口
-    return {"batch": batch, "imported": count,
+    # 容器临时目录不作为长期存储：将 CSV 文本一并回传给后台下载入口。
+    return {"batch": batch, "imported": inserted, "validated": validated,
             "csv": str(csv_path), "csv_text": csv_text}
 
 
@@ -1148,7 +1113,7 @@ def h_ann_publish(d: dict) -> dict:
 
 IPTV_KEY_LATEST = "iptv/iptv-latest.m3u"
 IPTV_KEY_META = "iptv/version.json"
-# 与 cloudfunctions/iptv-rebuild 同源上游（「API 同步」按钮用）
+# 「API 同步」按钮使用的上游源
 IPTV_UPSTREAMS = [
     "https://gh-proxy.com/raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
     "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
@@ -1177,7 +1142,7 @@ def safe_fetch(u: str, timeout: float = 30.0) -> bytes:
         _assert_public_https(cur)
         req = urllib.request.Request(cur, headers={"User-Agent": "Mozilla/5.0 OptimalTV-admin"})
         try:
-            with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=timeout) as r:
+            with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=timeout) as r:
                 return r.read(IPTV_FETCH_MAX)
         except urllib.error.HTTPError as e:
             if e.code in (301, 302, 303, 307, 308):
@@ -1370,7 +1335,7 @@ def _probe_iptv_line(url: str, timeout: float = 5.0):
     try:
         _assert_public_media_url(cur)
         t0 = time.time()
-        opener = urllib.request.build_opener(db_import.NoRedirect)
+        opener = urllib.request.build_opener(runtime_client.NoRedirect)
         body = None
         for _ in range(3):
             req = urllib.request.Request(cur, headers=_PROBE_UA)
@@ -1890,15 +1855,15 @@ def h_health(_d: dict) -> dict:
     （参数层拒绝，不入库不留审计痕迹；signin/RPC 链路由业务请求自然验证）。
     带 protocol=2 并以 400 为主判据；426（协议升级提示）同样说明链路活着，
     否则 v1.26+ 分协议校验上线后探针会恒定误报「异常」。"""
-    url = db_import.ACTIVATE_ENDPOINT
-    db_import.check_url(url)
+    url = runtime_client.ACTIVATE_ENDPOINT
+    runtime_client.check_url(url)
     body = json.dumps({"code": "OTV-0000-0000", "deviceId": "healthcheck0000",
                        "protocol": 2}).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
     t0 = time.time()
     try:
-        with urllib.request.build_opener(db_import.NoRedirect).open(req, timeout=8) as r:
+        with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=8) as r:
             out = json.loads(r.read().decode("utf-8"))
         return {"ok": out.get("ret") in (400, 426), "ret": out.get("ret"),
                 "latency_ms": int((time.time() - t0) * 1000)}
@@ -2032,7 +1997,7 @@ class Handler(BaseHTTPRequestHandler):
                            "application/json; charset=utf-8")
                 return
             cookie = f"{COOKIE}={make_session()}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}"
-            if CLOUD:
+            if CONTAINER_MODE:
                 cookie += "; Secure"
             self._send(200, b'{"ok":true}', "application/json; charset=utf-8",
                        [("Set-Cookie", cookie)])
@@ -2163,7 +2128,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    bind = "0.0.0.0" if CLOUD else "127.0.0.1"
+    bind = "0.0.0.0" if CONTAINER_MODE else "127.0.0.1"
     srv = ThreadingHTTPServer((bind, PORT), Handler)
     scheduler = None
     if SELFHOSTED and os.environ.get("OTV_IPTV_SCHEDULER_ENABLED", "1") == "1":
@@ -2186,17 +2151,16 @@ def main() -> None:
         except ValueError:
             srv.server_close()
             raise ValueError("OTV_IPTV_DAILY_TIME must use HH:MM")
-    url = f"http://127.0.0.1:{PORT}/" if not CLOUD else f"http://0.0.0.0:{PORT}/（容器平台对外域名）"
+    url = f"http://127.0.0.1:{PORT}/" if not CONTAINER_MODE else f"http://0.0.0.0:{PORT}/（容器内监听地址）"
     print(f"My TV 后台管理系统 v1.20 已启动: {url}")
     print(f"功能: 卡密 · 补货 · 热更新 · APK 更新 · 公告 · 电视源管理（v1.20）")
-    if CLOUD:
+    if CONTAINER_MODE:
         if _ADMIN_CREDENTIALS:
             print("登录门禁: 已从安全运行时凭据加载")
         elif os.environ.get("OTV_ADMIN_PASS"):
             print("登录门禁: 账号 OTV_ADMIN_USER / 密码 OTV_ADMIN_PASS（环境变量）")
         else:
-            print("⚠ 云端形态未设置 OTV_ADMIN_PASS，使用随机密码（见 keys/admin_pass.txt）——"
-                  "建议配置环境变量固定密码")
+            print("⚠ 容器未加载管理员凭据，使用临时密码；请配置运行时凭据文件")
     else:
         print(f"登录门禁: 账号 {ADMIN_USER} / 密码 {ADMIN_PASS}")
         print("仅本机可访问；关闭本窗口即下线。")

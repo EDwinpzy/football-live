@@ -7,7 +7,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 SERVER = ROOT / "tools" / "admin_server.py"
 ADMIN = ROOT / "tools" / "admin.html"
-CLOUD_ADMIN = ROOT / "cloudfunctions" / "otv-admin" / "admin.html"
+ADMIN_DOCKERFILE = ROOT / "deploy" / "selfhosted" / "Dockerfile.admin"
 MIGRATION = ROOT / "tools" / "license_note_migration.sql"
 
 spec = importlib.util.spec_from_file_location("admin_server_note_under_test", SERVER)
@@ -57,9 +57,10 @@ class AdminLicenseNoteContractTest(unittest.TestCase):
         self.assertIn("td.note-cell.editing{overflow:visible", css.split("*/")[1].replace(" ", ""))
         self.assertIn("note-edit", self.admin)
 
-    def test_cloud_function_copy_matches_tools_admin(self):
-        self.assertTrue(CLOUD_ADMIN.exists(), f"缺少云端副本 {CLOUD_ADMIN}")
-        self.assertEqual(ADMIN.read_text(encoding="utf-8"), CLOUD_ADMIN.read_text(encoding="utf-8"))
+    def test_selfhosted_image_uses_the_tools_admin_source(self):
+        dockerfile = ADMIN_DOCKERFILE.read_text(encoding="utf-8")
+        self.assertIn("COPY tools/admin.html /app/tools/admin.html", dockerfile)
+        self.assertIn("COPY tools/admin_server.py /app/tools/admin_server.py", dockerfile)
 
     def test_update_note_rejects_bad_code_and_overlong_note(self):
         self.assertEqual(admin_server.h_update_note({"code": "bad", "note": "x"}), {"error": "bad_code"})

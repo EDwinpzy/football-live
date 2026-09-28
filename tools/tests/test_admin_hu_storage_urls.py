@@ -39,16 +39,16 @@ class _FakeResponse:
 class AdminHotUpdateDeleteUrlTests(unittest.TestCase):
     def setUp(self):
         import admin_server  # noqa: E402  (tools/admin_server.py)
-        import db_import  # noqa: E402  (tools/db_import.py)
+        from selfhosted import runtime_client  # noqa: E402
 
         self.admin_server = admin_server
-        self.db_import = db_import
-        self._saved_endpoints = db_import.ENDPOINTS
-        db_import.ENDPOINTS = db_import.load_endpoint_config(SELF_HOSTED_ENV)
+        self.runtime_client = runtime_client
+        self._saved_endpoints = runtime_client.ENDPOINTS
+        runtime_client.ENDPOINTS = runtime_client.load_endpoint_config(SELF_HOSTED_ENV)
         self.addCleanup(self._restore)
 
     def _restore(self):
-        self.db_import.ENDPOINTS = self._saved_endpoints
+        self.runtime_client.ENDPOINTS = self._saved_endpoints
 
     def _capture(self):
         captured = {}
@@ -65,10 +65,14 @@ class AdminHotUpdateDeleteUrlTests(unittest.TestCase):
         patcher = mock.patch.object(self.admin_server.urllib.request, "build_opener", fake_opener)
         patcher.start()
         self.addCleanup(patcher.stop)
-        token = mock.patch.object(self.admin_server, "cloud_token", lambda: "test-token")
+        token = mock.patch.object(self.admin_server, "api_token", lambda: "test-token")
         token.start()
         self.addCleanup(token.stop)
         return captured
+
+    def test_hotupdate_archive_requires_resolver_modules(self):
+        self.assertIn("metadata_client.py", self.admin_server.HU_REQUIRED_ENTRIES)
+        self.assertIn("vod_resolver.py", self.admin_server.HU_REQUIRED_ENTRIES)
 
     def test_staging_chunk_cleanup_uses_private_storage_api(self):
         captured = self._capture()

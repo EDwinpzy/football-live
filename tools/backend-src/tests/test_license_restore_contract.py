@@ -1,18 +1,18 @@
-"""重装免重激活（设备维度恢复）契约。
-
-2026-09-16 用户报障：同一台机器重装后必须重新输入卡密。原因=卡密只存在 App 私有
-DataStore，卸载即清空，而客户端从不问服务端「这台设备以前激活过哪张卡」。设备指纹
-sha256(ANDROID_ID|包名|机型) 在同一台机器重装后不变，所以补一条 restore 路径：
-客户端首启动自愈 + 服务端按指纹找回已绑定的授权（不新增设备位、不改有效期）。
-"""
+"""Same-device license restore contracts for Android and the self-hosted API/SQL."""
 import pathlib
 import unittest
 
+from tools.selfhosted.api_service import BusinessApi
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 TV = ROOT / "android/app/src/main/java/com/qiubo/optimaltv/license/LicenseManager.kt"
 MOBILE = ROOT / "internal/mobile/app/src/main/java/com/qiubo/optimaltv/license/LicenseManager.kt"
-WORKER = ROOT / "后台管理系统/worker/index.js"
+# Restore lives in its own migration. A database predating the ledger already
+# has the v2 activate_code signature, so keeping restore inside
+# license_v2_migration.sql would let the migrator record it as applied without
+# ever executing the branch.
+API_SQL = ROOT / "tools/selfhosted/migrations/license_restore_v1.sql"
+LEGACY_V2_SQL = ROOT / "tools/license_v2_migration.sql"
 
 
 class LicenseRestoreContractTest(unittest.TestCase):
@@ -20,7 +20,7 @@ class LicenseRestoreContractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.client = TV.read_text(encoding="utf-8")
         cls.mobile = MOBILE.read_text(encoding="utf-8")
-        cls.worker = WORKER.read_text(encoding="utf-8")
+        cls.api_sql = API_SQL.read_text(encoding="utf-8").lower()
 
     def test_client_restores_only_when_not_activated(self):
         self.assertIn("private suspend fun tryRestore()", self.client)
@@ -28,28 +28,63 @@ class LicenseRestoreContractTest(unittest.TestCase):
         block = self.client[start:start + 220]
         self.assertIn("tryRestore()", block)
 
-    def test_client_sends_restore_action_without_code(self):
-        start = self.client.index("private suspend fun tryRestore()")
-        block = self.client[start:self.client.index("private suspend fun applySuccess")]
-        self.assertIn('callEndpoint("restore", "", deviceId(), null)', block)
-        # 恢复必须复用同一套票据校验/落盘（不能自己写一份宽松路径）
-        self.assertIn("applySuccess(resp)", block)
+    def test_both_clients_send_restore_without_code_and_reuse_ticket_validation(self):
+        for source in (self.client, self.mobile):
+            start = source.index("private suspend fun tryRestore()")
+            block = source[start:source.index("private suspend fun applySuccess")]
+            self.assertIn('callEndpoint("restore", "", deviceId(), null)', block)
+            self.assertIn("applySuccess(resp)", block)
 
-    def test_worker_accepts_restore_without_card_code(self):
-        start = self.worker.index("async function activateCode")
-        block = self.worker[start:self.worker.index("if (action === \"renew\")", start)]
-        self.assertIn('"restore"', block)
-        # 空卡密的 restore 不能被 CODE_RE 提前拒掉
-        self.assertIn('if (action !== "restore" && !CODE_RE.test(code))', block)
-        self.assertIn("restore_ok", block)
-        self.assertIn("restore_not_found", block)
+    def test_selfhosted_api_accepts_empty_restore_code_and_forwards_device(self):
+        calls = []
 
-    def test_worker_restore_never_adds_device_or_extends_expiry(self):
-        start = self.worker.index('if (action === "restore")')
-        block = self.worker[start:self.worker.index("if (action === \"renew\")", start)]
-        self.assertNotIn("nextDevices.push", block)
-        self.assertNotIn("UPDATE licenses", block)
-        self.assertIn("licenseResponse(row, serverNow)", block)
+        def rpc(name, payload):
+            calls.append((name, payload))
+            return {"ret": 404, "msg": "restore_not_found"}
+
+        api = BusinessApi(rpc)
+        status, body, _headers = api.handle(
+            "POST", "/activate",
+            {"protocol": 2, "action": "restore", "code": "", "deviceId": "a" * 64},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"ret": 404, "msg": "restore_not_found"})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "activate_code")
+        self.assertEqual(calls[0][1]["p_action"], "restore")
+        self.assertIsNone(calls[0][1]["p_code"], "restore must not read or look up an empty card code")
+        self.assertEqual(calls[0][1]["p_device"], "a" * 64)
+
+    def test_sql_restore_selects_latest_current_valid_bound_nonbanned_authorization(self):
+        sql = self.api_sql
+        self.assertIn("'restore'", sql)
+        start = sql.index("if v_action = 'restore'")
+        end = sql.index("if v_code !~", start)
+        branch = sql[start:end]
+
+        for requirement in (
+            "coalesce(l.devices", "? v_device", "activated_at is not null", "status = 'active'",
+            "expire_at is null or", "expire_at > v_now", "order by l.activated_at desc",
+            "restore_ok", "restore_not_found", "'ticket'", "'licensecode'",
+            "'activatedat'", "'expireat'", "'servernow'",
+        ):
+            self.assertIn(requirement, branch)
+        self.assertNotIn("update public.licenses", branch)
+        self.assertNotIn("devices :=", branch)
+        self.assertNotIn("expire_at =", branch)
+        self.assertNotIn("activated_at =", branch)
+
+    def test_restore_is_not_carried_only_by_license_v2_migration(self):
+        legacy = LEGACY_V2_SQL.read_text(encoding="utf-8").lower()
+        self.assertNotIn(
+            "v_action = 'restore'", legacy,
+            "restore must live in its own migration; a legacy database already has the v2 "
+            "activate_code signature and would skip a restore hidden inside this file",
+        )
+        # The marker is what the migrator probes in the installed function body.
+        # self.api_sql is already lowercased in setUpClass.
+        self.assertIn("otv-restore-marker-begin", self.api_sql.lower())
 
     def test_both_app_trees_identical(self):
         self.assertEqual(self.client, self.mobile, "两工程不一致，请跑 tools/sync_shared.py")

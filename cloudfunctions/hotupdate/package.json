@@ -1,6 +1,0 @@
-{
-  "name": "hotupdate",
-  "version": "1.0.0",
-  "description": "OptimalTV v1.18 热更新端点（公测版）",
-  "main": "index.js"
-}

@@ -2,18 +2,16 @@
 
 This directory contains the self-hosted My TV stack. Only Nginx publishes host ports: provider NAT maps external HTTPS `35208` to internal `8443`, and external health port `25182` to internal `8080`. Do not change security groups or NAT mappings. The health port exposes only `/health`; application traffic uses HTTPS on port `35208`.
 
-The file API allows only the `hotupdate` bucket. Its HTTPS object route is `/v1/storages/object/{bucket}/{key}` and supports `GET`, `HEAD`, and single byte ranges. Upload and deletion require a valid service JWT. Admin pages and business APIs are exposed only through Nginx over the configured HTTPS NAT port.
-
-The CloudBase migration scope is restricted to My TV's 13 `public` business tables and object keys under `apk-update/`, `backend-hu*.zip`, and `iptv/` in the `hotupdate` bucket. Other CloudBase schemas, buckets, and object keys are excluded.
+The file API allows only the `hotupdate` bucket. Its HTTPS object route is `/v1/storages/object/{bucket}/{key}` and supports `GET`, `HEAD`, and single byte ranges. Upload and deletion require a valid service JWT. Admin pages and business APIs are exposed only through Nginx over the configured HTTPS NAT port. The Admin UI is available at `/` and `/admin/`; `/admin` redirects to `/admin/`, and both entries reach the same static assets and API handlers.
 
 The self-hosted admin runs the existing IPTV source rebuild daily at 06:30 Asia/Shanghai. Scheduled rebuilds, manual publishes, rollbacks, and mode changes share a database lease with a five-minute expiry and 30-second renewal. If the lease RPC is unavailable, publication fails closed; a crashed process releases the lease automatically after expiry.
 
 ## Prepare the VPS
 
 1. Install Docker Engine and the Docker Compose plugin from the Ubuntu 24.04 package repository.
-2. Copy this directory and `tools/selfhosted/health.py` to the same relative paths on the VPS.
+2. Check out the approved repository version under `/srv/mytv`; Compose builds the web and admin images from this checkout.
 3. Create `/srv/mytv/objects`, `/srv/mytv/secrets`, and `/srv/mytv/secrets/license`. Copy `.env.example` to `.env`; generate separate random values for the Postgres administrator, PostgREST `authenticator` role, and JWT signing key. Create `auth-users.json` with salted PBKDF2 password hashes and a `jwt-signing-key` file containing the same JWT key used by PostgREST and the private file API.
-4. Create root-only `admin-credentials.json`, `admin-session-secret`, and `admin-api-credentials.json` files. The admin API account must use the My TV service subject `2094843486709620737`; store only its salted hash in `auth-users.json` and keep its matching username/password in `admin-api-credentials.json`. The original license-signing key, if available, belongs at `/srv/mytv/secrets/license/private_key.pem`; do not generate a replacement because existing apps trust the original public key.
+4. Create root-only `admin-credentials.json`, `admin-session-secret`, and `admin-api-credentials.json` files. The admin API account must use the My TV service subject `2094843486709620737`; store only its salted hash in `auth-users.json` and keep its matching username/password in `admin-api-credentials.json`. Create `/srv/mytv/secrets/license-importer-db-password` for the restricted license-import role as described below. The original license-signing key, if available, belongs at `/srv/mytv/secrets/license/private_key.pem`; do not generate a replacement because existing apps trust the original public key.
 5. Restrict `.env` and all secret files to root (`chmod 600`); make the object directory writable by the storage service.
 6. Create the Web asset archive directory and make it writable by the `web-api` container. The container runs as root, so the host directory must exist and must not be a read-only bind mount, a path whose SELinux label blocks writes, or a regular file:
 
@@ -25,10 +23,22 @@ The self-hosted admin runs the existing IPTV source rebuild daily at 06:30 Asia/
 
    Set `WEB_ASSET_ARCHIVE_HOST_PATH` in `.env` when the archive should not live at the default `./data/web-assets`. Compose mounts that host path at `/var/lib/mytv/web-assets` and passes the same location to the entrypoint as `OTV_WEB_ASSET_ARCHIVE`; if the two ever drift, the "persistent" archive silently becomes a container-local directory that dies with the container. When the volume cannot be written, `web-api` aborts before its health port opens and `docker compose logs web-api` reports `Web asset archive directory is not writable: <path>`.
 7. In the provider NAT panel, forward an external port to internal TCP port 8080. Do not add or change a security group.
-8. Start the staging stack with `docker compose up -d --build` and check `docker compose ps` plus `curl http://127.0.0.1:8080/health`.
+8. From the repository root, run `python tools/release_all.py` to build the Web assets and the embedded backend package. Then start the stack with `docker compose -f deploy/selfhosted/compose.yaml up -d --build` and check `docker compose -f deploy/selfhosted/compose.yaml ps` plus `curl http://127.0.0.1:8080/health`. Before PostgREST starts, the one-shot `schema-migrations` service applies each missing SQL version to the existing PostgreSQL volume and records its filename and timestamp in `public.schema_migrations`.
 9. Confirm the Web stack came up with a healthy archive. `GET /api/health` on `web-api` reports `"assets":{"ok":true,"build":"<id>","retained":[...]}`, where `build` is the running build and `retained` lists the generations kept on disk. `ok:false` means the running tree and the archive disagree.
 
-The HTTP health endpoint intentionally serves only `/health`; never send credentials or App traffic to it. The HTTPS certificate is issued for the VPS IP and its migration CA is packaged with both APKs and the CloudBase bridge functions. If the original license-signing key is not installed, license replenishment stays unavailable while migrated existing licenses continue to work.
+On this deployment host, `python tools/release_all.py --deploy` performs the same local build and then invokes the configured self-hosted Compose deployment entry. The Admin container does not receive the PostgreSQL bootstrap credentials. It mounts only the separate password file for `license_importer`, which can insert issued licenses and read only their `code` column for duplicate detection.
+
+### Prepare the license-import password
+
+Generate a strong password directly into the root-only file mounted by Admin. Keep this file outside the repository and do not add its contents to `.env`:
+
+```sh
+sudo sh -c 'umask 077; openssl rand -base64 36 > /srv/mytv/secrets/license-importer-db-password'
+```
+
+The `schema-migrations` service reads this file without printing its contents, creates or repairs `license_importer`, and reconciles its grants before PostgREST starts. It records the role policy version and runs a rollback-only SQL smoke check that verifies insert, duplicate import, code-only reads, rejected detail reads, and rejected updates. A missing/empty password file or a failed migration keeps PostgREST and dependent API services stopped. On each Compose rollout, the role password is refreshed from this file, so rotate the file and restart the stack together.
+
+The HTTP health endpoint intentionally serves only `/health`; never send credentials or App traffic to it. The HTTPS certificate is issued for the VPS IP and its migration CA is packaged with both APKs. If the original license-signing key is not installed, license replenishment stays unavailable while existing licenses continue to work.
 
 ## Publish an APK from the VPS
 
@@ -42,9 +52,7 @@ docker compose -f deploy/selfhosted/compose.yaml --profile ops run --rm apk-publ
   --title "后台迁移" --note "后台服务已迁移到新服务器"
 ```
 
-Use `--channel mobile` for the mobile package. During the CloudBase compatibility period, publish the same release to CloudBase storage as well so already-installed clients can download it from their existing update endpoint. The CloudBase bridge sends API requests to this VPS; it does not carry large APK or hot-update binaries through a function response.
-
-CloudBase service cutoff is **2026-10-09**. Keep the legacy `activate`, `hotupdate`, and `iptv` bridges plus APK/hot-update object mirrors active until then. Publish the migration APK with forced update and minimum supported version `100`; confirm that existing clients can download and install it before the cutoff. After the verified data cutover, the VPS is the sole writer. This migration covers My TV resources only.
+Use `--channel mobile` for the mobile package. The self-hosted storage service serves APK and hot-update objects; publish each release through this stack so installed clients use the configured self-hosted origin.
 
 ## Stop and preserve data
 

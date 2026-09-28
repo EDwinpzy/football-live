@@ -102,12 +102,12 @@ class VodSourceAdminContractTest(unittest.TestCase):
         self.assertEqual(result["grade"], "不可用")
         self.assertIn("匹配度 0", result["summary"])
 
-    def test_admin_bundle_build_includes_vod_source_ui_and_runtime_modules(self):
-        builder = (ROOT / "tools" / "build_admin_function.py").read_text(encoding="utf-8")
-        for name in ("vod_sources.py", "vod_sources.default.json", "hhkan.py"):
-            self.assertIn(name, builder)
-        bundle_html = (ROOT / "cloudfunctions" / "otv-admin" / "admin.html").read_text(encoding="utf-8")
-        self.assertIn('data-tab="vod-sources"', bundle_html)
+    def test_selfhosted_admin_image_includes_vod_source_runtime_and_ui(self):
+        dockerfile = (ROOT / "deploy" / "selfhosted" / "Dockerfile.admin").read_text(encoding="utf-8")
+        self.assertIn("COPY tools/backend-src /app/tools/backend-src", dockerfile)
+        self.assertIn("COPY tools/admin.html /app/tools/admin.html", dockerfile)
+        html = (ROOT / "tools" / "admin.html").read_text(encoding="utf-8")
+        self.assertIn('data-tab="vod-sources"', html)
 
 
 if __name__ == "__main__":
