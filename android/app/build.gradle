@@ -123,7 +123,12 @@ android {
         // 注意：两端 label 相同，故**同一台设备不要同时装 TV 版与移动版**（靠 applicationId
         // 可以共存，但桌面会出现两个同名图标），分发时按设备类型二选一。
         resValue 'string', 'app_name', 'My TV'
-        buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'    // 正式包：卡密门禁生效（未激活/过期走激活页）
+        // 卡密门控由 buildType 决定（见 buildTypes 里的 licenseEnabled）：
+        // Release 保持 true 生效；Debug 默认 false，好让全新安装的调试包能直接进主界面
+        // 做 UI 回归，不必每跑一次回归就消耗一个正式卡密槽位（一卡限 2 台设备）。
+        // 需要在 Debug 上验证真实卡密流程时：-PdebugLicenseEnabled=true 覆盖。
+        buildConfigField 'boolean', 'LICENSE_ENABLED',
+                (project.findProperty('debugLicenseEnabled') ?: 'false').toString()
         buildConfigField 'String', 'API_BASE_URL', apiBaseUrlConstant
         buildConfigField 'String', 'LICENSE_ENDPOINT', '"' + apiBaseUrl + '/activate"'
         buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'true'
@@ -180,11 +185,16 @@ android {
         release {
             minifyEnabled false   // Chaquopy + 反射（引擎/Room）保守不混淆
             signingConfig signingConfigs.release
+            // 正式包：卡密门禁生效（未激活/过期走激活页），不因 Debug 旁路而放宽。
+            buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'
         }
         debug {
             // v1.20 QA：debug 也用发布签名——可覆盖安装 release（保激活/收藏等数据），
             // 模拟器经 otvDebugLicense 注码通道激活后装回 release 即可验证激活态
             signingConfig signingConfigs.release
+            // Debug 跳过卡密门控：defaultConfig 的默认值已是 false，这里显式写一遍，
+            // 免得有人改默认值时无声地把「Debug 进不了主界面」这个坑带回来。
+            buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'
         }
     }
 
