@@ -7,6 +7,7 @@ import struct
 import subprocess
 import sys
 import zlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -33,11 +34,37 @@ def load_matrix() -> dict:
 
 
 def write_png(path: Path, width: int, height: int) -> Path:
+    """Write a structurally valid but flat single-colour PNG.
+
+    The acceptance gate rejects blank screenshots, so this is only for tests
+    that specifically exercise blank/single-colour detection.
+    """
     def chunk(kind: bytes, data: bytes) -> bytes:
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
 
     row = b"\x00" + (b"\x24\x48\x6c" * width)
     pixels = zlib.compress(row * height)
+    image = b"\x89PNG\r\n\x1a\n"
+    image += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    image += chunk(b"IDAT", pixels)
+    image += chunk(b"IEND", b"")
+    path.write_bytes(image)
+    return path
+
+
+def write_rendered_png(path: Path, width: int, height: int) -> Path:
+    """Write a PNG that looks like a rendered page: several distinct colours."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    rows = []
+    for y in range(height):
+        row = b"".join(
+            bytes([(x * 7) % 256, (y * 11) % 256, (x * y) % 256])
+            for x in range(width)
+        )
+        rows.append(b"\x00" + row)
+    pixels = zlib.compress(b"".join(rows))
     image = b"\x89PNG\r\n\x1a\n"
     image += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
     image += chunk(b"IDAT", pixels)
@@ -369,7 +396,7 @@ def test_apply_browser_result_records_evidence_and_rejects_wrong_viewport(tmp_pa
     ledger = load_matrix()
     row = next(row for row in ledger["browser_runs"] if row["id"] == "web-01-desktop")
     screenshot = tmp_path / "web-home.png"
-    write_png(screenshot, 1440, 900)
+    write_rendered_png(screenshot, 1440, 900)
     (tmp_path / "web-home-evidence.json").write_text(json.dumps({
         "row_id": row["id"],
         "product_version": "2.6.0",
@@ -428,7 +455,7 @@ def test_show_steps_displays_manual_web_instructions_without_claiming_acceptance
 def test_record_result_command_persists_one_browser_row_and_keeps_global_gate_blocked(tmp_path):
     ledger_path = tmp_path / "media_matrix.json"
     ledger_path.write_text(MATRIX_PATH.read_text(encoding="utf-8"), encoding="utf-8")
-    screenshot = write_png(tmp_path / "web-home.png", 1440, 900)
+    screenshot = write_rendered_png(tmp_path / "web-home.png", 1440, 900)
     (tmp_path / "web-home-evidence.json").write_text(json.dumps({
         "row_id": "web-01-desktop",
         "product_version": "2.6.0",
@@ -875,3 +902,166 @@ def test_mobile_rotation_requires_both_portrait_and_landscape_viewports():
     row = next(row for row in ledger["acceptance_runs"] if row["id"] == "mobile-rotation")
     assert "1080x2400" in row["viewport"]
     assert "2400x1080" in row["viewport"]
+
+
+@pytest.mark.parametrize(("collection", "row_id", "field"), [
+    ("browser_runs", "web-01-desktop", "screenshot_required"),
+    ("browser_runs", "admin-13-desktop", "write_readback_required"),
+])
+def test_canonical_browser_evidence_requirements_cannot_be_disabled(collection, row_id, field):
+    runner = load_runner()
+    ledger = load_matrix()
+    row = next(row for row in ledger[collection] if row["id"] == row_id)
+    row[field] = False
+
+    blockers = []
+    runner._check_canonical_rows(ledger, blockers)
+
+    assert any(row_id in blocker and ("screenshot" in blocker.lower() or "readback" in blocker.lower()) for blocker in blockers)
+
+
+def test_required_playback_row_cannot_be_optional_or_point_to_fabricated_evidence():
+    runner = load_runner()
+    ledger = load_matrix()
+    run = ledger["media_samples"][0]["runs"][0]
+    run.update({
+        "required": False,
+        "status": "PASS",
+        "evidence_ref": "artifacts/acceptance/nonexistent-playback.json",
+        "screenshot_paths": ["artifacts/acceptance/nonexistent-playback.png"],
+        "screenshot_reviewed": True,
+        "product_version": "2.6.0",
+        "build_version": "build-20260927.1",
+        "device_or_browser": "Chrome 140",
+        "browser_version": "Chrome 140",
+        "viewport": "1440x900",
+        "network_profile": "stable-wifi",
+        "content_category": "movie",
+        "attempts": 1,
+        "first_frame_ms": 400,
+        "rebuffer_count": 0,
+        "auto_switch_result": "no switch needed",
+        "survival_minutes": 30,
+        "error_log_result": "NONE",
+    })
+
+    blockers = []
+    runner._check_canonical_rows(ledger, blockers)
+
+    assert any(run["id"] in blocker and "cannot be marked optional" in blocker for blocker in blockers)
+
+
+def test_uniform_single_color_png_is_not_accepted_as_screenshot(tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    row = next(row for row in ledger["browser_runs"] if row["id"] == "web-01-desktop")
+    attach_passing_browser_result(tmp_path, row)
+
+    blockers = []
+    runner._check_run_row(row, "web home", blockers, tmp_path, browser_run=True)
+
+    assert any("blank" in blocker.lower() or "single-color" in blocker.lower() for blocker in blockers)
+
+
+def test_two_hour_playback_rejects_future_measurement_window():
+    runner = load_runner()
+    row = {}
+    started = datetime.now(timezone.utc) + timedelta(days=1)
+    ended = started + timedelta(minutes=120)
+    fill_longrun_measurements(
+        row,
+        started=started.isoformat(),
+        ended=ended.isoformat(),
+    )
+
+    blockers = []
+    runner._check_two_hour_measurements(row, "future playback", blockers)
+
+    assert any("future" in blocker.lower() for blocker in blockers)
+
+
+def test_admin_readback_manifest_cannot_be_the_ordinary_screenshot_evidence(tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    row = next(row for row in ledger["browser_runs"] if row["id"] == "admin-13-desktop")
+    evidence_path = attach_passing_browser_result(tmp_path, row)
+    row.update({
+        "data_scope": "仅用于隔离 staging，不触碰生产；每项写入后读回。",
+        "staging_environment_ref": "staging:acceptance-test",
+        "readback_status": "PASS",
+        "readback_evidence_ref": evidence_path.name,
+    })
+    identity = {
+        "id": "acceptance-test",
+        "registered": True,
+        "status": "PASS",
+        "environment_type": "isolated_staging",
+        "environment_ref": "staging:acceptance-test",
+    }
+
+    blockers = []
+    runner._check_run_row(
+        row,
+        "admin staging write",
+        blockers,
+        tmp_path,
+        browser_run=True,
+        staging_identity=identity,
+    )
+
+    assert any("readback" in blocker.lower() and "manifest" in blocker.lower() for blocker in blockers)
+
+
+@pytest.mark.parametrize("evidence_id", [
+    "isolated_staging",
+    "vps_egress",
+    "database_backup_restore",
+    "cloudbase_runtime_requests",
+    "object_storage_contract",
+])
+def test_deployment_pass_claim_requires_a_bound_verifiable_manifest(evidence_id, tmp_path):
+    runner = load_runner()
+    ledger = load_matrix()
+    item = ledger["deployment_evidence"][evidence_id]
+    item.update({"status": "PASS", "evidence_ref": "deployment-evidence.json"})
+    identity = None
+    if evidence_id == "isolated_staging":
+        identity = {
+            "id": "acceptance-test",
+            "registered": True,
+            "status": "PASS",
+            "environment_type": "isolated_staging",
+            "environment_ref": "staging:acceptance-test",
+        }
+        item.update({
+            "environment_type": "isolated_staging",
+            "environment_id": identity["id"],
+            "environment_ref": identity["environment_ref"],
+            "write_readback_evidence": "staging-readback.json",
+        })
+        (tmp_path / "staging-readback.json").write_text(json.dumps({
+            "environment_id": identity["id"],
+            "environment_ref": identity["environment_ref"],
+            "environment_type": "isolated_staging",
+            "readback_status": "PASS",
+        }), encoding="utf-8")
+    elif evidence_id == "vps_egress":
+        item.update({
+            "enabled_source_inventory_ref": "inventory.json",
+            "sources_tested": ["source-a"],
+        })
+    elif evidence_id == "database_backup_restore":
+        item.update({"backup_ref": "backup.tar", "restore_target_ref": "restore-db"})
+    elif evidence_id == "cloudbase_runtime_requests":
+        item.update({"observed_requests": 0, "observation_window": "2026-09-26T00:00Z/2026-09-27T00:00Z"})
+    (tmp_path / "deployment-evidence.json").write_text(json.dumps({"status": "PASS"}), encoding="utf-8")
+
+    blockers = []
+    runner._check_deployment(
+        ledger["deployment_evidence"],
+        blockers,
+        identity,
+        tmp_path,
+    )
+
+    assert any(evidence_id in blocker and "manifest" in blocker.lower() for blocker in blockers)

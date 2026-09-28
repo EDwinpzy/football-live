@@ -195,6 +195,17 @@ _SYNTHETIC_EVIDENCE_FIELDS = {
     "auto_switch_result", "content_category", "registration_evidence_ref", "write_readback_evidence",
 }
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# Canonical browser evidence requirements are pinned in code, not read from the
+# ledger. The matrix is the artifact under test, so letting it declare its own
+# requirements would let a matrix edit quietly switch a hard gate off.
+CANONICAL_BROWSER_SCREENSHOT_ROW_IDS = frozenset(REQUIRED_BROWSER_ROW_IDS)
+# Rows that write to isolated staging and must read every write back.
+CANONICAL_BROWSER_WRITE_READBACK_ROW_IDS = frozenset({
+    *(f"admin-{number:02d}-{view}" for number in (6, 8, 9, 10, 11, 13, 14) for view in ("desktop", "mobile")),
+    "admin-import-desktop-53", "admin-import-mobile-54",
+    "admin-import-desktop-55", "admin-import-mobile-56",
+    "admin-import-desktop-57", "admin-import-mobile-58",
+})
 
 
 @dataclass(frozen=True)
@@ -282,6 +293,27 @@ def _check_canonical_rows(ledger: dict[str, Any], blockers: list[str]) -> None:
         for improperly_optional in sorted(REQUIRED_ROW_IDS.get(collection, set()) & observed):
             if not required_flags.get(improperly_optional, False):
                 blockers.append(f"{collection}: canonical required row {improperly_optional} cannot be marked optional")
+        if collection == "browser_runs":
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                row_id = row.get("id")
+                if not isinstance(row_id, str) or row_id not in CANONICAL_BROWSER_SCREENSHOT_ROW_IDS:
+                    continue
+                if row.get("screenshot_required") is not True:
+                    blockers.append(
+                        f"browser_runs: canonical required row {row_id} cannot disable its required screenshot evidence"
+                    )
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                row_id = row.get("id")
+                if not isinstance(row_id, str) or row_id not in CANONICAL_BROWSER_WRITE_READBACK_ROW_IDS:
+                    continue
+                if row.get("write_readback_required") is not True:
+                    blockers.append(
+                        f"browser_runs: canonical required row {row_id} cannot disable its required write/readback evidence"
+                    )
         for domain in sorted(REQUIRED_PRODUCT_DOMAINS.get(collection, set()) - domains):
             blockers.append(f"{collection}: required product domain {domain} is missing")
 
@@ -307,7 +339,7 @@ def _check_canonical_rows(ledger: dict[str, Any], blockers: list[str]) -> None:
                     else:
                         all_ids[row_id] = "media_samples playback"
                     observed_playback_ids.add(row_id)
-                    if row.get("required") is not True:
+                    if run.get("required") is not True:
                         blockers.append(f"media_samples: canonical required playback row {row_id} cannot be marked optional")
                 domain = (str(run.get("product")), str(run.get("duration_minutes")))
                 if domain in seen_domains:
@@ -356,6 +388,65 @@ def _viewport_dimensions(viewport: Any) -> set[tuple[int, int]]:
 
 
 def _png_dimensions(image_path: Path) -> tuple[int, int] | None:
+    """Read a PNG's declared size and validate its structure.
+
+    Dimensions come from IHDR, so this deliberately stops before unfiltering
+    pixels; callers that need pixel data use `_png_pixel_variety`.
+    """
+    header = _png_structure(image_path)
+    return None if header is None else (header[0], header[1])
+
+
+def _png_structure(image_path: Path) -> tuple[int, int, int, bytes] | None:
+    """Return (width, height, channels, filtered scanline bytes) or None."""
+    decoded = _read_png(image_path, unfilter=False)
+    return None if decoded is None else (decoded[0], decoded[1], decoded[2], decoded[3])
+
+
+def _paeth_predictor(left: int, above: int, upper_left: int) -> int:
+    estimate = left + above - upper_left
+    left_distance = abs(estimate - left)
+    above_distance = abs(estimate - above)
+    upper_left_distance = abs(estimate - upper_left)
+    if left_distance <= above_distance and left_distance <= upper_left_distance:
+        return left
+    return above if above_distance <= upper_left_distance else upper_left
+
+
+def _unfilter_sub(line: bytearray, row_bytes: int, channels: int) -> None:
+    """Reverse the Sub filter in place; each byte depends only on the same channel."""
+    for index in range(channels, row_bytes):
+        line[index] = (line[index] + line[index - channels]) & 0xFF
+
+
+def _unfilter_up(line: bytearray, previous: bytearray) -> None:
+    """Reverse the Up filter; it is a straight per-byte add of the row above."""
+    for index in range(len(line)):
+        line[index] = (line[index] + previous[index]) & 0xFF
+
+
+def _unfilter_average(line: bytearray, previous: bytearray, row_bytes: int, channels: int) -> None:
+    """Reverse the Average filter."""
+    for index in range(row_bytes):
+        left = line[index - channels] if index >= channels else 0
+        line[index] = (line[index] + ((left + previous[index]) >> 1)) & 0xFF
+
+
+def _unfilter_paeth(line: bytearray, previous: bytearray, row_bytes: int, channels: int) -> None:
+    """Reverse the Paeth filter."""
+    for index in range(row_bytes):
+        left = line[index - channels] if index >= channels else 0
+        upper_left = previous[index - channels] if index >= channels else 0
+        line[index] = (line[index] + _paeth_predictor(left, previous[index], upper_left)) & 0xFF
+
+
+def _read_png(image_path: Path, *, unfilter: bool) -> tuple[int, int, int, bytes] | None:
+    """Read a plain 8-bit PNG, optionally unfiltering it into raw pixel bytes.
+
+    Only non-interlaced 8-bit greyscale/RGB/greyscale-alpha/RGBA images are
+    accepted, which covers screenshot capture output. Anything else returns None
+    so the caller can treat the file as an unreadable image.
+    """
     try:
         data = image_path.read_bytes()
     except OSError:
@@ -414,7 +505,69 @@ def _png_dimensions(image_path: Path) -> tuple[int, int] | None:
     stride = width * channels + 1
     if any(decoded[row * stride] > 4 for row in range(height)):
         return None
-    return width, height
+    if not unfilter:
+        return width, height, channels, bytes(decoded)
+    row_bytes = width * channels
+    pixels = bytearray(row_bytes * height)
+    previous = bytearray(row_bytes)
+    for row_index in range(height):
+        start = row_index * stride
+        filter_type = decoded[start]
+        line = bytearray(decoded[start + 1:start + stride])
+        if filter_type == 1:
+            _unfilter_sub(line, row_bytes, channels)
+        elif filter_type == 2:
+            _unfilter_up(line, previous)
+        elif filter_type == 3:
+            _unfilter_average(line, previous, row_bytes, channels)
+        elif filter_type == 4:
+            _unfilter_paeth(line, previous, row_bytes, channels)
+        pixels[row_index * row_bytes:(row_index + 1) * row_bytes] = line
+        previous = line
+    return width, height, channels, bytes(pixels)
+
+
+# A screenshot that is one flat colour proves nothing rendered. Real UI captures
+# always carry several distinct pixel values, so a tiny palette is the signal
+# that a placeholder or blank canvas was submitted instead of the page.
+MIN_SCREENSHOT_COLOR_VARIETY = 3
+# Sample a grid of this many cells per axis when judging whether a screenshot
+# is a flat colour. Bounded work keeps the check cheap on 1440x900 captures.
+PNG_SAMPLE_GRID = 32
+
+
+def _png_pixel_variety(image_path: Path) -> int | None:
+    """Count distinct pixel colours in a screenshot, or None if unreadable.
+
+    The image is sampled on a bounded grid rather than scanned pixel by pixel.
+    A flat image is flat everywhere, so the grid reaches the same verdict while
+    a real capture stops as soon as enough distinct colours are seen.
+    """
+    decoded = _read_png(image_path, unfilter=True)
+    if decoded is None:
+        return None
+    width, height, channels, pixels = decoded
+    # Greyscale-alpha and RGBA: ignore the alpha channel when comparing colours.
+    step = channels - 1 if channels in {2, 4} else channels
+    colours: set[bytes] = set()
+    row_bytes = width * channels
+    columns = range(0, width, max(1, width // PNG_SAMPLE_GRID))
+    for y in range(0, height, max(1, height // PNG_SAMPLE_GRID)):
+        row_start = y * row_bytes
+        for x in columns:
+            index = row_start + x * channels
+            colours.add(pixels[index:index + step])
+            if len(colours) >= MIN_SCREENSHOT_COLOR_VARIETY:
+                return len(colours)
+    return len(colours)
+
+
+def _screenshot_is_blank(image_path: Path) -> bool:
+    """Return True when a screenshot carries too little colour to prove anything rendered."""
+    variety = _png_pixel_variety(image_path)
+    if variety is None:
+        return False
+    return variety < MIN_SCREENSHOT_COLOR_VARIETY
 
 
 def _check_bound_evidence(
@@ -724,7 +877,7 @@ def _check_run_row(
         if row.get("readback_status") == "PASS":
             readback_row = dict(row)
             readback_row["evidence_ref"] = row.get("readback_evidence_ref")
-            _check_bound_evidence(readback_row, f"{label} readback", blockers, artifact_root)
+            _check_readback_manifest(readback_row, label, blockers, artifact_root)
 
     if not _is_safe_reference(row.get("evidence_ref")):
         blockers.append(f"{label}: missing evidence_ref")
@@ -758,6 +911,10 @@ def _check_run_row(
                 if expected_dimensions and dimensions not in expected_dimensions:
                     target = " or ".join(f"{width}x{height}" for width, height in sorted(expected_dimensions))
                     blockers.append(f"{label}: screenshot dimensions {dimensions[0]}x{dimensions[1]} do not match viewport {target}")
+                if not _SELF_TEST_ACTIVE.get() and _screenshot_is_blank(screenshot_path):
+                    blockers.append(
+                        f"{label}: screenshot is blank or single-color and cannot prove the page loaded"
+                    )
             if expected_dimensions and observed_dimensions != expected_dimensions:
                 blockers.append(f"{label}: screenshots do not cover every target viewport {sorted(expected_dimensions)}")
             if row.get("screenshot_reviewed") is not True:
@@ -773,6 +930,61 @@ def _check_run_row(
             )
     elif status == "PASS":
         _check_bound_evidence(row, label, blockers, artifact_root, require_measurements=require_measurements)
+
+
+def _check_readback_manifest(
+    row: dict[str, Any],
+    label: str,
+    blockers: list[str],
+    artifact_root: Path,
+) -> dict[str, Any] | None:
+    """Require structured written/read-back pairs for staging write workflows.
+
+    A screenshot shows that something rendered, not that the value written came
+    back, so image evidence can never stand in for the readback record.
+    """
+    readback_label = f"{label} readback"
+    readback_path = _local_artifact_path(row.get("evidence_ref"), artifact_root)
+    if readback_path is None or not readback_path.is_file():
+        blockers.append(f"{readback_label}: structured readback manifest is missing under the artifact root")
+        return None
+    if readback_path.suffix.lower() != ".json":
+        blockers.append(
+            f"{readback_label}: readback must be a structured JSON manifest, not {readback_path.suffix or 'a non-JSON file'}"
+        )
+        return None
+    try:
+        manifest = json.loads(readback_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        blockers.append(f"{readback_label}: readback manifest must be valid UTF-8 JSON")
+        return None
+    if not isinstance(manifest, dict):
+        blockers.append(f"{readback_label}: readback manifest must be a JSON object")
+        return None
+    if not _SELF_TEST_ACTIVE.get() and _contains_synthetic_data(manifest):
+        blockers.append(f"{readback_label}: fixture or synthetic readback manifest is prohibited")
+    expected_staging = row.get("staging_environment_ref")
+    if manifest.get("staging_environment_ref") != expected_staging:
+        blockers.append(f"{readback_label}: readback manifest does not bind to the staging environment")
+    entries = manifest.get("readback_items")
+    if not isinstance(entries, list) or not entries:
+        blockers.append(f"{readback_label}: readback manifest must list the written items that were read back")
+        return manifest
+    for index, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict):
+            blockers.append(f"{readback_label}: readback item {index} is malformed")
+            continue
+        written = entry.get("written_value")
+        read_back = entry.get("read_back_value")
+        if written in (None, "", []) or read_back in (None, "", []):
+            blockers.append(
+                f"{readback_label}: readback item {index} must record both the written and read-back value"
+            )
+        elif written != read_back:
+            blockers.append(
+                f"{readback_label}: readback item {index} read-back value does not match what was written"
+            )
+    return manifest
 
 
 def _check_row_staging_identity(
@@ -830,6 +1042,13 @@ def _check_two_hour_measurements(row: dict[str, Any], label: str, blockers: list
         blockers.append(f"{label}: measured playback window is shorter than 120 minutes")
     if _is_number(survival) and survival > elapsed_minutes + 1:
         blockers.append(f"{label}: survival_minutes exceeds the measured playback window")
+    # A window that ends in the future has not been measured yet, so it cannot
+    # stand in for a completed two-hour stability run.
+    now = datetime.now(timezone.utc)
+    if ended > now:
+        blockers.append(f"{label}: measurement window ends in the future and cannot be a completed two-hour run")
+    if started > now:
+        blockers.append(f"{label}: measurement window starts in the future and cannot be a completed two-hour run")
 
 
 def _eligible_sample(sample: dict[str, Any]) -> bool:
@@ -1060,13 +1279,68 @@ def _check_services(
                 blockers.append(f"{label}: evidence does not bind to the staging environment")
 
 
+# Each deployment gate must bind a manifest whose entry keys prove the claim.
+# A gate cannot simply assert PASS: the manifest has to enumerate the same
+# evidence the gate already demands, so an empty or status-only file is not a
+# pass. CloudBase is included because "zero requests" is a measured claim.
+REQUIRED_DEPLOYMENT_MANIFEST_ENTRIES = {
+    "isolated_staging": ("environment", "readback"),
+    "vps_egress": ("sources", "targets"),
+    "database_backup_restore": ("backup", "restore"),
+    "cloudbase_runtime_requests": ("observations",),
+    "object_storage_contract": ("contract_checks",),
+}
+
+
+def _check_deployment_manifest(
+    evidence_id: str,
+    item: dict[str, Any],
+    label: str,
+    blockers: list[str],
+    artifact_root: Path | None,
+) -> dict[str, Any] | None:
+    """Verify the gate's bound manifest exists and substantiates a PASS claim."""
+    if artifact_root is None or _SELF_TEST_ACTIVE.get():
+        return None
+    manifest_path = _local_artifact_path(item.get("evidence_ref"), artifact_root)
+    if manifest_path is None or not manifest_path.is_file():
+        blockers.append(f"{label}: PASS requires a bound verifiable manifest; evidence_ref is missing")
+        return None
+    if manifest_path.suffix.lower() != ".json":
+        blockers.append(f"{label}: PASS requires a bound verifiable manifest; evidence_ref is not a JSON manifest")
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        blockers.append(f"{label}: PASS requires a bound verifiable manifest; evidence_ref is not valid UTF-8 JSON")
+        return None
+    if not isinstance(manifest, dict):
+        blockers.append(f"{label}: PASS requires a bound verifiable manifest; manifest must be a JSON object")
+        return None
+    if _contains_synthetic_data(manifest):
+        blockers.append(f"{label}: deployment manifest contains fixture or synthetic evidence")
+        return None
+    entries = manifest.get("manifest_entries")
+    if not isinstance(entries, dict) or not entries:
+        blockers.append(f"{label}: PASS requires a bound verifiable manifest; manifest_entries are missing or empty")
+        return manifest
+    for key in REQUIRED_DEPLOYMENT_MANIFEST_ENTRIES.get(evidence_id, ()):
+        value = entries.get(key)
+        if value in (None, "", [], {}):
+            blockers.append(f"{label}: manifest is missing required entry {key!r} for this gate")
+    return manifest
+
+
 def _check_deployment(
     ledger: dict[str, Any],
     blockers: list[str],
     staging_identity: dict[str, Any] | None = None,
     artifact_root: Path | None = None,
 ) -> None:
-    evidence = ledger.get("deployment_evidence")
+    # Accept either the full ledger or the deployment_evidence section itself so
+    # both the gate pipeline and direct section checks validate the same rows.
+    nested = ledger.get("deployment_evidence")
+    evidence = nested if isinstance(nested, dict) else ledger
     if not isinstance(evidence, dict):
         blockers.append("deployment: required deployment evidence is missing")
         return
@@ -1080,6 +1354,7 @@ def _check_deployment(
             for field in ("evidence_ref",):
                 if not _is_safe_reference(item.get(field)):
                     blockers.append(f"{label}: missing {field}")
+            _check_deployment_manifest(evidence_id, item, label, blockers, artifact_root)
             if evidence_id == "isolated_staging":
                 if item.get("environment_type") != "isolated_staging":
                     blockers.append(f"{label}: environment is not confirmed as isolated staging")
@@ -1484,6 +1759,19 @@ def _fixture_screenshot_paths(temp_root: Path, row: dict[str, Any]) -> list[str]
     return paths
 
 
+def _fixture_readback_manifest(temp_root: Path, row_id: str) -> str:
+    """Write a real structured readback manifest for the fixture-only self-test."""
+    path = temp_root / f"fixture-readback-{row_id}.json"
+    path.write_text(json.dumps({
+        "fixture_only": True,
+        "staging_environment_ref": "fixture-staging",
+        "readback_items": [
+            {"field": "fixture-field", "written_value": "fixture-value", "read_back_value": "fixture-value"},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    return path.name
+
+
 def _prepare_fixture_ledger(temp_root: Path) -> dict[str, Any]:
     fixture = copy.deepcopy(load_ledger())
     fixture["self_test_mode"] = True
@@ -1523,7 +1811,9 @@ def _prepare_fixture_ledger(temp_root: Path) -> dict[str, Any]:
             if row.get("write_readback_required"):
                 row["staging_environment_ref"] = "fixture-staging"
                 row["readback_status"] = "PASS"
-                row["readback_evidence_ref"] = "fixture://evidence/staging-readback"
+                row["readback_evidence_ref"] = _fixture_readback_manifest(
+                    temp_root, row.get("id", "fixture-row")
+                )
 
     for row in fixture["longrun_runs"]:
         row.update({
