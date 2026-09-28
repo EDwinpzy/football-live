@@ -26,7 +26,10 @@
 1. 测试：后端改动跑 `tools/backend-src/tests`（至少 `test_douban_catalog.py`）；Kotlin 侧以 `assembleRelease` 编译通过兜底。
 2. 部署网页版 + 重建产物：`python tools/release_all.py --deploy`。
 3. 构建 APK：`android` 与 `internal/mobile` 各跑一次 `.\gradlew.bat assembleRelease`（自动归档到 `apk/TV版/`、`apk/移动版/`）。
-4. 上传并发布热更：`node 后台管理系统/scripts/ops/hu-upload.mjs --name "<名称>" --notes "<备注>"`（默认站点最高版本 +1、立即发布）。
+4. 上传并发布热更：`node 后台管理系统/scripts/ops/hu-upload.mjs --site "https://<正式域名>/admin" --name "<名称>" --notes "<备注>"`
+   （站点最高版本 +1、立即发布）。**`--site` 或 `SITE_URL` 必须显式传入**：
+   CloudBase 已退役，脚本不再内置默认站点，缺站点会直接 exit 2 失败，
+   避免标准发布流程把热更静默发回已下线的云端。
 5. 更新文档：`docs/04-records/版本史.md` 追加变更摘要，`docs/04-records/测试记录.md` 追加实测证据。
 6. 提交并推送：`git add -A` → commit → `git push origin main`。
 
