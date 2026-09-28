@@ -81,6 +81,7 @@ def releaseKeyPassword = project.findProperty('OTV_RELEASE_KEY_PASSWORD') ?: Sys
 android {
     namespace 'com.qiubo.optimaltv'
     compileSdk 35
+    testOptions { unitTests.includeAndroidResources = true }
 
     defaultConfig {
         // v1.19 版本重规划（2026-09-03）：只保留原公测版一条线，命名「TV 版」。
@@ -271,6 +272,7 @@ dependencies {
 
     // 焦点导航几何规则（NavGeom）JVM 单元测试
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.16.1'
 
     // 焦点导航仪器测试（第二层）：Compose ui-test 的 performKeyInput 经 Espresso
     // sendKeySync 注入真按键，走 Activity.dispatchKeyEvent 全链路（与遥控器同路径）

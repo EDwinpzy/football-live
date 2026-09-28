@@ -1,6 +1,7 @@
 package com.qiubo.optimaltv.data.source
 
 import com.qiubo.optimaltv.data.model.Category
+import com.qiubo.optimaltv.data.model.CatalogMedia
 import com.qiubo.optimaltv.data.model.VodItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -115,8 +116,43 @@ class VodApiSource(
                     heroUrl = relayPoster(base, heroPoster(item.optString("hero_url").ifBlank { rawPoster })),
                     tags = strings(item.optJSONArray("genres")),
                     detailRef = rawId,
+                    mytvId = item.optString("mytv_id").takeIf(String::isNotBlank).orEmpty(),
                 )
             }
+
+        /** Convert a local metadata row while keeping the existing Douban key for user records. */
+        fun fromCatalogMedia(media: CatalogMedia, imageProxyBase: String = ""): VodItem {
+            val legacy = media.legacyRef
+            val id = legacy ?: "mytv:${media.mytvId}"
+            val mediaType = media.mediaType.trim().lowercase()
+            val category = when {
+                mediaType in setOf("tv", "series", "tv_series", "show") -> "tv"
+                mediaType in setOf("anime", "animation") -> "anime"
+                mediaType in setOf("variety", "short") -> mediaType
+                else -> "movie"
+            }
+            val poster = relayPoster(imageProxyBase, media.posterUrl)
+            val meta = listOf(media.year, media.regions.joinToString(" / "), media.genres.joinToString(" / "))
+                .filter(String::isNotBlank).joinToString(" / ")
+            return VodItem(
+                id = id,
+                sourceId = if (legacy == null) "metadata" else "douban",
+                title = media.title,
+                categoryId = "douban:$category",
+                year = media.year,
+                area = media.regions.joinToString(" / "),
+                rating = media.rating,
+                desc = media.overview,
+                posterUrl = poster,
+                heroUrl = relayPoster(imageProxyBase, heroPoster(media.posterUrl)),
+                tags = media.genres,
+                detailRef = legacy?.removePrefix("douban:").orEmpty(),
+                meta = meta,
+                actors = media.actors.joinToString(" / "),
+                mytvId = media.mytvId,
+                searchTerms = media.searchTerms,
+            )
+        }
 
         fun fetchHome(
             base: String,

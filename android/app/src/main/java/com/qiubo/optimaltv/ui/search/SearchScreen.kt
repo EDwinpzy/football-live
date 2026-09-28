@@ -255,12 +255,11 @@ fun SearchScreen(nav: NavController) {
         remote = Graph.live.searchRemote(searchable)
         remoteLoading = false
     }
-    // v1.19 流畅度：本地目录扫描挪 Default 派发——旧版 remember(query){search(query)}
-    // 在组合期主线程对全目录（数千条）做多字段 contains，逐键输入有可感知延迟
+    // 版本化 SQLite 搜索在 Repository 的 IO dispatcher 执行；种子目录回退扫描在 Default 执行。
     var localHits by remember { mutableStateOf<List<VodItem>>(emptyList()) }
     LaunchedEffect(query) {
         localHits = if (query.isBlank()) emptyList()
-        else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { Graph.repo.search(query) }
+        else Graph.repo.search(query)
     }
     val results = remember(localHits, remote) {
         (localHits + remote).distinctBy { it.id }
