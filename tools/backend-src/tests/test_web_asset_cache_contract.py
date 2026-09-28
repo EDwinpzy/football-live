@@ -178,6 +178,24 @@ def test_self_hosted_web_image_builds_and_uses_hashed_dist(tmp_path):
         assert hashlib.sha256(asset.read_bytes()).hexdigest().startswith(expected_prefix)
 
 
+def test_web_image_decrypt_stream_js_is_either_copied_or_explicitly_excluded():
+    """Important 6: narrowing the COPY list must not silently drop a runtime dep.
+
+    proxy.py shells out to `node decrypt_stream.js` and falls back to the
+    quickjs path in decrypt_python when node is missing. The image is
+    python:3.12-slim, so node is never there: the file is dead weight. But
+    dropping it without a word makes the next person debug quickjs instead of
+    noticing the file never shipped. Whichever way this goes, say so.
+    """
+    dockerfile = (ROOT / "deploy" / "selfhosted" / "Dockerfile.web").read_text(encoding="utf-8")
+    copied = "COPY tools/backend-src/decrypt_stream.js" in dockerfile
+    explained = "decrypt_stream.js" in dockerfile and "decrypt_python" in dockerfile
+    assert copied or explained, (
+        "decrypt_stream.js must either be copied into the image or have a comment "
+        "explaining that the container has no node and decryption uses decrypt_python"
+    )
+
+
 def test_output_nested_in_source_is_rejected_without_changing_source(tmp_path):
     build_assets = _load_builder().build_assets
     source = tmp_path / "source"

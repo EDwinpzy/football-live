@@ -15,15 +15,15 @@ _ASSET_NAMES = {
     "app": re.compile(r"^app\.[0-9a-f]{16}\.js$"),
     "style": re.compile(r"^style\.[0-9a-f]{16}\.css$"),
 }
+_BUILD_ID = re.compile(r"^[0-9a-f]{32}$")
+_MANIFEST_NAME = "manifest.json"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _is_hashed_bundle(relative: str) -> bool:
     """True for a content-addressed JS/CSS name, whose bytes can never differ."""
     name = PurePosixPath(relative).name
     return any(pattern.fullmatch(name) for pattern in _ASSET_NAMES.values())
-_BUILD_ID = re.compile(r"^[0-9a-f]{32}$")
-_MANIFEST_NAME = "manifest.json"
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _fail(message: str) -> ValueError:

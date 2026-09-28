@@ -15,8 +15,18 @@ The self-hosted admin runs the existing IPTV source rebuild daily at 06:30 Asia/
 3. Create `/srv/mytv/objects`, `/srv/mytv/secrets`, and `/srv/mytv/secrets/license`. Copy `.env.example` to `.env`; generate separate random values for the Postgres administrator, PostgREST `authenticator` role, and JWT signing key. Create `auth-users.json` with salted PBKDF2 password hashes and a `jwt-signing-key` file containing the same JWT key used by PostgREST and the private file API.
 4. Create root-only `admin-credentials.json`, `admin-session-secret`, and `admin-api-credentials.json` files. The admin API account must use the My TV service subject `2094843486709620737`; store only its salted hash in `auth-users.json` and keep its matching username/password in `admin-api-credentials.json`. The original license-signing key, if available, belongs at `/srv/mytv/secrets/license/private_key.pem`; do not generate a replacement because existing apps trust the original public key.
 5. Restrict `.env` and all secret files to root (`chmod 600`); make the object directory writable by the storage service.
-6. In the provider NAT panel, forward an external port to internal TCP port 8080. Do not add or change a security group.
-7. Start the staging stack with `docker compose up -d --build` and check `docker compose ps` plus `curl http://127.0.0.1:8080/health`.
+6. Create the Web asset archive directory and make it writable by the `web-api` container. The container runs as root, so the host directory must exist and must not be a read-only bind mount, a path whose SELinux label blocks writes, or a regular file:
+
+   ```sh
+   mkdir -p /srv/mytv/web-assets
+   chown root:root /srv/mytv/web-assets
+   chmod 755 /srv/mytv/web-assets
+   ```
+
+   Set `WEB_ASSET_ARCHIVE_HOST_PATH` in `.env` when the archive should not live at the default `./data/web-assets`. Compose mounts that host path at `/var/lib/mytv/web-assets` and passes the same location to the entrypoint as `OTV_WEB_ASSET_ARCHIVE`; if the two ever drift, the "persistent" archive silently becomes a container-local directory that dies with the container. When the volume cannot be written, `web-api` aborts before its health port opens and `docker compose logs web-api` reports `Web asset archive directory is not writable: <path>`.
+7. In the provider NAT panel, forward an external port to internal TCP port 8080. Do not add or change a security group.
+8. Start the staging stack with `docker compose up -d --build` and check `docker compose ps` plus `curl http://127.0.0.1:8080/health`.
+9. Confirm the Web stack came up with a healthy archive. `GET /api/health` on `web-api` reports `"assets":{"ok":true,"build":"<id>","retained":[...]}`, where `build` is the running build and `retained` lists the generations kept on disk. `ok:false` means the running tree and the archive disagree.
 
 The HTTP health endpoint intentionally serves only `/health`; never send credentials or App traffic to it. The HTTPS certificate is issued for the VPS IP and its migration CA is packaged with both APKs and the CloudBase bridge functions. If the original license-signing key is not installed, license replenishment stays unavailable while migrated existing licenses continue to work.
 
@@ -39,6 +49,23 @@ CloudBase service cutoff is **2026-10-09**. Keep the legacy `activate`, `hotupda
 ## Stop and preserve data
 
 Use `docker compose down` to stop containers. Do not pass `--volumes`; `postgres_data` contains the database. Object files persist under `OBJECTS_HOST_PATH`.
+
+The Web asset archive persists under `WEB_ASSET_ARCHIVE_HOST_PATH` (default `./data/web-assets`) and holds the current and previous Web builds: the content-hashed JS/CSS, the football poster pool, the logo and the web manifest. It exists so that a browser which loaded `index.html` just before a container replacement can still fetch the exact assets that page references, instead of silently mixing in the new release's artwork.
+
+It is a cache, not system of record: every build regenerates the current generation, so a lost archive costs one extra fetch for any page mid-load and no data. Back it up only to speed up rollbacks or preserve a known-good generation across a host migration:
+
+```sh
+# back up (safe while the stack runs; each generation is written to a temp dir and renamed)
+tar -czf web-assets-$(date +%F).tar.gz -C "$(dirname "${WEB_ASSET_ARCHIVE_HOST_PATH:-./data/web-assets}")" "$(basename "${WEB_ASSET_ARCHIVE_HOST_PATH:-./data/web-assets}")"
+
+# restore into a stopped stack
+docker compose down
+rm -rf "${WEB_ASSET_ARCHIVE_HOST_PATH:-./data/web-assets}"
+tar -xzf web-assets-2026-09-28.tar.gz -C "$(dirname "${WEB_ASSET_ARCHIVE_HOST_PATH:-./data/web-assets}")"
+docker compose up -d
+```
+
+If a generation in the archive is damaged, the next start discards it, logs the drop and keeps the current build, so a corrupt archive degrades to "one fewer cached generation" rather than an outage. A damaged *current* build is a different matter and stops the container on purpose: that is an image build problem, not a cache problem.
 
 ## Metadata centre
 

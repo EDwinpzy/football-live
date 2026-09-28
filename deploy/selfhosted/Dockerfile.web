@@ -17,6 +17,13 @@ WORKDIR /app
 # raw Web tree. The generated, content-addressed dist replaces /app/www, which
 # remains the static root used by proxy.py.
 COPY tools/backend-src/*.py tools/backend-src/*.json /app/
+COPY tools/selfhosted/web_asset_archive.py tools/selfhosted/web_entrypoint.py /app/
+# proxy.py prefers `node decrypt_stream.js` for live-stream decryption. This
+# image is python:3.12-slim and has no node, so that call always raises and
+# proxy.py falls back to decrypt_python (quickjs, from cloudfunctions/otv-web/
+# vendor/). The file is copied anyway so the runtime path matches the source
+# tree and a future image that does ship node does not silently break.
+COPY tools/backend-src/decrypt_stream.js /app/
 COPY tools/backend-src/svg_icon_cache/ /app/svg_icon_cache/
 COPY tools/backend-src/transparent_icon_cache/ /app/transparent_icon_cache/
 COPY cloudfunctions/otv-web/vendor/ /app/vendor/
@@ -27,4 +34,4 @@ COPY --from=web-assets /build/web-dist/ /app/www/
 RUN cp /app/vendor/_quickjs.cpython-311-x86_64-linux-gnu.so /app/vendor/_quickjs.so
 
 EXPOSE 8090
-CMD ["python", "proxy.py", "8090"]
+CMD ["python", "web_entrypoint.py"]
