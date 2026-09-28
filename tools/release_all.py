@@ -17,7 +17,41 @@ def run(cmd, cwd, input_text=None):
     return result.returncode == 0
 
 
-def selfhosted_deploy_command(root=ROOT):
+def script_path(root, *parts):
+    return os.path.join(root, "tools", *parts)
+
+
+def required_scripts(root=ROOT):
+    """发布器会用到的仓库内脚本；缺任何一个都要在启动前说清楚。"""
+    return [
+        script_path(root, "build_douban_snapshot.py"),
+        script_path(root, "probe_douban_filter_matrix.py"),
+        script_path(root, "build_catalog_seed.py"),
+        script_path(root, "build_web_assets.py"),
+        script_path(root, "build_backend_zip.py"),
+    ]
+
+
+def required_deploy_files(root=ROOT):
+    """自建部署入口依赖的编排文件与一次性迁移脚本。"""
+    return [
+        os.path.join(root, "deploy", "selfhosted", "compose.yaml"),
+        os.path.join(root, "tools", "selfhosted", "apply_schema_migrations.sh"),
+    ]
+
+
+def missing_files(paths):
+    return [path for path in paths if not os.path.isfile(path)]
+
+
+def require_files(paths, label):
+    missing = missing_files(paths)
+    if missing:
+        listed = "\n".join(f"  - {os.path.relpath(path, ROOT)}" for path in missing)
+        raise SystemExit(f"{label} 缺少必需文件，请先修复仓库后再发布：\n{listed}")
+
+
+def selfhosted_compose_base(root=ROOT):
     deploy_dir = os.path.join(root, "deploy", "selfhosted")
     compose_file = os.path.join(deploy_dir, "compose.yaml")
     return [
@@ -27,6 +61,21 @@ def selfhosted_deploy_command(root=ROOT):
         deploy_dir,
         "-f",
         compose_file,
+    ]
+
+
+def selfhosted_migration_command(root=ROOT):
+    """一次性迁移容器必须显式重跑：bind mount 的 SQL/密码变化不会触发 Compose 重建。"""
+    return selfhosted_compose_base(root) + [
+        "run",
+        "--rm",
+        "schema-migrations",
+    ]
+
+
+def selfhosted_deploy_command(root=ROOT):
+    return [
+        *selfhosted_compose_base(root),
         "up",
         "-d",
         "--build",
@@ -38,6 +87,10 @@ def main():
     parser.add_argument("--deploy", action="store_true",
                         help="run the configured self-hosted Docker Compose deployment entry")
     args = parser.parse_args()
+
+    require_files(required_scripts(ROOT), "发布器")
+    if args.deploy:
+        require_files(required_deploy_files(ROOT), "自建部署入口")
 
     # Refresh source data when possible; a transient upstream failure preserves the
     # checked-in snapshot and does not block a local build.
@@ -56,9 +109,17 @@ def main():
 
     if args.deploy:
         deploy_dir = os.path.join(ROOT, "deploy", "selfhosted")
+        # 迁移先跑：schema-migrations 是一次性容器，restart="no"，
+        # 后续 `up` 不会因为 SQL 变化重跑它，失败时必须挡住 API 启动。
+        if not run(selfhosted_migration_command(ROOT), deploy_dir):
+            raise SystemExit(
+                "schema-migrations 一次性迁移失败，已阻止 API 启动；"
+                "请先修复数据库迁移再重新发布"
+            )
         if not run(selfhosted_deploy_command(ROOT), deploy_dir):
             raise SystemExit("self-hosted Docker Compose deployment failed")
         print("\n[OK] 本地 Web 静态资源与 App 后端包已构建\n"
+              "[OK] schema-migrations 已重跑并成功\n"
               "[OK] 已调用自建 Docker Compose 部署入口")
     else:
         print("\n[OK] 本地 Web 静态资源与 App 后端包已构建\n"

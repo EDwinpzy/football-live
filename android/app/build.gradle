@@ -8,15 +8,72 @@ plugins {
 // 复验/联调可临时抬高版本号打一个升级包（-PapkVersionCode / -PapkVersionName），不必改死代码。
 def apkVersionCodeOverride = project.findProperty('apkVersionCode')
 def apkVersionNameOverride = project.findProperty('apkVersionName')
-def defaultApiBaseUrl = 'https://103.236.97.137:35208'
-def apiBaseUrl = (project.findProperty('apiBaseUrl') ?: defaultApiBaseUrl).toString().trim().replaceAll('/+$', '')
-def apiBaseUri = java.net.URI.create(apiBaseUrl)
-if (apiBaseUri.scheme != 'https' || !apiBaseUri.host || apiBaseUri.userInfo ||
-        !(apiBaseUri.path in ['', '/']) || apiBaseUri.query || apiBaseUri.fragment ||
-        apiBaseUri.port == 0 || apiBaseUri.port > 65535) {
-    throw new GradleException('apiBaseUrl must be an HTTPS origin without a path, query, or fragment')
+// ---- My TV Release 入口门槛（OTV-RELEASE-ORIGIN-GATE-BEGIN）----------------
+// TV 版与移动版必须使用逐字节相同的一段规则与同一套报错文案；对称性由
+// tools/tests/test_release_api_origin_contract.py 断言，改动必须同步两处。
+// 正式包：必须显式传入已验收的正式域名 -PapiBaseUrl=https://<正式域名>/api/
+// （或环境变量 OTV_RELEASE_API_BASE_URL），缺省立即 fail fast。
+// 迁移 CA + IP 测试入口只允许 Debug 本机联调，正式包一律拒绝。
+def otvMigrationTestOrigin = 'https://103.236.97.137:35208'
+def otvReleaseApiPath = '/api'
+def otvApiOriginProblem = { String otvUrl ->
+    if (!otvUrl) {
+        return '未显式传入正式 API 入口：Release 必须使用 -PapiBaseUrl=https://<正式域名>/api/（或环境变量 OTV_RELEASE_API_BASE_URL）'
+    }
+    if (otvUrl == otvMigrationTestOrigin || otvUrl.startsWith(otvMigrationTestOrigin + '/')) {
+        return "拒绝迁移 CA / IP 测试入口：${otvUrl}（正式包必须使用已验收的正式域名与公共 CA 证书）"
+    }
+    def otvUri
+    try {
+        otvUri = java.net.URI.create(otvUrl)
+    } catch (Exception otvIgnored) {
+        return "apiBaseUrl 不是合法 URL：${otvUrl}"
+    }
+    if (otvUri.scheme != 'https') {
+        return "Release 入口必须是 https://：${otvUrl}"
+    }
+    if (otvUri.userInfo) {
+        return "Release 入口不得包含 userinfo：${otvUrl}"
+    }
+    if (otvUri.query) {
+        return "Release 入口不得包含 query：${otvUrl}"
+    }
+    if (otvUri.fragment) {
+        return "Release 入口不得包含 fragment：${otvUrl}"
+    }
+    def otvHost = otvUri.host ?: ''
+    if (!otvHost) {
+        return "Release 入口缺少 host：${otvUrl}"
+    }
+    if (otvHost ==~ /\d{1,3}(\.\d{1,3}){3}/ || otvHost.contains(':')) {
+        return "Release 入口不得使用 IP 字面量：${otvUrl}（IP + 迁移 CA 只允许 Debug 本机联调）"
+    }
+    if (!(otvHost ==~ /(?i)(?!-)[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})*\.[a-z]{2,}$/)) {
+        return "Release 入口必须使用已备案的正式域名：${otvUrl}"
+    }
+    if (otvUri.path.replaceAll('/+$', '') != otvReleaseApiPath) {
+        return "Release 入口路径必须是 ${otvReleaseApiPath}/ 形式：${otvUrl}"
+    }
+    return null
+}
+// IDE 同步等无 task 名的场景 taskNames 为空，此时不按 Release 处理，避免配置期被拦。
+def otvReleaseRequested = gradle.startParameter.taskNames.any { String otvTaskName ->
+    def otvLower = otvTaskName.toLowerCase()
+    otvLower.contains('release') || otvLower in ['assemble', 'build', 'install']
+}
+def otvConfiguredApiBaseUrl = (project.findProperty('apiBaseUrl') ?: System.getenv('OTV_RELEASE_API_BASE_URL'))?.toString()?.trim()
+def apiBaseUrl
+if (otvReleaseRequested) {
+    def otvProblem = otvApiOriginProblem(otvConfiguredApiBaseUrl)
+    if (otvProblem) {
+        throw new GradleException("My TV Release 入口门槛未通过：${otvProblem}")
+    }
+    apiBaseUrl = otvConfiguredApiBaseUrl.replaceAll('/+$', '')
+} else {
+    apiBaseUrl = (otvConfiguredApiBaseUrl ?: otvMigrationTestOrigin).replaceAll('/+$', '')
 }
 def apiBaseUrlConstant = '"' + apiBaseUrl + '"'
+// ---- My TV Release 入口门槛（OTV-RELEASE-ORIGIN-GATE-END）------------------
 def releaseStorePassword = project.findProperty('OTV_RELEASE_STORE_PASSWORD') ?: System.getenv('OTV_RELEASE_STORE_PASSWORD') ?: ''
 def releaseKeyPassword = project.findProperty('OTV_RELEASE_KEY_PASSWORD') ?: System.getenv('OTV_RELEASE_KEY_PASSWORD') ?: ''
 

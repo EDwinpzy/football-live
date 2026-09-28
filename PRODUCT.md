@@ -29,7 +29,7 @@ web
 
 - 当前模块：总览、卡密、激活日志、补货、版本发布、公告、电视源、影视源。
 - 现有接口、路由、业务 DOM、危险操作确认逻辑必须继续工作。
-- 源码单一来源为 `tools/admin.html`，云端副本为 `cloudfunctions/otv-admin/admin.html`。
+- 源码单一来源为 `tools/admin.html`；线上由自建 `admin` 容器从该文件提供，无云端副本。
 - 视觉重设计可以替换布局、信息层级、色彩和交互表现，但不改变业务数据协议。
 - 不得把私钥、卡密、服务密钥、Cookie 或长期令牌写入代码、文档或部署包。
 
@@ -41,7 +41,7 @@ web
 ## Evidence on Hand
 
 - `tools/admin.html`：当前可运行的后台单文件源码，包含真实模块、表格渲染和接口调用。
-- `cloudfunctions/otv-admin/admin.html`：线上函数副本。
+- `deploy/selfhosted/compose.yaml` 的 `admin` 服务：自建后台容器，挂载 `tools/admin.html`。
 - `README.md` 与 `docs/`：My TV 的产品、发布和部署约束。
 - 当前后台真实表格数据由云端接口提供，设计稿中的示例数字只能作为结构占位，不能当作产品指标。
 

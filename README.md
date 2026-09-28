@@ -33,8 +33,8 @@ tvOS 深色风格；Python 后端内嵌进 app（Chaquopy），设备端自给�
 
 | 我想… | 怎么做 |
 |---|---|
-| 用网页版 | 主入口 https://103.236.97.137:35208/web/ （自建 VPS；浏览器需先信任迁移 CA `android/app/src/main/res/raw/mytv_migration_ca.pem`）· 兼容入口 https://appletv-d5ge1bth794873f76.service.tcloudbase.com/web/ |
-| 进后台管理 | 主入口 https://103.236.97.137:35208/ · 账号 `admin`，口令见本机 `tools/keys/admin_pass.txt`（不入库）· 兼容入口 https://appletv-d5ge1bth794873f76.service.tcloudbase.com/admin/ |
+| 用网页版 | 自建入口 `https://<正式域名>/web/`（浏览器信任公共 CA 证书）。IP + 迁移 CA 地址只用于本机 Debug 联调。 |
+| 进后台管理 | 自建入口 `https://<正式域名>/admin/` · 账号 `admin`，口令见本机 `tools/keys/admin_pass.txt`（不入库） |
 | 本地构建后端与网页 | `python tools/release_all.py`（默认只在本机生成部署包和 App 热更新包，不触碰公网） |
 | 部署/推送 | `python tools/release_all.py --deploy` 部署网页版 → 重打两个 APK → `node 后台管理系统/scripts/ops/hu-upload.mjs` 上传并发布热更 → `git push origin main` |
 | 发新 APK | `android/` 或 `internal/mobile/` 下 `./gradlew assembleRelease`（v1.19 起双 flavor 退役，单线发布），产物自动归档到 `apk/` |
@@ -63,14 +63,7 @@ My TV/
 │       ├── python/           # Chaquopy Python 源码（proxy.py 后端、scraper 等）
 │       └── cpp/pinyinime/    # AOSP 谷歌拼音解码器（搜索页拼音候选）
 ├── internal/mobile/          # 移动版工程（触屏；data/playback/license 与 TV 版字节级一致，sync_shared.py 监管）
-├── cloudfunctions/           # CloudBase 云函数（部署包；2026-09-23 起仅作旧客户端兼容入口 + 对象镜像）
-│   │                         #   activate / hotupdate / iptv / 网页版 / 后台管理全在
-│   │                         #   appletv-d5ge1bth794873f76 这一个环境（国内可直连）
-│   ├── activate/             # 卡密激活 v2（App LICENSE_ENDPOINT）
-│   ├── hotupdate/            # 热更 check/report + 公告下发 + 影视源下发
-│   ├── iptv-rebuild/         # 电视源每日自动推流（现由后台 /iptv/refresh 承担）
-│   ├── otv-admin/            # 后台管理（/admin；源码单一来源 tools/admin_server.py）
-│   └── otv-web/              # 网页版（含 www/ 前端；源码 tools/backend-src/）
+├── deploy/selfhosted/        # 自建部署入口（compose.yaml / Dockerfile / nginx.conf）
 ├── 后台管理系统/             # 自建站点形态（Sites / Worker）——已退役，仅留源码与运维脚本参考
 ├── tools/                    # 构建/运维脚本 + 旧后台 UI 源码（admin.html/admin_server.py）+ SQL 迁移
 ├── docs/
@@ -82,10 +75,9 @@ My TV/
 ```
 
 > **线上主环境（2026-09-23 起）**：后台管理 / 卡密激活 / 热更分发 / 电视源发布 / 网页版 / 影视元数据中心
-> 全部跑在自建 VPS `https://103.236.97.137:35208`（仓库副本 `/srv/mytv`，部署见
-> [项目文档](docs/项目文档.md) 第二部分 §9）。
-> 腾讯云 CloudBase（`appletv-d5ge1bth794873f76`）自 2026-09-23 起降级为**兼容入口 + 对象镜像**，服务截止日
-> **2026-10-09**：旧版 APK 仍从它的 `activate` / `hotupdate` / `iptv` 窄路由请求并转发到 VPS。
+> 全部跑在自建 VPS（仓库副本 `/srv/mytv`，部署见 [项目文档](docs/项目文档.md) 第二部分 §9）。
+> 腾讯云 CloudBase 已**完全退役、不再执行**：原云函数部署包、兼容入口域名与相关部署命令均已删除，
+> 历史事实只保留在 [项目文档](docs/项目文档.md) §7.2 的归档段落里，不可照着执行。
 > 内嵌目录 **[后台管理系统](./后台管理系统)** 是上一代自建站点（Sites / Cloudflare Worker + D1）
 > 的源码与运维脚本，已退役，仅供迁移对照与历史追溯。
 

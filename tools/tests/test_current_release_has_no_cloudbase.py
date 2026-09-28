@@ -38,7 +38,21 @@ def run_release(release_root, deploy, fake_runner, monkeypatch):
     return release
 
 
+@pytest.fixture
+def real_script_runner(monkeypatch):
+    """保留真实存在性检查，只把耗时的构建子进程换成记录器。"""
+    runner = FakeRunner()
+    release = importlib.import_module("tools.release_all")
+    monkeypatch.setattr(release, "run", runner)
+    return runner
+
+
 def test_release_deploy_never_invokes_cloudbase_cli(release_root, fake_runner, monkeypatch):
+    # 跳过存在性检查：它由 test_release_migration_gate.py 单独覆盖。
+    monkeypatch.setattr(importlib.import_module("tools.release_all"),
+                        "required_scripts", lambda root: [])
+    monkeypatch.setattr(importlib.import_module("tools.release_all"),
+                        "required_deploy_files", lambda root: [])
     run_release(release_root, deploy=True, fake_runner=fake_runner, monkeypatch=monkeypatch)
 
     assert not any(
@@ -48,6 +62,10 @@ def test_release_deploy_never_invokes_cloudbase_cli(release_root, fake_runner, m
 
 
 def test_release_build_inventory_and_deploy_target_are_selfhosted(release_root, fake_runner, monkeypatch):
+    monkeypatch.setattr(importlib.import_module("tools.release_all"),
+                        "required_scripts", lambda root: [])
+    monkeypatch.setattr(importlib.import_module("tools.release_all"),
+                        "required_deploy_files", lambda root: [])
     run_release(release_root, deploy=True, fake_runner=fake_runner, monkeypatch=monkeypatch)
     rendered = [
         " ".join([*(str(part) for part in command), str(cwd), str(input_text or "")])
@@ -61,6 +79,23 @@ def test_release_build_inventory_and_deploy_target_are_selfhosted(release_root, 
     assert not any("cloudfunctions/" in call for call in rendered)
     assert any("deploy/selfhosted/compose.yaml" in call and "compose" in call and "up" in call
                for call in rendered), rendered
+
+
+def test_release_actually_rejects_a_missing_build_script(release_root, monkeypatch, tmp_path):
+    """存在性检查必须真的执行：拿掉一个脚本就必须在跑任何命令前失败。"""
+    release = importlib.import_module("tools.release_all")
+    runner = FakeRunner()
+    monkeypatch.setattr(release, "run", runner)
+    monkeypatch.setattr(release, "required_scripts",
+                        lambda root: [str(tmp_path / "definitely_missing_script.py")])
+    monkeypatch.setattr(release, "required_deploy_files", lambda root: [])
+    monkeypatch.setattr(sys, "argv", ["release_all.py", "--deploy"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        release.main()
+
+    assert "definitely_missing_script.py" in str(excinfo.value)
+    assert runner.calls == [], f"缺脚本时不应执行任何构建命令：{runner.calls}"
 
 
 def test_current_release_and_apk_runtime_config_has_no_cloudbase_paths():

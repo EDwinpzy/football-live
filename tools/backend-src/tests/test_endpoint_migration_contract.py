@@ -23,21 +23,32 @@ class EndpointMigrationContractTests(unittest.TestCase):
         for module in (APP_CONFIG, MOBILE_CONFIG):
             with self.subTest(module=module):
                 gradle = (module / "build.gradle").read_text(encoding="utf-8")
-                self.assertIn("def defaultApiBaseUrl = 'https://103.236.97.137:35208'", gradle)
+                # 正式包不再有 IP 默认入口：必须显式传入已验收的正式域名。
+                # 完整校验规则见 tools/tests/test_release_api_origin_contract.py。
+                self.assertNotIn("def defaultApiBaseUrl", gradle)
+                self.assertIn("otvMigrationTestOrigin = 'https://103.236.97.137:35208'", gradle)
+                self.assertIn("OTV_RELEASE_API_BASE_URL", gradle)
                 self.assertIn("Integer.parseInt(apkVersionCodeOverride.toString()) : 110", gradle)
                 self.assertIn("apkVersionNameOverride.toString() : \"1.1\"", gradle)
 
-    def test_network_security_keeps_local_http_backend_and_ip_tv_streams_working(self):
+    def test_network_security_keeps_local_http_backend_working(self):
         for module in (APP_CONFIG, MOBILE_CONFIG):
             with self.subTest(module=module):
                 manifest = (module / "src" / "main" / "AndroidManifest.xml").read_text(encoding="utf-8")
-                config = ElementTree.parse(module / "src" / "main" / "res" / "xml" / "network_security_config.xml").getroot()
+                config = ElementTree.parse(
+                    module / "src" / "main" / "res" / "xml" / "network_security_config.xml"
+                ).getroot()
                 self.assertIn('android:networkSecurityConfig="@xml/network_security_config"', manifest)
                 base = config.find("base-config")
                 self.assertIsNotNone(base)
                 self.assertEqual(base.attrib.get("cleartextTrafficPermitted"), "true")
+                # 正式包只信任系统 CA：迁移 CA 与 IP 测试入口只留在 debug source set。
+                self.assertEqual(config.findall("domain-config"), [])
+                debug_config = module / "src" / "debug" / "res" / "xml" / "network_security_config.xml"
+                self.assertTrue(debug_config.is_file(), "Debug 必须保留迁移 CA 覆盖配置")
+                debug_root = ElementTree.parse(debug_config).getroot()
                 host_config = next(
-                    block for block in config.findall("domain-config")
+                    block for block in debug_root.findall("domain-config")
                     if block.findtext("domain") == "103.236.97.137"
                 )
                 self.assertEqual(host_config.attrib.get("cleartextTrafficPermitted"), "false")

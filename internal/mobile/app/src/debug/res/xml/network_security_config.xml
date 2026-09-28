@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 仅 Debug 覆盖：本机自建测试入口（IP + 迁移 CA）。
+      与 main 同名的资源在 debug source set 优先，正式包不会信任迁移 CA。 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="false">103.236.97.137</domain>
+        <trust-anchors>
+            <certificates src="@raw/mytv_migration_ca" />
+        </trust-anchors>
+    </domain-config>
+</network-security-config>
