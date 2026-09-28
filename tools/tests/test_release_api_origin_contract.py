@@ -23,7 +23,7 @@ GRADLE_MODULES = {
     "tv": ROOT / "android" / "app",
     "mobile": ROOT / "internal" / "mobile" / "app",
 }
-RELEASE_URL = "https://tv.example.com/api/"
+RELEASE_URL = "https://tv.example.com"
 MIGRATION_ORIGIN = "https://103.236.97.137:35208"
 
 GATE_BEGIN = "OTV-RELEASE-ORIGIN-GATE-BEGIN"
@@ -168,22 +168,22 @@ def test_release_rejects_ip_literal(name, module):
 
 @pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
 def test_release_rejects_plain_http(name, module):
-    accepted, reason = run_gate(module, "http://tv.example.com/api/")
+    accepted, reason = run_gate(module, "http://tv.example.com")
     assert not accepted, f"{name} 竟然接受了 http 入口"
     assert "https" in reason, reason
 
 
 @pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
 def test_release_rejects_userinfo(name, module):
-    accepted, reason = run_gate(module, "https://user:secret@tv.example.com/api/")
+    accepted, reason = run_gate(module, "https://user:secret@tv.example.com")
     assert not accepted, f"{name} 竟然接受了带 userinfo 的入口"
     assert "userinfo" in reason, reason
 
 
 @pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
 def test_release_rejects_query_and_fragment(name, module):
-    cases = [("https://tv.example.com/api/?token=1", "query"),
-             ("https://tv.example.com/api/" + chr(35) + "top", "fragment")]
+    cases = [("https://tv.example.com?token=1", "query"),
+             ("https://tv.example.com" + chr(35) + "top", "fragment")]
     for bad, marker in cases:
         accepted, reason = run_gate(module, bad)
         assert not accepted, f"{name} 竟然接受了带 {marker} 的入口 {bad}"
@@ -192,7 +192,7 @@ def test_release_rejects_query_and_fragment(name, module):
 
 @pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
 def test_release_rejects_migration_ca_test_origin(name, module):
-    for bad in (MIGRATION_ORIGIN, MIGRATION_ORIGIN + "/api/"):
+    for bad in (MIGRATION_ORIGIN, MIGRATION_ORIGIN + "/"):
         accepted, reason = run_gate(module, bad)
         assert not accepted, f"{name} 竟然接受了迁移 CA 测试入口 {bad}"
         assert "迁移 CA" in reason, reason
@@ -200,18 +200,19 @@ def test_release_rejects_migration_ca_test_origin(name, module):
 
 @pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
 def test_release_rejects_wrong_api_path(name, module):
-    for bad in ("https://tv.example.com/", "https://tv.example.com/web/",
-                "https://tv.example.com/api/v2/"):
+    """入口必须是纯 origin：任何路径都要 fail fast（端点由 /activate 等固定路径拼出）。"""
+    for bad in ("https://example.com/api/", "https://tv.example.com/v1/activate"):
         accepted, reason = run_gate(module, bad)
-        assert not accepted, f"{name} 竟然接受了非 /api/ 入口 {bad}"
-        assert "/api" in reason, reason
+        assert not accepted, f"{name} 竟然接受了带路径的入口 {bad}"
+        assert "不得包含路径" in reason, reason
 
 
 @pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
 def test_release_accepts_verified_public_domain(name, module):
-    accepted, resolved = run_gate(module, RELEASE_URL)
-    assert accepted, f"{name} 拒绝了合法正式域名：{resolved}"
-    assert resolved == "https://tv.example.com/api", resolved
+    for good in ("https://tv.example.com", "https://tv.example.com/"):
+        accepted, resolved = run_gate(module, good)
+        assert accepted, f"{name} 拒绝了合法正式域名 {good}：{resolved}"
+        assert resolved == "https://tv.example.com", resolved
 
 
 @pytest.mark.parametrize("name,module", GRADLE_MODULES.items(), ids=list(GRADLE_MODULES))
@@ -229,7 +230,8 @@ def test_tv_and_mobile_share_the_same_release_gate_rules():
     tv, mobile = (_extract_gate(module) for module in GRADLE_MODULES.values())
     assert tv == mobile, "TV 与移动版的 Release 入口门槛代码块出现分叉"
     markers = ["拒绝迁移 CA / IP 测试入口", "Release 入口不得包含 userinfo",
-               "Release 入口不得包含 query", "Release 入口不得使用 IP 字面量"]
+               "Release 入口不得包含 query", "Release 入口不得使用 IP 字面量",
+               "Release 入口不得包含路径"]
     for marker in markers:
         assert marker in tv, f"门槛缺少拒绝条件：{marker}"
 
