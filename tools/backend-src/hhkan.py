@@ -14,6 +14,8 @@ import time
 import urllib.parse
 import urllib.request
 
+import source_dns
+
 BASE = "https://www.hhkan0.com"
 # 同站镜像域（2026-08-15 验证 hhkan1.com 存活，同一套 cdndefend）：主域失效自动回退
 DOMAINS = ["www.hhkan0.com", "www.hhkan1.com"]
@@ -86,18 +88,19 @@ def _host_of(url: str) -> str:
     return (netloc.rsplit("@", 1)[-1].split(":")[0] or "").lower()
 
 
-def _check_url_safety(url: str) -> None:
+def _check_url_safety(url: str, timeout: float = None) -> None:
     """仅 https + 白名单域；解析 IP 落在私网/环回/保留段直接拒绝。"""
     scheme = urllib.parse.urlparse(url).scheme
     host = _host_of(url)
     if scheme != "https" or host not in _ALLOWED_HOSTS:
         raise ValueError("blocked url host: %s" % host)
     try:
-        import socket
-        for info in socket.getaddrinfo(host, 443):
+        for info in source_dns.getaddrinfo(host, 443, timeout=timeout):
             ip = info[4][0]
             if _private_ip.match(ip) or ip == "::1":
                 raise ValueError("blocked private ip: %s" % ip)
+    except TimeoutError:
+        raise
     except ValueError:
         raise
     except Exception:
@@ -114,11 +117,23 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_safe_opener = urllib.request.build_opener(_SafeRedirectHandler)
+class _SafeBoundedHTTPHandler(source_dns.BoundedHTTPHandler):
+    def http_open(self, req):
+        _check_url_safety(req.full_url, timeout=getattr(req, "timeout", None))
+        return super().http_open(req)
+
+
+class _SafeBoundedHTTPSHandler(source_dns.BoundedHTTPSHandler):
+    def https_open(self, req):
+        _check_url_safety(req.full_url, timeout=getattr(req, "timeout", None))
+        return super().https_open(req)
+
+
+_safe_opener = urllib.request.build_opener(
+    _SafeRedirectHandler, _SafeBoundedHTTPHandler, _SafeBoundedHTTPSHandler)
 
 
 def _safe_urlopen(req, timeout):
-    _check_url_safety(req.full_url if hasattr(req, "full_url") else str(req))
     return _safe_opener.open(req, timeout=timeout)
 
 
@@ -183,7 +198,13 @@ def _fetch(url: str, referer: str = None, timeout: float = None,
             headers["Cookie"] = _cookie
         req = urllib.request.Request(request_url, headers=headers)
         try:
-            resp = _safe_urlopen(req, 25 if remaining is None else remaining)
+            previous_dns_deadline = (
+                source_dns.set_deadline(deadline) if deadline is not None else None)
+            try:
+                resp = _safe_urlopen(req, 25 if remaining is None else remaining)
+            finally:
+                if deadline is not None:
+                    source_dns.restore_deadline(previous_dns_deadline)
             try:
                 body = _read_response_body(resp, max_bytes, deadline).decode("utf-8", "ignore")
             finally:

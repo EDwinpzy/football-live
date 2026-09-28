@@ -157,10 +157,32 @@ class VodResolver:
     def invalidate_source_configuration(self):
         """Drop cached references when the configured source registry is replaced."""
         with self._cache_lock:
-            self._cache_generation += 1
-            self._last_good.clear()
-            self._hot_cache.clear()
-            self._failure_cache.clear()
+            self._invalidate_source_configuration_locked()
+
+    def replace_registry(self, registry):
+        """Atomically replace the source snapshot and invalidate its cached results.
+
+        The previous registry is returned so callers can close it after releasing
+        the cache lock. Readers snapshot the registry and generation under this
+        same lock, so they cannot observe the new registry with the old caches.
+        """
+        with self._cache_lock:
+            previous = self.registry
+            if previous is registry:
+                return previous
+            self.registry = registry
+            self._invalidate_source_configuration_locked()
+            return previous
+
+    def _invalidate_source_configuration_locked(self):
+        self._cache_generation += 1
+        self._last_good.clear()
+        self._hot_cache.clear()
+        self._failure_cache.clear()
+
+    def _registry_snapshot(self):
+        with self._cache_lock:
+            return self.registry, self._cache_generation
 
     def resolve(self, mytv_id, episode=1, cancel_event=None):
         canonical_id = _positive_integer(mytv_id, "mytv_id")
@@ -204,8 +226,7 @@ class VodResolver:
         if isinstance(entry, dict) and not _entry_identity_matches(entry, canonical_id, douban_id):
             return unavailable(index_result.version, cache)
 
-        registry_snapshot = self.registry
-        generation = self._cache_generation
+        registry_snapshot, generation = self._registry_snapshot()
         cache_key = (canonical_id, requested_episode,
                      None if index_result.version is None else str(index_result.version))
         cached = self._cache_get(self._last_good, cache_key, LAST_GOOD_TTL_SECONDS)
@@ -262,8 +283,7 @@ class VodResolver:
 
     def _resolve_missing_index(self, detail, mytv_id, episode, version, cache_key,
                                miss_cache, cancel_event):
-        registry_snapshot = self.registry
-        generation = self._cache_generation
+        registry_snapshot, generation = self._registry_snapshot()
         submit = getattr(registry_snapshot, "submit_fast_searches", None)
         if not callable(submit):
             result = self._unavailable_result(mytv_id, episode, version, miss_cache)
@@ -275,11 +295,14 @@ class VodResolver:
         started = time.monotonic()
         soft_deadline = started + FAST_SOURCE_SOFT_TIMEOUT_SECONDS
         hard_deadline = started + FAST_RESOLVE_BUDGET_SECONDS
-        futures = tuple(submit(subject, max_sources=MAX_FAST_SOURCES) or ())
+        submission = submit(subject, max_sources=MAX_FAST_SOURCES)
+        overloaded = bool(getattr(submission, "overloaded", False))
+        futures = tuple(submission or ())
         if not futures:
             result = self._unavailable_result(mytv_id, episode, version, miss_cache)
-            self._cache_put_if_current(
-                self._failure_cache, cache_key, result, registry_snapshot, generation)
+            if not overloaded:
+                self._cache_put_if_current(
+                    self._failure_cache, cache_key, result, registry_snapshot, generation)
             return result
 
         pending = set(futures)
@@ -332,8 +355,10 @@ class VodResolver:
 
         if preferred is None:
             result = self._unavailable_result(mytv_id, episode, version, miss_cache)
-            stored = self._cache_put_if_current(
-                self._failure_cache, cache_key, result, registry_snapshot, generation)
+            stored = False
+            if not overloaded:
+                stored = self._cache_put_if_current(
+                    self._failure_cache, cache_key, result, registry_snapshot, generation)
         else:
             backups = _unique_backups(preferred, completed_candidates)
             result = ResolveResult(
