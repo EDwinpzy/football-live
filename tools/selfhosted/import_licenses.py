@@ -158,7 +158,27 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description="Import a signed license_gen batch into self-hosted PostgreSQL")
     parser.add_argument("batch_dir", help="license_gen batch directory containing cards.csv and tickets.jsonl")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate signatures and card/ticket agreement without connecting to a database",
+    )
     args = parser.parse_args(argv)
+    if args.dry_run:
+        # Card migration is irreversible in practice: a card imported against the
+        # wrong database, or one whose signature does not verify, is hard to
+        # unpick afterwards. So validation has to be runnable on its own first.
+        try:
+            entries = _read_batch(args.batch_dir, load_public_key())
+        except (ValueError, RuntimeError, OSError) as exc:
+            print(f"license batch validation failed: {exc}", file=sys.stderr)
+            return 1
+        plans = sorted({row[1] for row in entries})
+        print(
+            f"Validated {len(entries)} license tickets in {args.batch_dir} "
+            f"(plans: {', '.join(plans)}). No database was contacted."
+        )
+        return 0
     try:
         inserted, validated = import_batch(args.batch_dir)
     except (ValueError, RuntimeError, OSError) as exc:
