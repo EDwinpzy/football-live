@@ -50,7 +50,7 @@ class IptvRepository(context: Context) {
          *     上游每日 EPG 校验，gh-proxy ~4s / jsdelivr ~1.6s）；
          *  ④⑤ vbskycn/iptv 聚合（原源，gh-proxy 实测 2.7s；raw 直连国内超时仅作兜底）。 */
         val SOURCES = listOf(
-                // 由 apiBaseUrl Gradle 属性注入；默认沿用现有 CloudBase 主源，迁移构建指向新服务器。
+                // 由 apiBaseUrl Gradle 属性注入：迁移后指向新服务器，旧 CloudBase 地址不再内置。
                 BuildConfig.IPTV_LATEST_URL,
             "https://gh-proxy.com/raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
             "https://cdn.jsdelivr.net/gh/Guovin/iptv-api@gd/output/result.m3u",
