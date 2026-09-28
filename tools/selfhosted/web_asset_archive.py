@@ -280,6 +280,7 @@ def _prune_builds(builds_dir: Path, current_build_id: str, keep_builds: int) -> 
         except ValueError:
             shutil.rmtree(candidate, ignore_errors=True)
             discarded.add(candidate.name)
+            print(f"[web-assets] 丢弃损坏的历史构建 {candidate.name}，已用当前构建继续启动")
             continue
         previous.append(candidate)
         if len(previous) >= keep_builds - 1:

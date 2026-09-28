@@ -247,10 +247,12 @@ def test_removed_source_asset_is_removed_from_persistent_dist(tmp_path):
 def test_index_reference_forms_the_rewriter_cannot_see_are_rejected(tmp_path):
     """Minor 9: the rewriter only matches a few HTML shapes, so guard the rest.
 
-    Absolute paths, protocol-relative URLs and `<base>` all change how a
-    reference resolves and would leave the generated index pointing at an
-    unhashed or missing asset. The build has to fail rather than emit a dist
-    that silently falls back to the 5-minute cache.
+    The stylesheet/script rewriters fail fast on the shapes they cannot match,
+    but a *second* reference the rewriter never inspects - another icon, a
+    traversal - would sail through and leave the index pointing at an asset
+    that is not in the dist. Absolute and protocol-remote URLs are exempt: the
+    hls.js CDN reference is deliberate and is not served from dist, so only
+    local paths have to resolve.
     """
     build_assets = _load_builder().build_assets
     source = tmp_path / "source"
@@ -258,20 +260,35 @@ def test_index_reference_forms_the_rewriter_cannot_see_are_rejected(tmp_path):
     _write_source(source, app=b"window.app = 1;\n", css=b"body {}\n")
     index = source / "index.html"
 
+    # A CDN reference is legitimate and must not be resolved against dist.
     index.write_text(
-        '<!doctype html><html><head><link rel="stylesheet" href="/style.css">'
+        '<!doctype html><html><head><link rel="stylesheet" href="style.css">'
+        '</head><body><script src="app.js"></script>'
+        '<script src="https://cdn.example.com/hls.min.js"></script></body></html>',
+        encoding="utf-8",
+    )
+    result = build_assets(source, dist)
+    assert result.referenced_files
+
+    # A local path that escapes the dist is still rejected.
+    index.write_text(
+        '<!doctype html><html><head><link rel="stylesheet" href="style.css">'
+        '</head><body><script src="app.js"></script>'
+        '<link rel="icon" href="../outside.png"></body></html>',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="outside the dist"):
+        build_assets(source, dist)
+
+    # So is a second local reference the rewriter never inspects and that
+    # silently does not exist in the dist.
+    index.write_text(
+        '<!doctype html><html><head><link rel="stylesheet" href="style.css">'
+        '<link rel="apple-touch-icon" href="assets/absent.png">'
         '</head><body><script src="app.js"></script></body></html>',
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="reference"):
-        build_assets(source, dist)
-
-    index.write_text(
-        '<!doctype html><html><head><link rel="stylesheet" href="style.css">'
-        '</head><body><script src="//cdn.example.com/app.js"></script></body></html>',
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="reference"):
+    with pytest.raises(ValueError, match="missing asset"):
         build_assets(source, dist)
 
 

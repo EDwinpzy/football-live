@@ -208,6 +208,11 @@ def _verify_generated_index(output: Path, html: str) -> None:
     for reference in _INDEX_REFERENCE_RE.findall(html):
         if _UNHASHED_BUNDLE_RE.search(reference):
             raise ValueError(f"index.html still references an unhashed bundle: {reference}")
+        # Absolute, protocol-relative and data URLs are not served from dist
+        # (the hls.js CDN reference is deliberate), so they cannot be checked
+        # against the output tree. Only local paths have to resolve.
+        if re.match(r"(?:[a-z][a-z0-9+.-]*:|//)", reference, re.IGNORECASE):
+            continue
         target = _output_file(output, reference)
         if target is None:
             raise ValueError(f"index.html references a path outside the dist: {reference}")
