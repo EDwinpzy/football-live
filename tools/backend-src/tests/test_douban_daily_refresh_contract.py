@@ -18,8 +18,14 @@ class DoubanDailyRefreshContractTest(unittest.TestCase):
     def test_android_retries_stale_home_until_daily_refresh_arrives(self):
         for root in (ANDROID, MOBILE):
             source = (root / "data" / "repo" / "VodRepository.kt").read_text(encoding="utf-8")
-            self.assertIn("home.stale", source)
-            self.assertIn("refreshStaleHome", source)
+            # The dedicated refreshStaleHome poller was replaced by the local
+            # metadata catalogue: empty library blocks are now retried on a
+            # backoff schedule until real content arrives, and the startup gate
+            # waits for content rather than for a job to merely finish. Assert
+            # that behaviour survives instead of the retired symbol.
+            self.assertIn("scheduleLibRetry", source)
+            self.assertIn("LIB_RETRY_DELAYS", source)
+            self.assertIn("awaitLibBlocksContent", source)
 
     def test_web_retries_stale_home_until_daily_refresh_arrives(self):
         source = APP.read_text(encoding="utf-8")

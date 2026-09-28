@@ -20,8 +20,12 @@ class LocalSearchClientContractTest(unittest.TestCase):
 
     def test_android_debounces_latin_queries_without_chinese_gate(self):
         source = self.read("android/app/src/main/java/com/qiubo/optimaltv/ui/search/SearchScreen.kt")
-        search_block = source[source.index("var remote by remember"):source.index("// v1.19 流畅度")]
+        # Slice on stable code anchors: the explanatory comments around this
+        # block move as the implementation changes, the code does not.
+        search_block = source[
+            source.index("var remote by remember"):source.index("var localHits by remember")]
         self.assertNotIn("if (!hasChinese)", search_block)
+        self.assertIn("delay(450)", search_block)
         self.assertIn("Graph.live.searchRemote(searchable", search_block)
 
     def test_web_search_uses_local_api_without_retry_storm(self):

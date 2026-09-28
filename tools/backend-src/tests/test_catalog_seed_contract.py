@@ -18,8 +18,10 @@ SEEDS = (
 GENERATOR = ROOT / "tools" / "build_catalog_seed.py"
 RELEASE = ROOT / "tools" / "release_all.py"
 VOD_REPO = ROOT / "android" / "app" / "src" / "main" / "java" / "com" / "qiubo" / "optimaltv" / "data" / "repo" / "VodRepository.kt"
-# 客户端 decodeSnapshot 的判据：版本号 + 只允许豆瓣卡片
-SNAPSHOT_VERSION = 3
+# 客户端写盘使用的当前快照版本。随包发布的种子由真实后端导出、CI 无法重新生成，
+# 因此它的版本只需要落在客户端显式接受的种子版本集合内，不必等于 SNAPSHOT_VERSION。
+SNAPSHOT_VERSION = 4
+SEED_ACCEPTED_VERSIONS = (3, 4)
 CATEGORY_KEYS = ("movie", "tv", "anime", "variety", "short")
 
 
@@ -30,12 +32,17 @@ class CatalogSeedContractTest(unittest.TestCase):
         cls.vod = VOD_REPO.read_text(encoding="utf-8")
 
     def test_version_matches_client_policy(self):
-        """客户端 SNAPSHOT_VERSION 与种子 v 必须一致（改了任一边都要同步）。"""
+        """种子 v 必须落在客户端显式接受的种子版本集合内。"""
         m = re.search(r"SNAPSHOT_VERSION\s*=\s*(\d+)", self.vod)
         self.assertIsNotNone(m, "VodRepository 里找不到 SNAPSHOT_VERSION")
         self.assertEqual(int(m.group(1)), SNAPSHOT_VERSION)
+        seed_versions = re.search(
+            r"SEED_ACCEPTED_VERSIONS\s*=\s*setOf\(([^)]*)\)", self.vod)
+        self.assertIsNotNone(seed_versions, "VodRepository 里找不到 SEED_ACCEPTED_VERSIONS")
+        accepted = {int(value) for value in re.findall(r"\d+", seed_versions.group(1))}
+        self.assertEqual(accepted, set(SEED_ACCEPTED_VERSIONS))
         for seed in self.seeds:
-            self.assertEqual(seed["v"], SNAPSHOT_VERSION)
+            self.assertIn(seed["v"], SEED_ACCEPTED_VERSIONS)
 
     def test_只包含豆瓣卡片(self):
         """CatalogOriginPolicy.allows：sourceId 必须是 douban、id 必须是 douban: 前缀。"""
