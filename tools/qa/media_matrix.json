@@ -7736,7 +7736,7 @@
         "operator": "<=",
         "value": 100,
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-web-performance-and-acceptance-design.md"
+        "source": "docs/项目文档.md#5-网页版"
       },
       "actual": null,
       "sample_count": null,
@@ -7755,7 +7755,7 @@
         "operator": "<=",
         "value": 200,
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-web-performance-and-acceptance-design.md"
+        "source": "docs/项目文档.md#5-网页版"
       },
       "actual": null,
       "sample_count": null,
@@ -7774,7 +7774,7 @@
         "operator": "<=",
         "value": 1500,
         "unit": "ms",
-        "source": "docs/superpowers/plans/2026-09-24-mytv-vod-resolver.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -7793,7 +7793,7 @@
         "operator": "<=",
         "value": 500,
         "unit": "ms",
-        "source": "docs/superpowers/plans/2026-09-24-mytv-vod-resolver.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -7812,7 +7812,7 @@
         "operator": ">=",
         "value": 99,
         "unit": "%",
-        "source": "docs/superpowers/plans/2026-09-24-mytv-vod-resolver.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -7831,7 +7831,7 @@
         "operator": "<",
         "value": 0.1,
         "unit": "%",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-web-performance-and-acceptance-design.md"
+        "source": "docs/项目文档.md#5-网页版"
       },
       "actual": null,
       "sample_count": null,
@@ -7850,7 +7850,7 @@
         "operator": "<=",
         "value": 1000,
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -7869,7 +7869,7 @@
         "operator": "<=",
         "value": 1200,
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -7888,7 +7888,7 @@
         "operator": "<=",
         "value": 300,
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -7907,7 +7907,7 @@
         "operator": "<=",
         "value": 2000,
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -7926,7 +7926,7 @@
         "operator": "<=",
         "value": 4000,
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -7945,7 +7945,7 @@
         "operator": "<",
         "value": 0.5,
         "unit": "%",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -7964,7 +7964,7 @@
         "operator": "<",
         "value": 1,
         "unit": "%",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -7986,7 +7986,7 @@
           3000
         ],
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -8005,7 +8005,7 @@
         "operator": "<",
         "value": 1,
         "unit": "%",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -8024,7 +8024,7 @@
         "operator": "<=",
         "value": 1000,
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -8043,7 +8043,7 @@
         "operator": "<=",
         "value": 1200,
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -8062,7 +8062,7 @@
         "operator": "<=",
         "value": 300,
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -8081,7 +8081,7 @@
         "operator": "<=",
         "value": 2000,
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -8100,7 +8100,7 @@
         "operator": "<=",
         "value": 4000,
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -8119,7 +8119,7 @@
         "operator": "<",
         "value": 0.5,
         "unit": "%",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -8138,7 +8138,7 @@
         "operator": "<",
         "value": 1,
         "unit": "%",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -8160,7 +8160,7 @@
           3000
         ],
         "unit": "ms",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -8179,7 +8179,7 @@
         "operator": "<",
         "value": 1,
         "unit": "%",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-android-playback-design.md"
+        "source": "docs/项目文档.md#3-端侧功能模块"
       },
       "actual": null,
       "sample_count": null,
@@ -8201,7 +8201,7 @@
           "relay_count"
         ],
         "unit": "requests",
-        "source": "docs/superpowers/specs/2026-09-24-mytv-web-performance-and-acceptance-design.md"
+        "source": "docs/项目文档.md#5-网页版"
       },
       "actual": null,
       "sample_count": null,

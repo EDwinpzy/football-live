@@ -108,6 +108,24 @@ def main() -> None:
     seed = build()
     if not seed["categories"] or not seed["items"]:
         raise SystemExit("生成结果为空，拒绝覆盖现有种子")
+
+    # 内容没变就沿用旧的 ts，保证同样的输入产出同样的字节。
+    # 否则每次跑构建都会刷新时间戳，即使 270 条目录一字未改，产物哈希也会变，
+    # 于是"APK 内嵌种子 == 仓库种子"这条发布后自检永远对不上，只能靠人工解释。
+    # ts 的用途只是告诉 App 种子有多新，不代表内容版本，所以这样复用是安全的。
+    for target in TARGETS:
+        if not target.exists():
+            continue
+        try:
+            previous = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        old = {k: v for k, v in previous.items() if k != "ts"}
+        new = {k: v for k, v in seed.items() if k != "ts"}
+        if old == new and isinstance(previous.get("ts"), int):
+            seed["ts"] = previous["ts"]
+            break
+
     blob = json.dumps(seed, ensure_ascii=False, separators=(",", ":")) + "\n"
     for target in TARGETS:
         target.write_text(blob, encoding="utf-8")
