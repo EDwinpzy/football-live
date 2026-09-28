@@ -24,6 +24,7 @@
 ## Review Focus
 
 - 旧浏览器缓存继续使用上一版 JS：Task 1 通过哈希文件名与 HTML 引用一致性测试。
+- `app.<16-hex>.js` 与 `style.<16-hex>.css` 属于不可变 URL 命名空间；source/assets 不得覆盖当前或上一版引用的这些 URL。自建 Web 镜像必须运行相同 builder，并将 dist 放入 API 的 `/app/www` 静态根，不能让原始 www 覆盖生成资源。
 - 首页缓存/metadata 更新失败使离线页面变空：Task 2 注入超时、manifest 损坏和 5xx 测试。
 - 跨域媒体直连失败后无 relay/重试操作：Task 2 覆盖直接播放、有限 relay、重试和错误恢复。
 - 埋点意外保存播放 URL 或稳定设备身份：Task 3 对结构日志和指标响应做禁用字段断言。
@@ -80,6 +81,7 @@ record = BaselineRecord(
 - Modify: tools/backend-src/www/style.css
 - Modify: tools/build_backend_zip.py
 - Create: tools/build_web_assets.py
+- Modify: deploy/selfhosted/Dockerfile.web
 - Test: tools/backend-src/tests/test_web_portrait_player_contract.py
 - Create: tools/backend-src/tests/test_web_asset_cache_contract.py
 
@@ -96,7 +98,7 @@ assert first.manifest == second.manifest
 assert all((tmp_path / "dist" / path).is_file() for path in first.referenced_files)
 ```
 
-测试重复构建字节/文件名稳定、改动 JS 后 hash 文件名改变、index 引用资源真实存在、旧 hash 资源可短期并存、HTML no-store、哈希 JS/CSS 为 public,max-age=31536000,immutable、非哈希 app.js/style.css 不超过 300 秒。
+测试重复构建字节/文件名稳定、改动 JS 后 hash 文件名改变、index 引用资源真实存在、旧 hash 资源可短期并存、source/assets 不能覆盖保留旧 URL、HTML no-store、哈希 JS/CSS 为 public,max-age=31536000,immutable、非哈希 app.js/style.css 不超过 300 秒。自建 Web 镜像合同测试 builder CLI 的实际引用/hash，以及 Dockerfile 的 dist 构建、API 代码复制和最终静态根 COPY 结构。
 
 - [ ] **Step 2: 运行 Web 静态资源测试确认当前引用和缓存不满足合同**
 

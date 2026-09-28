@@ -182,6 +182,7 @@ services:
       # MetadataClient 读不到地址，每次 detail() 都抛 MetadataUnavailable，接口恒定返回
       # TEMPORARILY_UNAVAILABLE（部署阻断，不是片源问题）。
       OTV_METADATA_API_URL: http://metadata-api:8094
+      OTV_WEB_ASSET_ARCHIVE: /var/lib/mytv/web-assets
     depends_on:
       business-api:
         condition: service_started
@@ -189,6 +190,8 @@ services:
         condition: service_started
       metadata-api:
         condition: service_started
+    volumes:
+      - ${WEB_ASSET_ARCHIVE_HOST_PATH:-./data/web-assets}:/var/lib/mytv/web-assets
     expose:
       - "8090"
     healthcheck:
@@ -403,7 +406,7 @@ services:
       health:
         condition: service_started
       web-api:
-        condition: service_started
+        condition: service_healthy
       admin:
         condition: service_started
       storage:

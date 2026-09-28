@@ -11,6 +11,7 @@ import os
 import atexit
 import re
 import json
+import hashlib
 import hhkan  # 影视源（hhkan0.com 抓取）
 import hhkan_snapshot  # 好好看静态快照（云函数出口受风控时容灾，绝不引入外部卡片）
 import team_backdrop  # 球队 16:9 海报（TheSportsDB）
@@ -46,6 +47,92 @@ except ImportError:
     HAS_URLLIB3 = False
 
 SOURCE_URL = "http://www.yoozb.live/m.html"
+WWW_ROOT = Path(__file__).parent / "www"
+
+# ---- 网页静态资源缓存合同（内容寻址资源 immutable）----
+# tools/build_web_assets.py 生成的 manifest.json 里的 cacheControl 才是
+# 缓存策略的唯一真实来源：它知道哪个文件名是内容哈希、哪个是 HTML。
+# 之前这里靠 "v=" in path 猜测，可内容寻址产物是 assets/app.<sha16>.js
+# （文件名寻址、没有 ?v=），于是哈希资源被误判成 max-age=300 短缓存，
+# 而旧式 ?v= 资源反而拿 immutable——缓存强度刚好接反。
+# 现在按 manifest 查表，miss 再退回扩展名规则；新增文件类型不用改代码。
+_WEB_CACHE_LOCK = threading.Lock()
+_web_cache_manifest: dict = {"stamp": None, "cache_control": None}
+_WEB_BUILD_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _web_asset_health() -> dict:
+    """报告当前内容寻址构建与归档保留的构建，供健康检查/监控观察降级。
+
+    任何读取失败都收敛成 ok=False 而不是抛错：健康端点必须始终能回答，
+    真正的归档完整性问题由 web_entrypoint 在启动时 fail fast 挡住。
+    """
+    result = {"ok": False, "build": None, "retained": []}
+    try:
+        manifest_bytes = (_web_static_root() / "manifest.json").read_bytes()
+        result["build"] = hashlib.sha256(manifest_bytes).hexdigest()[:32]
+    except (OSError, ValueError):
+        return result
+    archive_root = os.environ.get("OTV_WEB_ASSET_ARCHIVE", "/var/lib/mytv/web-assets")
+    try:
+        builds = Path(archive_root) / "builds"
+        retained = sorted(
+            path.name for path in builds.iterdir()
+            if path.is_dir() and not path.is_symlink() and _WEB_BUILD_ID_RE.fullmatch(path.name)
+        )
+    except OSError:
+        retained = []
+    result["retained"] = retained
+    result["ok"] = bool(retained) and result["build"] in retained
+    return result
+
+
+def _web_cache_control_table():
+    """读一次 www/manifest.json 的 cacheControl 映射，带 mtime 检查后进程内缓存。
+
+    每个请求读磁盘会拖慢静态分发，所以只比较 mtime/size；manifest 在
+    容器生命周期内不变，mtime 检查只是兜住开发期重建。
+    """
+    manifest_path = _web_static_root() / "manifest.json"
+    try:
+        stat = manifest_path.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        stamp = None
+    cached = _web_cache_manifest
+    if stamp is None or cached.get("stamp") == stamp:
+        return cached.get("cache_control")
+    with _WEB_CACHE_LOCK:
+        if cached.get("stamp") == stamp:
+            return cached.get("cache_control")
+        table = None
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            raw = manifest.get("cacheControl")
+            if isinstance(raw, dict) and raw:
+                table = {
+                    str(key).lower(): str(value)
+                    for key, value in raw.items()
+                    if isinstance(key, str) and isinstance(value, str)
+                }
+        except (OSError, UnicodeError, json.JSONDecodeError, AttributeError):
+            table = None
+        cached["stamp"] = stamp
+        cached["cache_control"] = table
+        return table
+
+
+def _web_static_root() -> Path:
+    """当前实际服务的静态根。
+
+    容器内与本机默认都是 proxy.py 同级的 www/；解析器允许通过
+    OTV_WEB_ROOT 指向别的目录（测试与开发期用生成的 dist），
+    缓存表和健康字段都必须跟着实际服务的根走，不能写死。
+    """
+    override = os.environ.get("OTV_WEB_ROOT", "").strip()
+    if override:
+        return Path(override)
+    return WWW_ROOT
 # 同族镜像站（2026-08-15 验证 5cj.tv 存活且数据同源；fifa2022.tv 已 404 剔除）：
 # 主源网络失败自动切换，保证直播列表不断供
 SOURCE_MIRRORS = [
@@ -3510,8 +3597,10 @@ class Handler(SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def __init__(self, *a, **kw):
-        # 网页版：前端在 www/ 子目录（proxy.py 在 pc-web/ 根）
-        super().__init__(*a, directory=str(Path(__file__).parent / "www"), **kw)
+        # 网页版：前端在 www/ 子目录（proxy.py 在 pc-web/ 根）。
+        # OTV_WEB_ROOT 与 web_entrypoint 共用同一个根，缓存表/健康字段也读它，
+        # 避免「服务的目录」和「读 manifest 的目录」各说各话。
+        super().__init__(*a, directory=str(_web_static_root()), **kw)
 
     # ---- 卡密激活同源转发（v1.25 需求②：网页版会员系统） ----
     # 直连云端 activate 会踩网关 CORS 头合并（函数回 * + 网关回显 Origin → "origin,*"
@@ -4001,8 +4090,12 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/health":
             # vod 字段（2026-09-18）：影视服务是否已预热。App 侧只把它当诊断信息，
             # 便于区分「后端没起来」和「后端起来了但影视还没就绪」。
+            # assets 字段（2026-09-28）：当前内容寻址构建 + 归档保留的构建列表。
+            # 归档降级（例如跳过损坏的历史档）必须在这里看得见，否则
+            # compose healthcheck 与后台监控都无从发现「上一版本已丢失」。
             body = json.dumps({"ok": True, "time": time.strftime("%H:%M:%S"),
-                               "vod": VOD_SERVICE is not None},
+                               "vod": VOD_SERVICE is not None,
+                               "assets": _web_asset_health()},
                               ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -4542,32 +4635,43 @@ class Handler(SimpleHTTPRequestHandler):
         super().send_header(keyword, value)
 
     def end_headers(self):
-        """HTML 与错误静态响应不缓存；带内容哈希的资源可永久缓存。
-
-        无哈希静态资源最多缓存 5 分钟，部署期间旧哈希文件由运行时保留，
-        因此已加载页面仍能取回其引用的 JS/CSS。
-        API 分支已自定 Cache-Control（分片 max-age=10 / 队标 max-age=86400 / 清单
-        no-store）时，尊重分支设置，不再重复发送。
-        """
+        """静态文件默认禁用缓存（开发期改前端后刷新立即可见）；API 分支已自定
+        Cache-Control（分片 max-age=10 / 队标 max-age=86400 / 清单 no-store）则
+        尊重分支设置，不再重复发送。
+        v1.22（2026-09-05 需求⑫ 网页版加载提速）：静态分支按扩展名给缓存——
+        海报/图标等不可变资源 24h，app.js/style.css 5min，html 仍 no-store
+        （发布即生效）。
+        2026-09-28：构建产物改成内容寻址后，判定改以 www/manifest.json 的
+        cacheControl 为准（进程内按 mtime 缓存），miss 才退回下面的扩展名规则。
+        否则 assets/app.<sha16>.js 没有 ?v= 会被误判成 5min 短缓存，
+        而旧式 ?v= 引用反而拿 immutable，缓存强度接反。"""
         if not getattr(self, "_cc_sent", False):
             cc = "no-store"
             if getattr(self, "_static_response", False):
                 try:
-                    request_target = self.path.lower()
-                    path = urlparse(request_target).path
-                    # 前端用 ?v=<版本号> 而不是路径哈希做发布失效（app.js?v=134）。
-                    # 少了这一条，www 树里每个文件都会掉到 5min。
-                    versioned = "v=" in request_target.split("?", 1)[-1]
+                    low_all = self.path.lower()
+                    low = low_all.split("?", 1)[0]
                     status = getattr(self, "_response_code", 200)
-                    if status < 400 and not path.endswith(".html"):
-                        if _STATIC_CONTENT_HASH_RE.search(path) or (
-                                versioned and path.endswith((".js", ".css"))):
-                            cc = "public, max-age=31536000, immutable"
-                        elif re.search(
-                                r"\.(jpe?g|png|webp|gif|ico|webmanifest)$", path):
-                            cc = "public, max-age=86400"
-                        elif re.search(r"\.(js|css)$", path):
-                            cc = "public, max-age=300"
+                    # Never let an error response be cached as an immutable asset:
+                    # a 404 for a hashed name would otherwise be pinned for a year.
+                    if status < 400 and not low.endswith(".html"):
+                        table = _web_cache_control_table()
+                        declared = table.get(low) if table else None
+                        if declared is not None:
+                            cc = declared
+                        else:
+                            versioned = "v=" in low_all
+                            # A content-hashed filename is immutable by construction:
+                            # the bytes behind the name never change.
+                            content_hashed = _STATIC_CONTENT_HASH_RE.search(low) is not None
+                            if re.search(r"\.(jpe?g|png|webp|gif|ico|webmanifest)$", low):
+                                # v1.25：带 ?v= 版本号的资源视为不可变（发布即换版本号，
+                                # 浏览器可长存；未版本化的维持 24h）
+                                cc = "public, max-age=31536000, immutable" if (
+                                    versioned or content_hashed) else "public, max-age=86400"
+                            elif re.search(r"\.(js|css)$", low):
+                                cc = "public, max-age=31536000, immutable" if (
+                                    versioned or content_hashed) else "public, max-age=300"
                 except Exception:
                     pass
             self.send_header("Cache-Control", cc)
