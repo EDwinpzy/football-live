@@ -7,6 +7,7 @@ import com.qiubo.optimaltv.data.catalog.MetadataCatalogStore
 import com.qiubo.optimaltv.data.prefs.SettingsStore
 import java.io.File
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlin.concurrent.thread
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -62,6 +63,67 @@ class MetadataCatalogRepositoryTest {
         assertTrue(!CatalogSnapshotPolicy.isReadableSize(CatalogSnapshotPolicy.MAX_BYTES + 1))
         assertTrue(!CatalogSnapshotPolicy.shouldReadLegacy(metadataInstalled = true, size = 1L))
     }
+
+    @Test
+    fun `内置 seed 的 v3 快照被接受`() {
+        val decoded = decodeSnapshot(snapshotJson(version = 3), CatalogOriginPolicy.SEED_ACCEPTED_VERSIONS)
+
+        assertTrue("随包发布的 seed 仍是 v3，必须可读", decoded != null)
+        assertEquals(listOf("年会不能停"), decoded!!.items.map { it.title })
+        assertEquals("10000013", decoded.items.single().mytvId)
+    }
+
+    @Test
+    fun `持久化快照仍严格拒绝 v3 接受 v4`() {
+        assertTrue(
+            "用户数据路径不能放宽：v3 持久化快照必须被拒绝",
+            decodeSnapshot(snapshotJson(version = 3), CatalogOriginPolicy.PERSISTED_ACCEPTED_VERSIONS) == null,
+        )
+        assertTrue(
+            "当前 v4 持久化快照必须可读",
+            decodeSnapshot(snapshotJson(version = 4), CatalogOriginPolicy.PERSISTED_ACCEPTED_VERSIONS) != null,
+        )
+        assertEquals(setOf(3, 4), CatalogOriginPolicy.SEED_ACCEPTED_VERSIONS)
+        assertEquals(setOf(4), CatalogOriginPolicy.PERSISTED_ACCEPTED_VERSIONS)
+    }
+
+    @Test
+    fun `无 SQLite 时 v3 seed 驱动离线搜索与详情恢复`() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val directory = File(context.filesDir, "metadata-catalog")
+        directory.deleteRecursively()
+        val snapshot = File(context.filesDir, "catalog_snapshot.json")
+        snapshot.delete()
+        val settings = SettingsStore(context)
+        settings.setHhkanBase("")
+
+        try {
+            val repository = VodRepository(settings, OkHttpClient(), context)
+            withTimeout(30_000L) { repository.awaitCatalogAvailable() }
+
+            val match = repository.search("年会不能停").firstOrNull()
+            assertTrue("v3 seed 必须能驱动离线搜索", match != null)
+            val detail = repository.resolveDetail(match!!.id)
+            assertEquals(match.title, detail?.title)
+            assertEquals(match.mytvId, detail?.mytvId)
+        } finally {
+            directory.deleteRecursively()
+            snapshot.delete()
+        }
+    }
+
+    private fun snapshotJson(version: Int): String = """
+        {
+          "v": $version,
+          "ts": 1790213591604,
+          "categories": [{"id": "douban:movie", "name": "电影"}],
+          "items": [{
+            "id": "douban:1291546", "s": "douban", "t": "年会不能停", "c": "douban:movie",
+            "y": "2021", "ar": "中国大陆", "r": 7.8, "p": "", "h": "", "rm": "TC",
+            "d": "", "mytv_id": "10000013", "q": ["年会不能停", "nianhui"]
+          }]
+        }
+    """.trimIndent()
 
     @Test
     fun `离线片库筛选与分页读取本地目录`() = runBlocking {

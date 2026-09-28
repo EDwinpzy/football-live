@@ -82,6 +82,18 @@ private class SourceResult(val source: ContentSource, val snapshot: SourceSnapsh
 internal object CatalogOriginPolicy {
     const val SNAPSHOT_VERSION = 4
 
+    /**
+     * 内置 assets/catalog_seed.json 可接受的版本集合（v3 = 随包发布的目录种子，v4 = 当前快照格式）。
+     *
+     * 放宽只针对 seed：它是随 APK 发布的静态资源，由真实后端导出、CI 不可重新生成，体积固定约 100KB，
+     * 不会像用户设备上的持久化快照那样随目录增长绕过 MAX_ITEMS / MAX_BYTES 上限。
+     * 持久化快照仍走 [SNAPSHOT_VERSION] 严格门槛，避免旧快照里的超大 items 绕过大小限制。
+     */
+    val SEED_ACCEPTED_VERSIONS = setOf(3, 4)
+
+    /** 用户设备上持久化的目录快照：只接受当前版本。 */
+    val PERSISTED_ACCEPTED_VERSIONS = setOf(SNAPSHOT_VERSION)
+
     fun allows(sourceId: String, itemId: String): Boolean =
         (sourceId == "douban" && itemId.startsWith("douban:")) ||
             (sourceId == "metadata" && itemId.startsWith("mytv:"))
@@ -98,6 +110,11 @@ internal object CatalogSnapshotPolicy {
     fun <T> boundedItems(items: List<T>): List<T> = items.take(MAX_ITEMS)
 }
 
+/** 随 APK 发布的内置目录种子文件名；与用户设备上持久化的磁盘快照区分开版本策略。 */
+internal object CatalogSeedAsset {
+    const val NAME = "catalog_seed.json"
+}
+
 internal object VodIdPolicy {
     fun isCatalogId(id: String): Boolean = id.startsWith("douban:") || id.startsWith("mytv:")
 }
@@ -109,10 +126,42 @@ internal object PlaybackLineSelector {
     }
 }
 
-private data class CatalogSnapshot(
+internal data class CatalogSnapshot(
     val categories: List<Category>,
     val items: List<VodItem>,
 )
+
+/**
+ * 解析目录快照 JSON。
+ *
+ * [acceptedVersions] 决定接受哪些 `v`：持久化快照传 [CatalogOriginPolicy.PERSISTED_ACCEPTED_VERSIONS]（严格 v4），
+ * 内置种子传 [CatalogOriginPolicy.SEED_ACCEPTED_VERSIONS]（v3/v4）。其余校验逻辑两种来源完全一致。
+ */
+internal fun decodeSnapshot(text: String, acceptedVersions: Set<Int>): CatalogSnapshot? {
+    val o = org.json.JSONObject(text)
+    if (o.optInt("v") !in acceptedVersions) return null
+    val catArr = o.optJSONArray("categories") ?: return null
+    val itemArr = o.optJSONArray("items") ?: return null
+    val cats = (0 until catArr.length()).mapNotNull { i ->
+        val c = catArr.optJSONObject(i) ?: return@mapNotNull null
+        Category(c.optString("id"), c.optString("name")).takeIf { it.id.isNotBlank() }
+    }
+    val items = (0 until itemArr.length()).mapNotNull { i ->
+        val e = itemArr.optJSONObject(i) ?: return@mapNotNull null
+        VodItem(
+            id = e.optString("id"), sourceId = e.optString("s"), title = e.optString("t"),
+            categoryId = e.optString("c"), year = e.optString("y"), area = e.optString("ar"),
+            rating = e.optDouble("r", 0.0), posterUrl = e.optString("p"), heroUrl = e.optString("h"),
+            remark = e.optString("rm"), detailRef = e.optString("d"),
+            mytvId = e.optString("mytv_id").ifBlank { e.optString("m") },
+            searchTerms = (0 until (e.optJSONArray("q")?.length() ?: 0))
+                .mapNotNull { e.optJSONArray("q")?.optString(it)?.takeIf(String::isNotBlank) },
+        ).takeIf { it.id.isNotBlank() && it.title.isNotBlank() }
+    }
+    if (cats.isEmpty() || items.isEmpty()) return null
+    if (items.any { !CatalogOriginPolicy.allows(it.sourceId, it.id) }) return null
+    return CatalogSnapshot(cats, items)
+}
 
 /** 目录连续空结果时的后台重试间隔（毫秒）：内嵌后端冷启动/热更重启需要的时间窗。 */
 private val CATALOG_RETRY_DELAYS = longArrayOf(5_000L, 10_000L, 20_000L, 30_000L)
@@ -992,53 +1041,41 @@ class VodRepository(
         }
     }
 
-    private fun readSnapshotCandidates(metadataInstalled: Boolean): List<Pair<String, String>> = buildList {
+    /** 目录来源候选：标签 + JSON 文本 + 该来源允许的快照版本集合。 */
+    private data class SnapshotCandidate(
+        val label: String,
+        val text: String,
+        val acceptedVersions: Set<Int>,
+    )
+
+    private fun readSnapshotCandidates(metadataInstalled: Boolean): List<SnapshotCandidate> = buildList {
         val f = snapshotFile
         if (CatalogSnapshotPolicy.shouldReadLegacy(metadataInstalled, f.length())) {
-            runCatching { f.readText() }.getOrNull()?.let { add("磁盘快照" to it) }
+            runCatching { f.readText() }.getOrNull()?.let {
+                add(SnapshotCandidate("磁盘快照", it, CatalogOriginPolicy.PERSISTED_ACCEPTED_VERSIONS))
+            }
         }
         // 磁盘快照过旧、损坏或混入补充源时也必须回退到可信种子，而不是空屏。
+        // 种子用 SEED_ACCEPTED_VERSIONS：它是随包发布的静态资源，v3 仍可读（见 CatalogOriginPolicy 注释）。
         runCatching {
-            appContext.assets.open("catalog_seed.json").use { it.readBytes().toString(Charsets.UTF_8) }
-        }.getOrNull()?.let { add("内置种子" to it) }
-    }
-
-    private fun decodeSnapshot(text: String): CatalogSnapshot? {
-        val o = org.json.JSONObject(text)
-        if (o.optInt("v") != CatalogOriginPolicy.SNAPSHOT_VERSION) return null
-        val catArr = o.optJSONArray("categories") ?: return null
-        val itemArr = o.optJSONArray("items") ?: return null
-        val cats = (0 until catArr.length()).mapNotNull { i ->
-            val c = catArr.optJSONObject(i) ?: return@mapNotNull null
-            Category(c.optString("id"), c.optString("name")).takeIf { it.id.isNotBlank() }
+            appContext.assets.open(CatalogSeedAsset.NAME).use { it.readBytes().toString(Charsets.UTF_8) }
+        }.getOrNull()?.let {
+            add(SnapshotCandidate("内置种子", it, CatalogOriginPolicy.SEED_ACCEPTED_VERSIONS))
         }
-        val items = (0 until itemArr.length()).mapNotNull { i ->
-            val e = itemArr.optJSONObject(i) ?: return@mapNotNull null
-            VodItem(
-                id = e.optString("id"), sourceId = e.optString("s"), title = e.optString("t"),
-                categoryId = e.optString("c"), year = e.optString("y"), area = e.optString("ar"),
-                rating = e.optDouble("r", 0.0), posterUrl = e.optString("p"), heroUrl = e.optString("h"),
-                remark = e.optString("rm"), detailRef = e.optString("d"),
-                mytvId = e.optString("mytv_id").ifBlank { e.optString("m") },
-                searchTerms = (0 until (e.optJSONArray("q")?.length() ?: 0))
-                    .mapNotNull { e.optJSONArray("q")?.optString(it)?.takeIf(String::isNotBlank) },
-            ).takeIf { it.id.isNotBlank() && it.title.isNotBlank() }
-        }
-        if (cats.isEmpty() || items.isEmpty()) return null
-        if (items.any { !CatalogOriginPolicy.allows(it.sourceId, it.id) }) return null
-        return CatalogSnapshot(cats, items)
     }
 
     private suspend fun restoreSnapshot() {
         if (metadataCatalog.hasInstalledDatabase()) return
         var restored: Pair<String, CatalogSnapshot>? = null
-        for ((label, text) in readSnapshotCandidates(metadataInstalled = false)) {
-            val decoded = runCatching { decodeSnapshot(text) }.getOrNull()
+        for (candidate in readSnapshotCandidates(metadataInstalled = false)) {
+            val decoded = runCatching {
+                decodeSnapshot(candidate.text, candidate.acceptedVersions)
+            }.getOrNull()
             if (decoded != null) {
-                restored = label to decoded
+                restored = candidate.label to decoded
                 break
             }
-            android.util.Log.w("OTV", "$label 已损坏或含非好好看卡片，跳过")
+            android.util.Log.w("OTV", "${candidate.label} 已损坏或含非好好看卡片，跳过")
         }
         val (label, snapshot) = restored ?: return
         val cats = snapshot.categories
