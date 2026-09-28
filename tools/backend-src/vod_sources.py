@@ -556,6 +556,107 @@ def normalize_title(value):
     return TITLE_SEPARATORS.sub("", str(value or "")).casefold()
 
 
+def source_aliases(source):
+    """Stable, id-independent names for a source, derived from its own URLs.
+
+    A static line index is built on one machine and served by another, and the
+    published registry is free to rename a source (the admin API mints UUIDs).
+    The site host is what survives that rename, so it is the join key. The
+    short form matches what ``discover_source`` would have called the source
+    locally, which is why an index built on a workstation lines up.
+    """
+    aliases = set()
+    for value in (getattr(source, "site_url", ""), getattr(source, "api_url", "")):
+        host = urllib.parse.urlsplit(str(value or "")).hostname or ""
+        host = host.strip().lower()
+        if host:
+            aliases.add(host)
+            # The registry and the index can disagree about "www."; the site
+            # is the same either way, so register both spellings.
+            if host.startswith("www."):
+                bare = host[4:]
+                aliases.add(bare)
+                aliases.add(normalize_title(bare).replace("_", "-"))
+            # discover_source would label a locally-discovered source by its
+            # host, so accept that shape too when joining a rebuilt index.
+            short = normalize_title(host).replace("_", "-")
+            if short:
+                aliases.add(short)
+    return aliases
+
+
+def source_alias_index(sources):
+    """Map every alias of every source to the single source that claims it.
+
+    A host claimed by more than one enabled source is dropped rather than
+    resolved to the first hit: guessing would silently route a line to
+    whichever source happens to be listed first. Returns
+    ``(by_id, by_alias)``; ``by_id`` always wins over ``by_alias``.
+    """
+    by_id = {}
+    claimants = {}
+    for source in sources or ():
+        source_id = str(getattr(source, "id", "") or "").strip()
+        if not source_id:
+            continue
+        by_id[source_id] = source
+        for alias in source_aliases(source):
+            claimants.setdefault(alias, []).append(source)
+    by_alias = {alias: owners[0] for alias, owners in claimants.items()
+                if len(owners) == 1}
+    return by_id, by_alias
+
+
+def match_source(source_id, index, *, alias=None):
+    """Resolve an index line's ``source_id`` against published source ids.
+
+    Exact id matches win. Otherwise the id is looked up in the alias index so a
+    line carrying a locally-generated short name still finds the published
+    source that serves the same site. The returned id is always the published
+    one, because the play step looks the line up by id in the live registry.
+
+    A rebuilt line records its own ``alias`` (the site host at build time), so a
+    registry entry renamed in the admin UI still matches. Display names are
+    deliberately not used as a join key: they are user-editable, so two
+    unrelated sources can carry the same one.
+    """
+    wanted = str(source_id or "").strip()
+    if not wanted:
+        return None
+    by_id, by_alias = index
+    source = by_id.get(wanted)
+    if source is not None:
+        return source
+    for key in (alias,):
+        for candidate in _alias_keys(key):
+            source = by_alias.get(candidate)
+            if source is not None:
+                return source
+    host = str(wanted).strip().lower()
+    if host.startswith(("http://", "https://")):
+        host = urllib.parse.urlsplit(host).hostname or ""
+    for key in _alias_keys(host):
+        source = by_alias.get(key)
+        if source is not None:
+            return source
+    return None
+
+
+def _alias_keys(value):
+    """Every spelling under which an alias may have been registered."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return ()
+    if text.startswith(("http://", "https://")):
+        text = urllib.parse.urlsplit(text).hostname or ""
+    keys = [text]
+    for host in (text, text[4:] if text.startswith("www.") else ""):
+        if host:
+            keys.append(host)
+            keys.append(normalize_title(host).replace("_", "-"))
+    return tuple(dict.fromkeys(key for key in keys if key))
+
+
 def _base_search_title(value):
     """Remove only a trailing season/年番 marker for a safe source fallback."""
     title = str(value or "").strip()

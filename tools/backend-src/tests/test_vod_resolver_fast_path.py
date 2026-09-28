@@ -404,18 +404,46 @@ class ResolverFastPathCacheTest(unittest.TestCase):
                     pass
             registry.close()
 
-    def test_stale_index_never_serves_cached_playable_candidates(self):
+    def test_stale_index_serves_its_own_lines_as_stale_available(self):
+        """A stale index still names a real source and episode.
+
+        The web client pairs STALE_AVAILABLE with the candidate on purpose:
+        it plays the recorded line and refreshes in the background. Returning
+        nothing here instead left the detail page with no line at all, even
+        though the index still identified a source. The candidate is served
+        under the stale status, never as a fresh MATCHED, so the client knows
+        to refresh rather than trust it.
+        """
         index = MutableIndex({"resolved_at": NOW, "lines": [_line()]})
         resolver, _index = self.make_resolver(index=index)
-        self.assertIsNotNone(resolver.resolve(MYTV_ID, episode=1).preferred)
+        fresh = resolver.resolve(MYTV_ID, episode=1)
+        self.assertEqual(fresh.status, "MATCHED")
+        self.assertIsNotNone(fresh.preferred)
 
         index.stale = True
         stale = resolver.resolve(MYTV_ID, episode=1)
 
         self.assertEqual(stale.cache["kind"], "stale_index")
-        self.assertEqual(stale.status, "TEMPORARILY_UNAVAILABLE")
-        self.assertIsNone(stale.preferred)
+        self.assertEqual(stale.status, "STALE_AVAILABLE")
+        self.assertIsNotNone(stale.preferred)
         self.assertEqual(stale.backups, ())
+
+    def test_stale_index_never_serves_a_candidate_the_index_does_not_hold(self):
+        """Staleness relaxes freshness, not the match-confidence floor.
+
+        A stale line still has to clear AUTO_MATCH_THRESHOLD, otherwise an
+        expired guess would be handed to the player with the same authority as
+        a confirmed title match.
+        """
+        line = _line()
+        line["match_score"] = vod_sources.AUTO_MATCH_THRESHOLD - 1
+        index = MutableIndex({"resolved_at": NOW, "lines": [line]}, stale=True)
+        resolver, _index = self.make_resolver(index=index)
+
+        result = resolver.resolve(MYTV_ID, episode=1)
+
+        self.assertIsNone(result.preferred)
+        self.assertNotEqual(result.status, "STALE_AVAILABLE")
 
     def test_first_trusted_source_at_650ms_returns_before_slow_sources(self):
         registry = _registry(("fast", "slow-1", "slow-2", "disabled"))

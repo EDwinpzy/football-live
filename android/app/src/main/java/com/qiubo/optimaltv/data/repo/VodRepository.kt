@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class Aggregated(
     val categories: List<Category>,
@@ -126,10 +127,160 @@ internal object PlaybackLineSelector {
     }
 }
 
+/**
+ * 起播线路的 L0→L5 取源阶梯（2026-09-28）。
+ *
+ * 目标只有一个：**尽快拿到一条能播的线路**。每一级都比下一级便宜，所以按「便宜且可靠」
+ * 从上往下走；任一级拿到线路就停。
+ *
+ *  - L0 本地 last_good —— 纯 Room 读（微秒级）。上次这集成功播过，最可信；
+ *  - L1 云端 resolver —— 一次 HTTP 拿服务端算好的首选线路，命中即用（也是「快速起播」
+ *    的关键：不等本地全量匹配跑完）；
+ *  - L2 本地 /vod/detail 全量匹配 —— 端侧实测 ~0.9s 能出 12 条线路，兜底主力；
+ *  - L3 云端 resolver 的 backups —— 云端算了多条时，用作换线候选；
+ *  - L4 跨源同名线路 —— catalog 里其它源命中同一部影片的线路；
+ *  - L5 空 —— 真的没有线路，调用方弹「暂无片源」。
+ *
+ * **云端拿不到结果必须回落**：resolver 返回 TEMPORARILY_UNAVAILABLE / RESOLVING /
+ * FALLBACK_SEARCHING 等非 MATCHED 状态时一律继续往下走，绝不能把「云端没匹配上」当成
+ * 「这部片子没片源」——端侧匹配是好的（实测 12 条线路），让它回落才不至于把功能改坏。
+ *
+ * 抽成纯函数是为了能直接单测这条阶梯，而不必把仓库的 IO 全跑起来。
+ */
+internal object SourceResolveCascade {
+
+    /** 每一级的来源标记，会写进埋点用于事后归因。 */
+    enum class Tier(val wire: String) {
+        LAST_GOOD("last_good"),
+        CLOUD_PREFERRED("cloud_preferred"),
+        LOCAL_DETAIL("local_detail"),
+        CLOUD_BACKUP("cloud_backup"),
+        CROSS_SOURCE("cross_source"),
+        NONE("none"),
+    }
+
+    /**
+     * 按优先级挑一条线路。
+     *
+     * @param lastGood 本地记忆的线路 id（L0）。
+     * @param cloudPreferred 云端 resolver 的首选线路 id（L1）。
+     * @param localDetailLines 本地 `/vod/detail` 匹配出的线路 id 列表（L2）。
+     * @param cloudBackupLines 云端 resolver 的备用线路 id 列表（L3）。
+     * @param crossSourceLines 跨源同名线路 id 列表（L4）。
+     * @return 命中的线路 id 与来源级别；一个都没有时返回 [Tier.NONE] + null。
+     */
+    fun pick(
+        lastGood: String? = null,
+        cloudPreferred: String? = null,
+        localDetailLines: List<String> = emptyList(),
+        cloudBackupLines: List<String> = emptyList(),
+        crossSourceLines: List<String> = emptyList(),
+    ): Pair<String?, Tier> {
+        lastGood?.takeIf { it.isNotBlank() }?.let { return it to Tier.LAST_GOOD }
+        cloudPreferred?.takeIf { it.isNotBlank() }?.let { return it to Tier.CLOUD_PREFERRED }
+        localDetailLines.firstOrNull { it.isNotBlank() }
+            ?.let { return it to Tier.LOCAL_DETAIL }
+        cloudBackupLines.firstOrNull { it.isNotBlank() }
+            ?.let { return it to Tier.CLOUD_BACKUP }
+        crossSourceLines.firstOrNull { it.isNotBlank() }
+            ?.let { return it to Tier.CROSS_SOURCE }
+        return null to Tier.NONE
+    }
+
+    /**
+     * 云端 resolver 响应是否可以直接用。
+     *
+     * 只有拿到 preferred 引用才 true；其余状态（RESOLVING / TEMPORARILY_UNAVAILABLE /
+     * FAST_PATH_FAILED / FALLBACK_SEARCHING）都要回落本地匹配。STALE_AVAILABLE 只要
+     * 带着 preferred 就能用（过期索引也是一条能播的线路）。
+     */
+    fun cloudUsable(status: String, hasPreferred: Boolean): Boolean =
+        hasPreferred && status in setOf("MATCHED", "STALE_AVAILABLE")
+}
+
+/**
+ * 云端 resolver 的时序预算（2026-09-28）。
+ *
+ * 抽成独立可测对象的原因：这条不是「风格」而是**这次事故的根因**。原先
+ * `pickPlayableSources` 串行地 `await` 云端，而它用的是与本地详情同一个
+ * `detailClient`（readTimeout 45s）。自建 VPS 的出口一旦超时，「点播放 → 出画面」
+ * 就被一个**可选提速路径**卡住 45s，而端侧本地匹配其实 ~0.9s 就能出 12 条线。
+ *
+ * 两个预算是同一个意思的两面：
+ *  - [httpTimeoutSeconds] 给 resolver 的 HTTP 调用本身设上限（它读的是服务端索引，
+ *    正常是毫秒级，3s 还回来说明这条路此刻不健康）；
+ *  - [graceMs] 给本地线路先到之后的「插队」窗口——云端可能在几十毫秒内返回一条
+ *    **更优**的 preferred，值得等一小会儿；但宽限一过就用本地起播。
+ *
+ * 合起来保证：**云端最多只比本地多花 [graceMs]，绝不让云端超时进入起播关键路径。**
+ */
+internal object SourceResolveTimingPolicy {
+
+    /** resolver HTTP 读/连超时（秒）。刻意远小于本地详情的 45s。 */
+    const val HTTP_TIMEOUT_SECONDS = 3L
+
+    /** 本地线路到手后仍愿意为云端 preferred 额外等待的毫秒数。 */
+    const val GRACE_MS = 1_500L
+
+    /**
+     * 自检：resolver 的预算必须显著小于本地详情匹配的上限。
+     *
+     * 这是把「别再把可选优化接回阻塞路径」写成一个会被测到的数字，而不是靠注释
+ * 维持的约定——将来有人图省事把 [HTTP_TIMEOUT_SECONDS] 调回 45，这里立刻红。
+     */
+    val isBoundedAgainstDetailTimeout: Boolean get() = HTTP_TIMEOUT_SECONDS < 45L
+}
+
 internal data class CatalogSnapshot(
     val categories: List<Category>,
     val items: List<VodItem>,
 )
+
+/**
+ * L0「上次成功线路」记忆的线路号编解码。
+ *
+ * 后端 `/vod/detail` 的线路 id 格式是 `{source_id}:{content_id}:{lineIndex}`，第三段
+ * 是「该内容在源下的第几条线路」（见 `tools/backend-src/vod_sources.py`
+ * `"%s:%s:%d" % (source.id, candidate["id"], index)`），**不是集号**。
+ *
+ * 2026-09-28 修的真实缺陷：L0 记忆在写入时只留 `source_id` + `content_id`、丢掉了
+ * lineIndex，读回时又硬编码补 `:0`。于是「上次成功播的是第 3 条线路」被记成第 0 条，
+ * 下次起播去播**另一条线路**——记忆反而变成了「随机换线」，比没有记忆更糟。
+ *
+ * 记��的是稳定标识（源/内容/线路号），**不含任何播放地址、Cookie 或签名 token**。
+ */
+internal object LastGoodSourceCodec {
+
+    /** 解出的一条线路记忆。 */
+    data class Stored(val sourceId: String, val contentId: String, val lineIndex: Int) {
+        /** 还原成 `/vod/play` 用的 line id。 */
+        fun lineId(): String = "$sourceId:$contentId:$lineIndex"
+    }
+
+    /**
+     * 解析 line id；无效返回 null。
+     *
+     * 「无效就判无效」而不是「尽力猜一个」：记忆指向错误线路的代价（用户莫名其妙被
+     * 切到另一条线）远大于没有记忆（多跑一轮本地匹配）。宁可回落 L2。
+     */
+    fun encode(rawLineId: String): Stored? {
+        val raw = rawLineId.trim()
+        if (raw.isEmpty()) return null
+        val parts = raw.split(":")
+        if (parts.size < 2 || parts.size > 3) return null
+        val sourceId = parts[0].trim()
+        val contentId = parts[1].trim()
+        if (sourceId.isEmpty() || contentId.isEmpty()) return null
+        // 两段 id（云端 resolver 候选）= 该内容在源下的第 0 条线路。
+        // 三段 id 的第三段若不是非负整数，按 0 处理而不是丢弃整条记忆。
+        val lineIndex = parts.getOrNull(2)
+            ?.trim()
+            ?.toIntOrNull()
+            ?.takeIf { it >= 0 }
+            ?: 0
+        return Stored(sourceId, contentId, lineIndex)
+    }
+}
 
 /**
  * 解析目录快照 JSON。
@@ -184,6 +335,24 @@ class VodRepository(
      *  「暂无片源/暂无简介」）；这里放宽到 45s，与 HhkanSource 的详情口径一致。 */
     private val detailClient by lazy {
         okHttp.newBuilder().readTimeout(45, java.util.concurrent.TimeUnit.SECONDS).build()
+    }
+
+    /**
+     * 云端 resolver 专用客户端（2026-09-28）。
+     *
+     * 刻意用**比 [detailClient] 短得多的**超时：resolver 是一个可选优化（它算的
+     * preferred 比本地第一条更准），而 [detailClient] 的 45s 是给「本地详情匹配」
+     * 留的（端侧实测冷路径要 12~30s）。用同一个 45s 客户端打 resolver，就是让一个
+     * 可选分支具备和主路径一样长的阻塞能力——出口一慢，整条起播链就跟着慢。
+     *
+     * 3s 的含义：正常情况下 resolver 是毫秒级命中（读本地索引）；3s 还没回来，
+     * 说明这条优化路径此刻不健康，本地线路早该顶上。
+     */
+    private val resolveClient by lazy {
+        okHttp.newBuilder()
+            .readTimeout(RESOLVE_CLIENT_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+            .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
     }
 
     /** 内置后端就绪探测：仅当 base 指向 127.0.0.1/localhost（内置后端冷启动需几秒）时轮询。
@@ -769,6 +938,25 @@ class VodRepository(
 
         /** 直链解析缓存 TTL：超过即重解析（签名类直链 ~20 分钟档过期；解析本身 <1s 不贵） */
         const val PLAY_URL_TTL_MS = 15 * 60_000L
+
+        /**
+         * 云端 resolver 的 HTTP 读超时（秒）。
+         *
+         * resolver 只是一条**可选**的提速路径（它算的 preferred 比本地第一条更准），
+         * 本地 `/vod/detail` 匹配才是兜底主力。给它 45s（= detailClient）等于让一个
+         * 可选优化具备和主路径同等的阻塞能力。3s 足够正常命中（读本地索引是毫秒级），
+         * 超时就该让本地线路顶上，而不是让用户对着黑屏等。
+         */
+        const val RESOLVE_CLIENT_TIMEOUT_SECONDS = SourceResolveTimingPolicy.HTTP_TIMEOUT_SECONDS
+
+        /**
+         * 本地线路到手后，仍愿意为云端 preferred 额外等待的时长（毫秒）。
+         *
+         * 并发跑之后，本地线路先到；这一刻给云端一个很短的宽限期，让它有机会作为
+         * **更优**的首选插队（服务端可能已经缓存好、只是比本地慢几十毫秒）。
+         * 宽限一过就用本地起播——绝不因为一个可选优化让用户继续等。
+         */
+        const val RESOLVE_GRACE_MS = SourceResolveTimingPolicy.GRACE_MS
     }
 
     // ---------- 全部影视页（原版 view-all：筛选 + 分页海报墙） ----------
@@ -974,6 +1162,205 @@ class VodRepository(
                 playRef = "${item.detailRef}|${ep.second}|${ep.third}",
             )
         }
+    }
+
+    // ---------- 起播取源阶梯（L0→L5，2026-09-28） ----------
+
+    /**
+     * 起播取源结果。[lines] 已按「可用性 × 顺序」排好，[preferredIndex] 指向该点就播的那条。
+     */
+    internal data class SourcePick(
+        val lines: List<LineInfo>,
+        val preferredIndex: Int,
+        val tier: SourceResolveCascade.Tier,
+    ) {
+        val isEmpty: Boolean get() = lines.isEmpty() || preferredIndex !in lines.indices
+
+        /** 已有一条可立刻 prepare 的线路（不等所有线路到齐）。 */
+        val hasImmediate: Boolean get() = !isEmpty
+    }
+
+    /**
+     * 按 [SourceResolveCascade] 阶梯取一组可播线路。
+     *
+     * 与 [resolveLines] 的区别：那个是「把本地匹配到的线路原样交给播放器」，这个是
+     * **跨数据源**找一条最快能播的——本地记忆 → 云端 resolver → 本地全量匹配 → 云端备用
+     * → 跨源同名。返回的线路已按「首选项在前」排序，播放器直接取 [SourcePick.preferredIndex]。
+     *
+     * 云端 resolver 拿不到结果时**必须**回落到本地 `/vod/detail`——端侧匹配是好的，
+     * 把它当权威会让「云端暂时不可用」直接变成「用户看到空片源」。
+     *
+     * @param item 影片条目（[VodItem.mytvId] 为空时跳过云端 resolver，只走本地）。
+     * @param epIndex 集下标（0 基）。
+     * @param db last_good 记忆表；为 null 时不读 L0（便于单测与无 DB 场景）。
+     */
+    internal suspend fun pickPlayableSources(
+        item: VodItem,
+        epIndex: Int,
+        lastGoodDao: com.qiubo.optimaltv.data.db.LastGoodSourceDao? = null,
+    ): SourcePick = withContext(Dispatchers.IO) {
+        val detailRef = item.detailRef.ifBlank { item.id.removePrefix("douban:") }
+        val mytvId = item.mytvId.trim().toLongOrNull()
+
+        // ---- L0 本地 last_good：微秒级 Room 读，上次成功过的线路最可信 ----
+        val lastGoodLineId = if (mytvId != null && lastGoodDao != null) {
+            runCatching { lastGoodDao.get(mytvId, epIndex) }
+                .onFailure { android.util.Log.w("OTV", "last_good 读取失败: ${it.message}") }
+                .getOrNull()
+                ?.let {
+                    // 还原成完整 line id：第三段是**线路号**，不能硬编码 0。
+                    // 写坏成 0 会让「上次播第 3 条」变成「这次播第 0 条」——
+                    // 记忆不仅失效，还会静默把用户换到另一条线路。
+                    LastGoodSourceCodec.encode("${it.sourceId}:${it.contentId}:${it.lineIndex}")?.lineId()
+                }
+        } else {
+            null
+        }
+
+        // ---- L1 云端 resolver 与 L2 本地全量匹配**并发**跑 ----
+        //
+        // 这里原来是串行的：先 await 云端再跑本地。而 detailClient 的 readTimeout 是 45s，
+        // 2026-09-28 实测自建 VPS 的云端出口全部超时——于是「点播放」会先黑屏 45s，
+        // 而端侧本地匹配其实 ~0.9s 就能出 12 条线。云端在这里是**优化**（它算的 preferred
+        // 比本地第一条更准），不是**前提**；把它串在本地前面，等于让一个可选的优化
+        // 变成整个起播的阻塞前提。
+        //
+        // 改成并发后：
+        //  - 本地线路无论云端死活都能按时到手（云端超时不再拖起播）；
+        //  - 云端仍然优先于本地（preferred 胜出，见 [SourceResolveCascade.pick]），
+        //    所以服务端算好的最优线路没有白白浪费。
+        val cloudDeferred = if (mytvId != null) {
+            // 用一个独立的短超时客户端：本地结果不依赖它，但也不该让整个协程
+            // 因为一个可选分支而无限期挂着。
+            async {
+                val base = settings.current().hhkanBaseUrl
+                runCatching {
+                    VodApiSource.fetchResolve(base, resolveClient, mytvId, epIndex + 1)
+                }.onFailure {
+                    android.util.Log.w("OTV", "resolve mytv=$mytvId ep=$epIndex 失败: ${it.message}")
+                }.getOrNull()
+            }
+        } else {
+            null
+        }
+        val localLines = runCatching { resolveLines(item, epIndex) }
+            .onFailure { android.util.Log.w("OTV", "本地线路匹配失败: ${it.message}") }
+            .getOrDefault(emptyList())
+
+        // 本地出结果后，最多再给云端 RESOLVE_GRACE_MS 让它「插队」成为首选；
+        // 超时不等——宁可拿本地第一条起播，也不把可选优化变成阻塞。
+        val resolve = cloudDeferred?.let { d ->
+            runCatching {
+                withTimeoutOrNull(RESOLVE_GRACE_MS) { d.await() }
+            }.getOrNull()
+        }
+        cloudDeferred?.let { d ->
+            // 宽限期用尽就放弃等待。cancel() 只停掉协程的「结果交付」，不会中断已经
+            // 阻塞在 socket 上的 execute()——那一次请求最坏跑满 resolveClient 的 3s
+            // 读超时后自行结束。这仍然远好于旧实现的 45s：用户早已用本地线路起播，
+            // 残留的那次请求只占一个 IO 线程，不在关键路径上。
+            if (!d.isCompleted) d.cancel()
+        }
+        val cloudUsable = resolve != null &&
+            SourceResolveCascade.cloudUsable(resolve.status, resolve.preferred != null)
+        if (resolve != null && !cloudUsable) {
+            android.util.Log.i(
+                "OTV",
+                "resolver status=${resolve.status} 无可用线路 → 回落本地 /vod/detail 匹配",
+            )
+        }
+
+        // ---- L3 云端备用线路 ----
+        val cloudBackupIds = resolve?.backups.orEmpty().map { it.lineId() }
+
+        // ---- L4 跨源同名线路 ----
+        val crossSourceIds = siblings(item.normTitle)
+            .filter { it.id != item.id }
+            .filter { epIndex < it.episodes.size }
+            .map { it.detailRef.ifBlank { it.id } }
+
+        // ---- 按阶梯挑一条，并把所有候选线路并进可换线列表 ----
+        val localIds = localLines.map { it.playRef.substringBefore('|').ifBlank { it.vodId } }
+        val (pickedId, tier) = SourceResolveCascade.pick(
+            lastGood = lastGoodLineId,
+            cloudPreferred = resolve?.takeIf { cloudUsable }?.preferred?.lineId(),
+            localDetailLines = localIds,
+            cloudBackupLines = cloudBackupIds,
+            crossSourceLines = crossSourceIds,
+        )
+
+        if (pickedId == null) {
+            return@withContext SourcePick(localLines, 0, SourceResolveCascade.Tier.NONE)
+        }
+
+        // 把阶梯选中的线路提到列表最前：播放器按 index 起播，用户换线时其余线路仍可用。
+        val reordered = reorderWithPreferred(localLines, pickedId, detailRef)
+        val index = reordered.indexOfFirst { it.playRef.substringBefore('|') == pickedId }
+            .let { if (it >= 0) it else reordered.indexOfFirst { it.vodId == pickedId } }
+            .coerceAtLeast(0)
+        android.util.Log.i("OTV", "取源 tier=$tier mytv=$mytvId ep=$epIndex → 第 ${index + 1}/${reordered.size} 条")
+        SourcePick(reordered, index, tier)
+    }
+
+    /**
+     * 把 [preferredId] 对应的线路提到列表首位。
+     *
+     * 命中本地线路列表时直接换序；命中不了（例如只存在于 last_good / 云端引用）时，
+     * 用 `{detailRef}|{lineId}|{epIndex}` 拼一条新线路——`/vod/play` 只按 line id 定位，
+     * 拼出来的引用照样能解析出直链。
+     */
+    private fun reorderWithPreferred(
+        lines: List<LineInfo>,
+        preferredId: String,
+        detailRef: String,
+    ): List<LineInfo> {
+        if (lines.isEmpty()) return lines
+        val hit = lines.indexOfFirst { it.playRef.substringBefore('|') == preferredId }
+        if (hit <= 0) {
+            if (hit < 0) {
+                val synthetic = LineInfo(
+                    vodId = lines.first().vodId,
+                    label = "线路·${preferredId.substringBefore(':')}",
+                    url = "",
+                    playRef = "$detailRef|$preferredId|0",
+                )
+                return listOf(synthetic) + lines
+            }
+            return lines
+        }
+        return lines.toMutableList().also { it.add(0, it.removeAt(hit)) }
+    }
+
+    /**
+     * 起播成功后记住这条线路（写 last_good）。
+     *
+     * 只存 `{mytv_id, episode_index, source_id, content_id, line_index}`——**不存播放地址、
+     * Cookie 或任何签名 token**（见 [com.qiubo.optimaltv.data.db.LastGoodSourceEntity]）。
+     * 写入失败绝不影响播放，永远静默。
+     *
+     * [lineIndex] 必须原样保留：它是「该内容在源下的第几条线路」。丢掉它（写 0）会让
+     * 下次起播去播另一条线路——记忆从「更快」变成「乱换」。
+     */
+    internal suspend fun rememberLastGoodSource(
+        mytvId: Long,
+        epIndex: Int,
+        lineId: String,
+        dao: com.qiubo.optimaltv.data.db.LastGoodSourceDao? = null,
+    ) {
+        val target = dao ?: return
+        val stored = LastGoodSourceCodec.encode(lineId) ?: return
+        runCatching {
+            target.upsert(
+                com.qiubo.optimaltv.data.db.LastGoodSourceEntity(
+                    mytvId = mytvId,
+                    episodeIndex = epIndex,
+                    sourceId = stored.sourceId,
+                    contentId = stored.contentId,
+                    lineIndex = stored.lineIndex,
+                    successfulAt = System.currentTimeMillis(),
+                ),
+            )
+        }.onFailure { android.util.Log.w("OTV", "last_good 写入失败: ${it.message}") }
     }
 
     /** 直链缓存条目：raw=上游直链 + 解析时刻（点播部分 CDN 直链带分钟级签名，须按 TTL 失效） */

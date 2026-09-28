@@ -498,7 +498,10 @@ private fun LeagueFilterBar(
             contentPadding = PaddingValues(start = 90f.sx(s), end = 50f.sx(s)),
             modifier = Modifier.padding(top = 24f.sx(s)),
         ) {
-        items(LEAGUE_FILTERS.size) { i ->
+        // 方案 §11.1：联赛筛选 chip 用稳定的联赛 key，不用 index。
+        // LEAGUE_FILTERS 是编译期常量，index 当 key 看似安全，但把「位置即身份」的
+        // 写法留在代码里，后续一旦改成动态列表就会静默退化成焦点漂移。
+        items(LEAGUE_FILTERS.size, key = { i -> "league-${LEAGUE_FILTERS[i].first}" }) { i ->
             val (key, label) = LEAGUE_FILTERS[i]
             val active = selected == key
             var chipFocused by remember { mutableStateOf(false) }

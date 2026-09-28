@@ -48,6 +48,22 @@ class VodSourceAdminContractTest(unittest.TestCase):
         self.assertIn("停用中的影视源不能设为默认优先", sql)
         self.assertIn("row_number() over(order by (id=p_id) desc, sort_order, id)", sql)
 
+    def test_admin_rpc_grants_survive_importer_role_hardening(self):
+        hardening = (ROOT / "tools" / "selfhosted" / "license_importer_role.sql").read_text(encoding="utf-8").lower()
+        signatures = (
+            "vod_source_admin_list()",
+            "vod_source_admin_save(uuid,text,text,text,text,boolean,integer)",
+            "vod_source_admin_set_enabled(uuid,boolean)",
+            "vod_source_admin_set_priority(uuid)",
+            "vod_source_admin_delete(uuid)",
+            "vod_source_admin_publish()",
+        )
+        for signature in signatures:
+            with self.subTest(signature=signature):
+                self.assertIn(f"public.{signature}", hardening)
+        runner = (ROOT / "tools" / "selfhosted" / "apply_schema_migrations.psql").read_text(encoding="utf-8").lower()
+        self.assertIn("\\ir license_importer_role.sql", runner)
+
     def test_test_grade_boundaries(self):
         self.assertEqual(admin_server.vod_test_grade(80), "优秀")
         self.assertEqual(admin_server.vod_test_grade(60), "良好")

@@ -172,18 +172,25 @@ class VodResolverContractTest(unittest.TestCase):
         self.assertIsNone(result.preferred)
         self.assertEqual(result.status, "TEMPORARILY_UNAVAILABLE")
 
-    def test_expired_index_cannot_produce_a_playable_candidate(self):
+    def test_expired_index_serves_its_line_but_reports_itself_as_stale(self):
+        """The client plays a stale line and refreshes behind it.
+
+        STALE_AVAILABLE is part of the published status vocabulary and the web
+        client pairs it with the candidate, so the age of the index must not
+        erase a source it still identifies.
+        """
         old_entry = {"resolved_at": NOW - 31 * 86400, "lines": [_line()]}
         resolver, _metadata_client, _index = self.make_resolver(entries={"1292052": old_entry})
 
         result = resolver.resolve(mytv_id=10_000_123, episode=1)
 
-        self.assertEqual(result.status, "TEMPORARILY_UNAVAILABLE")
-        self.assertIsNone(result.preferred)
+        self.assertEqual(result.status, "STALE_AVAILABLE")
+        self.assertIsNotNone(result.preferred)
+        self.assertEqual(result.cache["kind"], "stale_index")
         self.assertEqual(result.backups, ())
         self.assertGreater(result.cache["age_ms"], 30 * 86400 * 1000)
 
-    def test_entry_from_an_expired_index_version_is_marked_stale(self):
+    def test_entry_from_an_expired_index_version_is_served_as_stale(self):
         payload = {
             "version": "current-v2",
             "generated_at": NOW,
@@ -200,8 +207,9 @@ class VodResolverContractTest(unittest.TestCase):
         result = resolver.resolve(mytv_id=10_000_123, episode=1)
 
         self.assertEqual(result.resolve_version, "current-v2")
-        self.assertEqual(result.status, "TEMPORARILY_UNAVAILABLE")
-        self.assertIsNone(result.preferred)
+        self.assertEqual(result.status, "STALE_AVAILABLE")
+        self.assertIsNotNone(result.preferred)
+        self.assertEqual(result.cache["kind"], "stale_index")
         self.assertEqual(result.backups, ())
 
     def test_quality_score_is_not_a_substitute_for_match_confidence(self):

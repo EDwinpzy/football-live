@@ -3,9 +3,12 @@ package com.qiubo.optimaltv.ui.detail
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.qiubo.optimaltv.Graph
+import com.qiubo.optimaltv.data.analytics.PlaybackTelemetry
 import com.qiubo.optimaltv.data.db.ProgressEntity
 import com.qiubo.optimaltv.data.model.VodItem
 import com.qiubo.optimaltv.data.model.SourceAvailability
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -20,6 +23,8 @@ data class DetailUiState(
     val resumeEpIndex: Int = -1,
     val resumePositionMs: Long = 0,
     val sourceAvailability: SourceAvailability = SourceAvailability.MATCHING,
+    /** 实际生效的取源层级（L0_last_good / L1_cloud_resolver / L2_local_detail / none）。 */
+    val resolveTier: String = "none",
 )
 
 class DetailViewModel(private val vodId: String) : ViewModel() {
@@ -58,7 +63,36 @@ class DetailViewModel(private val vodId: String) : ViewModel() {
                     sourceAvailability = SourceAvailability.MATCHING,
                 )
                 // 懒解析源（hhkan）：补全选集/简介后重算跨源线路
-                val full = if (item.detailRef.isNotBlank()) Graph.repo.resolveDetail(vodId) ?: item else item
+                /* 2026-09-28 取源提速：详情元数据与片源解析【并行】发起。
+                   旧版串行 = 详情往返 + 线路解析往返，首帧片源要连等两趟网络。
+                   两趟都只依赖 item 本身、互不依赖，故可并发；
+                   合并口径不变（先上屏元数据、再补片源），UI 时序无感。 */
+                val session = PlaybackTelemetry.Session(item.id)
+                session.markDetailStart()
+                // 并行预取第 1 集线路：既暖连接/后端热缓存，也在「从第 1 集起播」这个
+                // 最常见路径上省掉一趟网络。若续播集号不是 1，下面会按真实集号重取。
+                val prefetched = coroutineScope {
+                    val detailJob = async {
+                        if (item.detailRef.isNotBlank()) Graph.repo.resolveDetail(vodId) else null
+                    }
+                    val linesJob = async {
+                        runCatching { Graph.repo.resolveLinesWithResolver(item, 0) }.getOrNull()
+                    }
+                    val resolvedDetail = detailJob.await()
+                    val resolvedLines = linesJob.await()
+                    session.markDetailDone()
+                    (resolvedDetail ?: item) to resolvedLines
+                }
+                val full = prefetched.first
+                val prefetchedLines = prefetched.second
+                // 云端 Resolver 命中首选线路即记「拿到第一个片源」时刻。
+                prefetchedLines?.resolve?.takeIf { it.usable }?.let { hit ->
+                    session.emit(
+                        PlaybackTelemetry.Phase.RESOLVE_FIRST_SOURCE,
+                        sourceId = hit.preferred?.sourceId.orEmpty(),
+                        contentId = hit.preferred?.contentId.orEmpty(),
+                    )
+                }
                 val fullLines = if (full != item) {
                     st.catalog?.groups?.get(full.normTitle).orEmpty().ifEmpty { lines }
                 } else lines
@@ -91,6 +125,7 @@ class DetailViewModel(private val vodId: String) : ViewModel() {
                     resumeEpIndex = resumeEp,
                     resumePositionMs = resumePos,
                     sourceAvailability = if (full.episodes.isEmpty()) SourceAvailability.UNAVAILABLE else SourceAvailability.AVAILABLE,
+                    resolveTier = prefetchedLines?.tier ?: "none",
                 )
                 // 缓存版本先上屏后强制回源；新增集数只替换详情数据，不重置续播位置或焦点。
                 val refreshed = if (item.detailRef.isNotBlank()) {

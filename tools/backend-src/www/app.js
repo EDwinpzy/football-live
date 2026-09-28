@@ -159,6 +159,201 @@ function os(v) { return v == null || v === "null" ? "" : String(v); }
 function pct(n) { return Math.max(0, Math.min(100, Math.round(n))); }
 
 /* ---------------- 本地存储（进度/历史/收藏，App 断点续播同语义） ---------------- */
+/* ================================================================
+ * 播放埋点（2026-09-28 优化方案 §7）
+ *
+ * 目标是把「点播放 → 首帧」这条链路量化出来（detail_ms / resolve_ms /
+ * prepare_ms / first_frame_ms / total_click_to_frame_ms）。
+ *
+ * 隐私红线（源码级锁死，契约测试 test_playback_telemetry_privacy.py 守住）：
+ *   埋点**只**允许 source_id、耗时、错误分类、布尔标记；
+ *   播放地址、m3u8、Cookie、token、Authorization、签名参数一律不得上报。
+ * 实现上用两道闸：① 字段白名单 TELEMETRY_ALLOWED_FIELDS；
+ * ② 值级检测 looksLikeSensitiveValue——即使字段名在白名单里，
+ * 值长得像地址/凭据也直接丢弃。发送前再过一遍 sanitizeTelemetry。
+ *
+ * 默认不发：未配置 ?telemetry= 时 TELEMETRY_ENDPOINT 为空，
+ * 队列只进不出，什么都不会离开浏览器。
+ * ================================================================ */
+const TELEMETRY_EVENTS = Object.freeze({
+  APP_START: "app_start",
+  HOME_FIRST_CONTENT: "home_first_content",
+  DETAIL_OPEN: "detail_open",
+  RESOLVE_START: "resolve_start",
+  RESOLVE_FIRST_SOURCE: "resolve_first_source",
+  PLAY_CLICK: "play_click",
+  PLAYER_PREPARE: "player_prepare",
+  FIRST_FRAME: "first_frame",
+  BUFFER_START: "buffer_start",
+  BUFFER_END: "buffer_end",
+  AUTO_SWITCH: "auto_switch",
+  ENGINE_FALLBACK: "engine_fallback",
+  PLAY_5MIN: "play_5min",
+  PLAY_30MIN: "play_30min",
+  FATAL: "fatal",
+});
+const METRIC_FIELDS = ["detail_ms", "resolve_ms", "prepare_ms", "first_frame_ms",
+  "total_click_to_frame_ms"];
+/* 唯一允许出网的字段。任何新增字段必须先进这张表，否则发不出去。 */
+const TELEMETRY_ALLOWED_FIELDS = new Set([
+  "event", "kind", "source_id", "engine", "portrait", "status", "resolve_status",
+  "reason", "error_class", "attempt", "episode_count", "line_count", "has_resume",
+  "app_version", "ts",
+].concat(METRIC_FIELDS));
+const TELEMETRY_ERROR_CLASSES = new Set(["timeout", "network", "http", "abort",
+  "no_source", "decode", "unknown"]);
+/* 埋点默认关闭：必须显式配置（?telemetry=/ 同源路径，或宿主注入
+   OTV_TELEMETRY_URL）才会发任何数据。绝不把数据送到第三方域。 */
+const TELEMETRY_ENDPOINT = (() => {
+  try {
+    const q = (new URLSearchParams(location.search).get("telemetry") || "").trim();
+    if (q) return q;
+    const injected = (window.OTV_TELEMETRY_URL || "").trim();
+    /* 只接受同源相对路径 / 同源绝对地址，杜绝把埋点发到第三方。 */
+    if (injected && /^\//.test(injected)) return injected;
+    if (injected) {
+      const u = new URL(injected, location.href);
+      if (u.origin === location.origin) return u.pathname + u.search;
+    }
+    return "";
+  } catch (e) { return ""; }
+})();
+const TELEMETRY_EVENT_VALUES = new Set(Object.values(TELEMETRY_EVENTS));
+const TELEMETRY_QUEUE_MAX = 60;
+let telemetryQueue = [];
+
+function looksLikeSensitiveValue(v) {
+  if (typeof v !== "string" || !v) return false;
+  const s = v.toLowerCase();
+  /* 播放地址本体：.m3u8 / http(s):// */
+  if (/\.m3u8/.test(s)) return true;
+  if (/https?:\/\//.test(s)) return true;
+  /* 凭据类 key=value（大小写不敏感） */
+  if (/(authorization|cookie|token|secret|password|passwd|auth_key|authkey|sign|md5|uid|\bkey\b)/.test(s)
+      && /[:=]/.test(s)) return true;
+  /* 常见的签名/鉴权 query 片段 */
+  if (/[?&](sign|token|auth|key|md5|uid|t)=/.test(s)) return true;
+  return false;
+}
+function classifyTelemetryError(err) {
+  const code = String((err && (err.name || err.code)) || "").toLowerCase();
+  const msg = String((err && err.message) || "").toLowerCase();
+  /* 分类是封闭集合：命不中就落到 unknown，绝不把原始报错文案当分类上报。 */
+  const rules = [
+    ["abort", /aborterror|abort/],
+    ["timeout", /timeout|timed out|超时/],
+    ["no_source", /no_source|未解析到播放地址|片源/],
+    ["http", /http\s*[45]\d\d|\bhttp\b/],
+    ["network", /network|failed to fetch|网络|load failed/],
+    ["decode", /decode|manifest|demux/],
+  ];
+  for (const [name, re] of rules) {
+    if (TELEMETRY_ERROR_CLASSES.has(name) && (re.test(code) || re.test(msg))) return name;
+  }
+  return TELEMETRY_ERROR_CLASSES.has("unknown") ? "unknown" : "unknown";
+}
+function sanitizeTelemetry(payload) {
+  const out = {};
+  if (!payload || typeof payload !== "object") return out;
+  Object.keys(payload).forEach(k => {
+    if (!TELEMETRY_ALLOWED_FIELDS.has(k)) return;
+    const v = payload[k];
+    if (v == null) return;
+    if (typeof v === "string") {
+      if (!v || v.length > 64 || looksLikeSensitiveValue(v)) return;
+      out[k] = v;
+      return;
+    }
+    if (typeof v === "number") { out[k] = Math.round(v); return; }
+    if (typeof v === "boolean") { out[k] = v; }
+  });
+  return out;
+}
+function telemetryEnabled() { return !!TELEMETRY_ENDPOINT; }
+function flushTelemetry() {
+  if (!telemetryEnabled() || !telemetryQueue.length) return;
+  const batch = telemetryQueue.splice(0, TELEMETRY_QUEUE_MAX);
+  try {
+    const body = JSON.stringify(batch.map(sanitizeTelemetry).filter(e => e.event));
+    if (body === "[]") return;
+    /* sendBeacon 走 keepalive 通道，页面关闭也能把数据送出去。 */
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon(TELEMETRY_ENDPOINT,
+        new Blob([body], { type: "application/json" }));
+      return;
+    }
+    fetch(TELEMETRY_ENDPOINT, {
+      method: "POST", body, keepalive: true,
+      headers: { "Content-Type": "application/json" },
+    }).catch(() => {});
+  } catch (e) { /* 埋点永远不能影响播放 */ }
+}
+function telemetryEmit(event, props) {
+  try {
+    if (!TELEMETRY_EVENT_VALUES.has(event)) return;
+    const payload = sanitizeTelemetry(Object.assign({}, props || {}, {
+      event: event, ts: Date.now(),
+    }));
+    if (!payload.event) return;
+    telemetryQueue.push(payload);
+    if (telemetryQueue.length > TELEMETRY_QUEUE_MAX) telemetryQueue.shift();
+    if (telemetryEnabled()) flushTelemetry();
+  } catch (e) { /* 埋点永远不能影响播放 */ }
+}
+addEventListener("visibilitychange", () => { if (document.hidden) flushTelemetry(); });
+addEventListener("pagehide", flushTelemetry);
+
+/* ---- 漏斗计时：全部走 performance.now()，不受系统时钟/标签页休眠影响 ---- */
+function metricNow() {
+  return (window.performance && typeof performance.now === "function")
+    ? performance.now() : Date.now();
+}
+function metricDelta(from) {
+  if (from == null) return null;
+  /* clamp 到 0：后台标签页恢复后 mark 顺序可能倒置，不能出负数 */
+  return Math.max(0, Math.round(metricNow() - from));
+}
+/* 每条会话的 mark 集合 + 已发里程碑，避免同一集重复计数 */
+const metrics = { marks: {}, milestones: [], bufferStart: null };
+function metricMark(name, at) { metrics.marks[name] = at == null ? metricNow() : at; }
+function metricCloseDetail() {
+  const d = metricDelta(metrics.marks.detail);
+  if (d != null) {
+    telemetryEmit(TELEMETRY_EVENTS.DETAIL_OPEN, { detail_ms: d, kind: "detail" });
+  }
+  return d;
+}
+function metricCloseResolve(status) {
+  const d = metricDelta(metrics.marks.resolve);
+  if (d != null) {
+    telemetryEmit(TELEMETRY_EVENTS.RESOLVE_FIRST_SOURCE, {
+      resolve_ms: d, resolve_status: status || "",
+    });
+  }
+  return d;
+}
+function metricResetSession() {
+  metrics.marks = {};
+  metrics.milestones = [];
+  metrics.bufferStart = null;
+}
+function metricMilestone(name, seconds) {
+  if (metrics.milestones.indexOf(name) >= 0) return;
+  metrics.milestones.push(name);
+  telemetryEmit(TELEMETRY_EVENTS[name], { kind: "engagement" });
+}
+function metricBuffer(stall) {
+  if (stall) {
+    if (metrics.bufferStart != null) return;
+    metrics.bufferStart = metricNow();
+    telemetryEmit(TELEMETRY_EVENTS.BUFFER_START, { kind: "buffer" });
+    return;
+  }
+  const d = metricDelta(metrics.bufferStart);
+  metrics.bufferStart = null;
+  telemetryEmit(TELEMETRY_EVENTS.BUFFER_END, { kind: "buffer", prepare_ms: d || 0 });
+}
+
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
@@ -1385,6 +1580,8 @@ function renderCatChips() {
 }
 
 function renderVodLib(refresh = false) {
+  /* 首页首屏内容真正上屏的时刻（方案 §7：home_first_content）。 */
+  telemetryEmit(TELEMETRY_EVENTS.HOME_FIRST_CONTENT, { kind: "home" });
   const cats = vodCategories();
   const sel = cats[vod.catSel] || { id: "" };
   const host = $("#vodSections");
@@ -1745,6 +1942,184 @@ function allCard(it) {
  * ================================================================ */
 let detail = null, dLineIdx = 0, dEpIdx = 0, dEpPage = 0, dResumeEp = -1, dResumePos = 0;
 let detailRequest = null, detailSeq = 0;
+let resolverState = { status: "IDLE", mytvId: null, preferred: null, backups: [] };
+/* resolver 竞速的代次：每次 openDetail 自增，迟到响应据此自我作废。 */
+let resolverSeq = 0;
+
+/* ================================================================
+ * Source Resolver 客户端（2026-09-28 优化方案 §5 / §6.3）
+ *
+ * 自建 VPS 实测：出口到全部影视源不可达，`/vod/resolve` 常态返回
+ *   {status:"TEMPORARILY_UNAVAILABLE", preferred:null, backups:[]}
+ * 所以 resolver 在网页版里是**加速器，不是闸门**：
+ *   - 只有 status=MATCHED 且带 preferred 时才用它挑线路；
+ *   - 任何其它状态（含超时、400/404、老后端没有该路由）都继续用
+ *     /vod/detail 已经匹配出来的全部线路，UI 绝不把网络抖动说成没有这部片。
+ *
+ * 另一个现实约束：网页的目录/详情全是 douban:<id> 键，从不下发 mytv_id，
+ * 而 /vod/resolve 只接受正整数 mytv_id。所以 canonicalMyTvId() 只在
+ * 确实拿到规范 id 时才发请求，拿不到就安静跳过——绝不拿 douban id 去猜。
+ * ================================================================ */
+const RESOLVER_STATUS = Object.freeze({
+  IDLE: "IDLE",
+  RESOLVING: "RESOLVING",
+  FAST_PATH_FAILED: "FAST_PATH_FAILED",
+  FALLBACK_SEARCHING: "FALLBACK_SEARCHING",
+  STALE_AVAILABLE: "STALE_AVAILABLE",
+  TEMPORARILY_UNAVAILABLE: "TEMPORARILY_UNAVAILABLE",
+  MATCHED: "MATCHED",
+  UNSUPPORTED: "UNSUPPORTED",
+});
+const RESOLVER_TIMEOUT_MS = 6000;
+
+function canonicalMyTvId(vid) {
+  /* 网页侧只拿到 douban:<id>；没有显式 mytv_id 字段时返回 null，
+     宁可跳过 resolver，也不把 douban id 当成 mytv_id 发出去。 */
+  const raw = vid == null ? "" : String(vid).trim();
+  const m = raw.match(/^mytv:(\d+)$/) || raw.match(/^(\d+)$/);
+  if (!m || !m[1]) return null;
+  const n = Number(m[1]);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+function readResolverDecision(payload) {
+  /* 把后端契约折成前端内部状态。preferred 为 null 时**永远**回落到
+     既有匹配结果，不清空、不报错。 */
+  const p = payload && typeof payload === "object" ? payload : {};
+  const status = typeof p.status === "string" ? p.status : RESOLVER_STATUS.TEMPORARILY_UNAVAILABLE;
+  const backups = Array.isArray(p.backups) ? p.backups.filter(x => x && x.source_id) : [];
+  const preferred = p.preferred && p.preferred.source_id ? p.preferred : null;
+  return {
+    status: status,
+    preferred: preferred,
+    backups: backups,
+    resolveVersion: p.resolve_version == null ? "" : String(p.resolve_version),
+  };
+}
+
+async function fetchResolverDecision(mytvId, episode) {
+  const id = canonicalMyTvId(mytvId);
+  if (!id) return readResolverDecision({ status: RESOLVER_STATUS.UNSUPPORTED });
+  const ep = Number.isSafeInteger(episode) && episode > 0 ? episode : 1;
+  const path = "/vod/resolve/" + encodeURIComponent(String(id)) + "?episode=" + ep;
+  const raw = await fetchJSON(BASE + path, { timeout: RESOLVER_TIMEOUT_MS });
+  return readResolverDecision(raw);
+}
+
+/* 按 resolver 候选在既有 sources 里找同源同集；找不到就返回 null——
+   绝不凭空造一条线路出来（方案 §6.3：不伪造错误影片）。 */
+function findCandidateLine(sources, candidate, episodeIndex) {
+  if (!candidate || !candidate.source_id) return null;
+  const list = Array.isArray(sources) ? sources : [];
+  /* 线路对上：先按 source_id，再退到源名——自建后台的 source_id 是数据库 UUID，
+     云端下发的是 hongniu 这类 slug，同名不同 id（vod_api._adopt_external_lines 同理）。 */
+  const bySource = list.findIndex(line => line
+    && (line.source_id === candidate.source_id || line.id === candidate.source_id
+        || line.name === candidate.source_name));
+  if (bySource < 0) return null;
+  const line = list[bySource];
+  const episodes = line.episodes || [];
+  /* content_id 对得上就优先用它定位集数；同源同名但内容不同（重名片）时避免串集。 */
+  const byContent = candidate.content_id
+    ? episodes.findIndex(ep => ep && String(ep.content_id || ep.pid) === String(candidate.content_id))
+    : -1;
+  /* 集数优先级：content_id 命中 > 调用方指定的集 > 候选自带的 episode_index。
+     episodeIndex 传 0/undefined 表示「调用方没有指定」，此时用候选自带的。 */
+  const fromCaller = Number.isSafeInteger(episodeIndex) && episodeIndex > 0
+    ? episodeIndex - 1 : -1;
+  const fromCandidate = Number(candidate.episode_index || 1) - 1;
+  const want = fromCaller >= 0 ? fromCaller : Math.max(0, fromCandidate);
+  /* 实际命中的集下标：content_id 优先，其次调用方要的集，最后候选自带的集。 */
+  const epIdx = byContent >= 0 ? byContent : Math.max(0, Math.min(want, episodes.length - 1));
+  const ep = episodes[epIdx];
+  if (!ep) return null;
+  return { lineIdx: bySource, epIdx: epIdx, line: line, ep: ep };
+}
+
+/* resolver 只做「挑线路 / 提前预热」；它拿不到就原样保留既有匹配结果。 */
+function applyResolverDecision(decision, d, episode) {
+  if (!decision || !d) return null;
+  /* keep：无论什么状态都保留 d.sources，这是「不误报没有片源」的底线 */
+  const keep = Array.isArray(d.sources) ? d.sources : [];
+  /* episode 传 0/undefined = 调用方没有指定，此时用候选自带的 episode_index。 */
+  const ep = Number.isSafeInteger(episode) && episode > 0 ? episode : 0;
+  if (decision.status !== RESOLVER_STATUS.MATCHED || !decision.preferred) {
+    if (decision.status === RESOLVER_STATUS.STALE_AVAILABLE
+        && decision.preferred) {
+      /* 陈旧索引仍可用：先试历史线路，同时后台刷新。 */
+      const hit = findCandidateLine(keep, decision.preferred, ep);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  return findCandidateLine(keep, decision.preferred, ep);
+}
+
+/* 详情打开时**并行**发起 resolver 与详情请求；失败/超时都不影响详情。 */
+function startResolverRace(vid, episode) {
+  metricMark("resolve");
+  telemetryEmit(TELEMETRY_EVENTS.RESOLVE_START, { kind: "resolve" });
+  /* 认领本次竞速：后续响应必须同时匹配 seq 与 vid，否则上一部片的
+     迟到响应会写坏当前片的 resolverState，并拿当前片的 detail 去预热。 */
+  const seq = ++resolverSeq;
+  const mytvId = canonicalMyTvId(vid);
+  resolverState = { status: RESOLVER_STATUS.RESOLVING, mytvId: mytvId,
+    preferred: null, backups: [] };
+  const mine = () => seq === resolverSeq && (!detail || detail.vid === vid);
+  if (!mytvId) {
+    /* 目录没下发 mytv_id：安静跳过，走既有 /vod/detail 全量匹配。 */
+    resolverState.status = RESOLVER_STATUS.UNSUPPORTED;
+    metricCloseResolve(RESOLVER_STATUS.UNSUPPORTED);
+    return Promise.resolve(readResolverDecision({ status: RESOLVER_STATUS.UNSUPPORTED }));
+  }
+  return fetchResolverDecision(mytvId, episode)
+    .then(decision => {
+      /* 用户已经翻到别的片：本次结果作废，但不影响任何 UI（本来就没人等它）。 */
+      if (!mine()) return decision;
+      resolverState = {
+        status: decision.status, mytvId: mytvId,
+        preferred: decision.preferred, backups: decision.backups,
+      };
+      metricCloseResolve(decision.status);
+      const hit = applyResolverDecision(decision, detail, dResumeEp + 1 || 1);
+      if (hit) {
+        telemetryEmit(TELEMETRY_EVENTS.RESOLVE_FIRST_SOURCE, {
+          source_id: String(hit.line.id || hit.line.name || "").slice(0, 64),
+        });
+        /* 命中即预热该线路该集，点了就能起。 */
+        if (hit.line.id != null && detail) prefetchPlay(detail.vid, hit.ep.pid, hit.ep.vid);
+      }
+      return decision;
+    })
+    .catch(e => {
+      /* 同样只认自己那次竞速，避免上一部片的失败覆盖当前片的状态。 */
+      if (!mine()) return readResolverDecision({ status: RESOLVER_STATUS.TEMPORARILY_UNAVAILABLE });
+      resolverState = { status: RESOLVER_STATUS.TEMPORARILY_UNAVAILABLE, mytvId: mytvId,
+        preferred: null, backups: [] };
+      metricCloseResolve(RESOLVER_STATUS.TEMPORARILY_UNAVAILABLE);
+      return readResolverDecision({ status: RESOLVER_STATUS.TEMPORARILY_UNAVAILABLE });
+    });
+}
+
+/* 快速起播：已有 resolver 候选就直接用，不再等所有线路。 */
+async function resolveFirstSource(ctx) {
+  /* 用户在详情页/「更多」面板手动选过线路（dLineIdx 变了、或续播集落在
+     非第 1 集）时，playRef 才是他的明确选择——这时 resolver 只能预热，
+     不能把播放目标换成 preferred 那条。只有「默认线路 + 默认集」才让
+     resolver 决定起播线路，否则「当前播放 线路2/5」会悄悄播成另一条。 */
+  const userPicked = ctx.linePinned === true;
+  const hit = !userPicked && resolverState.preferred
+    ? findCandidateLine(detail && detail.sources, resolverState.preferred, ctx.epIdx + 1)
+    : null;
+  if (hit) {
+    return resolvePlayCached(ctx.vid, hit.ep.pid, hit.ep.vid);
+  }
+  return resolvePlayCached(ctx.vid, ctx.playRef.pid, ctx.playRef.vid);
+}
+
+function retryDetail() {
+  if (detail) openDetail(detail.vid);
+}
 
 async function openDetail(vid, cardHint, autoplay) {
   detailRequest?.abort();
@@ -1752,6 +2127,13 @@ async function openDetail(vid, cardHint, autoplay) {
   detailRequest = controller;
   const seq = ++detailSeq;
   const current = () => detailSeq === seq && !controller.signal.aborted;
+  metricMark("detail");
+  telemetryEmit(TELEMETRY_EVENTS.DETAIL_OPEN, { kind: "detail" });
+  /* 与详情请求**并行**起跑，不新增串行等待（方案 §5：resolver 是加速器）。
+     刻意不 await：/vod/resolve 在自建 VPS 上常态不可达，一旦在这里等它，
+     线路早就到手的详情页反而要再陪它耗满 RESOLVER_TIMEOUT_MS。它到货后
+     自己预热对应线路即可（见 startResolverRace），到得晚也不影响起播。 */
+  startResolverRace(vid, 1).catch(() => {});
   $("#pDetail").hidden = false; document.body.style.overflow = "hidden";
   $("#dTitle").textContent = "加载中…";
   ["dMeta", "dScore", "dActors", "dDesc", "dResume", "dButtons", "dLines", "dLinesTitle"].forEach(id => $("#" + id).textContent = "");
@@ -1793,6 +2175,10 @@ async function openDetail(vid, cardHint, autoplay) {
   let cached = null;
   try { const v = store.get(dkey, null); cached = v && v._d ? v : null; } catch (e) {}
   if (cached) {
+    /* 缓存里可能残留上一轮的 source_state="unavailable"（第二段失败时打的标记）。
+       重试/再进详情时必须先剥掉，否则按钮一上来就是「线路暂时不可用」，
+       哪怕这次线路已经正常到货。 */
+    delete cached._d.source_state;
     applyDetail(cached._d);
   }
   /* 2026-09-17 详情提速：详情页原先要等「多源匹配 + 线路测速」整段跑完才上屏
@@ -1820,14 +2206,16 @@ async function openDetail(vid, cardHint, autoplay) {
     const d = normalizeDetail(rawDetail);
     if (!d.title) throw new Error(d.error || "未找到该影片");
     try { store.set(dkey, { _ts: Date.now(), _d: d }); } catch (e) {}
+    metricCloseDetail();
+    /* 线路一到就上屏选集，绝不等 resolver。 */
     applyDetail(d);
     if (autoplay && current()) startPlayButton();
   } catch (e) {
     if (!current()) return;
     if (painted) {
-      /* 第二段失败：保留已上屏的信息，只把主按钮从「正在查找片源」落到「暂无片源」 */
+      /* 第二段失败：保留已上屏的信息，落到可恢复文案（不误报「没有这部片」）。 */
       if (detail) { detail.source_state = "unavailable"; renderDetail(); }
-      hint("线路匹配失败：" + e.message);
+      hint("线路暂时不可用，正在后台恢复");
     } else if (!cached) {
       $("#dTitle").textContent = "加载失败"; hint(e.message);
     }
@@ -1855,14 +2243,26 @@ function renderDetail() {
   const favs = getFavs().some(x => x.id === d.vid);
   /* App 按钮文案：「继续播放 第N集」/「立即播放」；「从头看」仅续播时 */
   const btns = [];
-  if (d.source_state === "matching") btns.push('<button class="d-btn primary" disabled>正在查找片源</button>');
-  else if (d.source_state === "unavailable" || !d.sources.length) btns.push('<button class="d-btn primary" disabled>暂无片源</button>');
+  /* 方案 §6.3：链路还在工作 → 「正在匹配最佳线路」；全挂 → 可恢复文案 + 重试。
+     任何情况下都不把网络抖动说成「片库里没有这部片」。 */
+  if (d.source_state === "matching") btns.push('<button class="d-btn primary" disabled>正在匹配最佳线路</button>');
+  else if (d.source_state === "unavailable" || !d.sources.length) {
+    btns.push('<button class="d-btn primary" id="dPlayBtn">线路暂时不可用，正在后台恢复</button>');
+  }
   else btns.push(`<button class="d-btn primary" id="dPlayBtn">${dResumeEp >= 0 ? `继续播放 第${dResumeEp + 1}集` : "立即播放"}</button>`);
   btns.push(`<button class="d-btn ghost" id="dFavBtn">${favs ? "★ 已收藏" : "☆ 收藏"}</button>`);
   if (dResumeEp >= 0) btns.push(`<button class="d-btn ghost" id="dRestart">从头看</button>`);
   $("#dButtons").innerHTML = btns.join("");
   const playButton = $("#dPlayBtn");
-  if (playButton) playButton.addEventListener("click", () => startPlayButton());
+  if (playButton) playButton.addEventListener("click", () => {
+    /* 可恢复状态下这个按钮是「重试」而不是「立即播放」——线路可能已经恢复。 */
+    if (detail.source_state === "unavailable" || !detail.sources.length) {
+      hint("正在重新匹配线路…");
+      retryDetail();
+      return;
+    }
+    startPlayButton();
+  });
   $("#dFavBtn").addEventListener("click", () => {
     const on = toggleFav({ id: d.vid, title: d.title, cover: d.cover, remark: "" });
     $("#dFavBtn").textContent = on ? "★ 已收藏" : "☆ 收藏";
@@ -1924,6 +2324,12 @@ function startPlayAt(idx, resumePos) {
   if (!eps.length) { hint("该线路暂无选集"); return; }
   if (idx >= eps.length) idx = 0;
   const ep = eps[idx];
+  metricResetSession();
+  metricMark("click");
+  telemetryEmit(TELEMETRY_EVENTS.PLAY_CLICK, {
+    kind: "click", episode_count: eps.length, line_count: (detail.sources || []).length,
+    has_resume: resumePos > 0,
+  });
   const prog = getProgress("vod:" + detail.vid);
   const epSaved = store.get("otvw:ep:" + detail.vid, -1);
   const resume = resumePos > 0 ? resumePos : (epSaved === idx && resumable(prog) ? prog.pos : 0);
@@ -1931,7 +2337,9 @@ function startPlayAt(idx, resumePos) {
   openPlayer({
     kind: "vod", vid: detail.vid, title: detail.title, cover: detail.cover,
     epIdx: idx, epName: ep.ep || `第${idx + 1}集`, epCount: eps.length,
-    lineName: s.name, playRef: { pid: ep.pid, vid: ep.vid }, resume
+    lineName: s.name, playRef: { pid: ep.pid, vid: ep.vid }, resume,
+    /* 详情页默认线路仍可由 resolver 优选；播放器内手动换线才锁定线路。 */
+    linePinned: false,
   });
   /* v1.32 换集提速：起播同时预解析下一集（本线路），连播/手动换集秒切 */
   const nxt = eps[idx + 1];
@@ -2567,15 +2975,18 @@ function prefetchPlay(vid, pid, evid) {
 }
 
 async function resolveVodAndPlay(ctx) {
+  metricMark("prepare");
+  telemetryEmit(TELEMETRY_EVENTS.PLAYER_PREPARE, { kind: "prepare" });
   try {
-    const d = await resolvePlayCached(ctx.vid, ctx.playRef.pid, ctx.playRef.vid);
+    /* resolver 已给出首选线路时直接用它起播，不再等所有线路（方案 §5 快速起播）。 */
+    const d = await resolveFirstSource(ctx);
     pv.sources = (d.sources || []).filter(x => x && x.url && x.alive !== false).map(x => x.url);
     if (!pv.sources.length) throw new Error("未解析到播放地址");
     vodAttach(pv.sources[0], ctx.resume || 0);
     pushHistory({ id: ctx.vid, title: ctx.title, cover: ctx.cover || "", epIndex: ctx.epIdx || 0 });
     if ("mediaSession" in navigator)
       navigator.mediaSession.metadata = new MediaMetadata({ title: ctx.title, artist: ctx.epName || "" });
-  } catch (e) { playerFatal(e.message); }
+  } catch (e) { playerFatal(e); }
 }
 
 /* App bootLive：首选源（=上次手动选择的源，localStorage 记忆；无记忆回退 bb）快路径
@@ -2670,6 +3081,9 @@ function attachPlayer(url, resume, opts) {
   const gen = ++pv.recoveryGen;
   const opt = opts || {};
   pv.recovering = false;
+  /* 起播瞬间引擎降级（hls.js 不可用 → 原生 HLS，或直连 → 中继）都记一笔。 */
+  const engine = window.Hls && Hls.isSupported() ? "hlsjs" : "native";
+  telemetryEmit(TELEMETRY_EVENTS.ENGINE_FALLBACK, { engine: engine, kind: "player" });
   $("#bufSpin").hidden = false;
   if (pv.hls) { pv.hls.destroy(); pv.hls = null; }
   v.removeAttribute("src");
@@ -2705,6 +3119,17 @@ function attachPlayer(url, resume, opts) {
     if (gen !== pv.recoveryGen) return;
     pv.recoveryAttempts = 0; pv.recovering = false;
     $("#bufSpin").hidden = true; setPlayIcon(true);
+    metricBuffer(false);
+    if (metrics.marks.click != null) {
+      const first = metricDelta(metrics.marks.click);
+      telemetryEmit(TELEMETRY_EVENTS.FIRST_FRAME, {
+        kind: "playback", first_frame_ms: first || 0,
+        total_click_to_frame_ms: first || 0, prepare_ms: metricDelta(metrics.marks.prepare) || 0,
+      });
+      metrics.marks.click = null;
+    } else {
+      metricBuffer(false);
+    }
   };
   v.onpause = () => setPlayIcon(false);
   v.onended = () => onEnded();
@@ -2717,6 +3142,8 @@ function attachPlayer(url, resume, opts) {
   pv.stallTimer = setInterval(() => {
     if (gen !== pv.recoveryGen || !pv.ctx || v.paused || v.ended) return;
     const buffering = v.readyState < 3;
+    /* readyState<3 = 正在缓冲；这只在起播/续播窗口内才上报，避免长视频常态抖动刷屏。 */
+    if (metrics.marks.click != null) metricBuffer(buffering);
     stuckTicks = buffering || Math.abs(v.currentTime - lastPos) < 0.05 ? stuckTicks + 1 : 0;
     lastPos = v.currentTime;
     if (stuckTicks >= 8) { stuckTicks = 0; recoverPlayback("播放 8 秒无进展", gen); }
@@ -2728,6 +3155,10 @@ async function recoverPlayback(reason, expectedGen) {
   if (!pv.ctx || pv.recovering || (expectedGen != null && expectedGen !== pv.recoveryGen)) return;
   pv.recovering = true;
   const attempt = pv.recoveryAttempts++;
+  telemetryEmit(TELEMETRY_EVENTS.AUTO_SWITCH, {
+    attempt: attempt + 1, error_class: classifyTelemetryError(new Error(reason)),
+    kind: "recovery",
+  });
   if (attempt >= MAX_RECOVERY_ATTEMPTS) {
     pv.recovering = false;
     playerFatal("播放持续卡顿，自动恢复已达上限");
@@ -2765,6 +3196,9 @@ async function recoverPlayback(reason, expectedGen) {
 
 function nextSource() {
   pv.srcIdx++;
+  telemetryEmit(TELEMETRY_EVENTS.AUTO_SWITCH, {
+    attempt: pv.srcIdx + 1, kind: "source_switch",
+  });
   if (pv.srcIdx < pv.sources.length) {
     hint("线路失效，切换下一个源");
     if (pv.ctx.kind === "vod") vodAttach(pv.sources[pv.srcIdx], 0);
@@ -2786,8 +3220,11 @@ function startPlayFromCtx(keepPos) {
   openPlayer({ ...c, resume: pos });
 }
 function playerFatal(msg) {
+  /* 埋点只取错误分类，不取原始文案（可能含上游拓扑）。 */
+  const errClass = msg instanceof Error ? classifyTelemetryError(msg) : "unknown";
+  telemetryEmit(TELEMETRY_EVENTS.FATAL, { error_class: errClass, kind: "player" });
   $("#bufSpin").hidden = true;
-  $("#peMsg").textContent = msg || "播放失败";
+  $("#peMsg").textContent = (msg && msg.message) || msg || "播放失败";
   $("#pError").hidden = false;
   $("#controls").hidden = true; $("#morePanel").hidden = true;
   $("#ctlBack").hidden = true; $("#srcPickerWrap").hidden = true;
@@ -2858,6 +3295,11 @@ function updatePb() {
   if (v.duration && !isLive) $("#cFill").style.width = (v.currentTime / v.duration * 100) + "%";
   $("#cPos").textContent = fmtTime(v.currentTime);
   $("#cDur").textContent = isLive ? "直播" : "-" + fmtTime((v.duration || 0) - v.currentTime);
+  /* 观看时长里程碑：每次播放会话各报一次（直播不报时长）。 */
+  if (!isLive) {
+    if (v.currentTime >= 1800) metricMilestone("PLAY_30MIN");
+    else if (v.currentTime >= 300) metricMilestone("PLAY_5MIN");
+  }
 }
 /* 进度条：点按 + 拖动 scrub（App detectTapGestures + detectHorizontalDragGestures） */
 (function () {
@@ -2985,6 +3427,8 @@ function renderMorePanel() {
       `<button class="lchip ${i === dLineIdx ? "on" : ""}" data-i="${i}">${esc("信号源" + (i + 1))}</button>`).join("");
     $$("#mpLines .lchip").forEach(ch => ch.addEventListener("click", () => {
       dLineIdx = +ch.dataset.i;
+      /* 手动换线 = 明确选择，之后的起播/换集都不得被 resolver 改写。 */
+      if (pv.ctx) pv.ctx.linePinned = true;
       mpApplyEpisode(0);          /* 换线回到该线路第 1 集，同时把 pv.ctx.playRef 指向新线路 */
       renderDetailEps(); startPlayFromCtx(true);
     }));
@@ -3145,6 +3589,8 @@ $$(".back-btn").forEach(b => b.addEventListener("click", closePush));
 
 /* ---------------- 启动 ---------------- */
 fit();
+metricMark("app");
+telemetryEmit(TELEMETRY_EVENTS.APP_START, { kind: "app", portrait: !!state.portrait });
 /* 深链：#vod/#tv/#fav/#search 直达对应页；#detail/{vid} 直达详情（默认足球） */
 const bootHash = (location.hash || "").replace("#", "");
 if (bootHash.startsWith("detail/")) {

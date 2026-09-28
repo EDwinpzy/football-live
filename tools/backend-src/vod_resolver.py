@@ -219,9 +219,6 @@ class VodResolver:
                  "age_ms": max(0, int(index_result.age_ms or 0))}
         if index_result.conflict:
             return unavailable(index_result.version, cache)
-        if index_result.stale:
-            return unavailable(index_result.version, {
-                "kind": "stale_index", "age_ms": cache["age_ms"]})
         entry = index_result.entry
         if isinstance(entry, dict) and not _entry_identity_matches(entry, canonical_id, douban_id):
             return unavailable(index_result.version, cache)
@@ -233,13 +230,15 @@ class VodResolver:
         if cached is not None:
             result = self._cached_result(cached, canonical_id, requested_episode,
                                          index_result.version, "last_good", registry_snapshot)
-            if result is not None and self._cache_snapshot_is_current(registry_snapshot, generation):
+            if (result is not None and not index_result.stale
+                    and self._cache_snapshot_is_current(registry_snapshot, generation)):
                 return result
         cached = self._cache_get(self._hot_cache, cache_key, HOT_RESULT_TTL_SECONDS)
         if cached is not None:
             result = self._cached_result(cached, canonical_id, requested_episode,
                                          index_result.version, "hot_cache", registry_snapshot)
-            if result is not None and self._cache_snapshot_is_current(registry_snapshot, generation):
+            if (result is not None and not index_result.stale
+                    and self._cache_snapshot_is_current(registry_snapshot, generation)):
                 return result
         cached = self._cache_get(self._failure_cache, cache_key, FAILURE_TTL_SECONDS)
         if cached is not None:
@@ -524,14 +523,22 @@ class VodResolver:
             ))
         if not valid:
             return None
+        # `kind` names the cache layer that answered. The stored result also
+        # knows how the answer was produced, and that provenance is what a
+        # stale replay must keep reporting, so it is not overwritten here.
+        stored_kind = result.cache.get("kind")
+        reported_kind = stored_kind if stored_kind == "stale_index" else kind
         return ResolveResult(
-            status="MATCHED",
+            # A cached result keeps the status it was stored under. Replaying a
+            # stale answer as MATCHED would tell the client the line is current
+            # and stop it from refreshing in the background.
+            status=result.status,
             mytv_id=mytv_id,
             episode=episode,
             resolve_version=version,
             preferred=valid[0],
             backups=tuple(valid[1:]),
-            cache={"kind": kind, "age_ms": age_ms},
+            cache={"kind": reported_kind, "age_ms": age_ms},
         )
 
     def _cache_snapshot_is_current(self, registry, generation):
@@ -540,20 +547,21 @@ class VodResolver:
 
     def _candidates(self, entry, requested_episode, registry=None):
         registry = self.registry if registry is None else registry
-        configured = {
-            str(getattr(source, "id", "")): source
-            for source in getattr(registry, "sources", ())
-            if getattr(source, "id", None)
-        }
+        sources = [source for source in getattr(registry, "sources", ())
+                   if getattr(source, "id", None)]
+        by_id, by_alias = vod_sources.source_alias_index(sources)
         result = []
         seen = set()
         for line in entry.get("lines") or ():
             if not isinstance(line, dict):
                 continue
             source_id = str(line.get("source_id") or "").strip()
-            source = configured.get(source_id)
+            source = vod_sources.match_source(
+                source_id, (by_id, by_alias),
+                alias=line.get("source_alias"))
             if source is None or not bool(getattr(source, "enabled", True)):
                 continue
+            published_id = str(getattr(source, "id", ""))
             source_name = str(getattr(source, "name", "") or line.get("source_name") or "").strip()
             if not source_name:
                 continue
@@ -579,12 +587,12 @@ class VodResolver:
             if not content_id:
                 continue
             episode_index = wanted_index
-            key = (source_id, content_id, episode_index)
+            key = (published_id, content_id, episode_index)
             if key in seen:
                 continue
             seen.add(key)
             result.append(ResolveCandidate(
-                source_id=source_id,
+                source_id=published_id,
                 source_name=source_name,
                 content_id=content_id,
                 episode_index=episode_index,

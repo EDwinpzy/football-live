@@ -2,6 +2,7 @@ package com.qiubo.optimaltv.data.db
 
 import android.content.Context
 import androidx.room.Dao
+import androidx.room.ColumnInfo
 import androidx.room.Database
 import androidx.room.Entity
 import androidx.room.Insert
@@ -11,6 +12,8 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import kotlinx.coroutines.flow.Flow
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 /** 收藏表（技术方案 §3.5） */
 @Entity(tableName = "favorite")
@@ -42,6 +45,25 @@ data class ProgressEntity(
     val positionMs: Long,
     val durationMs: Long,
     val updatedAt: Long,
+)
+
+/** 最近成功线路的稳定引用，不保存播放 URL、Cookie 或临时认证信息。 */
+@Entity(
+    tableName = "last_good_source",
+    primaryKeys = ["mytv_id", "episode_index"],
+)
+data class LastGoodSourceEntity(
+    @ColumnInfo(name = "mytv_id") val mytvId: Long,
+    @ColumnInfo(name = "episode_index") val episodeIndex: Int,
+    @ColumnInfo(name = "source_id") val sourceId: String,
+    @ColumnInfo(name = "content_id") val contentId: String,
+    /**
+     * 该内容在源下的**线路号**（对应 line id 第三段），不是集号。
+     * 缺这一段时读回会被当成第 0 条线路，于是「上次播第 3 条」变成「这次播第 0 条」——
+     * 记忆静默指向错误线路，比没有记忆更糟。
+     */
+    @ColumnInfo(name = "line_index", defaultValue = "0") val lineIndex: Int = 0,
+    @ColumnInfo(name = "successful_at") val successfulAt: Long,
 )
 
 @Dao
@@ -94,20 +116,68 @@ interface VodDao {
     suspend fun clearAllProgress()
 }
 
+@Dao
+interface LastGoodSourceDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: LastGoodSourceEntity)
+
+    @Query("SELECT * FROM last_good_source WHERE mytv_id = :mytvId AND episode_index = :episodeIndex LIMIT 1")
+    suspend fun get(mytvId: Long, episodeIndex: Int): LastGoodSourceEntity?
+
+    @Query("SELECT * FROM last_good_source")
+    suspend fun all(): List<LastGoodSourceEntity>
+
+    @Query("DELETE FROM last_good_source WHERE mytv_id = :mytvId AND episode_index = :episodeIndex")
+    suspend fun delete(mytvId: Long, episodeIndex: Int)
+}
+
+val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+                CREATE TABLE IF NOT EXISTS last_good_source (
+                    mytv_id INTEGER NOT NULL,
+                    episode_index INTEGER NOT NULL,
+                    source_id TEXT NOT NULL,
+                    content_id TEXT NOT NULL,
+                    successful_at INTEGER NOT NULL,
+                    PRIMARY KEY(mytv_id, episode_index)
+                )
+            """.trimIndent(),
+        )
+    }
+}
+
+/**
+ * v2 → v3：last_good_source 补上 `line_index`。
+ *
+ * 缺这一段时读回会被当成第 0 条线路（见 [LastGoodSourceEntity.lineIndex]），
+ * 于是「上次成功播第 3 条」会静默变成「这次播第 0 条」。
+ *
+ * 已有数据一律补 0：那批记录写入时就丢掉了线路号、无法还原，保持原语义
+ * （「回落到该内容第 0 条线路」= 旧行为），不做猜测性迁移。
+ */
+val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE last_good_source ADD COLUMN line_index INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
 @Database(
-    entities = [FavoriteEntity::class, HistoryEntity::class, ProgressEntity::class],
-    version = 1,
+    entities = [FavoriteEntity::class, HistoryEntity::class, ProgressEntity::class, LastGoodSourceEntity::class],
+    version = 3,
     exportSchema = false,
 )
 abstract class AppDb : RoomDatabase() {
     abstract fun vodDao(): VodDao
+    abstract fun lastGoodSourceDao(): LastGoodSourceDao
 
     companion object {
         @Volatile private var instance: AppDb? = null
 
         fun get(context: Context): AppDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "optimal_tv.db")
-                .fallbackToDestructiveMigration()
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
                 .also { instance = it }
         }

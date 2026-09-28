@@ -89,10 +89,18 @@ GRANT EXECUTE ON FUNCTION public.vod_source_public_check(bigint)
 -- the importer remain excluded from the management surface.
 GRANT EXECUTE ON FUNCTION public.admin_mark_sold(text, boolean), public.admin_stats()
     TO authenticated;
+GRANT EXECUTE ON FUNCTION public.vod_source_admin_list(),
+    public.vod_source_admin_save(uuid,text,text,text,text,boolean,integer),
+    public.vod_source_admin_set_enabled(uuid,boolean),
+    public.vod_source_admin_set_priority(uuid),
+    public.vod_source_admin_delete(uuid),
+    public.vod_source_admin_publish()
+    TO authenticated;
 
 DO $validate_importer_privileges$
 DECLARE
     v_column record;
+    v_admin_rpc text;
 BEGIN
     IF EXISTS (
         SELECT 1
@@ -182,6 +190,21 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'authenticated is missing required admin RPC privileges';
     END IF;
+
+    FOREACH v_admin_rpc IN ARRAY ARRAY[
+        'public.vod_source_admin_list()',
+        'public.vod_source_admin_save(uuid,text,text,text,text,boolean,integer)',
+        'public.vod_source_admin_set_enabled(uuid,boolean)',
+        'public.vod_source_admin_set_priority(uuid)',
+        'public.vod_source_admin_delete(uuid)',
+        'public.vod_source_admin_publish()'
+    ] LOOP
+        IF NOT has_function_privilege('authenticated', v_admin_rpc, 'EXECUTE')
+           OR has_function_privilege('anon', v_admin_rpc, 'EXECUTE')
+           OR has_function_privilege('license_importer', v_admin_rpc, 'EXECUTE') THEN
+            RAISE EXCEPTION 'incorrect VOD admin RPC privilege: %', v_admin_rpc;
+        END IF;
+    END LOOP;
 
     IF has_function_privilege(
         'anon', 'public.admin_mark_sold(text,boolean)', 'EXECUTE'

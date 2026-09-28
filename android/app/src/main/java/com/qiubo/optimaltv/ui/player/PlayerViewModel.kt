@@ -20,6 +20,7 @@ import com.qiubo.optimaltv.playback.PlaybackHealthLog
 import com.qiubo.optimaltv.playback.PlaybackHealthSnapshot
 import com.qiubo.optimaltv.playback.PlaybackRecoveryPolicy
 import com.qiubo.optimaltv.playback.RecoveryAction
+import com.qiubo.optimaltv.data.analytics.PlaybackTelemetry
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -167,6 +168,12 @@ class PlayerViewModel(
     }
     /** 上一次 5 分钟体检的墙上时间（跨会话重启保持节拍，长跑日志不会因换源而断档） */
     private var lastHealthLogAt = 0L
+    /**
+     * 本次起播的埋点会话（2026-09-28）。点播放时开一次，量到首帧后结算出
+     * detail/resolve/prepare/first_frame/total 五个耗时。跨换线沿用同一个会话，
+     * 因为用户视角的「点播放 → 出画面」就是一次，不该被内部换线切成多次。
+     */
+    private var telemetry: PlaybackTelemetry.Session = PlaybackTelemetry.newSession()
     private var progressJob: Job? = null
     private var episodeRefreshJob: Job? = null
     /** 直播静默续签循环（90s 重新解析当前源 → 签名变化即热切换） */
@@ -705,10 +712,30 @@ class PlayerViewModel(
         // 懒解析源（hhkan）：先补全选集元数据，vodKey/epCount 才正确
         val effItem = repo.resolveDetail(item.id) ?: item
         currentItem = effItem
-        // 线路构建（含 hhkan 懒解析源）：跨源同名线路或站内多线路
-        val lines = VisibleVodLinePolicy.apply(repo.resolveLines(effItem, epStart))
+        // 埋点：解析开始（详情与片源解析并行的起点就在这里）。
+        telemetry.mark(
+            PlaybackTelemetry.Stage.RESOLVE_START,
+            source = effItem.detailRef,
+            detail = "title=${effItem.title}",
+        )
+        // 线路构建：走 L0→L5 取源阶梯（last_good → 云端 resolver → 本地全量匹配 →
+        // 云端备用 → 跨源同名），拿到的首选项直接排到第 0 位起播，不等全部线路到齐。
+        val pick = repo.pickPlayableSources(effItem, epStart, db.lastGoodSourceDao())
+        if (!pick.isEmpty) {
+            telemetry.mark(
+                PlaybackTelemetry.Stage.RESOLVE_FIRST_SOURCE,
+                source = pick.lines.getOrNull(pick.preferredIndex)?.playRef.orEmpty(),
+                detail = "tier=${pick.tier.wire}",
+            )
+        }
+        val lines = VisibleVodLinePolicy.apply(pick.lines)
         if (lines.isEmpty()) {
             stopForFatal()
+            telemetry.mark(
+                PlaybackTelemetry.Stage.FATAL,
+                errorClass = PlaybackTelemetry.classify("no available line"),
+                detail = "该集没有可用线路",
+            )
             _ui.value = _ui.value.copy(fatalMsg = "该集没有可用线路", title = effItem.title)
             return
         }
@@ -716,7 +743,11 @@ class PlayerViewModel(
         // 线路记忆直选（方案 §3.2-3），否则用设置里的引擎偏好
         val memory = settings.lastLine(vodId)
         val enginePref = memory?.first ?: settings.current().engineId
-        val initialLine = memory?.second?.takeIf { it in lines.indices } ?: 0
+        // 阶梯选中的线路优先于历史记忆——last_good/resolver 刚给出的那条是「当前最可能
+        // 能播」的，历史记忆可能已经失效（签名轮换、线路下线）。
+        val initialLine = pick.preferredIndex.takeIf { it in lines.indices && pick.hasImmediate }
+            ?: memory?.second?.takeIf { it in lines.indices }
+            ?: 0
 
         if (this::engine.isInitialized) runCatching { engine.release() }
         installEngine(EngineRegistry.create(enginePref, Graph.appContext))
@@ -842,6 +873,12 @@ class PlayerViewModel(
         // 连续 TS 端点（实验设施，VLC ts demux 对拼接段时间戳重置容忍差，弃用）
         Log.i(TAG, "session start line=$lineIdx engine=${engine.engineId} url=$playUrl")
         OtvLog.i("startSession line=$lineIdx engine=${engine.engineId} startPos=$startPos url=${playUrl.take(120)}")
+        // 埋点：拿到直链、交引擎前的这一刻。只记线路哈希与耗时，不记地址本身。
+        telemetry.mark(
+            PlaybackTelemetry.Stage.PLAYER_PREPARE,
+            source = playUrl,
+            detail = "engine=${engine.engineId} line=$lineIdx",
+        )
         engine.prepare(PrepareRequest(playUrl, startPos))
         armWatchdog()
         armFirstFrameWatchdog()
@@ -860,8 +897,26 @@ class PlayerViewModel(
      * 点播不启用（有进度语义，黑屏可由用户 seek 感知，避免误伤慢起播长视频）。
      */
     private var firstFrameJob: Job? = null
+    /**
+     * 点播首帧分级阶梯的协程句柄（2026-09-28）。
+     *
+     * 之前 [armVodFirstFrameLadder] 直接 `viewModelScope.launch` 却不持有 Job，
+     * 换线时旧阶梯不会被取消，会切走刚起播的新线路。这里显式持有，换线时先 cancel。
+     */
+    private var vodLadderJob: Job? = null
+    /** 阶梯代次跟踪：作废旧代阶梯、保证「只升一档」。 */
+    private val firstFrameLadder = FirstFrameRecoveryLadderTracker()
+    /**
+     * 上次**自动**切线时刻（单调时钟，-1 = 从未切过）。
+     * 供 [LongPlaybackHealthPolicy.canSwitchNow] 做 20–30s 切线冷却：
+     * 刚失败/刚切过的线在冷却内不自动切回，防止「线1→线2→线1」把线路耗光。
+     * 用户手动切线（[switchLine]）不算自动切线，不受冷却约束。
+     */
+    private var lastAutoSwitchAt = -1L
+
     private fun armFirstFrameWatchdog() {
         firstFrameJob?.cancel()
+        armVodFirstFrameLadder()
         firstFrameJob = viewModelScope.launch {
             delay(15_000)
             while (isActive) {
@@ -880,6 +935,174 @@ class PlayerViewModel(
                 return@launch
             }
         }
+    }
+
+    /**
+     * 点播首帧分级看门狗（2026-09-28）。
+     *
+     * 旧的 [armFirstFrameWatchdog] 只管直播且只有一个 15s 硬超时；点播根本没有首帧
+     * 看门狗（注释里写「有进度语义，黑屏可由用户 seek 感知」），于是点播黑屏只能等
+     * 20s 起播看门狗兜底——用户盯着 20s 黑屏。
+     *
+     * 这里按 [FirstFrameRecoveryPolicy] 的四档渐进处置（3s 预备 / 5s 切 / 15s 硬超时），
+     * 每档只做一次、只升不降，避免同一起播反复折腾。
+     */
+    private fun armVodFirstFrameLadder() {
+        if (_ui.value.isLive) return
+        // 换线必须先取消上一代阶梯：否则旧协程仍按自己的计时继续跑，会在新线路刚起播时
+        // 就判定「已等 7s」并把它切走——用户看到的是「刚切成功又被切走、反复横跳」。
+        vodLadderJob?.cancel()
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        val generation = firstFrameLadder.beginGeneration()
+        vodLadderJob = viewModelScope.launch {
+            while (isActive && !_ui.value.isLive) {
+                delay(500)
+                // 代次校验：换线后旧代一律停止。即便本协程侥幸没被取消（正在执行动作体的
+                // 那个窗口），代次也不匹配，动作不会生效。
+                if (!firstFrameLadder.isCurrent(generation)) return@launch
+                val s = _ui.value
+                if (s.fatalMsg != null) return@launch
+                // 已经出过帧（引擎报 firstFrame）或进入 READY 且位置在动 → 本次起播完成。
+                val rendered = if (hasEngine()) engine.uiState.value.firstFrameRendered else false
+                if (rendered || (s.playState == EnginePlayState.READY && s.positionMs > 0)) {
+                    firstFrameLadder.markFirstFrame(generation)
+                    return@launch
+                }
+                val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
+                val onMedia3 = hasEngine() && engine.engineId == "media3"
+                val action = FirstFrameRecoveryPolicy.action(
+                    elapsedMs = elapsed,
+                    hasBackup = s.lines.indices.any { it != s.activeLine },
+                    onMedia3 = onMedia3,
+                    vlcAlreadyTried = vlcFallbackTried,
+                )
+                // 只在档位变严重时动作（阶梯单调升档）。
+                if (!firstFrameLadder.acceptEscalation(generation, action)) continue
+                when (action) {
+                    FirstFrameRecoveryPolicy.Action.WAIT -> Unit
+                    FirstFrameRecoveryPolicy.Action.PREP_BACKUP ->
+                        OtvLog.i("点播首帧 ${elapsed}ms 未出 → 预备备用线（不打断）")
+                    FirstFrameRecoveryPolicy.Action.ENGINE_FALLBACK -> {
+                        // 只剩一条线（或换线更可能无效）且还在 media3：换引擎。
+                        vlcFallbackTried = true
+                        OtvLog.w("点播首帧 ${elapsed}ms 未出且无备用线 → 切 libVLC 兜底引擎")
+                        telemetry.mark(
+                            PlaybackTelemetry.Stage.ENGINE_FALLBACK,
+                            errorClass = PlaybackTelemetry.ErrorClass.DECODE,
+                            detail = "first frame ${elapsed}ms → vlc",
+                        )
+                        switchEngine("vlc")
+                    }
+                    FirstFrameRecoveryPolicy.Action.SWITCH -> {
+                        val next = pickNextLineForVod()
+                        if (next == null) {
+                            // 没有可切的线了，但阶梯还没到硬超时：换引擎再试一次
+                            // （media3 硬解挂死而线路只有一条是常见组合）。
+                            if (onMedia3 && !vlcFallbackTried) {
+                                vlcFallbackTried = true
+                                OtvLog.w("点播首帧 ${elapsed}ms 未出且无线可切 → 切 libVLC 兜底引擎")
+                                telemetry.mark(
+                                    PlaybackTelemetry.Stage.ENGINE_FALLBACK,
+                                    errorClass = PlaybackTelemetry.ErrorClass.DECODE,
+                                    detail = "first frame ${elapsed}ms no line → vlc",
+                                )
+                                switchEngine("vlc")
+                            } else {
+                                OtvLog.w("点播首帧 ${elapsed}ms 未出且已无线可切 → 等硬超时收口")
+                            }
+                        } else {
+                            OtvLog.w("点播首帧 ${elapsed}ms 未出 → 切备用线 #$next")
+                            telemetry.mark(
+                                PlaybackTelemetry.Stage.AUTO_SWITCH,
+                                detail = "first frame ${elapsed}ms → line $next",
+                            )
+                            markAutoSwitch(next)
+                            viewModelScope.launch { startSession(next, 0L) }
+                        }
+                    }
+                    FirstFrameRecoveryPolicy.Action.HARD_TIMEOUT -> {
+                        // 硬超时不再直接走 onLineFail：那条链第一步是「同线直连重试」，
+                        // 而 15s 一个画面都没出恰恰说明同线重试没有意义（地址没取到，
+                        // 或者取到了也解不出来帧），只会让用户再白等一轮 15s。
+                        // 这里按策略先换线、再换引擎，都用尽才判死。
+                        val next = pickNextLineForVod()
+                        val action = FirstFrameRecoveryPolicy.hardTimeoutAction(
+                            hasBackupLine = next != null,
+                            onMedia3 = onMedia3,
+                            vlcAlreadyTried = vlcFallbackTried,
+                        )
+                        when (action) {
+                            FirstFrameRecoveryPolicy.HardTimeoutAction.SWITCH_LINE -> {
+                                OtvLog.e("点播首帧 ${elapsed}ms 硬超时 → 换备用线 #$next")
+                                telemetry.mark(
+                                    PlaybackTelemetry.Stage.AUTO_SWITCH,
+                                    detail = "first frame hard timeout ${elapsed}ms → line $next",
+                                )
+                                markAutoSwitch(next!!)
+                                viewModelScope.launch { startSession(next, 0L) }
+                            }
+                            FirstFrameRecoveryPolicy.HardTimeoutAction.ENGINE_FALLBACK -> {
+                                vlcFallbackTried = true
+                                OtvLog.e("点播首帧 ${elapsed}ms 硬超时且无线可切 → 切 libVLC 兜底引擎")
+                                telemetry.mark(
+                                    PlaybackTelemetry.Stage.ENGINE_FALLBACK,
+                                    errorClass = PlaybackTelemetry.ErrorClass.DECODE,
+                                    detail = "first frame hard timeout ${elapsed}ms → vlc",
+                                )
+                                switchEngine("vlc")
+                            }
+                            FirstFrameRecoveryPolicy.HardTimeoutAction.GIVE_UP -> {
+                                OtvLog.e("点播首帧 ${elapsed}ms 硬超时且已无线可切/换引擎 → 判死")
+                                telemetry.mark(
+                                    PlaybackTelemetry.Stage.FATAL,
+                                    errorClass = PlaybackTelemetry.ErrorClass.DECODE,
+                                    detail = "first frame hard timeout ${elapsed}ms exhausted",
+                                )
+                                onLineFail("画面无输出（首帧超时 ${elapsed}ms）")
+                            }
+                        }
+                        return@launch
+                    }
+                    FirstFrameRecoveryPolicy.Action.DONE -> return@launch
+                }
+            }
+        }
+    }
+
+    /**
+     * 首帧阶梯切线时的候选选择：跳过已试过的线，并避开「刚失败过的那条线」。
+     *
+     * 冷却窗口内的回切会被 [LongPlaybackHealthPolicy.canSwitchNow] 拦下——同一条线
+     * 刚失败就立刻切回去，在 20s 内很容易把三条线耗光（比卡住更糟）。
+     */
+    private fun pickNextLineForVod(): Int? {
+        val s = _ui.value
+        val cur = s.activeLine
+        val now = android.os.SystemClock.elapsedRealtime()
+        val candidates = s.lines.indices.filter { it != cur }
+        // 先选没试过的，再退而求其次选试过的（但仍要过冷却）。
+        return candidates.firstOrNull { it !in triedLines && canAutoSwitchTo(it, now) }
+            ?: candidates.firstOrNull { canAutoSwitchTo(it, now) }
+    }
+
+    /** 自动切线是否允许（切线冷却未挡住刚失败的那条线）。用户手动切线不受此限。 */
+    private fun canAutoSwitchTo(candidateIndex: Int, nowMs: Long): Boolean =
+        LongPlaybackHealthPolicy.canSwitchNow(
+            nowMs = nowMs,
+            lastSwitchAtMs = lastAutoSwitchAt,
+            candidateIndex = candidateIndex,
+            failedIndex = _ui.value.activeLine,
+        )
+
+    /**
+     * 记录一次**自动**切线，作为 20–30s 冷却的起点。
+     *
+     * 冷却只拦「切回刚失败/刚切过的那一条」，切到别的线路永远放行——否则冷却会把
+     * 恢复链锁死（只剩刚那条线可用时反而不能自救）。
+     */
+    private fun markAutoSwitch(targetIndex: Int) {
+        if (targetIndex == _ui.value.activeLine) return
+        lastAutoSwitchAt = android.os.SystemClock.elapsedRealtime()
     }
 
     /** 防线一：20s 未起播 → 判定失败自动换线（方案 §3.2-1） */
@@ -901,17 +1124,80 @@ class PlayerViewModel(
         stallJob?.cancel()
         stallJob = viewModelScope.launch {
             var lastPos = -1L
+            var lastBuf = -1L
             var ticks = 0
+            // 缓冲/停滞的连续累计时长（毫秒）：交给 LongPlaybackHealthPolicy 判档。
+            var bufferingMs = 0L
+            // 已在当前缓冲周期里触发过的最高档位，避免同一周期反复重复动作。
+            var lastBufferAction = LongPlaybackHealthPolicy.Action.HEALTHY
             while (isActive) {
                 delay(1_000)
                 val s = _ui.value
                 if (s.playState == EnginePlayState.BUFFERING && !userPaused) {
-                    ticks++
-                    if (ticks >= STALL_TICKS_LIMIT) {
-                        ticks = 0
-                        recoverPlaybackStall("BUFFERING ${STALL_TICKS_LIMIT}s 无进展")
+                    bufferingMs += 1_000L
+                    // 2026-09-28：buffer 还在涨 = 正常补片，不是卡死。旧版只看
+                    // 「BUFFERING 满 8s」就把正常抖动判成卡死并换线（用户侧观感是
+                    // 「看十几分钟莫名换台」）。现在交给策略结合 buffer 增长判定。
+                    val bufferGrowing = s.bufferedAheadMs > lastBuf
+                    if (bufferGrowing) {
+                        if (lastBufferAction != LongPlaybackHealthPolicy.Action.HEALTHY) {
+                            telemetry.mark(
+                                PlaybackTelemetry.Stage.BUFFER_END,
+                                detail = "recovered buf=${s.bufferedAheadMs}ms",
+                            )
+                        }
+                        bufferingMs = 0
+                        lastBufferAction = LongPlaybackHealthPolicy.Action.HEALTHY
+                    } else {
+                        val action = LongPlaybackHealthPolicy.action(
+                            bufferingMs = bufferingMs,
+                            bufferGrowing = false,
+                            positionMoving = false,
+                            hasBackup = s.lines.indices.any { it != s.activeLine },
+                        )
+                        telemetry.mark(PlaybackTelemetry.Stage.BUFFER_START, detail = "buf=${s.bufferedAheadMs}ms")
+                        // 只在档位「变严重」时动作一次，别在同一档里反复触发。
+                        if (action != LongPlaybackHealthPolicy.Action.HEALTHY &&
+                            action != lastBufferAction
+                        ) {
+                            lastBufferAction = action
+                            when (action) {
+                                LongPlaybackHealthPolicy.Action.PREP_BACKUP ->
+                                    OtvLog.i("缓冲 ${bufferingMs}ms 无增长 → 预备备用线（不打断）")
+                                LongPlaybackHealthPolicy.Action.SWITCH -> {
+                                    OtvLog.w("缓冲 ${bufferingMs}ms 无增长 → 切备用线")
+                                    telemetry.mark(PlaybackTelemetry.Stage.AUTO_SWITCH, detail = "reason=buffering")
+                                    recoverPlaybackStall("BUFFERING ${bufferingMs / 1000}s 无进展")
+                                }
+                                LongPlaybackHealthPolicy.Action.DEGRADE_ENGINE -> {
+                                    OtvLog.w("缓冲 ${bufferingMs}ms 无增长 → 引擎降级")
+                                    if (hasEngine() && engine.engineId == "media3" && !vlcFallbackTried) {
+                                        vlcFallbackTried = true
+                                        telemetry.mark(
+                                            PlaybackTelemetry.Stage.ENGINE_FALLBACK,
+                                            errorClass = PlaybackTelemetry.ErrorClass.DECODE,
+                                            detail = "buffering ${bufferingMs}ms → vlc",
+                                        )
+                                        switchEngine("vlc")
+                                    } else {
+                                        recoverPlaybackStall("BUFFERING ${bufferingMs / 1000}s 无进展")
+                                    }
+                                }
+                                LongPlaybackHealthPolicy.Action.GIVE_UP -> {
+                                    OtvLog.e("缓冲 ${bufferingMs}ms 无增长 → 放弃当前线")
+                                    recoverPlaybackStall("BUFFERING ${bufferingMs / 1000}s 无进展")
+                                }
+                                LongPlaybackHealthPolicy.Action.HEALTHY -> Unit
+                            }
+                        }
                     }
+                    ticks = 0
                 } else if (s.playState == EnginePlayState.READY && s.isPlaying) {
+                    if (bufferingMs > 0) {
+                        telemetry.mark(PlaybackTelemetry.Stage.BUFFER_END, detail = "buf=${s.bufferedAheadMs}ms")
+                    }
+                    bufferingMs = 0
+                    lastBufferAction = LongPlaybackHealthPolicy.Action.HEALTHY
                     ticks = if (s.positionMs == lastPos) ticks + 1 else 0
                     lastPos = s.positionMs
                     if (ticks >= STALL_TICKS_LIMIT) {
@@ -921,7 +1207,10 @@ class PlayerViewModel(
                 } else {
                     ticks = 0
                     lastPos = -1
+                    bufferingMs = 0
+                    lastBufferAction = LongPlaybackHealthPolicy.Action.HEALTHY
                 }
+                lastBuf = s.bufferedAheadMs
             }
         }
     }
@@ -980,11 +1269,46 @@ class PlayerViewModel(
                     healthyTicks = 0
                 }
                 if (frozenTicks >= HEALTH_FREEZE_TICKS) {
+                    // 先取用本次累计值再清零：frozenMs 要用于冻结判定，不能被重置覆盖。
+                    val frozenMs = frozenTicks.toLong() * HEALTH_TICK_MS
                     frozenTicks = 0
-                    val secs = HEALTH_FREEZE_TICKS * HEALTH_TICK_MS / 1000
+                    val secs = frozenMs / 1000
+                    // 冻结 = 位置在前进但渲染帧数不增：换源对同编码内容无效，直接降级引擎。
+                    // 之前这里走的是通用 recoverPlaybackStall，而那条阶梯第 0 步是
+                    // RELOAD_CURRENT（原地重试同一条线）——对解码/渲染管线挂死毫无意义，
+                    // 只会让用户多等一轮。改为按 LongPlaybackHealthPolicy 的 DECODE 判定降级引擎。
+                    val isFrozen = LongPlaybackHealthPolicy.isFrozen(
+                        positionMoving = es.positionMs > lastPos,
+                        renderedNotIncreasingForMs = frozenMs,
+                    )
                     OtvLog.e("画面冻结：位置前进但渲染帧数 ${secs}s 不增 → 交给既有恢复阶梯")
                     PlaybackHealthLog.freeze(healthSnapshot("画面冻结 ${secs}s（时钟前进、无新帧）"))
-                    recoverPlaybackStall("画面冻结 ${secs}s（时钟前进、无新帧）")
+                    if (isFrozen) {
+                        telemetry.mark(
+                            PlaybackTelemetry.Stage.ENGINE_FALLBACK,
+                            errorClass = PlaybackTelemetry.ErrorClass.DECODE,
+                            detail = "frozen ${frozenMs}ms position moving, no new frame",
+                        )
+                        val action = LongPlaybackHealthPolicy.action(
+                            bufferingMs = 0L,
+                            bufferGrowing = true, // buffer 满也不能代表能出画面
+                            positionMoving = true,
+                            hasBackup = _ui.value.lines.indices.any { it != _ui.value.activeLine },
+                            errorClass = PlaybackTelemetry.ErrorClass.DECODE,
+                        )
+                        if (action == LongPlaybackHealthPolicy.Action.DEGRADE_ENGINE &&
+                            hasEngine() && engine.engineId == "media3" && !vlcFallbackTried
+                        ) {
+                            vlcFallbackTried = true
+                            OtvLog.w("画面冻结 ${secs}s → 切 libVLC（解码类冻结换线无效）")
+                            switchEngine("vlc")
+                        } else {
+                            // 没有引擎可降（或已在 vlc）→ 交回通用阶梯换线/重建。
+                            recoverPlaybackStall("画面冻结 ${secs}s（时钟前进、无新帧）")
+                        }
+                    } else {
+                        recoverPlaybackStall("画面冻结 ${secs}s（时钟前进、无新帧）")
+                    }
                 } else if (android.os.SystemClock.elapsedRealtime() - lastHealthLogAt >= HEALTH_LOG_INTERVAL_MS) {
                     lastHealthLogAt = android.os.SystemClock.elapsedRealtime()
                     PlaybackHealthLog.tick(healthSnapshot("5 分钟体检"))
@@ -1091,10 +1415,13 @@ class PlayerViewModel(
                 viewModelScope.launch { startSession(current, if (s.isLive) 0L else resume) }
             }
             RecoveryAction.SWITCH_SOURCE -> {
-                val next = s.lines.indices.firstOrNull { it != current && it !in triedLines }
-                    ?: s.lines.indices.firstOrNull { it != current }
-                if (next != null) viewModelScope.launch { startSession(next, if (s.isLive) 0L else resume) }
-                else recreateEngineForRecovery(current, resume)
+                val next = pickNextLineForVod()
+                if (next != null) {
+                    markAutoSwitch(next)
+                    viewModelScope.launch { startSession(next, if (s.isLive) 0L else resume) }
+                } else {
+                    recreateEngineForRecovery(current, resume)
+                }
             }
             RecoveryAction.RECREATE_ENGINE -> recreateEngineForRecovery(current, resume)
             RecoveryAction.RESET_RUNTIME -> {
@@ -1137,12 +1464,32 @@ class PlayerViewModel(
            （见 startHealthMonitor），僵尸源撑不到 60s，第 4 次就会换线。 */
         Log.i(TAG, "READY line=${_ui.value.activeLine} @$posMs ms")
         OtvLog.i("READY line=${_ui.value.activeLine} @$posMs ms（出画面）")
+        // 埋点结算：首帧到达。此处打点后，一行就能读出这次「点播放 → 出画面」各段耗时。
+        runCatching {
+            val started = _ui.value.lines.getOrNull(_ui.value.activeLine)
+            telemetry.mark(
+                PlaybackTelemetry.Stage.FIRST_FRAME,
+                source = started?.playRef.orEmpty(),
+                detail = "line=${_ui.value.activeLine}",
+            )
+            OtvLog.i(telemetry.summary(started?.playRef.orEmpty()).format())
+        }
         // 长时体检基线：起播现场（30s 验收与长跑对比都以这条为参考）
         runCatching { PlaybackHealthLog.start(healthSnapshot("起播")) }
         if (_ui.value.isLive) armIptvAudioCodecCheck()   // 电视#8：无声编解码检查
         // 线路记忆（仅点播；直播始终默认 bb＝原版足球直播2，需求 足球#14）
         if (!_ui.value.isLive) {
             runCatching { settings.rememberLine(vodId, engine.engineId, _ui.value.activeLine) }
+            // L0 last_good 记忆：这次成功起播的线路，下次优先直接用它（省掉整轮匹配）。
+            // 只存 {mytv_id, episode_index, source_id, content_id}，不存任何地址或凭证。
+            runCatching {
+                val mytvId = currentItem?.mytvId?.trim()?.toLongOrNull()
+                val started = _ui.value.lines.getOrNull(_ui.value.activeLine)
+                if (mytvId != null && started != null) {
+                    val lineId = started.playRef.substringBefore('|').ifBlank { started.vodId }
+                    repo.rememberLastGoodSource(mytvId, epStart, lineId, db.lastGoodSourceDao())
+                }
+            }
         }
         if (_ui.value.isLive || isFootballVod) return  // 直播/足球回放不进观看历史/进度库
         // 历史
@@ -1353,7 +1700,7 @@ class PlayerViewModel(
                 return
             }
         }
-        val next = _ui.value.lines.indices.firstOrNull { it !in triedLines }
+        val next = pickNextLineForVod()
         Log.w(TAG, "line fail(${_ui.value.activeLine}): $reason → ${next ?: "no more lines"}")
         OtvLog.w("line fail(${_ui.value.activeLine}): $reason → ${next?.let { "换线 $it" } ?: "全部失败"}")
         if (next == null) {
@@ -1362,6 +1709,7 @@ class PlayerViewModel(
             _ui.value = _ui.value.copy(fatalMsg = reason, controlsVisible = false)
         } else {
             val pos = _ui.value.positionMs
+            markAutoSwitch(next)
             viewModelScope.launch { startSession(next, if (pos > 1_000) pos else 0L) }
         }
     }
@@ -1388,6 +1736,7 @@ class PlayerViewModel(
         val line = _ui.value.activeLine
         val pos = _ui.value.positionMs
         triedLines.clear()
+        lastAutoSwitchAt = -1L   // 手动重试 = 显式重置，切线冷却不该拦住
         viewModelScope.launch { startSession(line, if (pos > 1_000) pos else 0L) }
     }
 
@@ -1579,6 +1928,8 @@ class PlayerViewModel(
             startedThisSession = false
             stallRecoveries = 0
             triedLines.clear()
+            // 换集是用户显式动作：上一集的切线冷却不该连累新的一集。
+            lastAutoSwitchAt = -1L
             _ui.value = _ui.value.copy(
                 epIndex = ep,
                 lines = newLines,

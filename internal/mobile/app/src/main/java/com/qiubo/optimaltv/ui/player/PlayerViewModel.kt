@@ -23,6 +23,7 @@ import com.qiubo.optimaltv.playback.PlaybackHealthLog
 import com.qiubo.optimaltv.playback.PlaybackHealthSnapshot
 import com.qiubo.optimaltv.playback.PlaybackRecoveryPolicy
 import com.qiubo.optimaltv.playback.RecoveryAction
+import com.qiubo.optimaltv.data.analytics.PlaybackTelemetry
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -163,6 +164,40 @@ class PlayerViewModel(
     private var startedThisSession = false
     /** 会话代数：并发的 startSession 只允许最新一代操作引擎（防旧源倒灌） */
     private var sessionGen = 0
+
+    /* ---------- 2026-09-28 取源阶梯 / 快速起播 / 埋点 ---------- */
+
+    /** 本次取源实际生效的层级（L0_last_good / L1_cloud_resolver / L2_local_detail）。 */
+    private var resolveTier: String = "none"
+
+    /** 线路已由 L0（本地 last_good）命中 → 点播放可直接 prepare，不必等任何网络往返。 */
+    private var resolvePrefillReady: Boolean = false
+
+    /** 一次「点播放 → 出画面」的计时上下文；出首帧时汇总 total_click_to_frame。 */
+    private val telemetry = PlaybackTelemetry.Session(vodId)
+
+    /**
+     * 长播健康冷却窗（换源/换引擎后防抖）。
+     *
+     * 状态机化是为了修一个具体的自激循环：旧版这里是裸字段，换线时装弹、
+     * 紧接着新线 READY 时 [onSessionStarted] 无条件清零，于是「刚换的线正在起播、
+     * 缓冲属正常」这段最该被保护的窗口立刻失效 → 健康采样又判卡顿 → 再换线。
+     * 现在起播不再清它，只有稳定播放满 60s（[onStablePlayback]）或会话结束才清。
+     */
+    private val healthCooldown = LongPlaybackHealthPolicy.Cooldown()
+
+    /**
+     * 会话级恢复预算（僵尸源封顶）。阶梯本身在 PlaybackRecoveryPolicy 里收敛，
+     * 但 `recoveryAttempt` 每次起播成功都清零 —— 「能出画面、几秒后必断」的线
+     * 可以无限循环。预算只被真正稳定播放（[onStablePlayback]）或换片/重试重置。
+     */
+    private val recoveryBudget = LongPlaybackHealthPolicy.RecoveryBudget()
+
+    /** 连续 BUFFERING 起始时刻（0 = 未在缓冲中）。 */
+    private var bufferingSince: Long = 0L
+
+    /** 上一次健康采样时的缓冲量（判断缓冲是否还在增长）。 */
+    private var lastBufferedAheadMs: Long = 0L
     /** 防止同一引擎会话重复收到 ENDED 时重复切集。 */
     private var handledEndedSessionGen = -1
     private var stallRecoveries = 0
@@ -309,6 +344,9 @@ class PlayerViewModel(
         vlcFallbackTried = false
         audioCodecChecked = false
         liveAutoRetries = 0
+        // 换台 = 新会话（同上：换线/重试/回退配额全部重置）
+        recoveryBudget.reset()
+        healthCooldown.reset()
         liveAutoRetryJob?.cancel()
         renewJob?.cancel()          // IPTV 本就不启用续签，防御性取消
         _ui.value = _ui.value.copy(
@@ -629,6 +667,27 @@ class PlayerViewModel(
 
     /** 引擎状态镜像收集（点播/直播共用）；重试重建引擎时先取消旧收集协程 */
     private var engineStateJob: Job? = null
+
+    /**
+     * 缓冲态跟踪（2026-09-28）：只做埋点与「缓冲是否仍在增长」判定，
+     * 真正的处置由 [LongPlaybackHealthPolicy] 在健康采样里决定。
+     *
+     * 正常预缓冲也会进 BUFFERING，所以这里不直接升级故障——只有 buffer
+     * 停住超过阈值才交给阶梯，避免把正常预缓冲误判成故障而白白换源。
+     */
+    private fun trackBufferState(isBuffering: Boolean, bufferedAheadMs: Long) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (isBuffering) {
+            if (bufferingSince == 0L) {
+                bufferingSince = now
+                telemetry.emit(PlaybackTelemetry.Phase.BUFFER_START)
+            }
+        } else if (bufferingSince != 0L) {
+            telemetry.emit(PlaybackTelemetry.Phase.BUFFER_END)
+            bufferingSince = 0L
+        }
+        lastBufferedAheadMs = bufferedAheadMs
+    }
     private fun collectEngineState() {
         engineStateJob?.cancel()
         engineStateJob = viewModelScope.launch {
@@ -648,6 +707,7 @@ class PlayerViewModel(
                     bufferedAheadMs = bufOut,
                     speed = st.speed,
                 )
+                trackBufferState(st.state == EnginePlayState.BUFFERING, st.bufferedAheadMs)
                 when {
                     st.state == EnginePlayState.ENDED -> handlePlaybackEnded()
                     st.state == EnginePlayState.READY && !startedThisSession -> onSessionStarted(st.positionMs)
@@ -729,8 +789,27 @@ class PlayerViewModel(
         // 懒解析源（hhkan）：先补全选集元数据，vodKey/epCount 才正确
         val effItem = repo.resolveDetail(item.id) ?: item
         currentItem = effItem
-        // 线路构建（含 hhkan 懒解析源）：跨源同名线路或站内多线路
-        val lines = VisibleVodLinePolicy.apply(repo.resolveLines(effItem, epStart))
+        // 线路构建：走取源阶梯（端侧 detail → L0 last_good → 云端 Resolver 排序）。
+        // 云端不可达时自动回落到端侧原序，所以拿到的 lines 与旧版同源同量，
+        // 只是顺序可能被 Resolver 优化。
+        val resolved = repo.resolveLinesWithResolver(effItem, epStart)
+        val lines = VisibleVodLinePolicy.apply(resolved.lines)
+        resolveTier = resolved.tier
+        resolvePrefillReady = resolved.tier == "L0_last_good"
+        telemetry.emit(
+            PlaybackTelemetry.Phase.RESOLVE_START,
+            sourceId = resolved.resolve?.preferred?.sourceId.orEmpty(),
+            contentId = resolved.resolve?.preferred?.contentId.orEmpty(),
+            note = resolved.tier,
+        )
+        if (resolved.resolve?.usable == true) {
+            val hit = resolved.resolve.preferred
+            telemetry.emit(
+                PlaybackTelemetry.Phase.RESOLVE_FIRST_SOURCE,
+                sourceId = hit?.sourceId.orEmpty(),
+                contentId = hit?.contentId.orEmpty(),
+            )
+        }
         if (lines.isEmpty()) {
             stopForFatal()
             _ui.value = _ui.value.copy(fatalMsg = "该集没有可用线路", title = effItem.title)
@@ -872,12 +951,16 @@ class PlayerViewModel(
         // 连续 TS 端点（实验设施，VLC ts demux 对拼接段时间戳重置容忍差，弃用）
         Log.i(TAG, "session start line=$lineIdx engine=${engine.engineId} url=$playUrl")
         OtvLog.i("startSession line=$lineIdx engine=${engine.engineId} startPos=$startPos url=${playUrl.take(120)}")
+        telemetry.emit(PlaybackTelemetry.Phase.PLAYER_PREPARE, note = resolveTier)
         engine.prepare(PrepareRequest(playUrl, startPos))
         armWatchdog()
         armFirstFrameWatchdog()
         startStallMonitor()
         startHealthMonitor()
         prefetchLines()
+
+        // 2026-09-28 快速起播：L0/L1 命中时线路引用已就位，这一步不再有任何片源解析往返
+        if (resolvePrefillReady) PlaybackTelemetry.counters.inc("playback.fast_start")
     }
 
     /**
@@ -1001,6 +1084,7 @@ class PlayerViewModel(
                     healthyTicks++
                     if (healthyTicks >= HEALTH_HEALTHY_TICKS) {
                         healthyTicks = 0
+                        onStablePlayback()
                         if (sameLineRetries != 0) {
                             sameLineRetries = 0
                             OtvLog.i("本线稳定播放 60s → 同线重试配额恢复")
@@ -1015,6 +1099,9 @@ class PlayerViewModel(
                     OtvLog.e("画面冻结：位置前进但渲染帧数 ${secs}s 不增 → 交给既有恢复阶梯")
                     PlaybackHealthLog.freeze(healthSnapshot("画面冻结 ${secs}s（时钟前进、无新帧）"))
                     recoverPlaybackStall("画面冻结 ${secs}s（时钟前进、无新帧）")
+                } else if (checkBufferHealth(es.state, es.bufferedAheadMs)) {
+                    // 缓冲停住且已超阈值：交给恢复阶梯处置（换源或降级引擎）
+                    recoverPlaybackStall("缓冲停住 ${bufferingSince}ms 无增长")
                 } else if (android.os.SystemClock.elapsedRealtime() - lastHealthLogAt >= HEALTH_LOG_INTERVAL_MS) {
                     lastHealthLogAt = android.os.SystemClock.elapsedRealtime()
                     PlaybackHealthLog.tick(healthSnapshot("5 分钟体检"))
@@ -1024,6 +1111,39 @@ class PlayerViewModel(
     }
 
     /** 体检快照取数（主线程；全部 runCatching，取不到就记 -1）。 */
+    /**
+     * 缓冲健康评估（2026-09-28）。返回 true = 该升级处置了。
+     *
+     * 判据核心：**buffer 必须结合「是否还在增长」**。ExoPlayer 正常预缓冲同样会进
+     * BUFFERING，此时 buffer 在涨就是健康；只有停住不动才是真卡顿。旧口径只看状态，
+     * 正常预缓冲会被误判成故障，代价是把用户正在看的线路白白换掉。
+     *
+     * 冷却期只观测不动手，避免「换源 → 仍在起播 → 又判卡顿 → 再换源」的自激循环。
+     */
+    private fun checkBufferHealth(state: EnginePlayState, bufferedAheadMs: Long): Boolean {
+        if (state != EnginePlayState.BUFFERING || bufferingSince == 0L) return false
+        val now = android.os.SystemClock.elapsedRealtime()
+        val bufferingMs = now - bufferingSince
+        val growing = LongPlaybackHealthPolicy.isGrowing(lastBufferedAheadMs, bufferedAheadMs)
+        val inCooldown = healthCooldown.isActive(now)
+        val action = LongPlaybackHealthPolicy.actionFor(bufferingMs, growing, inCooldown)
+        lastBufferedAheadMs = bufferedAheadMs
+        return when (action) {
+            LongPlaybackHealthPolicy.Action.PREPARE_BACKUP -> {
+                prefetchLines()
+                healthCooldown.arm(now, escalationStep = 1)
+                false
+            }
+            LongPlaybackHealthPolicy.Action.SWITCH_BACKUP,
+            LongPlaybackHealthPolicy.Action.ENGINE_DEGRADE,
+            -> true
+            LongPlaybackHealthPolicy.Action.HEALTHY,
+            LongPlaybackHealthPolicy.Action.COOLDOWN,
+            LongPlaybackHealthPolicy.Action.NONE,
+            -> false
+        }
+    }
+
     private fun healthSnapshot(note: String): PlaybackHealthSnapshot {
         val s = _ui.value
         val es = if (hasEngine()) engine.uiState.value else com.qiubo.optimaltv.playback.EngineUiState()
@@ -1102,6 +1222,20 @@ class PlayerViewModel(
     /** Bounded live/VOD recovery ladder shared with the TV client. */
     private fun recoverPlaybackStall(reason: String) {
         if (!hasEngine() || _ui.value.fatalMsg != null) return
+        /* 恢复预算：给「僵尸源」循环封顶。阶梯本身在 PlaybackRecoveryPolicy 里收敛，
+           但 recoveryAttempt 每次起播成功都清零 —— 一条「能出画面、几秒后必断」的线
+           可以无限循环（起播→清零→卡顿→换线→起播→…），观众只看到永远转圈。
+           这里用会话级总预算兜底：只有真正稳定播放过 60s 的线才恢复预算。 */
+        if (!recoveryBudget.requestRecovery(stablePlayback = false)) {
+            OtvLog.e("恢复预算耗尽（${recoveryBudget.spent} 次未稳定起播）→ 放弃：$reason")
+            runCatching { PlaybackHealthLog.stall(healthSnapshot("恢复预算耗尽：$reason")) }
+            telemetry.emit(PlaybackTelemetry.Phase.FATAL, note = "recovery_budget_exhausted")
+            val s0 = _ui.value
+            stopForFatal()
+            _ui.value = s0.copy(fatalMsg = "播放持续卡顿，已完成自动恢复", controlsVisible = false)
+            if (s0.isLive) scheduleLiveAutoRetry()
+            return
+        }
         val s = _ui.value
         val kind = if (s.isLive) PlaybackKind.LIVE else PlaybackKind.VOD
         val attempt = recoveryAttempt++
@@ -1121,6 +1255,9 @@ class PlayerViewModel(
                 viewModelScope.launch { startSession(current, if (s.isLive) 0L else resume) }
             }
             RecoveryAction.SWITCH_SOURCE -> {
+                telemetry.emit(PlaybackTelemetry.Phase.AUTO_SWITCH, note = "step$attempt")
+                // 换源后进入冷却：刚换的线正在起播，缓冲中属正常，此刻再判卡顿会自激。
+                healthCooldown.arm(android.os.SystemClock.elapsedRealtime(), attempt)
                 val next = s.lines.indices.firstOrNull { it != current && it !in triedLines }
                     ?: s.lines.indices.firstOrNull { it != current }
                 if (next != null) viewModelScope.launch { startSession(next, if (s.isLive) 0L else resume) }
@@ -1145,6 +1282,7 @@ class PlayerViewModel(
 
     private fun recreateEngineForRecovery(line: Int, resume: Long) {
         val id = engine.engineId
+        telemetry.emit(PlaybackTelemetry.Phase.ENGINE_FALLBACK, note = id)
         runCatching { engine.release() }
         installEngine(EngineRegistry.create(id, Graph.appContext))
         _ui.value = _ui.value.copy(
@@ -1154,9 +1292,60 @@ class PlayerViewModel(
         viewModelScope.launch { startSession(line, if (_ui.value.isLive) 0L else resume) }
     }
 
+    /**
+     * 把本集成功的线路写进 last_good（L0 缓存的写侧）。
+     *
+     * 只存 `{sourceId}:{contentId}` 这段稳定引用——**不存播放地址、Cookie 或签名**，
+     * 播放地址每次仍由 `/vod/play` 即时解析，签名过期不会污染缓存。
+     */
+    private fun rememberSuccessfulLine() {
+        if (_ui.value.isLive) return
+        val line = _ui.value.lines.getOrNull(_ui.value.activeLine) ?: return
+        val item = currentItem ?: return
+        if (item.mytvId.isBlank() || line.playRef.isBlank()) return
+        val parts = line.playRef.split("|")
+        if (parts.size != 3) return
+        // playRef = "{detailRef}|{lineId}|{episode}"，lineId = "{sourceId}:{contentId}:{epIndex}"
+        val lineId = parts[1].split(":")
+        if (lineId.size < 2) return
+        Graph.appScope.launch {
+            repo.rememberLastGoodSource(
+                mytvId = item.mytvId,
+                epIndex = _ui.value.epIndex,
+                sourceId = lineId[0],
+                contentId = lineId[1],
+            )
+        }
+    }
+
+    /**
+     * 这条线**真的撑住了**（健康监控连续 60s 在播）——恢复冷却窗与恢复预算。
+     *
+     * 这是唯一有资格清 [healthCooldown] / [recoveryBudget] 的信号。
+     * 起播成功（哪怕只有一帧）不算数：僵尸源的特征恰好就是「能出画面、几秒后必断」，
+     * 拿起播当信号就等于给无限循环发通行证。
+     */
+    private fun onStablePlayback() {
+        if (healthCooldown.until == 0L && recoveryBudget.spent == 0) return
+        val wasCooling = healthCooldown.until
+        healthCooldown.onStablePlayback()
+        recoveryBudget.onStablePlayback()
+        OtvLog.i("本线稳定播放 60s → 冷却窗与恢复预算恢复（wasCooldown=$wasCooling）")
+    }
+
     private suspend fun onSessionStarted(posMs: Long) {
         startedThisSession = true
         recoveryAttempt = 0
+        // 冷却**不在这里清**：本方法在新线一 READY 就跑，而换线刚装过弹——
+        // 清掉等于「刚换的线正在起播、缓冲属正常」这段最需要保护的窗口当场作废，
+        // 紧接着的健康采样会再判卡顿、再换线，自激循环。真正清冷却的地方是
+        // 稳定播放满 60s（onStablePlayback）——那时才值得重新完全信任这条线。
+        bufferingSince = 0L
+        lastBufferedAheadMs = 0L
+        // 首帧达成：结算端到端耗时。此后端到端值不再变化，可安全上报表。
+        telemetry.emit(PlaybackTelemetry.Phase.FIRST_FRAME, note = resolveTier)
+        PlaybackTelemetry.counters.inc("playback.first_frame")
+        rememberSuccessfulLine()
         watchdogJob?.cancel()
         liveAutoRetries = 0   // 成功起播：自动重试计数归零（下次故障重新计 5 次）
         liveAutoRetryJob?.cancel()
@@ -1344,6 +1533,13 @@ class PlayerViewModel(
 
     private fun onLineFail(reason: String) {
         if (_ui.value.fatalMsg != null) return
+        // 2026-09-28 故障分类：解码类换引擎、网络类换源。方向判错代价很高——
+        // 解码失败反复换源只是把同一条坏线路换着花样重试，永远出不了画面。
+        val remedy = FirstFrameRecoveryPolicy.remedyFor(reason)
+        telemetry.emit(
+            PlaybackTelemetry.Phase.FATAL,
+            note = FirstFrameRecoveryPolicy.classify(reason).name.lowercase(),
+        )
         // v1.16：IPTV 频道内备用线路优先（换线路 ≠ 换频道，观众无感）
         if (iptvRotateLine(reason)) return
         if (_ui.value.isLive) {
@@ -1413,6 +1609,28 @@ class PlayerViewModel(
         val next = _ui.value.lines.indices.firstOrNull { it !in triedLines }
         Log.w(TAG, "line fail(${_ui.value.activeLine}): $reason → ${next ?: "no more lines"}")
         OtvLog.w("line fail(${_ui.value.activeLine}): $reason → ${next?.let { "换线 $it" } ?: "全部失败"}")
+        /* 解码类故障：换线救不了（URL 有效，是本机解不动）。libVLC 自带 ffmpeg
+           软解全编解码，是这类故障的正解；先用它重起同线，仍失败再进常规换线阶梯。 */
+        if (remedy == FirstFrameRecoveryPolicy.Remedy.SWITCH_ENGINE &&
+            hasEngine() && engine.engineId != "vlc" && !vlcFallbackTried
+        ) {
+            vlcFallbackTried = true
+            OtvLog.w("line fail(${_ui.value.activeLine}): 解码类故障 → 切 libVLC 重起同线")
+            telemetry.emit(PlaybackTelemetry.Phase.ENGINE_FALLBACK, note = "vlc")
+            val pos = _ui.value.positionMs
+            val cur = _ui.value.activeLine
+            viewModelScope.launch {
+                if (hasEngine()) engine.release()
+                installEngine(EngineRegistry.create("vlc", Graph.appContext))
+                _ui.value = _ui.value.copy(
+                    engineId = engine.engineId, engineName = engine.displayName,
+                    engineEpoch = engineEpochCounter,
+                )
+                collectEngineState()
+                startSession(cur, if (pos > 1_000) pos else 0L, reuseResolvedUrl = true)
+            }
+            return
+        }
         if (next == null) {
             viewModelScope.launch { saveProgress(force = false) }
             stopForFatal()
@@ -1445,6 +1663,10 @@ class PlayerViewModel(
         val line = _ui.value.activeLine
         val pos = _ui.value.positionMs
         triedLines.clear()
+        // 手动重试 = 用户明确再给一次机会：恢复预算与冷却窗归零，
+        // 否则刚点完「重试」就立刻撞上上一轮攒下的预算上限，观感像按钮没生效。
+        recoveryBudget.reset()
+        healthCooldown.reset()
         viewModelScope.launch { startSession(line, if (pos > 1_000) pos else 0L) }
     }
 
@@ -1792,6 +2014,9 @@ class PlayerViewModel(
             startedThisSession = false
             stallRecoveries = 0
             triedLines.clear()
+            // 换集 = 新会话：上一集的恢复预算与冷却窗不该拖累这一集。
+            recoveryBudget.reset()
+            healthCooldown.reset()
             _ui.value = _ui.value.copy(
                 epIndex = ep,
                 lines = newLines,

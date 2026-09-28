@@ -62,6 +62,14 @@ class VodApiSource(
                 val refreshQuery = if (!refresh) "" else if (deferSources) "&refresh=1" else "?refresh=1"
                 return "/vod/detail/${id.removePrefix("douban:")}$deferQuery$refreshQuery"
             }
+
+            /**
+             * 云端 Source Resolver（2026-09-28）。返回线路**引用**（source_id/content_id），
+             * 不含播放地址——播放地址仍由 [/vod/play] 在起播那一刻解析，避免把带分钟级
+             * 签名的直链提前落进缓存。
+             */
+            fun resolve(mytvId: Long, episode: Int = 1): String =
+                "/vod/resolve/$mytvId?episode=${episode.coerceAtLeast(1)}"
         }
 
         private fun fetchJson(base: String, path: String, client: OkHttpClient): JSONObject {
@@ -226,5 +234,108 @@ class VodApiSource(
             val json = fetchJson(base, path, client)
             return listOfNotNull(json.optString("url").takeIf(String::isNotBlank))
         }
+
+        // ---------- 云端 Source Resolver（2026-09-28） ----------
+
+        /**
+         * 解析器返回的一条线路引用。字段与后端 `ResolveCandidate.to_public_dict()` 一一对应。
+         *
+         * 这里**没有 url 字段**：resolver 只给稳定标识，播放地址由 [fetchPlay] 在起播那一刻
+         * 解析，避免把带分钟级签名的直链提前落进缓存。
+         */
+        data class ResolveCandidate(
+            val sourceId: String,
+            val sourceName: String,
+            val contentId: String,
+            val episodeIndex: Int,
+            val matchScore: Int,
+        ) {
+            /**
+             * 拼出 `/vod/play` 用的 line id。
+             *
+             * 后端 `vod_sources.py` 的线路 id 格式是 `"{source_id}:{content_id}:{lineIndex}"`
+             *（`"%s:%s:%d" % (self.source.id, candidate.get("id"), index)`）。resolver 只回
+             * source_id + content_id，第三段用 0 —— `/vod/play` 按整串 id 查线路行，
+             * 取 0 命中该内容在源下的第一组线路。
+             */
+            fun lineId(): String = "$sourceId:$contentId:0"
+        }
+
+        /** 解析器整体结果。[status] 取值见 [RESOLVE_STATUSES]。 */
+        data class ResolveResponse(
+            val mytvId: Long,
+            val episode: Int,
+            val status: String,
+            val preferred: ResolveCandidate?,
+            val backups: List<ResolveCandidate>,
+        ) {
+            /**
+             * 只有真正拿到线路引用才算「可用」。
+             *
+             * RESOLVING / FALLBACK_SEARCHING 是「服务端还在算」——此时没有 preferred，
+             * 客户端必须回落到本地 `/vod/detail` 全量匹配，不能空着干等。
+             * STALE_AVAILABLE 拿到的是过期索引里的线路，能播，只是可能不是最新集；
+             * 允许使用（总比让用户看到空片源强）。
+             */
+            val isUsable: Boolean get() = preferred != null
+
+            /** 服务端没给出线路引用时为 true —— 该状态下必须回落本地匹配。 */
+            val needsFallback: Boolean get() = !isUsable
+        }
+
+        /** 后端 `vod_resolver.RESOLVE_STATUSES` 的全集。 */
+        val RESOLVE_STATUSES = setOf(
+            "RESOLVING", "FAST_PATH_FAILED", "FALLBACK_SEARCHING",
+            "STALE_AVAILABLE", "TEMPORARILY_UNAVAILABLE", "MATCHED",
+        )
+
+        /**
+         * 解析 `/vod/resolve` 响应。
+         *
+         * 严格容错：任何字段缺失/类型不符都退化成「没有线路」，由上层回落本地匹配。
+         * 宁可少走一步云端，也不能因为一条脏数据把播放功能整个卡死。
+         */
+        fun parseResolve(json: JSONObject): ResolveResponse {
+            val status = json.optString("status").trim().uppercase()
+            fun candidate(raw: JSONObject?): ResolveCandidate? {
+                if (raw == null) return null
+                val sourceId = raw.optString("source_id").trim()
+                val contentId = raw.optString("content_id").trim()
+                if (sourceId.isBlank() || contentId.isBlank()) return null
+                return ResolveCandidate(
+                    sourceId = sourceId,
+                    sourceName = raw.optString("source_name").trim(),
+                    contentId = contentId,
+                    episodeIndex = raw.optInt("episode_index", 0),
+                    matchScore = raw.optInt("match_score", 0),
+                )
+            }
+            val backupArray = json.optJSONArray("backups")
+            val parsedBackups = (0 until (backupArray?.length() ?: 0)).mapNotNull { i ->
+                candidate(backupArray?.optJSONObject(i))
+            }
+            val preferred = candidate(json.optJSONObject("preferred"))
+            return ResolveResponse(
+                mytvId = json.optLong("mytv_id", 0L),
+                episode = json.optInt("episode", 1),
+                status = status,
+                // backups[0] 在「preferred 为空但 backups 非空」的异常形态下也当首选用，
+                // 免得白白浪费一次已经算好的匹配结果；此时 backups 不重复计入。
+                preferred = preferred ?: parsedBackups.firstOrNull(),
+                backups = if (preferred != null) parsedBackups else parsedBackups.drop(1),
+            )
+        }
+
+        /** 调 `/vod/resolve`。失败一律返回 null（上层回落本地匹配），不抛。 */
+        fun fetchResolve(
+            base: String,
+            client: OkHttpClient,
+            mytvId: Long,
+            episode: Int = 1,
+        ): ResolveResponse? = runCatching {
+            parseResolve(fetchJson(base, VodRoutes.resolve(mytvId, episode), client))
+        }.onFailure {
+            android.util.Log.w("OTV", "resolve mytv=$mytvId ep=$episode 失败: ${it.message}")
+        }.getOrNull()
     }
 }

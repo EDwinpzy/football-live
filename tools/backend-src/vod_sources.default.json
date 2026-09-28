@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": 1,
+  "version": 2,
   "sources": [
     {"id":"hhkan","name":"好好看","site_url":"https://www.haohankan.com","api_url":"","adapter_type":"hhkan","enabled":true,"revision":1},
     {"id":"bfzy","name":"暴风","site_url":"https://bfzyapi.com","api_url":"https://bfzyapi.com/api.php/provide/vod/","adapter_type":"macms_json","enabled":true,"revision":1},
@@ -10,6 +10,8 @@
     {"id":"hhzy","name":"豪华","site_url":"https://hhzyapi.com","api_url":"https://hhzyapi.com/api.php/provide/vod/","adapter_type":"macms_json","enabled":true,"revision":1},
     {"id":"hongniu","name":"红牛","site_url":"https://www.hongniuzy2.com","api_url":"https://www.hongniuzy2.com/api.php/provide/vod/","adapter_type":"macms_json","enabled":true,"revision":1},
     {"id":"subo","name":"速播","site_url":"https://subocaiji.com","api_url":"https://subocaiji.com/api.php/provide/vod/","adapter_type":"macms_json","enabled":true,"revision":1},
-    {"id":"360zy","name":"360","site_url":"https://360zy.com","api_url":"https://360zy.com/api.php/provide/vod/","adapter_type":"macms_json","enabled":true,"revision":1}
+    {"id":"360zy","name":"360","site_url":"https://360zy.com","api_url":"https://360zy.com/api.php/provide/vod/","adapter_type":"macms_json","enabled":true,"revision":1},
+    {"id":"10000000-0000-0000-0000-00000000000b","name":"猫眼","site_url":"https://api.maoyanapi.top","api_url":"https://api.maoyanapi.top/api.php/provide/vod/","adapter_type":"macms_json","enabled":true,"revision":1},
+    {"id":"10000000-0000-0000-0000-00000000000c","name":"VN影视","site_url":"https://api.vnzyz.com","api_url":"https://api.vnzyz.com/api.php/provide/vod/","adapter_type":"macms_json","enabled":true,"revision":1}
   ]
 }

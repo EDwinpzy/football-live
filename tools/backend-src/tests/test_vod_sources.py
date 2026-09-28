@@ -12,10 +12,36 @@ import vod_sources  # noqa: E402
 
 
 class VodSourcesTest(unittest.TestCase):
-    def test_default_registry_contains_current_nine_sources(self):
+    def test_default_registry_contains_reachable_fallback_candidates(self):
         registry = vod_sources.SourceRegistry.load_default()
+        self.addCleanup(registry.close)
         self.assertEqual([s.name for s in registry.sources],
-                         ["好好看", "暴风", "极速", "金鹰", "虎牙", "豪华", "红牛", "速播", "360"])
+                         ["好好看", "暴风", "极速", "金鹰", "虎牙", "豪华", "红牛", "速播", "360", "猫眼", "VN影视"])
+
+    def test_unreachable_source_does_not_block_reachable_source(self):
+        class FakeAdapter:
+            def __init__(self, source): self.source = source
+            def search(self, _subject):
+                if self.source.id == "offline":
+                    raise TimeoutError("source unavailable")
+                return [{"title": "兰香如故", "year": "2026", "category": "tv", "season": 0}]
+            def detail(self, _candidate):
+                return [{"id": "online:1:0", "source_id": self.source.id,
+                         "name": self.source.name,
+                         "episodes": [{"index": 0, "name": "第1集", "url": "https://v.example/1.m3u8"}]}]
+
+        old = vod_sources.MacCmsAdapter
+        vod_sources.MacCmsAdapter = FakeAdapter
+        registry = vod_sources.SourceRegistry([
+            vod_sources.VodSource("offline", "断线", "https://offline.example", "https://offline.example/api", "macms_json"),
+            vod_sources.VodSource("online", "可用", "https://online.example", "https://online.example/api", "macms_json"),
+        ], probe=lambda _url: {"alive": True, "height": 720, "latency_ms": 1})
+        try:
+            lines = registry.resolve_subject({"title": "兰香如故", "year": "2026", "category": "tv"}, wait_for_all=True)
+            self.assertIn("online", {line["source_id"] for line in lines})
+        finally:
+            registry.close()
+            vod_sources.MacCmsAdapter = old
 
     def test_discover_maccms_home_normalizes_api(self):
         def fake_fetch(url):

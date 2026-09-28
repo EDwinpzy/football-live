@@ -31,6 +31,7 @@ import os
 import pathlib
 import sys
 import time
+import urllib.parse
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "tools" / "backend-src"
@@ -41,8 +42,8 @@ import vod_sources  # noqa: E402
 SNAPSHOT = BACKEND / "douban_snapshot.json"
 DEFAULT_OUT = ROOT / "artifacts" / "vod-lines.json"
 LINE_KEYS = (
-    "id", "source_id", "source_name", "name", "episodes", "height", "alive",
-    "latency_ms", "score", "match_score",
+    "id", "source_id", "source_name", "source_alias", "name", "episodes",
+    "height", "alive", "latency_ms", "score", "match_score",
 )
 
 
@@ -84,6 +85,28 @@ def trim_line(line: dict) -> dict:
     return out
 
 
+def _primary_site_host(registry, source_id) -> str:
+    """The host the published registry can be joined on, without "www.".
+
+    The published registry hands out its own ids, so the local ``source_id`` in
+    a line is not a usable join key. The site host is what both sides know. A
+    source the builder cannot place yields no alias, which keeps the line
+    visibly unjoinable instead of guessing a host.
+    """
+    for source in getattr(registry, "sources", ()) or ():
+        if str(getattr(source, "id", "")) != str(source_id):
+            continue
+        for value in (getattr(source, "site_url", ""), getattr(source, "api_url", "")):
+            host = urllib.parse.urlsplit(str(value or "")).hostname or ""
+            host = host.strip().lower()
+            if host.startswith("www."):
+                host = host[4:]
+            if host and "." in host:
+                return host
+        return ""
+    return ""
+
+
 def resolve_one(registry, subject: dict) -> tuple[str, dict]:
     started = time.time()
     try:
@@ -93,6 +116,11 @@ def resolve_one(registry, subject: dict) -> tuple[str, dict]:
     kept = []
     for line in lines:
         trimmed = trim_line(line)
+        host = _primary_site_host(registry, line.get("source_id"))
+        if host:
+            trimmed["source_alias"] = host
+        else:
+            trimmed.pop("source_alias", None)
         if trimmed.get("episodes"):
             kept.append(trimmed)
     return subject["key"], {

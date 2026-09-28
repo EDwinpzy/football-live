@@ -346,7 +346,13 @@ fun VodScreen(nav: NavController) {
                         horizontalArrangement = Arrangement.spacedBy(18f.sx(s)),
                         contentPadding = PaddingValues(end = 40f.sx(s)),
                     ) {
-                    items(categories.size) { i ->
+                    // 方案 §11.1：分类 chip 用稳定的分类 id 做 key，不用 index。
+                    // 分类表是异步到货的（首页先渲染缓存、随后被服务端数据替换），
+                    // 用 index 会让「当前选中项」跟着位置漂移，表现为选中高亮跳到别的分类。
+                    items(categories.size, key = { i ->
+                        val id = categories[i].first
+                        if (id.isBlank()) "chip-all" else "chip-$id"
+                    }) { i ->
                         val (id, name) = categories[i]
                         val active = i == catSel
                         val isAllChip = id.isBlank()

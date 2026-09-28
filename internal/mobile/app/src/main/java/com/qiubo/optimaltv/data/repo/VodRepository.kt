@@ -1,7 +1,10 @@
 package com.qiubo.optimaltv.data.repo
 
 import com.qiubo.optimaltv.BuildConfig
+import com.qiubo.optimaltv.Graph
+import com.qiubo.optimaltv.data.analytics.PlaybackTelemetry
 import com.qiubo.optimaltv.data.catalog.MetadataCatalogStore
+import com.qiubo.optimaltv.data.db.LastGoodSourceEntity
 import com.qiubo.optimaltv.data.model.Category
 import com.qiubo.optimaltv.data.model.CatalogMedia
 import com.qiubo.optimaltv.data.model.Episode
@@ -10,6 +13,8 @@ import com.qiubo.optimaltv.data.model.VodItem
 import com.qiubo.optimaltv.data.prefs.SettingsStore
 import com.qiubo.optimaltv.data.source.ContentSource
 import com.qiubo.optimaltv.data.source.HhkanSource
+import com.qiubo.optimaltv.data.source.ResolverRanking
+import com.qiubo.optimaltv.data.source.SourceResolveResult
 import com.qiubo.optimaltv.data.source.VodApiSource
 import com.qiubo.optimaltv.data.source.HhkanSource.ChannelSection as HSec
 import com.qiubo.optimaltv.data.source.HhkanSource.Companion.DetailInfo
@@ -24,6 +29,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 data class Aggregated(
     val categories: List<Category>,
@@ -166,6 +172,39 @@ internal fun decodeSnapshot(text: String, acceptedVersions: Set<Int>): CatalogSn
 /** 目录连续空结果时的后台重试间隔（毫秒）：内嵌后端冷启动/热更重启需要的时间窗。 */
 private val CATALOG_RETRY_DELAYS = longArrayOf(5_000L, 10_000L, 20_000L, 30_000L)
 
+/**
+ * 取源阶梯的可断言契约。
+ *
+ * 抽成对象而不是散落的字面量，是为了让「本地优先、云端不拖起播」这条方案硬约束
+ * 有一个**可执行**的落点：生产代码读这里，单测也读这里，改坏了会红。
+ */
+object VodRepositoryConfig {
+
+    /**
+     * 云端 Resolver 的**硬上限**（毫秒）。
+     *
+     * Resolver 是排序层，本机 detail 已经先拿到线了，它只是锦上添花。
+     * 方案 P95 首帧 ≤ 4s，排序层多等一秒都是白等——所以给它 1.5s 封顶：
+     * 命中就重排（省掉后续人工换线），不命中/超时/机房出口不通就按本地原序起播，
+     * 观感与旧版完全一致但**不再被云端拖住**。
+     */
+    const val RESOLVER_TIMEOUT_MS = 1_500L
+
+    /**
+     * 阶梯的求值次序。`detail`（端侧多源匹配）是唯一能凭空产出可播线路的一层，
+     * 必须最先跑；`cloud`（云端 Resolver）只是它之上的排序层，恒定排在最后。
+     */
+    val TIER_ORDER = listOf("detail", "last_good", "cloud")
+
+    /**
+     * 云端不可用时的收敛动作：**原样返回端侧已解析出的线路**。
+     *
+     * 明确写出来而不是让调用方自己判断，是为了让「云端失败不得改变用户拿到什么」
+     * 变成一条可测语句——超时、不可达、无候选、状态非 MATCHED 全走这一个出口。
+     */
+    fun <T> onCloudUnavailable(local: List<T>): List<T> = local
+}
+
 /** 内容仓库（技术方案 §3.1 业务层·内容仓库）：好好看目录 / 分类 / 搜索。 */
 class VodRepository(
     private val settings: SettingsStore,
@@ -184,6 +223,22 @@ class VodRepository(
      *  「暂无片源/暂无简介」）；这里放宽到 45s，与 HhkanSource 的详情口径一致。 */
     private val detailClient by lazy {
         okHttp.newBuilder().readTimeout(45, java.util.concurrent.TimeUnit.SECONDS).build()
+    }
+
+    /**
+     * 云端 Resolver 专用客户端：**独立且超时不拖累其他请求**。
+     *
+     * 不能直接复用 [okHttp]（10s 读超时）：Resolver 不可达时会占住调用方 10s，
+     * 而它只是排序层，等 10s 毫无收益。callTimeout 保证整趟（含连接/读/写）封顶，
+     * 与外层 [RESOLVER_TIMEOUT_MS] 一起构成双保险——任一先到都立刻走本地原序。
+     */
+    private val resolveClient by lazy {
+        okHttp.newBuilder()
+            .callTimeout(
+                VodRepositoryConfig.RESOLVER_TIMEOUT_MS,
+                java.util.concurrent.TimeUnit.MILLISECONDS,
+            )
+            .build()
     }
 
     /** 内置后端就绪探测：仅当 base 指向 127.0.0.1/localhost（内置后端冷启动需几秒）时轮询。
@@ -972,6 +1027,153 @@ class VodRepository(
                 label = line.name,
                 url = "",
                 playRef = "${item.detailRef}|${ep.second}|${ep.third}",
+            )
+        }
+    }
+
+    // ---------- 云端 Resolver（L0~L5 取源阶梯） ----------
+
+    /**
+     * 一次取源的结果 + 走了哪一级（用于埋点与排障）。
+     *
+     * [lines] 为空表示这一层没拿到任何可播线路，调用方必须继续往下走，
+     * **绝不能让用户看到空片源**。
+     */
+    data class ResolvedLines(
+        val lines: List<LineInfo> = emptyList(),
+        val tier: String = "none",
+        val resolve: SourceResolveResult? = null,
+    )
+
+    /**
+     * 取源阶梯（**执行顺序**见 [VodRepositoryConfig.TIER_ORDER]）：
+     * - 端侧 `/vod/detail` 多源匹配（实测 ~0.9s 出 12 条线）——**最先跑**，唯一能造出可播线路的一层；
+     * - L0 本地 last_good（同影片同集上次成功线路）——在已取到的线路里零网络命中；
+     * - L1 云端 Resolver（按元数据中心 ID 的线路排序）——**最后跑，且有 1.5s 硬上限**。
+     *
+     * 顺序是刻意的：云端 Resolver 排在端侧之后，是因为它只是**排序层**——
+     * 候选 (source_id:content_id) 与 detail 线路 id 前两段同构，只能重排既有线路，
+     * 造不出可播线路。把它排在前面串行等，机房出口不通时（磐石云无境外出口）
+     * 每次点播都要先白等一个超时，方案「客户端优先直连、云端失败不拖起播」就废了。
+     *
+     * [ResolvedLines.tier] 记录实际生效层；任一层拿不到可用结果都回落到端侧原序，
+     * **绝不让用户看到空片源**。
+     */
+    suspend fun resolveLinesWithResolver(
+        item: VodItem,
+        epIndex: Int,
+        mytvId: String = item.mytvId,
+        episode: Int = epIndex + 1,
+    ): ResolvedLines = withContext(Dispatchers.IO) {
+        val mytvIdLong = mytvId.trim().toLongOrNull()
+
+        // L2 先跑（端侧既有 detail 路径）——它是**唯一能凭空造出可播线路**的一层，
+        // 也是本机可达、不依赖机房出口的一层。云端 Resolver 只是它之上的排序层。
+        // 旧序把云端排在本地前面、串行等它：机房到片源出口不通时（磐石云无境外出口），
+        // 每次点播都要先白等一个 /vod/resolve 超时才回落，方案「客户端优先直连、
+        // 云端失败不拖起播」被完全架空。改为：**本地先拿到线，再并行探云端排序**。
+        val local = resolveLines(item, epIndex)
+        if (local.isEmpty()) return@withContext ResolvedLines(emptyList(), "none", null)
+
+        // L0：本地 last_good（同影片同集上次成功线路，零网络）
+        if (mytvIdLong != null) {
+            val remembered = runCatching {
+                Graph.db.lastGoodSourceDao().get(mytvIdLong, epIndex)
+            }.getOrNull()
+            if (remembered != null) {
+                // 在已取到的 local 里找，不再为 L0 重新触发一整轮 /vod/detail。
+                // 逐段比对而非 startsWith：`content-1` 会前缀命中 `content-10`，
+                // 那样 L0 会把「上次成功的第 10 集线路」当成这集的线路送进起播——错集。
+                val hit = local.firstOrNull { line ->
+                    ResolverRanking.matchesCandidate(
+                        lineLinePrefix(line.playRef), remembered.sourceId, remembered.contentId,
+                    )
+                }
+                if (hit != null) {
+                    PlaybackTelemetry.counters.inc("resolve.tier.l0")
+                    return@withContext ResolvedLines(listOf(hit), "L0_last_good")
+                }
+            }
+        }
+
+        // L1：云端 Resolver（只做排序，不新增可播线路）。**短超时**：它是纯锦上添花的
+        // 排序层，超时不得影响起播——超了就用 local 原序（L2），与旧版功能等价。
+        if (mytvIdLong != null) {
+            val result = runCatching {
+                withTimeout(VodRepositoryConfig.RESOLVER_TIMEOUT_MS) {
+                    VodApiSource.fetchResolve(
+                        settings.current().hhkanBaseUrl, resolveClient, mytvIdLong, episode,
+                    )
+                }
+            }.getOrNull()
+            if (result != null && result.hasCandidates) {
+                val ranked = applyResolverRanking(local, result)
+                if (ranked.isNotEmpty()) {
+                    PlaybackTelemetry.counters.inc("resolve.tier.l1")
+                    return@withContext ResolvedLines(ranked, "L1_cloud_resolver", result)
+                }
+            }
+        }
+
+        // 云端没给出可用排序（或超时/不可达）→ 端侧原有顺序，行为与旧版一致。
+        PlaybackTelemetry.counters.inc("resolve.tier.l2")
+        return@withContext ResolvedLines(VodRepositoryConfig.onCloudUnavailable(local), "L2_local_detail")
+    }
+
+    /**
+     * 把 Resolver 的候选排序套到 detail 已解析出的线路上。
+     *
+     * 匹配不上的候选直接忽略（detail 才是可播线路的真相来源），
+     * 没被 resolver 点名的线路保持在原顺序排后面，保证不丢线路。
+     *
+     * 顺序与匹配规则由 [ResolverRanking] 承担（纯函数、可单测）：preferred 必须在首位，
+     * backups 保持后端次序，且按 `{sourceId}:{contentId}` 逐段比对。
+     */
+    private fun applyResolverRanking(
+        all: List<LineInfo>,
+        result: SourceResolveResult,
+    ): List<LineInfo> {
+        if (!result.usable) return emptyList()
+        if (all.isEmpty()) return emptyList()
+        val ranked = ResolverRanking.order(
+            linePrefixes = all.map { lineLinePrefix(it.playRef) },
+            preferred = result.preferred,
+            backups = result.backups,
+        ).mapNotNull { all.getOrNull(it) }
+        return ranked
+    }
+
+    /**
+     * playRef = `"{detailRef}|{lineId}|{episode}"`，取 [LineInfo.id] 段的前两段
+     * （`{sourceId}:{contentId}`）作为候选匹配前缀。直链线路没有 `{a}:{b}` 形态时返回空串，
+     * [ResolverRanking] 会跳过它——直链线路不该被云端候选改名换掉。
+     */
+    private fun lineLinePrefix(playRef: String): String {
+        if (playRef.isBlank()) return ""
+        val lineId = playRef.split("|").getOrNull(1) ?: return ""
+        val parts = lineId.split(':')
+        if (parts.size < 2) return ""
+        return "${parts[0]}:${parts[1]}"
+    }
+
+    /** 记录某集最近成功的线路（L0 的写侧）。只存稳定引用，不存播放地址/凭证。 */
+    suspend fun rememberLastGoodSource(
+        mytvId: String,
+        epIndex: Int,
+        sourceId: String,
+        contentId: String,
+    ) {
+        val id = mytvId.trim().toLongOrNull() ?: return
+        if (sourceId.isBlank() || contentId.isBlank()) return
+        runCatching {
+            Graph.db.lastGoodSourceDao().upsert(
+                LastGoodSourceEntity(
+                    mytvId = id,
+                    episodeIndex = epIndex,
+                    sourceId = sourceId,
+                    contentId = contentId,
+                    successfulAt = System.currentTimeMillis(),
+                ),
             )
         }
     }

@@ -411,7 +411,17 @@ fun SearchScreen(nav: NavController) {
                                 .padding(top = 22f.sx(s))
                                 .fillMaxWidth(),
                         ) {
-                    items(candidates.size, key = { i -> "cand-$i-${candidates[i]}" }) { i ->
+                    // 方案 §11.1：key 里不能带 index。原来的 `"cand-$i-xxx"` 在候选
+                    // 列表头部插入一条时会让后面每一条的 key 全部错位一位，Compose 按 key
+                    // 复用槽位时就会把焦点与图片加载状态挂到**别的候选**上——搜索过程中
+                    // 候选会随输入持续重排，这是最容易触发「焦点跳卡片」的地方。
+                    // 用候选内容本身（剧名 + 线路 id）做稳定 key。
+                    // 方案 §11.1：key 里不能带 index。原来的 `"cand-$i-xxx"` 在候选
+                    // 列表头部插入一条时会让后面每一条的 key 全部错位一位，Compose 按 key
+                    // 复用槽位时就会把焦点与图片加载状态挂到**别的候选**上——搜索过程中
+                    // 候选会随输入持续重排，这是最容易触发「焦点跳卡片」的地方。
+                    // candidates 已去重（.distinct()），候选词本身就是稳定业务 key。
+                    items(candidates.size, key = { i -> "cand-${candidates[i]}" }) { i ->
                         val cand = candidates[i]
                         var candFocused by remember { mutableStateOf(false) }
                         Box(

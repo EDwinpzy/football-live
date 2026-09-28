@@ -119,7 +119,11 @@ fun SectionRow(title: String, items: List<VodItem>, onOpen: (VodItem) -> Unit) {
             contentPadding = PaddingValues(horizontal = 48.dp),
             horizontalArrangement = Arrangement.spacedBy(22.dp),
         ) {
-            items(items.size) { i ->
+            // 方案 §11.1：LazyRow 的 item 必须用**稳定业务 key**（影片 id），不能用
+            // index。原先这里是 `items(items.size)` —— 完全没有 key，Compose 退化成按
+            // 位置复用：这一行的数据整体刷新时，焦点/滚动/图片加载状态会留在**原来那个
+            // 位置**上而不是留在那部影片上，表现为「换了内容焦点跳到别的卡片」。
+            items(items.size, key = { i -> items[i].id }) { i ->
                 PosterCard(item = items[i]) { onOpen(items[i]) }
             }
         }

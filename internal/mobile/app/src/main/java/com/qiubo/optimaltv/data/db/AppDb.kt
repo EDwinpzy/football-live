@@ -2,6 +2,7 @@ package com.qiubo.optimaltv.data.db
 
 import android.content.Context
 import androidx.room.Dao
+import androidx.room.ColumnInfo
 import androidx.room.Database
 import androidx.room.Entity
 import androidx.room.Insert
@@ -10,6 +11,8 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 /** 收藏表（技术方案 §3.5） */
@@ -42,6 +45,19 @@ data class ProgressEntity(
     val positionMs: Long,
     val durationMs: Long,
     val updatedAt: Long,
+)
+
+/** 最近成功线路的稳定引用，不保存播放 URL、Cookie 或临时认证信息。 */
+@Entity(
+    tableName = "last_good_source",
+    primaryKeys = ["mytv_id", "episode_index"],
+)
+data class LastGoodSourceEntity(
+    @ColumnInfo(name = "mytv_id") val mytvId: Long,
+    @ColumnInfo(name = "episode_index") val episodeIndex: Int,
+    @ColumnInfo(name = "source_id") val sourceId: String,
+    @ColumnInfo(name = "content_id") val contentId: String,
+    @ColumnInfo(name = "successful_at") val successfulAt: Long,
 )
 
 @Dao
@@ -94,20 +110,53 @@ interface VodDao {
     suspend fun clearAllProgress()
 }
 
+@Dao
+interface LastGoodSourceDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: LastGoodSourceEntity)
+
+    @Query("SELECT * FROM last_good_source WHERE mytv_id = :mytvId AND episode_index = :episodeIndex LIMIT 1")
+    suspend fun get(mytvId: Long, episodeIndex: Int): LastGoodSourceEntity?
+
+    @Query("SELECT * FROM last_good_source")
+    suspend fun all(): List<LastGoodSourceEntity>
+
+    @Query("DELETE FROM last_good_source WHERE mytv_id = :mytvId AND episode_index = :episodeIndex")
+    suspend fun delete(mytvId: Long, episodeIndex: Int)
+}
+
+val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+                CREATE TABLE IF NOT EXISTS last_good_source (
+                    mytv_id INTEGER NOT NULL,
+                    episode_index INTEGER NOT NULL,
+                    source_id TEXT NOT NULL,
+                    content_id TEXT NOT NULL,
+                    successful_at INTEGER NOT NULL,
+                    PRIMARY KEY(mytv_id, episode_index)
+                )
+            """.trimIndent(),
+        )
+    }
+}
+
 @Database(
-    entities = [FavoriteEntity::class, HistoryEntity::class, ProgressEntity::class],
-    version = 1,
+    entities = [FavoriteEntity::class, HistoryEntity::class, ProgressEntity::class, LastGoodSourceEntity::class],
+    version = 2,
     exportSchema = false,
 )
 abstract class AppDb : RoomDatabase() {
     abstract fun vodDao(): VodDao
+    abstract fun lastGoodSourceDao(): LastGoodSourceDao
 
     companion object {
         @Volatile private var instance: AppDb? = null
 
         fun get(context: Context): AppDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "optimal_tv.db")
-                .fallbackToDestructiveMigration()
+                .addMigrations(MIGRATION_1_2)
                 .build()
                 .also { instance = it }
         }

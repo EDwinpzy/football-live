@@ -14,6 +14,115 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 
+/**
+ * 云端 Resolver 的一条候选线路引用（不含任何播放地址）。
+ *
+ * 关键契约：[sourceId]:[contentId] 与 `/vod/detail` 下发线路的 `id`
+ * （`"{sourceId}:{contentId}:{epIndex}"`）前两段同构——Resolver 是既有可播线路之上的
+ * **排序层**，不是新的取流通道。播放地址仍由 `/vod/play` 即时解析。
+ */
+data class ResolvedSource(
+    val sourceId: String,
+    val contentId: String,
+    val sourceName: String = "",
+    val episodeIndex: Int = 0,
+    val matchScore: Double = 0.0,
+) {
+    /** 与 detail 线路 id 对齐的前缀，用于把候选对上具体线路。 */
+    val linePrefix: String get() = "$sourceId:$contentId"
+}
+
+/**
+ * Resolver 结果。status 与后端 `RESOLVE_STATUSES` 一一对应。
+ *
+ * 只有 MATCHED / STALE_AVAILABLE 视为可用；其余（含 TEMPORARILY_UNAVAILABLE）
+ * **必须回落到 `/vod/detail`**——端侧实测能正常匹配出 12 条线路（约 0.9s），
+ * 云端拿不到结果时绝不能把功能改坏成空片源。
+ */
+data class SourceResolveResult(
+    val mytvId: Long,
+    val episode: Int,
+    val status: String,
+    val preferred: ResolvedSource? = null,
+    val backups: List<ResolvedSource> = emptyList(),
+    val cacheKind: String = "",
+    val cacheAgeMs: Long = 0L,
+) {
+    /** 是否可直接用于起播。 */
+    val usable: Boolean
+        get() = (status == "MATCHED" || status == "STALE_AVAILABLE") && preferred != null
+
+    /** 有没有任何候选（哪怕状态不佳，也能给用户一条可试的线）。 */
+    val hasCandidates: Boolean
+        get() = preferred != null || backups.isNotEmpty()
+
+    /** 诊断用：云端说了什么、缓存命中什么类型。 */
+    val diagnostic: String get() = "status=$status cache=$cacheKind/${cacheAgeMs}ms"
+}
+
+/**
+ * Resolver 候选 → 已有 detail 线路的重排（**纯函数，不碰网络/DB**）。
+ *
+ * 单独抽出来的理由：这段排序是「用户点播放时最先决定用哪条线」的地方，
+ * 错一位就是把观众从最优源推到次优源，而它又是纯计算——没必要留在挂网络 IO 的
+ * 仓库方法里，只能靠真机点播才能发现。抽出后单测直接锁住顺序契约。
+ *
+ * 契约（顺序敏感，逐条都有代价）：
+ * 1. `preferred` 永远第一——它就是后端算出的最优匹配，被挤后等于优化白做；
+ * 2. `backups` 保持后端给的次序追加在 preferred 之后（**不倒序插入**）；
+ * 3. 没被点名的 detail 线路按原顺序接在最后——Resolver 只是排序层，不删线路。
+ */
+object ResolverRanking {
+
+    /**
+     * 返回重排后的下标序列（相对入参 [linePrefixes] 的原下标）。
+     *
+     * [linePrefixes] 是每条 detail 线路的 `"{sourceId}:{contentId}"`（前两段），
+     * 调用方从 `playRef` 里解析。这样本函数不依赖 LineInfo / 网络，可直接单测。
+     */
+    fun order(
+        linePrefixes: List<String>,
+        preferred: ResolvedSource?,
+        backups: List<ResolvedSource>,
+    ): List<Int> {
+        val lineCount = linePrefixes.size
+        if (lineCount == 0) return emptyList()
+        val picked = LinkedHashSet<Int>()
+        // preferred 在前，backups 按给定次序在后。用 addLast 语义（List.add）
+        // 而不是 insert(0, …)：后者会把首个 backup 顶到 preferred 前面。
+        val order = ArrayList<ResolvedSource>(backups.size + 1)
+        preferred?.let { order.add(it) }
+        order.addAll(backups)
+        for (candidate in order) {
+            if (picked.size >= lineCount) break
+            val idx = (0 until lineCount).firstOrNull { index ->
+                index !in picked && matchesCandidate(
+                    linePrefixes[index], candidate.sourceId, candidate.contentId,
+                )
+            }
+            if (idx != null) picked.add(idx)
+        }
+        // 未被点名的线路按原顺序补齐，保证「不丢线路」。
+        (0 until lineCount).forEach { if (it !in picked) picked.add(it) }
+        return picked.toList()
+    }
+
+    /**
+     * 候选与某条 detail 线路前缀是否同一条线路。
+     *
+     * detail 线路 id 形如 `{sourceId}:{contentId}:{epIndex}`，候选前缀是前两段
+     * `"{sourceId}:{contentId}"`。必须按**段**比较而不是整串 startsWith：
+     * `content-1` 会前缀命中 `content-10`，
+     * 把观众送到另一集的线路上（错集，且往往是不可播的那条）。
+     */
+    fun matchesCandidate(linePrefix: String, sourceId: String, contentId: String): Boolean {
+        if (linePrefix.isBlank()) return false
+        val parts = linePrefix.split(':')
+        if (parts.size < 2) return false
+        return parts[0] == sourceId && parts[1] == contentId
+    }
+}
+
 /** Device-local Douban catalogue exposed by the embedded Python VOD API. */
 class VodApiSource(
     private val baseUrl: String,
@@ -62,6 +171,13 @@ class VodApiSource(
                 val refreshQuery = if (!refresh) "" else if (deferSources) "&refresh=1" else "?refresh=1"
                 return "/vod/detail/${id.removePrefix("douban:")}$deferQuery$refreshQuery"
             }
+
+            /**
+             * 云端 Resolver：按元数据中心永久 ID 取线路引用排序。
+             * [episode] 是 1-based（与后端 `/vod/resolve` 的契约一致）。
+             */
+            fun resolve(mytvId: Long, episode: Int = 1): String =
+                "/vod/resolve/$mytvId?episode=${episode.coerceAtLeast(1)}"
         }
 
         private fun fetchJson(base: String, path: String, client: OkHttpClient): JSONObject {
@@ -225,6 +341,60 @@ class VodApiSource(
             val path = "/vod/play/${id.removePrefix("douban:")}/${URLEncoder.encode(lineId, "UTF-8")}/${episode.toIntOrNull() ?: 0}"
             val json = fetchJson(base, path, client)
             return listOfNotNull(json.optString("url").takeIf(String::isNotBlank))
+        }
+
+        /**
+         * 拉云端 Resolver 结果。**只做一次轻量请求**，任何失败都交由上层回落 `/vod/detail`——
+         * 这里不抛异常之外的语义：解析失败返回 null，由 [SourceResolveResult.usable] 决定回落。
+         */
+        fun fetchResolve(
+            base: String,
+            client: OkHttpClient,
+            mytvId: Long,
+            episode: Int = 1,
+        ): SourceResolveResult? {
+            if (mytvId <= 0L) return null
+            val json = runCatching {
+                fetchJson(base, VodRoutes.resolve(mytvId, episode), client)
+            }.getOrNull() ?: return null
+            return parseResolve(json, mytvId, episode)
+        }
+
+        private fun parseCandidate(obj: JSONObject?, fallbackEpisodeIndex: Int): ResolvedSource? {
+            obj ?: return null
+            val sourceId = obj.optString("source_id").trim()
+            val contentId = obj.optString("content_id").trim()
+            if (sourceId.isBlank() || contentId.isBlank()) return null
+            return ResolvedSource(
+                sourceId = sourceId,
+                contentId = contentId,
+                sourceName = obj.optString("source_name").trim(),
+                episodeIndex = obj.optInt("episode_index", fallbackEpisodeIndex),
+                matchScore = obj.optDouble("match_score", 0.0),
+            )
+        }
+
+        fun parseResolve(
+            json: JSONObject,
+            mytvId: Long,
+            episode: Int,
+        ): SourceResolveResult {
+            // 候选缺省回落到请求的集号（后端 episode 是 1-based，内部 0-based），避免 0 被当成第 0 集。
+            val fallbackIndex = episode - 1
+            val backupsArray = json.optJSONArray("backups")
+            val backups = (0 until (backupsArray?.length() ?: 0)).mapNotNull { index ->
+                parseCandidate(backupsArray?.optJSONObject(index), fallbackIndex)
+            }
+            val cache = json.optJSONObject("cache")
+            return SourceResolveResult(
+                mytvId = json.optLong("mytv_id", mytvId),
+                episode = json.optInt("episode", episode),
+                status = json.optString("status").ifBlank { "TEMPORARILY_UNAVAILABLE" },
+                preferred = parseCandidate(json.optJSONObject("preferred"), fallbackIndex),
+                backups = backups,
+                cacheKind = cache?.optString("kind").orEmpty(),
+                cacheAgeMs = cache?.optLong("age_ms", 0L) ?: 0L,
+            )
         }
     }
 }
