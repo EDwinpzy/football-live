@@ -226,6 +226,70 @@ def test_removed_source_asset_is_removed_from_persistent_dist(tmp_path):
     assert not (dist / "assets" / "logo.svg").exists()
 
 
+def test_index_reference_forms_the_rewriter_cannot_see_are_rejected(tmp_path):
+    """Minor 9: the rewriter only matches a few HTML shapes, so guard the rest.
+
+    Absolute paths, protocol-relative URLs and `<base>` all change how a
+    reference resolves and would leave the generated index pointing at an
+    unhashed or missing asset. The build has to fail rather than emit a dist
+    that silently falls back to the 5-minute cache.
+    """
+    build_assets = _load_builder().build_assets
+    source = tmp_path / "source"
+    dist = tmp_path / "dist"
+    _write_source(source, app=b"window.app = 1;\n", css=b"body {}\n")
+    index = source / "index.html"
+
+    index.write_text(
+        '<!doctype html><html><head><link rel="stylesheet" href="/style.css">'
+        '</head><body><script src="app.js"></script></body></html>',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="reference"):
+        build_assets(source, dist)
+
+    index.write_text(
+        '<!doctype html><html><head><link rel="stylesheet" href="style.css">'
+        '</head><body><script src="//cdn.example.com/app.js"></script></body></html>',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="reference"):
+        build_assets(source, dist)
+
+
+def test_index_referencing_a_missing_asset_is_rejected(tmp_path):
+    build_assets = _load_builder().build_assets
+    source = tmp_path / "source"
+    dist = tmp_path / "dist"
+    _write_source(source, app=b"window.app = 1;\n", css=b"body {}\n")
+    (source / "index.html").write_text(
+        '<!doctype html><html><head><link rel="stylesheet" href="style.css">'
+        '<link rel="icon" href="assets/absent.png">'
+        '</head><body><script src="app.js"></script></body></html>',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="missing asset"):
+        build_assets(source, dist)
+
+
+def test_manifest_describes_every_copied_asset_with_its_hash(tmp_path):
+    """The archive verifies copiedFiles against these records."""
+    build_assets = _load_builder().build_assets
+    source = tmp_path / "source"
+    dist = tmp_path / "dist"
+    _write_source(source, app=b"window.app = 1;\n", css=b"body {}\n")
+    (source / "assets" / "logo.png").write_bytes(b"logo-bytes")
+
+    build_assets(source, dist)
+    manifest = json.loads((dist / "manifest.json").read_text(encoding="utf-8"))
+
+    assert {item["path"] for item in manifest["copiedAssetMeta"]} == set(manifest["copiedFiles"])
+    for descriptor in manifest["copiedAssetMeta"]:
+        data = (dist / descriptor["path"]).read_bytes()
+        assert descriptor["sha256"] == hashlib.sha256(data).hexdigest()
+        assert descriptor["size"] == len(data)
+
+
 def _make_backend_zip_fixture(tmp_path, monkeypatch):
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))

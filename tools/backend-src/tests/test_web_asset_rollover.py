@@ -224,6 +224,79 @@ def test_corrupt_current_asset_aborts_before_entrypoint_starts_proxy(tmp_path, m
     assert not proxy_was_started
 
 
+def test_copied_files_are_archived_so_a_previous_page_keeps_its_own_bytes(tmp_path):
+    """Important 3: copiedFiles used to vanish from the archive entirely.
+
+    The hashed JS/CSS were preserved, but the 36 posters, the logo and the
+    web manifest were not written to the archive at all. copiedFiles use
+    unversioned fixed paths, so a browser that had just loaded the previous
+    index would fetch the *new* poster and logo bytes under the old page.
+    """
+    old_image = _build_dist_with_copied_files(tmp_path, 1)
+    new_image = _build_dist_with_copied_files(tmp_path, 2)
+    archive = tmp_path / "persistent-web-assets"
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    prepare_web_assets = importlib.import_module(
+        "tools.selfhosted.web_asset_archive"
+    ).prepare_web_assets
+
+    prepare_web_assets(old_image, archive)
+    prepare_web_assets(new_image, archive)
+
+    old_manifest = json.loads((old_image / "manifest.json").read_text(encoding="utf-8"))
+    copied = old_manifest["copiedFiles"]
+    assert copied, "the fixture must produce copiedFiles"
+    for relative in copied:
+        assert (new_image / relative).is_file(), relative
+    # The archive kept the old generation's bytes for every copied file.
+    for relative in copied:
+        assert (archive / "builds" / _build_id(old_image) / relative).is_file(), relative
+
+
+def test_previous_copied_files_are_restored_when_the_new_image_lacks_them(tmp_path):
+    """A dropped asset from the new build must not vanish under the old page."""
+    old_image = _build_dist_with_copied_files(tmp_path, 1)
+    archive = tmp_path / "persistent-web-assets"
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    prepare_web_assets = importlib.import_module(
+        "tools.selfhosted.web_asset_archive"
+    ).prepare_web_assets
+    prepare_web_assets(old_image, archive)
+
+    # Second image has no copied assets at all.
+    bare_source = tmp_path / "source-bare"
+    bare_image = tmp_path / "image-bare" / "www"
+    bare_source.mkdir(parents=True)
+    _write_source(bare_source, 9)
+    importlib.import_module("tools.build_web_assets").build_assets(bare_source, bare_image)
+
+    prepare_web_assets(bare_image, archive)
+
+    for relative in json.loads(
+        (old_image / "manifest.json").read_text(encoding="utf-8")
+    )["copiedFiles"]:
+        assert (bare_image / relative).is_file(), (
+            f"{relative} was restored from the archive for the previous page"
+        )
+
+
+def _build_dist_with_copied_files(tmp_path: Path, revision: int) -> Path:
+    build_assets = importlib.import_module("tools.build_web_assets").build_assets
+    source = tmp_path / f"source-assets-{revision}"
+    dist = tmp_path / f"image-assets-{revision}" / "www"
+    source.mkdir(parents=True)
+    _write_source(source, revision)
+    (source / "manifest.webmanifest").write_text(
+        f'{{"name":"My TV rev {revision}"}}\n', encoding="utf-8"
+    )
+    (source / "assets").mkdir(exist_ok=True)
+    (source / "assets" / "logo.png").write_bytes(f"LOGO-{revision}".encode())
+    build_assets(source, dist)
+    return dist
+
+
 def test_web_service_mounts_persistent_archive_and_runs_archive_entrypoint():
     compose = yaml.safe_load((ROOT / "deploy/selfhosted/compose.yaml").read_text(encoding="utf-8"))
     web_api = compose["services"]["web-api"]

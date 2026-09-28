@@ -15,8 +15,15 @@ _ASSET_NAMES = {
     "app": re.compile(r"^app\.[0-9a-f]{16}\.js$"),
     "style": re.compile(r"^style\.[0-9a-f]{16}\.css$"),
 }
+
+
+def _is_hashed_bundle(relative: str) -> bool:
+    """True for a content-addressed JS/CSS name, whose bytes can never differ."""
+    name = PurePosixPath(relative).name
+    return any(pattern.fullmatch(name) for pattern in _ASSET_NAMES.values())
 _BUILD_ID = re.compile(r"^[0-9a-f]{32}$")
 _MANIFEST_NAME = "manifest.json"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _fail(message: str) -> ValueError:
@@ -95,7 +102,67 @@ def _load_bundle(web_root: Path) -> tuple[bytes, dict[str, bytes]]:
         if len(data) != descriptor["size"] or hashlib.sha256(data).hexdigest() != descriptor["sha256"]:
             raise _fail(f"bundle bytes do not match manifest: {relative}")
         files[relative] = data
+    files.update(_load_copied(web_root, manifest))
     return manifest_bytes, files
+
+
+def _load_copied(web_root: Path, manifest: dict[str, Any]) -> dict[str, bytes]:
+    """Read the manifest's copiedFiles with the same rigour as the bundles.
+
+    These are the unversioned assets (posters, logo, web manifest). They are
+    addressed by fixed path, so the archive has to keep each generation's own
+    bytes or an already-open page silently loads the next release's artwork.
+    """
+    raw = manifest.get("copiedFiles")
+    metadata = manifest.get("copiedAssetMeta")
+    if not isinstance(raw, list) or not isinstance(metadata, list):
+        if not raw:
+            return {}
+        raise _fail("manifest copied asset metadata is incomplete")
+    descriptors: dict[str, dict[str, Any]] = {}
+    for item in metadata:
+        if not isinstance(item, dict):
+            raise _fail("manifest copied asset metadata is malformed")
+        path = item.get("path")
+        digest = item.get("sha256")
+        size = item.get("size")
+        if (
+            not isinstance(path, str)
+            or not isinstance(digest, str)
+            or not _SHA256_RE.fullmatch(digest)
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+        ):
+            raise _fail("manifest copied asset hash or size is malformed")
+        descriptors[path] = {"sha256": digest, "size": size}
+    if set(descriptors) != set(raw) or not all(isinstance(v, str) for v in raw):
+        raise _fail("manifest copied asset paths do not match their metadata")
+
+    files: dict[str, bytes] = {}
+    for relative in raw:
+        source_path = _safe_copied_path(web_root, relative)
+        if source_path.is_symlink() or not source_path.is_file():
+            raise _fail(f"copied file is missing or is a symlink: {relative}")
+        data = source_path.read_bytes()
+        descriptor = descriptors[relative]
+        if len(data) != descriptor["size"] or hashlib.sha256(data).hexdigest() != descriptor["sha256"]:
+            raise _fail(f"copied file bytes do not match manifest: {relative}")
+        files[relative] = data
+    return files
+
+
+def _safe_copied_path(root: Path, relative: str) -> Path:
+    """Resolve a copiedFiles entry under ``root``, rejecting traversal."""
+    posix_path = PurePosixPath(relative)
+    if (
+        posix_path.is_absolute()
+        or ".." in posix_path.parts
+        or not posix_path.parts
+        or not all(part not in ("", ".") for part in posix_path.parts)
+    ):
+        raise _fail(f"unsafe copied file path: {relative!r}")
+    return root.joinpath(*posix_path.parts)
 
 
 def _write_new_build(builds_dir: Path, build_id: str, manifest_bytes: bytes, files: dict[str, bytes]) -> Path:
@@ -110,7 +177,7 @@ def _write_new_build(builds_dir: Path, build_id: str, manifest_bytes: bytes, fil
     try:
         (temporary_dir / _MANIFEST_NAME).write_bytes(manifest_bytes)
         for relative, data in files.items():
-            target = temporary_dir.joinpath(*PurePosixPath(relative).parts)
+            target = _safe_copied_path(temporary_dir, relative)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
         _validate_archived_build(temporary_dir, manifest_bytes, files)
@@ -176,6 +243,7 @@ def _load_bundle_from_archive(build_dir: Path) -> tuple[bytes, dict[str, bytes]]
         files[relative] = data
     if kinds != {"app", "style"}:
         raise _fail(f"archived build must contain one JS and one CSS bundle: {build_dir.name}")
+    files.update(_load_copied(build_dir, manifest))
     return manifest_bytes, files
 
 
@@ -230,10 +298,20 @@ def _materialize(retained: list[Path], web_root: Path) -> None:
         _, files = _load_bundle_from_archive(build_dir)
         for relative, data in files.items():
             retained_files.add(relative)
-            destination = web_root.joinpath(*PurePosixPath(relative).parts)
+            destination = _safe_copied_path(web_root, relative)
             if destination.exists():
-                if destination.is_symlink() or not destination.is_file() or destination.read_bytes() != data:
+                if destination.is_symlink() or not destination.is_file():
+                    raise _fail(f"immutable URL is not a regular file: {relative}")
+                if destination.read_bytes() == data:
+                    continue
+                if _is_hashed_bundle(relative):
+                    # A hashed name can only ever hold one set of bytes; a
+                    # mismatch means the image and the archive disagree.
                     raise _fail(f"immutable URL already contains different bytes: {relative}")
+                # copiedFiles share a fixed path across generations. The
+                # current build is written first, so a differing archived copy
+                # is the previous generation's artwork: keep what is already
+                # there rather than letting an old page pull a mixed set.
                 continue
             destination.parent.mkdir(parents=True, exist_ok=True)
             temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")

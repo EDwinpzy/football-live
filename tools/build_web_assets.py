@@ -57,6 +57,17 @@ def _output_file(output: Path, relative: str) -> Path | None:
     return candidate if candidate.resolve().is_relative_to(output) else None
 
 
+def _file_descriptor(relative: str, path: Path) -> dict[str, Any]:
+    """Hash/size record for one copied asset.
+
+    copiedFiles use unversioned fixed paths, so the archive keeps each
+    generation's own bytes; these hashes are what let it tell a previous
+    generation's artwork apart from the current one and detect damage.
+    """
+    data = path.read_bytes()
+    return {"path": relative, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+
+
 def build_assets(source_dir: str | Path, output_dir: str | Path) -> BuildResult:
     """Build an index and content-hashed JS/CSS files into ``output_dir``.
 
@@ -107,7 +118,8 @@ def build_assets(source_dir: str | Path, output_dir: str | Path) -> BuildResult:
     )
 
     source_assets = source / "assets"
-    copied_files = []
+    copied_files: list[str] = []
+    copied_metadata: list[dict[str, Any]] = []
     if source_assets.is_dir():
         for asset in sorted(path for path in source_assets.rglob("*") if path.is_file()):
             # app/style hash URLs are immutable. Source copies must never take
@@ -119,10 +131,12 @@ def build_assets(source_dir: str | Path, output_dir: str | Path) -> BuildResult:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(asset, target)
             copied_files.append(relative)
+            copied_metadata.append(_file_descriptor(relative, target))
     web_manifest = source / "manifest.webmanifest"
     if web_manifest.is_file():
         shutil.copyfile(web_manifest, output / "manifest.webmanifest")
         copied_files.append("manifest.webmanifest")
+        copied_metadata.append(_file_descriptor("manifest.webmanifest", output / "manifest.webmanifest"))
 
     (output / "index.html").write_text(html, encoding="utf-8", newline="\n")
     for source_name, relative_name in zip(("app.js", "style.css"), referenced_files):
@@ -154,6 +168,7 @@ def build_assets(source_dir: str | Path, output_dir: str | Path) -> BuildResult:
         "format": 1,
         "referencedFiles": list(referenced_files),
         "copiedFiles": sorted(copied_files),
+        "copiedAssetMeta": sorted(copied_metadata, key=lambda item: item["path"]),
         "assets": [
             {
                 "path": f"/{path}",
@@ -172,7 +187,32 @@ def build_assets(source_dir: str | Path, output_dir: str | Path) -> BuildResult:
         newline="\n",
     )
     (output / "asset-manifest.json").unlink(missing_ok=True)
+    _verify_generated_index(output, html)
     return BuildResult(manifest=manifest, referenced_files=referenced_files)
+
+
+_INDEX_REFERENCE_RE = re.compile(r'(?:src|href)=["\']([^"\']+)["\']', re.IGNORECASE)
+_UNHASHED_BUNDLE_RE = re.compile(r"(?:^|/)app\.js(?:\?|$)|(?:^|/)style\.css(?:\?|$)")
+
+
+def _verify_generated_index(output: Path, html: str) -> None:
+    """Fail the build if the generated index kept a reference the builder missed.
+
+    The single-reference rewrites above only match `style.css` / `app.js` in a
+    few HTML shapes. An absolute path, a protocol-relative URL, a `<base>` tag
+    or a new reference form would slip through and leave the page pointing at
+    unhashed or missing assets. This is the regression net for those variants:
+    every app/style reference must be content-hashed, and every local assets/
+    reference must exist in the dist.
+    """
+    for reference in _INDEX_REFERENCE_RE.findall(html):
+        if _UNHASHED_BUNDLE_RE.search(reference):
+            raise ValueError(f"index.html still references an unhashed bundle: {reference}")
+        target = _output_file(output, reference)
+        if target is None:
+            raise ValueError(f"index.html references a path outside the dist: {reference}")
+        if not target.is_file():
+            raise ValueError(f"index.html references a missing asset: {reference}")
 
 
 def main() -> None:
