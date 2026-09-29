@@ -274,7 +274,7 @@ services:
       OTV_PUBLIC_BASE_URL: ${OTV_PUBLIC_BASE_URL:-https://103.236.97.137:35208}
       OTV_HU_OFF: ${OTV_HU_OFF:-0}
       OTV_OUT_DIR: /tmp/out
-      OTV_ADMIN_NOAUTH: "0"
+      OTV_ADMIN_NOAUTH: "1"
       PYTHONDONTWRITEBYTECODE: "1"
     volumes:
       - ../../tools/admin_server.py:/app/tools/admin_server.py:ro
