@@ -36,7 +36,17 @@ REPL = ["proxy.py", "hhkan.py", "hhkan_snapshot.py", "hhkan_snapshot.json",
         "team_backdrop.py", "scraper.py", "decrypt_stream.js",
         "douban_catalog.py", "douban_snapshot.json", "douban_filter_matrix.json",
         "media_index.py", "pinyin_map.json", "vod_api.py",
-        "vod_sources.py", "vod_sources.default.json"]
+        "vod_sources.py", "vod_sources.default.json",
+        # 下面三个都是顶层 import，曾因白名单手工维护而漏收，打出来的 zip
+        # 在真机启动时直接 ModuleNotFoundError，整个内嵌 Python 后端起不来，
+        # 影视详情 / 播放 / 片源全部失效：
+        #   proxy.py    import metadata_client / import vod_resolver
+        #   hhkan.py    import source_dns
+        # vod_resolver 是方案 §5/§6 的片源解析器。延迟导入的 decrypt_python
+        # 有 quickjs 兜底、不属于打包必需，不在此列。
+        # tests/test_backend_zip_completeness.py 用 AST 静态分析顶层 import，
+        # 新增硬依赖必须同步登记到这里。
+        "source_dns.py", "vod_resolver.py", "metadata_client.py"]
 # 需求⑤：热更包纳入前端（www 根文件 + www/assets 下全部前端资源；football 海报池仍走整池替换）
 WWW_FILES = ["index.html", "app.js", "style.css", "manifest.webmanifest"]
 WWW_ASSETS_PREFIX = "www/assets/"
