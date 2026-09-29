@@ -1849,6 +1849,36 @@ def h_vod_source_versions(_d: dict) -> dict:
     return rpc("vod_source_admin_versions", {})
 
 
+def h_vod_source_probe_device(d: dict) -> dict:
+    """转发到**设备**侧做源探活（2026-09-30）。
+
+    刻意不在这里 ping 源：后台跑在 VPS 上，磐石云没有境外出口，Cloudflare 段的源
+    从 VPS 必然超时。2026-09-30 实测 10 个源有 8 个在后台显示「失败」，但同一批
+    在实机网络下 7 个能正常取流——照后台结果清理会砍掉 App 里能用的线路。
+
+    设备基址由 App 报上来（`d["base"]`），默认取最近一次心跳记录；拿不到就
+    明确报错，不静默回落到「VPS 自己测」——那正是要避开的误判源。
+    """
+    base = str(d.get("base") or "").strip().rstrip("/")
+    if not base:
+        return {"error": "device_unavailable",
+                "hint": "缺少 base：设备侧探活需要 App 的内嵌后端地址，"
+                        "请传 base=http://<设备IP>:8090"}
+    if not base.startswith(("http://", "https://")):
+        return {"error": "bad_base"}
+    target = base + "/vod/sources/probe"
+    try:
+        req = urllib.request.Request(target, headers={"User-Agent": UA})
+        with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=90) as r:
+            body = r.read()
+    except Exception as exc:  # noqa: BLE001
+        return {"error": "device_probe_failed", "detail": str(exc)[:160], "base": base}
+    try:
+        return json.loads(body.decode("utf-8", "replace"))
+    except ValueError:
+        return {"error": "device_probe_bad_response", "base": base}
+
+
 def h_vod_source_rollback(d: dict) -> dict:
     """把 drafts 回滚到某个历史版本（BUG-06）。
 
@@ -1948,6 +1978,7 @@ ROUTES = {
     "/api/vod_source_publish": h_vod_source_publish,
     "/api/vod_source_versions": h_vod_source_versions,
     "/api/vod_source_rollback": h_vod_source_rollback,
+    "/api/vod_source_probe_device": h_vod_source_probe_device,
     # v1.20 电视源管理
     "/api/iptv_list": h_iptv_list,
     "/api/iptv_save": h_iptv_save,

@@ -4185,6 +4185,15 @@ class Handler(SimpleHTTPRequestHandler):
                     _safe_int((query.get("page") or ["1"])[0], 1, lo=1, hi=100))
             elif path == "/vod/sources/status":
                 payload = service.source_status()
+            elif path == "/vod/sources/probe":
+                # 设备侧探活（2026-09-30）：走**本机网络**探各 macms 源。
+                # 后台的「测速」跑在 VPS 上，磐石云无境外出口，Cloudflare 段的源
+                # 从 VPS 必然超时——2026-09-30 实测 10 个源有 8 个在后台显示「失败」，
+                # 但同一批在设备网络下 7 个能正常取流。所以判断「源死没死」必须
+                # 问设备，不能问 VPS。
+                payload = vod_sources.probe_all_sources(
+                    vod_sources.SourceRegistry.load_current().sources
+                )
             elif path.startswith("/vod/filters/"):
                 payload = service.filters(unquote(path[len("/vod/filters/"):]))
             elif path.startswith("/vod/show/"):

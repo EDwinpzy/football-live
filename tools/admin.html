@@ -924,6 +924,7 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
     <h1>影视源管理</h1><span class="sub">编辑内容保存为草稿，不会自动影响客户端</span><span class="spring"></span>
     <button class="act" id="btn-vod-source-publish" onclick="vodSourcePublish()">立即推送</button>
     <button class="act" onclick="vodSourceHistory()">历史 / 撤销</button>
+    <button class="act" id="btn-vod-source-probe-device" onclick="vodSourceProbeDevice()">设备侧测速</button>
   </div>
   <div class="formfoot" style="margin-bottom:18px">
     <span class="tag warn" id="vod-source-draft-state">未发布变更</span>
@@ -2733,6 +2734,33 @@ async function vodSourceHistory() {
   const r = await api("vod_source_rollback", {version});
   if (r.error || (r.ok === false)) { toast("回滚失败：" + (r.error || r.msg), true); return; }
   toast(`已回滚到 v${r.restoredFrom}（${r.drafts} 个源），记得点「立即推送」`);
+  loadVodSources();
+}
+async function vodSourceProbeDevice() {
+  // 设备侧测速（2026-09-30）：后台自己 ping 源不可信——磐石云无境外出口，
+  // Cloudflare 段的源从 VPS 必然超时，但同一批源在 App 所在网络下是通的。
+  // 实测 10 个源有 8 个在后台显示「失败」，实机网络下 7 个能正常取流。
+  // 这里把活转给设备（App 的内嵌后端）去问「你这网络下哪些能用」。
+  const base = (window.OTV_DEVICE_BACKEND_BASE || "").trim();
+  if (!base) {
+    toast("请先设置设备内嵌后端地址：window.OTV_DEVICE_BACKEND_BASE = "
+        + "http://<设备IP>:8090", true);
+    return;
+  }
+  const btn = document.getElementById("btn-vod-source-probe-device");
+  btn.disabled = true; btn.textContent = "设备探测中…";
+  const d = await api("vod_source_probe_device", {base: base});
+  btn.disabled = false; btn.textContent = "设备侧测速";
+  if (d.error) { toast("设备侧测速失败：" + (d.hint || d.error), true); return; }
+  const rows = d.results || [];
+  if (!rows.length) { toast("设备没有返回任何源"); return; }
+  const lines = rows.map((r) => {
+    const mark = r.ok ? "可用" : "不可用";
+    const detail = r.ok ? (r.latencyMs + "ms") : (r.error || "");
+    return mark + "  " + (r.name || r.id) + "  " + detail;
+  });
+  alert("设备侧结果：通过 " + d.ok + " / 失败 " + d.failed + "\n\n" + lines.join("\n"));
+  toast("设备侧测速完成：可用 " + d.ok + "，不可用 " + d.failed);
   loadVodSources();
 }
 function vodSourceTest(index) {

@@ -125,6 +125,124 @@ class UnsafeSourceUrl(ValueError):
     pass
 
 
+# 设备侧探活（2026-09-30）：后台的「测速」跑在 VPS 上，而内嵌后端跑在用户
+# 手机上——磐石云没有境外出口，挂在 Cloudflare 段的源从 VPS 必然超时。2026-09-30
+# 实测 10 个源有 8 个在后台显示「失败」，但同一批在实机网络下 7 个能正常取流。
+# 照后台结果清理会砍掉 App 里能用的线路，所以需要一条走设备网络的探测通道。
+#
+# 并发与单源超时都必须有上限：源多时串行会拖到几十秒，而一个卡住的源不能拖垮整批。
+PROBE_TIMEOUT = 8.0
+PROBE_CONCURRENCY = 4
+PROBE_BODY_LIMIT = 64 * 1024
+
+
+def _probe_error_text(exc):
+    """把异常压成可回显的短摘要。
+
+    上游报错里可能带 URL query（含签名 token），所以只取异常类型 + 截断后的
+    消息，且剥掉可能出现的 query 串——回给后台/日志的都不该带凭据。
+    """
+    text = re.sub(r"\?.*$", "", str(exc)).strip()
+    return ("%s: %s" % (type(exc).__name__, text))[:120]
+
+
+def probe_source(source, *, timeout=None):
+    """探测单个源在**当前设备网络**下能不能用。
+
+    走 macms 最轻的 `?ac=list`：能出 JSON 且带 list/total 字段即算通。
+    不拉整页数据——探活而已。
+
+    返回 ``{"id","name","ok","latencyMs","status","error"}``；任何异常都收敛成
+    error 字符串，不向上抛——一批源里有一个炸了不该让整批失败。
+    """
+    if isinstance(source, dict):
+        source_id = str(source.get("id") or "")
+        name = str(source.get("name") or source_id)
+        api_url = str(source.get("api_url") or "")
+        adapter = str(source.get("adapter_type") or "")
+    else:
+        source_id = str(getattr(source, "id", "") or "")
+        name = str(getattr(source, "name", "") or source_id)
+        api_url = str(getattr(source, "api_url", "") or "")
+        adapter = str(getattr(source, "adapter_type", "") or "")
+
+    started = time.time()
+    result = {"id": source_id, "name": name, "ok": False, "latencyMs": 0, "status": 0, "error": ""}
+
+    # 只对 macms 系做 HTTP 探活。hhkan 是 HTML 站，探它要打页面，那是另一条
+    # 链路（实测其 CDN 直链 SSL 常挂），不在这里给出误导性的 ok。
+    if not adapter.startswith("macms"):
+        result["error"] = "adapter not probeable"
+        return result
+    if not api_url:
+        result["error"] = "no api url"
+        return result
+
+    url = api_url.rstrip("/") + "/?ac=list"
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(request, timeout=timeout or PROBE_TIMEOUT) as response:
+            body = _read_response_body(response, PROBE_BODY_LIMIT)
+            result["status"] = int(getattr(response, "status", 0) or 0)
+        text = body[:4096].decode("utf-8", "replace")
+        head = text.lstrip()[:200].lower()
+        if head.startswith("<!doctype html") or "<title>just a moment" in head:
+            # Cloudflare 挑战页：源站可能活着，但当前网络过不去。
+            result["error"] = "challenge page (cloudflare)"
+        elif '"list"' in text or '"total"' in text or '"code"' in text:
+            result["ok"] = True
+        else:
+            result["error"] = "unexpected payload"
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = _probe_error_text(exc)
+    result["latencyMs"] = int((time.time() - started) * 1000)
+    return result
+
+
+def probe_all_sources(sources, *, timeout=None, concurrency=None):
+    """并发探测一批源，返回逐源结果 + 汇总。
+
+    并发上限（[PROBE_CONCURRENCY]）不可省：源站普遍限流，20 个源同时打过去
+    会把好源也挤成失败——实测正是这个现象。
+    """
+    items = list(sources or [])
+    if not items:
+        return {"results": [], "ok": 0, "failed": 0}
+    workers = max(1, int(concurrency or PROBE_CONCURRENCY))
+    results = [None] * len(items)
+    lock = threading.Lock()
+    cursor = [0]
+
+    def worker():
+        while True:
+            with lock:
+                if cursor[0] >= len(items):
+                    return
+                i = cursor[0]
+                cursor[0] += 1
+            item = items[i]
+            try:
+                results[i] = probe_source(item, timeout=timeout)
+            except Exception as exc:  # noqa: BLE001
+                results[i] = {
+                    "id": str(item.get("id", "")) if isinstance(item, dict) else "",
+                    "name": str(item.get("name", "")) if isinstance(item, dict) else "",
+                    "ok": False, "latencyMs": 0, "status": 0,
+                    "error": _probe_error_text(exc),
+                }
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(min(workers, len(items)))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return {
+        "results": [r for r in results if r],
+        "ok": sum(1 for r in results if r and r.get("ok")),
+        "failed": sum(1 for r in results if r and not r.get("ok")),
+    }
+
+
 @dataclass(frozen=True)
 class VodSource:
     id: str
