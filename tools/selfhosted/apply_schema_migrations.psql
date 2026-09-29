@@ -218,6 +218,19 @@ VALUES ('admin_sold_migration.sql', :'admin_sold_sha256');
 COMMIT;
 \endif
 
+-- BUG-05：补齐 admin_set_status / admin_unbind（admin_server.py 一直在调，
+-- 但这两个函数从未定义，后台「解绑」「改状态」必然报 schema cache 缺函数）。
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'admin_license_action_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../admin_license_action_migration.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('admin_license_action_migration.sql', :'admin_license_action_sha256');
+COMMIT;
+\endif
+
 SELECT NOT EXISTS (
     SELECT 1 FROM public.schema_migrations WHERE version = 'hotupdate_migration.sql'
 ) AS migration_pending \gset

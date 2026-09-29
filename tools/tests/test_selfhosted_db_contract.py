@@ -117,9 +117,17 @@ class SelfHostedDatabaseContractTests(unittest.TestCase):
             r"WHERE version = '([^']+\.sql)'",
             (ROOT / "tools" / "selfhosted" / "apply_schema_migrations.psql").read_text(encoding="utf-8"),
         )
-        # The self-hosted ledger runs one extra entry that the CloudBase cutover
-        # bundle deliberately omits: restore lives in its own migration so a
-        # legacy database cannot claim it as already applied.
+        # The self-hosted ledger runs entries the CloudBase cutover bundle
+        # deliberately omits:
+        #   - db_bootstrap / base_schema: CloudBase already had a schema.
+        #   - license_restore_v1: lives in its own migration so a legacy
+        #     database cannot claim it as already applied.
+        #   - admin_license_action_migration: self-hosted-only fix. The
+        #     admin_unbind / admin_set_status RPCs were called by
+        #     admin_server.py but never defined anywhere, so every「解绑」/
+        #     「改状态」failed with "Could not find the function … in the
+        #     schema cache". CloudBase is long retired, so this belongs to the
+        #     self-hosted ledger only.
         self.assertEqual(
             tuple(runtime_versions),
             (
@@ -129,6 +137,7 @@ class SelfHostedDatabaseContractTests(unittest.TestCase):
                 "license_note_migration.sql",
                 "license_restore_v1.sql",
                 "admin_sold_migration.sql",
+                "admin_license_action_migration.sql",
                 "hotupdate_migration.sql",
                 "announcement_migration.sql",
                 "iptv_migration.sql",
@@ -138,7 +147,12 @@ class SelfHostedDatabaseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(version for version in runtime_versions if version not in MIGRATION_ORDER),
-            ("db_bootstrap.sql", "base_schema.sql", "license_restore_v1.sql"),
+            (
+                "db_bootstrap.sql",
+                "base_schema.sql",
+                "license_restore_v1.sql",
+                "admin_license_action_migration.sql",
+            ),
         )
         # Restore is a self-hosted ledger entry only; it must not be pulled into
         # the CloudBase import bundle, which replays MIGRATION_ORDER only.

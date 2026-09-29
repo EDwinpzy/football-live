@@ -151,6 +151,11 @@ migration_hash_admin_sold=$(sha256_file "$migration_root/tools/admin_sold_migrat
     printf '%s\n' "schema migration failed: could not hash admin sold SQL" >&2
     exit 1
 }
+
+migration_hash_admin_license_action=$(sha256_file "$migration_root/tools/admin_license_action_migration.sql") || {
+  printf '%s\n' "schema migration failed: could not hash admin license action SQL" >&2
+  exit 1
+}
 migration_hash_hotupdate=$(sha256_file "$migration_root/tools/hotupdate_migration.sql") || {
     printf '%s\n' "schema migration failed: could not hash filtered hot-update SQL" >&2
     exit 1
@@ -186,6 +191,7 @@ run_psql_file() {
         -v "license_note_sha256=$migration_hash_license_note" \
         -v "license_restore_sha256=$migration_hash_license_restore" \
         -v "admin_sold_sha256=$migration_hash_admin_sold" \
+-v "admin_license_action_sha256=$migration_hash_admin_license_action" \
         -v "hotupdate_sha256=$migration_hash_hotupdate" \
         -v "announcement_sha256=$migration_hash_announcement" \
         -v "iptv_sha256=$migration_hash_iptv" \
