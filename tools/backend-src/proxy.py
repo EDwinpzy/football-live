@@ -2094,6 +2094,35 @@ SVG_ICON_CACHE = {}
 SVG_ICON_LOCK = threading.Lock()
 SVG_ICON_DIR = Path(__file__).parent / "svg_icon_cache"
 
+# 每个 URL 一把抓取锁：并发请求同一队标时只让第一个真正打上游，其余等它的结果。
+# 缺它时，足球页一次滚出十几个队 → 十几个 urlopen 同时打 crests.football-data.org
+# → 上游限流，一部分失败；而失败既不落盘也不记失败缓存，下个请求照样再失败一遍
+# （实测并发 16 个队标有 6 个返回 68 字节 1x1 占位图，串行则 0 失败）。
+SVG_ICON_FETCH_LOCKS = {}
+SVG_ICON_FETCH_LOCKS_GUARD = threading.Lock()
+SVG_ICON_FETCH_ATTEMPTS = 3
+SVG_ICON_FETCH_BACKOFF = 0.35
+# 单次抓取超时。实测同一个 SVG 本机 0.9s、设备（移动网络到境外 CDN）要 5~6s；
+# 原先写死 6s 时，真机 48 队并发仍有 3 个（利物浦/布伦特福德/巴黎圣日耳曼）
+# 三连超时后返回 68 字节占位图。放宽到 20s 让慢网也能拿到，代价只是失败路径等更久，
+# 而成功路径不受影响（真机绝大多数队标 1~2s 就回）。
+SVG_ICON_FETCH_TIMEOUT = 20
+# 对上游的总并发闸门。足球页一次滚出十几个队标就会同时打 crests.football-data.org；
+# 48 个并发时设备侧带宽被打满，连把单次超时放宽到 20s 也救不回来——大文件
+# （利物浦 299KB、巴黎圣日耳曼 274KB）会三连超时，而它们**单独**请求只要 3.1s。
+# 加超时治不了并发挤占，必须限流：同一时刻最多 4 个请求打上游，其余排队。
+SVG_ICON_FETCH_SEMAPHORE = threading.Semaphore(4)
+
+
+def _svg_fetch_lock(url):
+    """取（并按需创建）该 URL 的抓取锁。"""
+    with SVG_ICON_FETCH_LOCKS_GUARD:
+        lock = SVG_ICON_FETCH_LOCKS.get(url)
+        if lock is None:
+            lock = threading.Lock()
+            SVG_ICON_FETCH_LOCKS[url] = lock
+        return lock
+
 
 TRANS_ICON_DIR = Path(__file__).parent / "transparent_icon_cache"
 
@@ -2192,24 +2221,54 @@ def fetch_svg_icon(url):
             return data, True
         except Exception:
             pass
-    try:
-        req = urlreq.Request(url, headers={"User-Agent": UA})
-        with urlreq.urlopen(req, timeout=6) as resp:
-            data = resp.read()
-        if not data:
-            return None, False
-        try:
-            SVG_ICON_DIR.mkdir(exist_ok=True)
-            fpath.write_bytes(data)
-        except Exception:
-            pass
+
+    # 慢路径要加锁：并发下只让一个请求打上游，其余等结果复用。
+    # double-check 在锁内再查一次——等锁期间前一个线程可能已经写好缓存了。
+    with _svg_fetch_lock(url):
         with SVG_ICON_LOCK:
-            SVG_ICON_CACHE[url] = data
-            if len(SVG_ICON_CACHE) > 300:
-                for k in list(SVG_ICON_CACHE)[:150]:
-                    SVG_ICON_CACHE.pop(k, None)
-        return data, True
-    except Exception:
+            if url in SVG_ICON_CACHE:
+                return SVG_ICON_CACHE[url], True
+        if fpath.exists():
+            try:
+                data = fpath.read_bytes()
+                with SVG_ICON_LOCK:
+                    SVG_ICON_CACHE[url] = data
+                return data, True
+            except Exception:
+                pass
+
+        # 重试：上游 CDN 对突发并发会限流，单次 urlopen 失败率实测约 38%。
+        # 退避后重试即可稳定拿到；全失败才返回 False 让调用方给占位图。
+        last_error = None
+        for attempt in range(SVG_ICON_FETCH_ATTEMPTS):
+            if attempt:
+                time.sleep(SVG_ICON_FETCH_BACKOFF * attempt)
+            try:
+                req = urlreq.Request(url, headers={"User-Agent": UA})
+                with SVG_ICON_FETCH_SEMAPHORE:
+                    with urlreq.urlopen(req, timeout=SVG_ICON_FETCH_TIMEOUT) as resp:
+                        data = resp.read()
+                if not data:
+                    last_error = "empty body"
+                    continue
+                try:
+                    SVG_ICON_DIR.mkdir(exist_ok=True)
+                    fpath.write_bytes(data)
+                except Exception:
+                    pass
+                with SVG_ICON_LOCK:
+                    SVG_ICON_CACHE[url] = data
+                    if len(SVG_ICON_CACHE) > 300:
+                        for k in list(SVG_ICON_CACHE)[:150]:
+                            SVG_ICON_CACHE.pop(k, None)
+                return data, True
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+        if last_error is not None:
+            try:
+                print("svg 队标抓取失败 %s: %s" % (url, str(last_error)[:120]))
+            except Exception:
+                pass
         return None, False
 
 

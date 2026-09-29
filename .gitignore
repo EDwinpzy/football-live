@@ -34,6 +34,9 @@ cloudfunctions/otv-admin/vendor/
 # VOD 影视索引/抓取运行期缓存（本地代理自动生成，不入库）
 tools/backend-src/.cache/
 
+# build_backend_zip.py 的构建中间产物（TMP_ZIP，40MB；构建完才拷进 assets/）
+tools/python-backend-new.zip
+
 # 内嵌的后台管理项目（独立 git 仓库：站点 Worker + D1 + R2，不并入主项目）
 后台管理系统/
 
