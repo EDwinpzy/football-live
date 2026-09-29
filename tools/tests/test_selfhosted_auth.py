@@ -1,3 +1,4 @@
+import base64
 import json
 import threading
 import unittest
@@ -67,9 +68,22 @@ class SelfHostedAuthTests(unittest.TestCase):
         token = self.post_signin({"username": "svc_import", "password": "test-password"}).read()
         access_token = json.loads(token)["access_token"]
         first, middle, last = access_token.split(".")
-        changed = last[:-1] + ("A" if last[-1] != "A" else "B")
+        # Unpadded base64 of a 32-byte HMAC digest is 43 chars; the last char only
+        # carries 4 data bits, so its low 2 bits are discarded when decoding. Rewriting
+        # it to another char in the same 4-char group yields byte-identical signature
+        # bytes — a no-op mutation that made this test fail ~6% of the time. Flip a real
+        # signature byte instead so tampering is always observable.
+        changed = self._mutate_signature_byte(last)
         self.assertIsNone(decode_access_token(f"{first}.{middle}.{changed}", self.secret))
         self.assertIsNone(decode_access_token(access_token, self.secret, now=10**12))
+
+    @staticmethod
+    def _mutate_signature_byte(signature_part):
+        raw = bytearray(
+            base64.urlsafe_b64decode(signature_part + "=" * (-len(signature_part) % 4))
+        )
+        raw[10] ^= 0xFF
+        return base64.urlsafe_b64encode(bytes(raw)).rstrip(b"=").decode("ascii")
 
 
 if __name__ == "__main__":

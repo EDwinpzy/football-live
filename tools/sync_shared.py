@@ -88,14 +88,15 @@ def discover_versions():
 
 def iter_shared_files(proj: Path):
     """产出工程内所有共享文件的相对路径（相对项目根，含 Posix 分隔）。
-    排除 .mimosa 工具元数据目录（不是源码）。"""
+    排除 .mimosa 工具元数据目录（不是源码）与 __pycache__（字节码缓存，
+    内嵌绝对路径不同必然哈希不同，是纯噪声，会淹没真实漂移）。"""
     for rel in SHARED_PATHS:
         p = proj / rel
         if p.is_file():
             yield rel.replace("\\", "/")
         elif p.is_dir():
             for f in sorted(p.rglob("*")):
-                if f.is_file() and ".mimosa" not in f.parts:
+                if f.is_file() and ".mimosa" not in f.parts and "__pycache__" not in f.parts:
                     yield str(f.relative_to(proj)).replace("\\", "/")
 
 
