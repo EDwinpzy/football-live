@@ -20,9 +20,9 @@ COPY tools/backend-src/*.py tools/backend-src/*.json /app/
 COPY tools/selfhosted/web_asset_archive.py tools/selfhosted/web_entrypoint.py /app/
 # proxy.py prefers `node decrypt_stream.js` for live-stream decryption. This
 # image is python:3.12-slim and has no node, so that call always raises and
-# proxy.py falls back to decrypt_python (quickjs, from cloudfunctions/otv-web/
-# vendor/). The file is copied anyway so the runtime path matches the source
-# tree and a future image that does ship node does not silently break.
+# proxy.py falls back to decrypt_python (quickjs). The vendored extension now
+# lives in tools/backend-src/vendor/ — it used to be unpacked from the retired
+# cloudfunctions/otv-web tree, which no longer exists.
 COPY tools/backend-src/decrypt_stream.js /app/
 COPY tools/backend-src/svg_icon_cache/ /app/svg_icon_cache/
 COPY tools/backend-src/transparent_icon_cache/ /app/transparent_icon_cache/

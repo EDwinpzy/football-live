@@ -37,6 +37,13 @@ tools/backend-src/.cache/
 # 内嵌的后台管理项目（独立 git 仓库：站点 Worker + D1 + R2，不并入主项目）
 后台管理系统/
 
+# CloudBase 已退役，这些是本地残留的历史配置与云函数包。
+# cloudbaserc.json 无任何代码读取；cloudfunctions/ 的 otv-web / otv-admin
+# 早已不被部署流程引用（quickjs 依赖已迁到 tools/backend-src/vendor/）。
+# 忽略而不是提交，避免它们重新混进仓库。
+cloudbaserc.json
+cloudfunctions/
+
 # 本机 adb 调试导出（ui dump / 截图清单）
 out-*.xml
 
