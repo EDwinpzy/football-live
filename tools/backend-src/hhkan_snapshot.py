@@ -6,17 +6,68 @@
 from __future__ import annotations
 
 import copy
+import html
 import json
+import re
 from pathlib import Path
 
 
 SNAPSHOT_PATH = Path(__file__).with_name("hhkan_snapshot.json")
 
+_ENTITY = re.compile(r"&(?:amp|lt|gt|quot|apos|nbsp|#\d{2,6}|#x[0-9a-fA-F]{2,6});")
+
+# 双重转义在随包快照里是真实存在的（见 _decode_entities 注释），所以要多解几轮。
+# 上限只是防御：正常数据一两轮就收敛，`decoded == value` 会提前退出。
+_MAX_DECODE_PASSES = 5
+
+
+def _decode_entities(value):
+    """还原一次 HTML 实体。
+
+    快照是离线抓取时落盘的，落盘前没走 `hhkan._clean_text()`（其中含
+    `html.unescape`），所以实体被固化进 json。读取端若不解码，客户端就会
+    直接上屏 `&#039;` / `&quot;` / `&amp;` 字面量（BUG-02）。
+
+    解到**不再含实体**为止。随包快照里确实存在双重转义——实测
+    `details.378068.desc` 磁盘上是 `&amp;quot;Bridal Shower&amp;quot;`，
+    只解一层会把 `&quot;` 字面量留给用户看，正是 BUG-02 的残留症状。
+    循环以「本轮是否还检出实体」为终止条件：收敛后必然停下，
+    而裸 `&`（`A&B`）不含分号实体，不会被 `html.unescape` 吃掉。
+
+    非字符串原样返回——快照里 id/评分等字段是数字，不该被 coerce。
+    """
+    if not isinstance(value, str):
+        return value
+    for _ in range(_MAX_DECODE_PASSES):
+        if not _ENTITY.search(value):
+            break
+        decoded = html.unescape(value)
+        if decoded == value:
+            break
+        value = decoded
+    return value
+
+
+def _decode_tree(node):
+    """就地还原本节点树里的所有字符串实体（快照结构固定，全是 dict/list/str）。"""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            node[key] = _decode_tree(value)
+        return node
+    if isinstance(node, list):
+        for index, value in enumerate(node):
+            node[index] = _decode_tree(value)
+        return node
+    return _decode_entities(node)
+
 
 class SnapshotCatalog:
     def __init__(self, data=None):
         data = data if isinstance(data, dict) else {}
-        self.data = data if data.get("source") == "hhkan" else {}
+        # 在构造时就解码：无论数据来自 load_default() 还是测试/调用方直接
+        # `SnapshotCatalog(raw)`，「读出的文本不含 HTML 实体」这条不变式都成立。
+        # 放在这里而不是各读取方法里，是为了不会漏掉某个新增的读取路径。
+        self.data = _decode_tree(data) if data.get("source") == "hhkan" else {}
 
     @classmethod
     def load_default(cls):

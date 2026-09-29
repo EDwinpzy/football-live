@@ -418,6 +418,17 @@ def _clean_text(value: str) -> str:
     return _html.unescape(re.sub(r'<[^>]+>', '', value or '')).strip()
 
 
+def _decode_text(value: str) -> str:
+    """还原 HTML 实体但**不剥标签**——给已经 `re.search` 出来、只含纯文本的片段用。
+
+    [parse_detail] 的 `title` / `desc` 走的是这条路：它们不是从整块 HTML 里
+    提取后再清洗，而是直接 `re.search` 出一个文本片段，所以不能复用会剥标签的
+    `_clean_text`（那会连带吃掉实体外的排版）。源站页面里这些字段是转义过的，
+    不解码就会把 `&#039;` / `&quot;` 字面量送到客户端（BUG-02）。
+    """
+    return _html.unescape(value or "")
+
+
 def _parse_card(block: str) -> dict | None:
     """解析一个 module-item 卡片；兼容 data-original/data-src/src 三种海报写法。"""
     m = re.search(r'href\s*=\s*["\'](?:https?://[^"\']+)?/detail/(\d+)\.html', block, re.I)
@@ -621,7 +632,8 @@ def parse_detail(html: str, vid: int = 0) -> dict:
     titles = re.search(
         r'<div class="detail-title">\s*<strong>[^<]*</strong>\s*<strong>([^<]+)</strong>',
         html)
-    title = titles.group(1).strip() if titles else ""
+    # 解码实体：源站标题是 HTML 转义过的，不解会把 `&#039;` 之类字面量送到客户端。
+    title = _decode_text(titles.group(1)).strip() if titles else ""
     cover = re.search(r'detail-pic">\s*<img[^>]*data-original="([^"]+)"', html)
     # 标签：类型 / 年份 / 地区
     tags = [t.strip() for t in re.findall(
@@ -646,7 +658,11 @@ def parse_detail(html: str, vid: int = 0) -> dict:
         "meta": meta,
         "director": _clean(director.group(1)) if director else "",
         "actors": _clean(actors.group(1)) if actors else "",
-        "desc": re.sub(r"&lt;/?br&gt;", " ", re.sub(r"<[^>]+>", "", desc.group(1))).strip() if desc else "",
+        # 同 title：先摘标签、再把 <br> 变空格、最后解码实体。
+        # <br> 的还原必须在 unescape **之前**做——源站写的是 `&lt;br&gt;`。
+        "desc": _decode_text(
+            re.sub(r"&lt;/?br&gt;", " ", re.sub(r"<[^>]+>", "", desc.group(1)))
+        ).strip() if desc else "",
         "sources": [],
     }
     # 源 + 对应选集
