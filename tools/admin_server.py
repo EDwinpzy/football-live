@@ -1844,6 +1844,26 @@ def h_vod_source_publish(_d: dict) -> dict:
     return rpc("vod_source_admin_publish", {})
 
 
+def h_vod_source_versions(_d: dict) -> dict:
+    """可回滚的历史版本列表（新到旧）。撤销功能的前置。"""
+    return rpc("vod_source_admin_versions", {})
+
+
+def h_vod_source_rollback(d: dict) -> dict:
+    """把 drafts 回滚到某个历史版本（BUG-06）。
+
+    刻意**不隐式发布**：回滚只改 drafts，线上要生效还得再点一次「发布」。
+    否则用户会以为「撤销了」而线上其实还是那份配置。
+    """
+    try:
+        version = int(d.get("version"))
+    except (TypeError, ValueError):
+        return {"error": "bad_version"}
+    if version < 1:
+        return {"error": "bad_version"}
+    return rpc("vod_source_admin_rollback", {"p_version": version})
+
+
 def h_vod_source_speed(d: dict) -> dict:
     """单源测速：只打一次该源最轻的请求，返回毫秒延时，供后台「全部测速」后按延时排序。
     macms 取 `?ac=list`（接口探活）；其余适配器打站内搜索页（无 API，只能测页面）。"""
@@ -1926,6 +1946,8 @@ ROUTES = {
     "/api/vod_source_test": h_vod_source_test,
     "/api/vod_source_speed": h_vod_source_speed,
     "/api/vod_source_publish": h_vod_source_publish,
+    "/api/vod_source_versions": h_vod_source_versions,
+    "/api/vod_source_rollback": h_vod_source_rollback,
     # v1.20 电视源管理
     "/api/iptv_list": h_iptv_list,
     "/api/iptv_save": h_iptv_save,

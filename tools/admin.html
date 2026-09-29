@@ -923,6 +923,7 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
   <div class="w-head">
     <h1>影视源管理</h1><span class="sub">编辑内容保存为草稿，不会自动影响客户端</span><span class="spring"></span>
     <button class="act" id="btn-vod-source-publish" onclick="vodSourcePublish()">立即推送</button>
+    <button class="act" onclick="vodSourceHistory()">历史 / 撤销</button>
   </div>
   <div class="formfoot" style="margin-bottom:18px">
     <span class="tag warn" id="vod-source-draft-state">未发布变更</span>
@@ -2518,7 +2519,7 @@ async function iptvAutoRun() {
 }
 
 /* ---- 影视源草稿、发布与指定影片测试 ---- */
-let vodSourceRows = [], vodSourceEditId = null, vodSourceTestRow = null, vodSourceHls = null;
+let vodSourceRows = [], vodSourceEditId = null, vodSourceTestRow = null, vodSourceHls = null, vodSourcePublishedVersion = 0;
 let vodLatency = {}, vodLatSortDir = null; // null=配置顺序，asc=由快到慢，desc=由慢到快
 const VOD_LAT_KEY = "otv_vod_latency_v1";
 function vodLatLoad() {
@@ -2573,6 +2574,7 @@ async function loadVodSources() {
     return;
   }
   vodSourceRows = vodRows(d);
+  vodSourcePublishedVersion = d.published_version || d.publishedVersion || d.version || 0;
   document.getElementById("vod-source-version").textContent = `草稿 ${vodSourceRows.length} 个源 · 已发布 v${d.published_version || d.publishedVersion || d.version || 0}`;
   document.getElementById("vod-source-draft-state").style.display = d.dirty === false ? "none" : "inline-block";
   vodRenderRows();
@@ -2706,6 +2708,32 @@ async function vodSourcePublish() {
   btn.disabled = false; btn.textContent = "立即推送";
   if (d.error || (d.ret != null && d.ret !== 0)) { toast("推送失败：" + (d.error || d.msg), true); return; }
   toast(`影视源 v${d.version || "新版本"} 已推送`); loadVodSources();
+}
+async function vodSourceHistory() {
+  const d = await api("vod_source_versions");
+  if (d.error || d.msg) { toast("读取历史版本失败：" + (d.error || d.msg), true); return; }
+  const rows = Array.isArray(d) ? d : (d.versions || d.rows || []);
+  if (!rows.length) { toast("还没有可回滚的历史版本"); return; }
+  const cur = vodSourcePublishedVersion;
+  const currentVersion = Number(cur) || 0;
+  const lines = rows.map((v) => {
+    const tag = Number(v.version) === currentVersion ? "（当前线上）" : "";
+    const when = v.publishedAt ? new Date(v.publishedAt).toLocaleString() : "";
+    return `v${v.version}${tag} · ${v.sourceCount} 个源 · ${when}`;
+  });
+  const pick = prompt(
+    `可回滚的历史版本：\n\n${lines.join("\n")}\n\n` +
+    `输入版本号把草稿回滚到该版本（例如 ${rows[rows.length - 1].version}），留空取消。\n` +
+    `注意：回滚只改草稿，还需要再点「立即推送」才会对客户端生效。`
+  );
+  if (pick === null) return;
+  const version = parseInt(String(pick).trim(), 10);
+  if (!Number.isFinite(version)) { toast("请输入数字版本号", true); return; }
+  if (!confirm(`确认把草稿回滚到 v${version}？\n当前草稿会被该版本快照整体覆盖，之后仍需点「立即推送」。`)) return;
+  const r = await api("vod_source_rollback", {version});
+  if (r.error || (r.ok === false)) { toast("回滚失败：" + (r.error || r.msg), true); return; }
+  toast(`已回滚到 v${r.restoredFrom}（${r.drafts} 个源），记得点「立即推送」`);
+  loadVodSources();
 }
 function vodSourceTest(index) {
   vodSourceTestRow = vodSourceRows[index];

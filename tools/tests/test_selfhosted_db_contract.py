@@ -128,6 +128,10 @@ class SelfHostedDatabaseContractTests(unittest.TestCase):
         #     「改状态」failed with "Could not find the function … in the
         #     schema cache". CloudBase is long retired, so this belongs to the
         #     self-hosted ledger only.
+        #   - vod_source_undo_migration: self-hosted-only too. Adds the
+        #     vod_source_admin_versions / vod_source_admin_rollback RPCs the
+        #     admin UI needs to undo a source deletion (BUG-06); they read
+        #     vod_source_versions, which only exists on the self-hosted stack.
         self.assertEqual(
             tuple(runtime_versions),
             (
@@ -138,6 +142,7 @@ class SelfHostedDatabaseContractTests(unittest.TestCase):
                 "license_restore_v1.sql",
                 "admin_sold_migration.sql",
                 "admin_license_action_migration.sql",
+                "vod_source_undo_migration.sql",
                 "hotupdate_migration.sql",
                 "announcement_migration.sql",
                 "iptv_migration.sql",
@@ -152,6 +157,7 @@ class SelfHostedDatabaseContractTests(unittest.TestCase):
                 "base_schema.sql",
                 "license_restore_v1.sql",
                 "admin_license_action_migration.sql",
+                "vod_source_undo_migration.sql",
             ),
         )
         # Restore is a self-hosted ledger entry only; it must not be pulled into

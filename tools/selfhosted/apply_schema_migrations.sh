@@ -156,6 +156,11 @@ migration_hash_admin_license_action=$(sha256_file "$migration_root/tools/admin_l
   printf '%s\n' "schema migration failed: could not hash admin license action SQL" >&2
   exit 1
 }
+
+migration_hash_vod_source_undo=$(sha256_file "$migration_root/tools/vod_source_undo_migration.sql") || {
+  printf '%s\n' "schema migration failed: could not hash vod source undo SQL" >&2
+  exit 1
+}
 migration_hash_hotupdate=$(sha256_file "$migration_root/tools/hotupdate_migration.sql") || {
     printf '%s\n' "schema migration failed: could not hash filtered hot-update SQL" >&2
     exit 1
@@ -192,6 +197,7 @@ run_psql_file() {
         -v "license_restore_sha256=$migration_hash_license_restore" \
         -v "admin_sold_sha256=$migration_hash_admin_sold" \
 -v "admin_license_action_sha256=$migration_hash_admin_license_action" \
+-v "vod_source_undo_sha256=$migration_hash_vod_source_undo" \
         -v "hotupdate_sha256=$migration_hash_hotupdate" \
         -v "announcement_sha256=$migration_hash_announcement" \
         -v "iptv_sha256=$migration_hash_iptv" \

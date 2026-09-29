@@ -231,6 +231,18 @@ VALUES ('admin_license_action_migration.sql', :'admin_license_action_sha256');
 COMMIT;
 \endif
 
+-- BUG-06：影视源「撤销 / 回滚」（vod_source_admin_versions / vod_source_admin_rollback）。
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'vod_source_undo_migration.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir ../vod_source_undo_migration.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('vod_source_undo_migration.sql', :'vod_source_undo_sha256');
+COMMIT;
+\endif
+
 SELECT NOT EXISTS (
     SELECT 1 FROM public.schema_migrations WHERE version = 'hotupdate_migration.sql'
 ) AS migration_pending \gset
