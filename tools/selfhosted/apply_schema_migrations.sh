@@ -55,6 +55,8 @@ selfhosted/migrations/license_restore_v1.sql
 license_v2_migration.sql
 license_note_migration.sql
 admin_sold_migration.sql
+admin_license_action_migration.sql
+vod_source_undo_migration.sql
 hotupdate_migration.sql
 announcement_migration.sql
 iptv_migration.sql

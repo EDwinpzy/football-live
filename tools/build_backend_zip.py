@@ -26,10 +26,10 @@ except ImportError:  # direct `python tools/build_backend_zip.py` invocation
     from build_web_assets import build_assets
 
 ROOT = str(Path(__file__).resolve().parent.parent)
-SRC_ZIP = os.path.join(ROOT, r"android\app\src\main\assets\backend\python-backend.zip")
-MOBILE_ZIP = os.path.join(ROOT, r"internal\mobile\app\src\main\assets\backend\python-backend.zip")
-TMP_ZIP = os.path.join(ROOT, r"tools\python-backend-new.zip")
-SRC_DIR = os.path.join(ROOT, r"tools\backend-src")
+SRC_ZIP = os.path.join(ROOT, "android", "app", "src", "main", "assets", "backend", "python-backend.zip")
+MOBILE_ZIP = os.path.join(ROOT, "internal", "mobile", "app", "src", "main", "assets", "backend", "python-backend.zip")
+TMP_ZIP = os.path.join(ROOT, "tools", "python-backend-new.zip")
+SRC_DIR = os.path.join(ROOT, "tools", "backend-src")
 POSTER_DIR = r"D:\OneDrive\ZCode\football-posters"
 
 REPL = ["proxy.py", "hhkan.py", "hhkan_snapshot.py", "hhkan_snapshot.json",

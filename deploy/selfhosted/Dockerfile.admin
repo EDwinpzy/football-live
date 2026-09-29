@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app/tools
 
-RUN pip install --no-cache-dir cryptography "psycopg[binary]" \
+RUN pip install --no-cache-dir --index-url https://mirrors.aliyun.com/pypi/simple cryptography "psycopg[binary]" \
     && mkdir -p /app/tools/out /app/tools/keys
 
 COPY tools/admin_server.py /app/tools/admin_server.py

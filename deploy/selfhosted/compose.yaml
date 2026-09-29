@@ -74,6 +74,8 @@ services:
       - ../../tools/license_v2_migration.sql:/app/tools/license_v2_migration.sql:ro
       - ../../tools/license_note_migration.sql:/app/tools/license_note_migration.sql:ro
       - ../../tools/admin_sold_migration.sql:/app/tools/admin_sold_migration.sql:ro
+      - ../../tools/admin_license_action_migration.sql:/app/tools/admin_license_action_migration.sql:ro
+      - ../../tools/vod_source_undo_migration.sql:/app/tools/vod_source_undo_migration.sql:ro
       - ../../tools/hotupdate_migration.sql:/app/tools/hotupdate_migration.sql:ro
       - ../../tools/announcement_migration.sql:/app/tools/announcement_migration.sql:ro
       - ../../tools/iptv_migration.sql:/app/tools/iptv_migration.sql:ro
