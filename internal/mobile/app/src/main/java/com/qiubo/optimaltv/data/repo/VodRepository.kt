@@ -138,6 +138,46 @@ internal data class CatalogSnapshot(
 )
 
 /**
+ * 「上次成功线路」记忆的编解码。
+ *
+ * 记住的是稳定标识（源 / 内容 / 线路号），**不含任何播放地址、Cookie 或签名 token**。
+ * 与 TV 端同名对象逐字同口径：移动端曾漏掉第三段线路号，读回时被当成第 0 条，
+ * 于是「上次播第 3 条」静默变成「这次播第 0 条」（BUG-03）。
+ */
+internal object LastGoodSourceCodec {
+
+    /** 解出的一条线路记忆。 */
+    data class Stored(val sourceId: String, val contentId: String, val lineIndex: Int) {
+        /** 还原成 `/vod/play` 用的 line id。 */
+        fun lineId(): String = "$sourceId:$contentId:$lineIndex"
+    }
+
+    /**
+     * 解析 line id；无效返回 null。
+     *
+     * 「无效就判无效」而不是「尽力猜一个」：记忆指向错误线路的代价（用户莫名其妙被
+     * 切到另一条线）远大于没有记忆（多跑一轮本地匹配）。宁可回落 L2。
+     */
+    fun encode(rawLineId: String): Stored? {
+        val raw = rawLineId.trim()
+        if (raw.isEmpty()) return null
+        val parts = raw.split(":")
+        if (parts.size < 2 || parts.size > 3) return null
+        val sourceId = parts[0].trim()
+        val contentId = parts[1].trim()
+        if (sourceId.isEmpty() || contentId.isEmpty()) return null
+        // 两段 id（云端 resolver 候选）= 该内容在源下的第 0 条线路。
+        // 三段 id 的第三段若不是非负整数，按 0 处理而不是丢弃整条记忆。
+        val lineIndex = parts.getOrNull(2)
+            ?.trim()
+            ?.toIntOrNull()
+            ?.takeIf { it >= 0 }
+            ?: 0
+        return Stored(sourceId, contentId, lineIndex)
+    }
+}
+
+/**
  * 解析目录快照 JSON。
  *
  * [acceptedVersions] 决定接受哪些 `v`：持久化快照传 [CatalogOriginPolicy.PERSISTED_ACCEPTED_VERSIONS]（严格 v4），
@@ -1084,11 +1124,19 @@ class VodRepository(
                 // 在已取到的 local 里找，不再为 L0 重新触发一整轮 /vod/detail。
                 // 逐段比对而非 startsWith：`content-1` 会前缀命中 `content-10`，
                 // 那样 L0 会把「上次成功的第 10 集线路」当成这集的线路送进起播——错集。
-                val hit = local.firstOrNull { line ->
+                // 先按 source/content 前缀定位候选内容，再在**该内容内**按 line_index
+                // 精确定位真正播成功过的那条线——只比前缀会把「第 3 条」换成「第 0 条」
+                // （同一内容有多条可播线路时，BUG-03 的根因）。
+                val sameContent = local.filter { line ->
                     ResolverRanking.matchesCandidate(
                         lineLinePrefix(line.playRef), remembered.sourceId, remembered.contentId,
                     )
                 }
+                val hit = sameContent.firstOrNull { line ->
+                    val parts = line.playRef.split("|").getOrNull(1)?.split(":")
+                    parts != null && parts.size == 3 &&
+                        (parts[2].trim().toIntOrNull() ?: 0) == remembered.lineIndex
+                } ?: sameContent.firstOrNull()
                 if (hit != null) {
                     PlaybackTelemetry.counters.inc("resolve.tier.l0")
                     return@withContext ResolvedLines(listOf(hit), "L0_last_good")
@@ -1164,18 +1212,20 @@ class VodRepository(
     suspend fun rememberLastGoodSource(
         mytvId: String,
         epIndex: Int,
-        sourceId: String,
-        contentId: String,
+        lineId: String,
     ) {
         val id = mytvId.trim().toLongOrNull() ?: return
-        if (sourceId.isBlank() || contentId.isBlank()) return
+        // 线路号必须一起存：只存 sourceId/contentId 两段时读回会被当成第 0 条线路，
+        // 「上次播第 3 条」会静默变成「这次播第 0 条」（BUG-03）。
+        val stored = LastGoodSourceCodec.encode(lineId) ?: return
         runCatching {
             Graph.db.lastGoodSourceDao().upsert(
                 LastGoodSourceEntity(
                     mytvId = id,
                     episodeIndex = epIndex,
-                    sourceId = sourceId,
-                    contentId = contentId,
+                    sourceId = stored.sourceId,
+                    contentId = stored.contentId,
+                    lineIndex = stored.lineIndex,
                     successfulAt = System.currentTimeMillis(),
                 ),
             )

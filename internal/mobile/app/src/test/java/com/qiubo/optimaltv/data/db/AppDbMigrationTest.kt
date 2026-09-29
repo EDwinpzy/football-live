@@ -25,6 +25,7 @@ import org.robolectric.annotation.Config
  * 走**真实迁移路径**：先用 Room 在测试源集里建一个 version=1 的库并写入用户数据
  * （LegacyV1Db，见本文件末尾），再用正式的 [AppDb]（version 2 + [MIGRATION_1_2]）打开它。
  * 不用手写 SQL 伪造 v1 库——那会绕过 Room 的 schema identity 校验，测不到迁移本身。
+ * v2 -> v3 那一段另有 [AppDbMigrationV23Test] 覆盖。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -68,7 +69,9 @@ class AppDbMigrationTest {
         Room.databaseBuilder(
             RuntimeEnvironment.getApplication(), AppDb::class.java, dbFile.absolutePath,
         )
-            .addMigrations(MIGRATION_1_2)
+            // AppDb 已是 version 3；Room 需要直接的 1 -> 3 路径，故两个迁移都注册
+            // （与 AppDb.get() 的注册口径一致）。
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
             .allowMainThreadQueries()
             .build()
             .also { migrated = it }
@@ -111,7 +114,13 @@ class AppDbMigrationTest {
         seedV1WithUserData()
         val db = openMigrated()
         db.lastGoodSourceDao().upsert(
-            LastGoodSourceEntity(10000001L, 0, "hhkan", "abc123", 999L),
+            LastGoodSourceEntity(
+                mytvId = 10000001L,
+                episodeIndex = 0,
+                sourceId = "hhkan",
+                contentId = "abc123",
+                successfulAt = 999L,
+            ),
         )
         db.close()
         migrated = null
@@ -126,10 +135,10 @@ class AppDbMigrationTest {
     fun lastGoodSourceDao_roundTripsByCompositeKey() = runBlocking {
         seedV1WithUserData()
         val dao = openMigrated().lastGoodSourceDao()
-        dao.upsert(LastGoodSourceEntity(10000001L, 2, "hhkan", "vid-1", 10L))
-        dao.upsert(LastGoodSourceEntity(10000001L, 3, "hhkan", "vid-2", 20L))
+        dao.upsert(LastGoodSourceEntity(10000001L, 2, "hhkan", "vid-1", 0, 10L))
+        dao.upsert(LastGoodSourceEntity(10000001L, 3, "hhkan", "vid-2", 0, 20L))
         // 复合主键：同 (mytv_id, episode) 再写应覆盖而非新增
-        dao.upsert(LastGoodSourceEntity(10000001L, 2, "hhkan", "vid-1-new", 30L))
+        dao.upsert(LastGoodSourceEntity(10000001L, 2, "hhkan", "vid-1-new", 0, 30L))
         assertEquals(2, dao.all().size)
         assertEquals("vid-1-new", dao.get(10000001L, 2)?.contentId)
         assertEquals("vid-2", dao.get(10000001L, 3)?.contentId)

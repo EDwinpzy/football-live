@@ -1306,14 +1306,12 @@ class PlayerViewModel(
         val parts = line.playRef.split("|")
         if (parts.size != 3) return
         // playRef = "{detailRef}|{lineId}|{episode}"，lineId = "{sourceId}:{contentId}:{epIndex}"
-        val lineId = parts[1].split(":")
-        if (lineId.size < 2) return
+        val lineId = parts[1]
         Graph.appScope.launch {
             repo.rememberLastGoodSource(
                 mytvId = item.mytvId,
                 epIndex = _ui.value.epIndex,
-                sourceId = lineId[0],
-                contentId = lineId[1],
+                lineId = lineId,
             )
         }
     }
