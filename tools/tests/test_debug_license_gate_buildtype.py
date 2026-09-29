@@ -20,6 +20,13 @@ import re
 import unittest
 
 
+# 2026-09-29 用户要求「暂时隐藏 app 门禁、不需要激活」→ 两端 release 都改为
+# 'false'。整套授权链路（LicenseManager / PaywallShared / activate 端点 / 卡密库）
+# 都还在，只是不再拦人；改回 'true' 即可恢复，无需动业务代码。
+# 上架（应用商店）前必须改回 "true"。
+EXPECTED_RELEASE_GATE = "false"
+
+
 REPO = pathlib.Path(__file__).resolve().parents[2]
 TV_GRADLE = REPO / "android" / "app" / "build.gradle"
 MOBILE_GRADLE = REPO / "internal" / "mobile" / "app" / "build.gradle"
@@ -52,16 +59,35 @@ class DebugLicenseGateTest(unittest.TestCase):
                 )
 
     def test_release_keeps_the_gate_on(self):
-        """Release 必须仍强制卡密门控——本改动不得放宽正式包。"""
+        """Release 的卡密门禁必须**显式**声明（值本身可以是 true 或 false）。
+
+        2026-09-29 用户要求「暂时隐藏门禁、不需要激活」，两端 release 的
+        LICENSE_ENABLED 都被显式改成 'false'。本测试守住的是「**显式**声明」
+        这条性质——不接受有人删掉这行让 release 悄悄继承 defaultConfig 的值，
+        那才是真正的「无声」。
+
+        ⚠️ 上架前必须把两端 release 的 LICENSE_ENABLED 改回 'true'，
+        并把下面的 EXPECTED_RELEASE_GATE 一并改回 "true"。
+        """
         for gradle in (TV_GRADLE, MOBILE_GRADLE):
             with self.subTest(gradle=gradle.name):
                 source = gradle.read_text(encoding="utf-8")
                 self.assertRegex(
                     source,
                     r"release\s*\{(?:[^{}]|\{[^{}]*\})*?"
-                    r"buildConfigField\s+'boolean'\s*,\s*'LICENSE_ENABLED'\s*,\s*'true'",
-                    f"{gradle.name}: release buildType 必须显式把 LICENSE_ENABLED 设为 true，"
-                    "确保正式包不会因 Debug 旁路而丢失卡密门控。",
+                    r"buildConfigField\s+'boolean'\s*,\s*'LICENSE_ENABLED'\s*,\s*'([^']+)'",
+                    f"{gradle.name}: release buildType 必须显式声明 LICENSE_ENABLED，"
+                    "不能删掉这行让它继承 defaultConfig 的隐式值。",
+                )
+                match = re.search(
+                    r"release\s*\{(?:[^{}]|\{[^{}]*\})*?"
+                    r"buildConfigField\s+'boolean'\s*,\s*'LICENSE_ENABLED'\s*,\s*'([^']+)'",
+                    source,
+                )
+                self.assertEqual(
+                    match.group(1), EXPECTED_RELEASE_GATE,
+                    f"{gradle.name}: release 的卡密门禁当前应为 {EXPECTED_RELEASE_GATE}。"
+                    "上架前要恢复门禁的话，把两端 build.gradle 的这一行和本常量一起改回 true。",
                 )
 
     def test_debug_builds_explicitly_disable_the_gate(self):

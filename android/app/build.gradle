@@ -207,8 +207,14 @@ android {
         release {
             minifyEnabled false   // Chaquopy + 反射（引擎/Room）保守不混淆
             signingConfig signingConfigs.release
-            // 正式包：卡密门禁生效（未激活/过期走激活页），不因 Debug 旁路而放宽。
-            buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'
+            // 正式包卡密门禁：默认开（2026-09-18 起）。
+            //
+            // 2026-09-29 用户要求「暂时隐藏门禁、不需要激活」→ 置 false。
+            // 这是**临时**状态，不是废弃门禁：整套授权链路（LicenseManager /
+            // PaywallShared / activate 端点 / 卡密库）都还在，只是不再拦人。
+            // 恢复只需把下面改回 'true' 并重打 APK，无需动任何业务代码。
+            // ⚠️ 上架前务必确认这一行是 'true'（§11.4 的 Release 门槛不管这个）。
+            buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'
         }
         debug {
             // v1.20 QA：debug 也用发布签名——可覆盖安装 release（保激活/收藏等数据），
