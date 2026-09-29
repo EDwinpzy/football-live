@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 
 import vod_resolver
+import vod_sources
 
 
 class VodService:
@@ -92,6 +93,10 @@ class VodService:
                 if candidate:
                     sources = candidate
                     break
+        # 按实测可用性排序：LineHistory 一直在记录每条线路的成功/失败，
+        # 但此前没有用于排序，导致起播从 line 0 逐条试错（实测 78.8s 才
+        # 出画）。验证过的线排前面，用户不必每次先撞一遍坏线。
+        sources = vod_sources.rank_lines_by_health(sources, self.registry.history)
         self._resolved_lines[str(douban_id)] = {str(line.get("id")): copy.deepcopy(line) for line in sources}
         subject["sources"] = sources
         subject["source_state"] = "ready" if sources else "unavailable"

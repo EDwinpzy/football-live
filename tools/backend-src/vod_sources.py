@@ -780,6 +780,48 @@ class LineHistory:
         os.replace(tmp, self.path)
 
 
+def rank_lines_by_health(lines, history):
+    """按线路实测成功率排序，让起播先试验证过的线。
+
+    背景（2026-09-29 实测）：《肖申克的救赎》详情返回 12 条线路，App 从
+    line 0 逐条试到 line 12，每条等满 5s 首帧看门狗才换线，点播放到出画
+    耗时 78.8s。索引里的原始顺序只是"匹配出来的先后"，不代表可用性。
+    LineHistory 一直在 record(线路, 成功/失败)，却没有任何地方读它排序。
+
+    打分口径：
+      - success_rate 是最近 20 次尝试的成功率，无历史时 0.5（中性，不打乱顺序）；
+      - 最近连续失败会额外扣分。线路会坏——一条历史成功率很高但最近连挂的
+        线路，必须排到未知线路之后，否则用户每次都要先撞一次它。
+      - 排序稳定：分数相同保持原相对顺序，避免每次刷新顺序抖动导致缓存失效。
+
+    纯函数：不修改传入的 lines，返回新列表；history 为 None 时原样返回。
+    每条线会带上 health_score / health_samples 便于排障。
+    """
+    items = [line for line in (lines or []) if isinstance(line, dict)]
+    if not items or history is None:
+        return list(items)
+
+    scored = []
+    for position, line in enumerate(items):
+        line_id = str(line.get("id") or "")
+        attempts = history.attempts(line_id) if line_id else []
+        score = history.success_rate(line_id) if line_id else 0.5
+        # 最近连续失败：越往回连续越多，惩罚越重（最多扣 0.45）。
+        streak = 0
+        for ok in reversed(attempts):
+            if ok:
+                break
+            streak += 1
+        score -= min(0.45, 0.15 * streak)
+        enriched = dict(line)
+        enriched["health_score"] = round(score, 4)
+        enriched["health_samples"] = len(attempts)
+        scored.append((-score, position, enriched))
+
+    scored.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in scored]
+
+
 class SourceStats:
     """源质量画像：搜索成功率 + EMA 延迟 + 连续失败熔断，JSON 原子落盘。
 

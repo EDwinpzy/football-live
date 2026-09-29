@@ -1102,7 +1102,11 @@ class VodRepository(
             val result = runCatching {
                 withTimeout(VodRepositoryConfig.RESOLVER_TIMEOUT_MS) {
                     VodApiSource.fetchResolve(
-                        settings.current().hhkanBaseUrl, resolveClient, mytvIdLong, episode,
+                        // 必须打服务端（Release 注入的入口），不是本机内嵌后端：
+                        // hhkanBaseUrl 默认是 127.0.0.1:8090，L1 云端预匹配永远打不到
+                        // 服务端，实测每次都回落本地原序、逐条试错到 78.8s 才出画。
+                        CloudResolveBase.pick(settings.current()),
+                        resolveClient, mytvIdLong, episode,
                     )
                 }
             }.getOrNull()

@@ -1233,7 +1233,11 @@ class VodRepository(
             // 用一个独立的短超时客户端：本地结果不依赖它，但也不该让整个协程
             // 因为一个可选分支而无限期挂着。
             async {
-                val base = settings.current().hhkanBaseUrl
+                // 必须打服务端（Release 注入的 api 入口），不是本机内嵌后端：
+                // 用 hhkanBaseUrl 时它默认是 127.0.0.1:8090，L1 云端预匹配永远
+                // 打不到服务端，实测每次都回落 local_detail、逐条试错到 78.8s
+                // 才出画。详见 CloudResolveBase 的说明。
+                val base = CloudResolveBase.pick(settings.current())
                 runCatching {
                     VodApiSource.fetchResolve(base, resolveClient, mytvId, epIndex + 1)
                 }.onFailure {
