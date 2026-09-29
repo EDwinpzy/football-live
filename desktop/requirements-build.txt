@@ -1,0 +1,8 @@
+# My TV Windows EXE 构建依赖（版本钉死，保证 exe 体积与行为可复现）。
+# 先装这三个，再跑：python desktop/build.py
+pywebview==6.2.1
+quickjs==1.19.4
+pyinstaller==6.19.0
+
+# 仅有 logo.png -> 多档 .ico 需要（EXE 图标）。
+Pillow>=10.0

@@ -1,6 +1,6 @@
 # My TV（OptimalTV 工程）
 
-一款面向电视大屏、手机和平板的原生影视应用，外加一个功能对齐的网页版。
+一款面向电视大屏、手机和平板的原生影视应用，并提供 Windows 桌面版和网页版。
 Kotlin + Jetpack Compose + Media3 构建，tvOS 深色风格；Python 后端内嵌进 app（Chaquopy），
 设备端自给自足。商业化 = 卡密付费。
 
@@ -35,6 +35,7 @@ Kotlin + Jetpack Compose + Media3 构建，tvOS 深色风格；Python 后端内�
 - 卡密付费：一码 2 台设备，24 小时网络宽限
 - 热更新：改后端与网页资源不发 APK
 - 网页版：云端影视 + IPTV，与 APK 同构
+- Windows 版：独立 EXE，WebView2 窗口 + 本机 Python 后端，内置前端、影视快照与 HLS 播放脚本
 - 后台管理：卡密 / 热更 / 公告 / 电视源 / 影视源
 - OtvNav 遥控器焦点引擎
 
@@ -45,6 +46,7 @@ Kotlin + Jetpack Compose + Media3 构建，tvOS 深色风格；Python 后端内�
 | 客户端 | Kotlin · Jetpack Compose（TV 大屏 + 触屏）· Media3 · Room · DataStore · Chaquopy |
 | 内嵌后端 | Python 3（`proxy.py` / 抓取 / VOD 解析 / 队标）运行于 `127.0.0.1:8090` |
 | 网页版 | 原生 HTML/CSS/JS，与 APK 逐行对照复刻；hls.js + PWA |
+| Windows 版 | Python · pywebview · WebView2 · PyInstaller；数据存于 `%LOCALAPPDATA%\MyTV` |
 | 服务端 | Docker Compose · PostgreSQL + PostgREST · Nginx（自建 VPS） |
 | 发布 | Gradle `assembleRelease` · 内容寻址 zip 热更 · APK 更新清单 |
 
@@ -56,6 +58,7 @@ Kotlin + Jetpack Compose + Media3 构建，tvOS 深色风格；Python 后端内�
 | 本地构建后端与网页 | `python tools/release_all.py`（只在本机生成部署包与热更包，不触碰公网） |
 | 部署 / 推送 | `python tools/release_all.py --deploy` → 重打两个 APK → `node 后台管理系统/scripts/ops/hu-upload.mjs --site "https://<站点>"` 上传并发布热更 → `git push origin main` |
 | 发新 APK | `android/` 或 `internal/mobile/` 下跑 `.\gradlew.bat assembleRelease`（Release 必须显式传 `-PapiBaseUrl=`，见项目文档 §11.4）；产物自动归档到 `apk/` |
+| 构建 Windows EXE | `python -m pip install -r desktop/requirements-build.txt` → `python desktop/build.py`；产物为 `apk/Windows版/MyTV.exe` |
 | 跑测试 | `python -m unittest discover -s tools/backend-src/tests -p 'test_*.py'`（后端）＋ `python -m unittest discover -s tools/tests -p 'test_*.py'`（发布契约）＋ `node tools/backend-src/tests/web_resolver_harness.mjs`（网页换线） |
 | 签发卡密 | `python tools/license_gen.py gen --plan <套餐> --count <数量>` → `python tools/selfhosted/import_licenses.py` 入库（支持 `--dry-run` 预检） |
 | 验证改动 | 模拟器实测（截图 + logcat tag `OTV`）；网页版改动**必须浏览器实测** |
@@ -79,12 +82,13 @@ My TV/
 │       ├── python/           # Chaquopy Python 源码
 │       └── cpp/pinyinime/    # AOSP 谷歌拼音解码器
 ├── internal/mobile/          # 移动版工程（触屏；data/playback/license 与 TV 字节级一致）
+├── desktop/                  # Windows EXE 启动器、打包脚本与测试
 ├── deploy/selfhosted/        # 自建部署（compose.yaml / Dockerfile.* / nginx.conf）
 ├── tools/                    # 后端源码、后台源码（admin_server.py/admin.html）、构建与发布脚本、SQL 迁移、测试
 ├── docs/项目文档.md           # 唯一详细文档
 ├── 后台管理系统/             # 上一代自建站点形态（已退役，独立仓库，仅供迁移对照）
 ├── shots/                    # README 展示截图
-└── apk/                      # 构建产物（TV版/ 移动版/）
+└── apk/                      # 构建产物（TV版/ 移动版/ Windows版/）
 ```
 
 ## 三条铁律
