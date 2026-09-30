@@ -214,7 +214,9 @@ JNIEXPORT jboolean JNICALL nativeImFlushCache(JNIEnv *env, jclass clazz) {
 
 JNIEXPORT jint JNICALL nativeImGetPredictsNum(JNIEnv *env, jclass clazz,
                                               jstring fixed_str) {
-  char16 *fixed_ptr = (char16*)(*env).GetStringChars(fixed_str, JNI_FALSE);
+  const char16 *fixed_chars = (const char16*)(*env).GetStringChars(fixed_str, JNI_FALSE);
+  if (fixed_chars == NULL) return 0;
+  const char16 *fixed_ptr = fixed_chars;
   size_t fixed_len = (size_t)(*env).GetStringLength(fixed_str);
 
   char16 fixed_buf[kMaxPredictSize + 1];
@@ -228,7 +230,7 @@ JNIEXPORT jint JNICALL nativeImGetPredictsNum(JNIEnv *env, jclass clazz,
 
   predict_len = im_get_predicts(fixed_buf, predict_buf);
 
-  (*env).ReleaseStringChars(fixed_str, fixed_ptr);
+  (*env).ReleaseStringChars(fixed_str, fixed_chars);
 
   return predict_len;
 }

@@ -217,6 +217,17 @@ fun SearchScreen(nav: NavController) {
             imeReady = withContext(Dispatchers.IO) { PinyinIme.load(context) }
         }
     }
+    var hotwordsVersion by remember { mutableStateOf(0) }
+    LaunchedEffect(imeReady) {
+        if (!imeReady) return@LaunchedEffect
+        var attempts = 0
+        while (isActive) {
+            val base = Graph.settings.current().hhkanBaseUrl
+            if (PinyinIme.refreshHotwords(base)) hotwordsVersion++
+            // Cold backend/catalogue startup may finish after the first cached response.
+            delay(if (attempts++ < 6) 10_000L else 300_000L)
+        }
+    }
     // 尾部拼音输入段 → 汉字候选（AOSP 谷歌拼音 native 引擎）
     val trailing = remember(query) { PinyinIme.trailingSegment(query) }
 
@@ -257,10 +268,16 @@ fun SearchScreen(nav: NavController) {
     }
     // 单行候选：横滑不限个数，放宽到 24（旧 6×6 网格版因纵向空间只给 12）；
     // 首字母联想片名（词表+目录）排在 native 候选之前
-    val candidates = remember(trailing, imeReady, initialsMatches) {
-        if (imeReady && trailing.isNotEmpty()) {
-            (initialsMatches + PinyinIme.candidates(trailing, 24)).distinct().take(24)
-        } else emptyList()
+    val hotwordMatches = remember(trailing, hotwordsVersion) {
+        if (trailing.isNotEmpty()) PinyinIme.hotwordCandidates(trailing, 8) else emptyList()
+    }
+    val candidates = remember(query, trailing, imeReady, initialsMatches, titleIndexReady, hotwordsVersion) {
+        when {
+            !imeReady -> emptyList()
+            trailing.isNotEmpty() ->
+                (hotwordMatches + initialsMatches + PinyinIme.candidates(trailing, 24)).distinct().take(24)
+            else -> PinyinIme.predictions(query, 24)
+        }
     }
     val segmentedPinyin = remember(trailing, imeReady) {
         if (imeReady && trailing.isNotEmpty()) PinyinIme.segmentedPinyin(trailing) else trailing
@@ -371,10 +388,21 @@ fun SearchScreen(nav: NavController) {
     }
 
     // ---- 区域间定向跳转（需求⑤：严格相邻，只到最近的下个区域）----
+    val candListState = rememberLazyListState()
+    LaunchedEffect(query, candidates) {
+        if (candidates.isNotEmpty()) candListState.scrollToItem(0)
+    }
+    val focusFirstCandidate: () -> Unit = {
+        scope.launch {
+            candListState.scrollToItem(0)
+            delay(60)
+            focusTarget(firstCandFocus)
+        }
+    }
     // 键盘 DOWN → 候选词行（无候选时跳过它直接到分类 tab；都没有则封锁）
     val keyDown: () -> Unit = {
         when {
-            candidates.isNotEmpty() -> focusTarget(firstCandFocus)
+            candidates.isNotEmpty() -> focusFirstCandidate()
             results.isNotEmpty() -> focusTarget(firstTabFocus)
             else -> {}
         }
@@ -383,7 +411,7 @@ fun SearchScreen(nav: NavController) {
     val candUp: () -> Unit = { focusTarget(keyboardFocus) }
     val candDown: () -> Unit = { if (results.isNotEmpty()) focusTarget(firstTabFocus) }
     // 分类 tab UP → 候选词行（无候选回键盘）；DOWN → 结果首卡
-    val tabUp: () -> Unit = { if (candidates.isNotEmpty()) focusTarget(firstCandFocus) else focusTarget(keyboardFocus) }
+    val tabUp: () -> Unit = { if (candidates.isNotEmpty()) focusFirstCandidate() else focusTarget(keyboardFocus) }
     val tabDown: () -> Unit = { if (shown.isNotEmpty()) focusTarget(firstResultFocus) }
 
     // 返回键回上一页（标签栏仅键盘到顶 UP 定向可达，方向键不会误入）
@@ -417,7 +445,7 @@ fun SearchScreen(nav: NavController) {
             ) {
                 TvosSearchKeyboard(
                     query = query,
-                    pinyinHint = if (candidates.isNotEmpty()) segmentedPinyin else null,
+                    pinyinHint = if (trailing.isNotEmpty() && candidates.isNotEmpty()) segmentedPinyin else null,
                     numeric = numeric,
                     s = s,
                     keyboardFocus = keyboardFocus,
@@ -431,7 +459,6 @@ fun SearchScreen(nav: NavController) {
 
             // ---- 候选词一行（需求④：软键盘下方一行，可左右滚动）----
             if (candidates.isNotEmpty()) {
-                val candListState = rememberLazyListState()
                 val candScroll = remember(candListState) { lazyNavContainer(candListState) }
                 CompositionLocalProvider(
                     LocalNavOverride provides { dir: Int ->
@@ -476,7 +503,15 @@ fun SearchScreen(nav: NavController) {
                                         if (it) noteKeyGained() else noteKeyLost(null)
                                     },
                                 ) {
-                                    query = PinyinIme.applyCandidate(query, cand)
+                                    query = when {
+                                        trailing.isEmpty() -> query + cand
+                                        cand in hotwordMatches -> PinyinIme.applyHotwordCandidate(query, cand)
+                                        else -> PinyinIme.applyCandidate(query, cand)
+                                    }
+                                    scope.launch {
+                                        delay(60)
+                                        runCatching { keyboardFocus.requestFocus() }
+                                    }
                                 }
                                 .background(
                                     if (candFocused) OtvColors.White else Color(0x24FFFFFF),

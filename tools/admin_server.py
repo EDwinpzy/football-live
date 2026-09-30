@@ -211,7 +211,7 @@ HU_ENDPOINT = runtime_client.HOTUPDATE_ENDPOINT
 # 与 APK HotUpdateManager / hotupdate_admin_upsert RPC 的校验口径一致
 HU_REQUIRED_ENTRIES = (
     "proxy.py", "hhkan.py", "scraper.py", "team_backdrop.py", "decrypt_stream.js",
-    "douban_catalog.py", "douban_snapshot.json", "media_index.py", "pinyin_map.json", "vod_api.py",
+    "douban_catalog.py", "douban_snapshot.json", "media_index.py", "pinyin_map.json", "ime_hotwords.py", "vod_api.py",
     "vod_sources.py", "vod_sources.default.json", "metadata_client.py", "vod_resolver.py",
 )
 HU_MAX_BYTES = 220 * 1024 * 1024

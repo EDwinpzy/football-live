@@ -35,7 +35,7 @@ POSTER_DIR = r"D:\OneDrive\ZCode\football-posters"
 REPL = ["proxy.py", "hhkan.py", "hhkan_snapshot.py", "hhkan_snapshot.json",
         "team_backdrop.py", "scraper.py", "decrypt_stream.js",
         "douban_catalog.py", "douban_snapshot.json", "douban_filter_matrix.json",
-        "media_index.py", "pinyin_map.json", "vod_api.py",
+        "media_index.py", "pinyin_map.json", "ime_hotwords.py", "vod_api.py",
         "vod_sources.py", "vod_sources.default.json",
         # 下面三个都是顶层 import，曾因白名单手工维护而漏收，打出来的 zip
         # 在真机启动时直接 ModuleNotFoundError，整个内嵌 Python 后端起不来，

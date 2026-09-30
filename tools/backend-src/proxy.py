@@ -281,6 +281,22 @@ def _vod_data_dir(preferred=None):
         return fallback
 
 
+_IME_HOTWORD_SERVICE = None
+_IME_HOTWORD_LOCK = threading.Lock()
+
+
+def _get_ime_hotword_service():
+    global _IME_HOTWORD_SERVICE
+    if _IME_HOTWORD_SERVICE is None:
+        with _IME_HOTWORD_LOCK:
+            if _IME_HOTWORD_SERVICE is None:
+                from ime_hotwords import HotwordService
+                cache_root = Path(os.environ.get("OTV_DATA_DIR") or _vod_data_dir())
+                _IME_HOTWORD_SERVICE = HotwordService(
+                    _get_vod_service().catalog, cache_root / "ime_hotwords.json")
+    return _IME_HOTWORD_SERVICE
+
+
 def _get_vod_service():
     global VOD_SERVICE
     remote_registry = _refresh_remote_vod_registry()
@@ -3743,7 +3759,7 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if self._apk_update_manifest(parsed):
             return
-        if parsed.path.startswith("/vod/") or parsed.path == "/api/search":
+        if parsed.path.startswith("/vod/") or parsed.path in ("/api/search", "/api/ime/hotwords"):
             self._vod_api(parsed)
             return
         if parsed.path == "/api/matches":
@@ -4178,7 +4194,9 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             # 初始化失败必须回一份可读的 503，别让异常逃出处理器把响应整条丢掉。
             service = _get_vod_service()
-            if path == "/api/search":
+            if path == "/api/ime/hotwords":
+                payload = _get_ime_hotword_service().get()
+            elif path == "/api/search":
                 payload = service.search(
                     (query.get("q") or [""])[0],
                     page=_safe_int((query.get("page") or ["1"])[0], 1, lo=1, hi=100),
@@ -4247,7 +4265,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store" if (
-            "/play/" in path or "/detail/" in path or path == "/vod/resolve" or
+            "/play/" in path or "/detail/" in path or path in ("/vod/resolve", "/api/ime/hotwords") or
             path.startswith("/vod/resolve/")
         ) else "max-age=30")
         self.send_header("Content-Length", str(len(body)))

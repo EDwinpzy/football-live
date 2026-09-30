@@ -15,6 +15,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.List;
 
 public class PinyinDecoderService {
     private static final String TAG = "PinyinDecoderService";
@@ -78,6 +80,10 @@ public class PinyinDecoderService {
     native static int nativeSyncGetCapacity();
 
     private static final int MAX_PATH_FILE_LENGTH = 100;
+    /**
+     * 续写预测时喂给引擎的历史上限，与 native 的 kMaxPredictSize=7 保持一致。
+     */
+    private static final int MAX_PREDICT_HISTORY = 7;
     private static volatile boolean inited = false;
     private static volatile boolean loadFailed = false;
     private static final Object LOCK = new Object();
@@ -184,6 +190,40 @@ public class PinyinDecoderService {
         if (!inited) return null;
         synchronized (LOCK) {
             return nativeImGetPyStr(decoded);
+        }
+    }
+
+    /**
+     * 取「整词续写」候选：把已上屏的 fixedStr 交给引擎预测，取回后续字。
+     *
+     * native 侧 predicts 缓冲区是进程级全局（predict_buf / predict_len），必须
+     * 「取总数 + 读全部条目」在同一把锁里完成，否则并发读会读到别人那一轮的结果。
+     *
+     * 返回的是**续写后缀**（fixedStr="爱情" → ["公寓", ...]），不是整词，
+     * 调用方直接追加到已上屏文本后面即可。
+     *
+     * 另：native 预测缓冲按 kMaxPredictSize(7) 设计，历史只喂尾部 7 字。
+     */
+    public static List<String> getPredicts(String fixedStr, int limit) {
+        if (!inited || fixedStr == null || fixedStr.isEmpty() || limit <= 0) {
+            return new ArrayList<>(0);
+        }
+        synchronized (LOCK) {
+            // 只取尾部 MAX_HISTORY 字喂给引擎：native 预测缓冲按 7 字设计
+            String history = fixedStr.length() > MAX_PREDICT_HISTORY
+                    ? fixedStr.substring(fixedStr.length() - MAX_PREDICT_HISTORY)
+                    : fixedStr;
+            int n = nativeImGetPredictsNum(history);
+            if (n <= 0) return new ArrayList<>(0);
+            List<String> out = new ArrayList<>(Math.min(n, limit));
+            for (int i = 0; i < n && out.size() < limit; i++) {
+                String item = nativeImGetPredictItem(i);
+                if (item == null) break;
+                item = item.trim();
+                // 只丢空白项：续写就是追加，「人」续「人」得到「人人」是合法叠字
+                if (!item.isEmpty()) out.add(item);
+            }
+            return out;
         }
     }
 }
