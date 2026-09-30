@@ -5236,8 +5236,19 @@ def _mcms_channel_sections(cid: int) -> list[dict]:
             return 0.0
 
     recent = items[:12]
-    updates = items[12:24] or recent
-    hot = sorted(items, key=score, reverse=True)[:12]
+    # 上游不足 24 条时 items[12:24] 为空；原来 `or recent` 会让「最近更新」
+    # 和「最新上线」字面变成同一批数据（2026-09-30 用户反馈"两栏内容一样"）。
+    # 现在按 id 去重切分，三栏互斥；条目不够就留空，绝不用同一批冒充两栏。
+    def _key(item):
+        return str(item.get("vod_id") or item.get("id") or item.get("name") or "")
+
+    updates = items[12:24]
+    if not updates:
+        used = {_key(i) for i in recent}
+        updates = [i for i in items if _key(i) not in used][:12]
+    used_updates = {_key(i) for i in updates}
+    hot = [i for i in sorted(items, key=score, reverse=True)
+           if _key(i) not in used_updates][:12]
     return [
         {"name": "最近热门", "items": hot},
         {"name": "最新上线", "items": recent},

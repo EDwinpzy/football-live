@@ -312,7 +312,11 @@ body.portrait .fav-title-row{padding-top:150px}
   border:1px solid rgba(255,255,255,.2);color:rgba(255,255,255,.8);font-size:22px;
   padding:6px 18px;cursor:pointer;font-family:inherit}
 .ver-inline .vi-btn:hover{background:rgba(255,255,255,.2)}
-.ver-inline .vi-btn[disabled]{opacity:.5;cursor:default}
+.ver-inline .vi-btn:active{background:#fff;color:#0E0E0F;border-color:#fff}
+/* 检查中禁用态仍保留 pointer：按钮很快恢复，用户不该看到光标形状在按与不按之间
+   跳变（2026-09-30 用户反馈"更新弹窗光标逻辑有问题"）。真正不可点时用
+   not-allowed 表达，和默认箭头区分开。 */
+.ver-inline .vi-btn[disabled]{opacity:.5;cursor:progress}
 /* 「续费」入口：App 是行尾带下划线的两字（深色底 0x1FFFFFFF 胶囊 + 1px 0x33FFFFFF 描边，
    字号 22sp SemiBold、AccentBlue 蓝字下划线）。网页版保留同一层级信息，聚焦态同样
    反色为白底深字 + 去下划线。 */

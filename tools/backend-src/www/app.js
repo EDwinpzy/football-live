@@ -21,6 +21,18 @@ function normalizeDoubanItem(it, category) {
     area: (it.regions || []).join(" / "), tags: it.genres || it.tags || [], remark: it.remark || "" };
 }
 
+/* 好好看条目：线上 /hhkan/home 实测字段为 {id:number, title, cover, score, remark}，
+   没有 hero/regions/genres。id 必须带 hhkan: 前缀，否则详情页会按豆瓣 id 去查
+   /vod/detail/ 拿不到东西（2026-09-30 接入时踩过）。 */
+function normalizeHhkanItem(it) {
+  const cover = it.cover || it.poster_url || "";
+  const id = String(it.id == null ? "" : it.id);
+  return { ...it, id: /^\d+$/.test(id) ? "hhkan:" + id : id, title: it.title || "",
+    cover, hero: heroImg(cover), score: +it.score || 0,
+    categoryId: "hhkan:home", area: it.area || "", tags: it.tags || [],
+    remark: it.remark || "" };
+}
+
 /* ---------------- 工具 ---------------- */
 const $ = (s, p) => (p || document).querySelector(s);
 const $$ = (s, p) => Array.from((p || document).querySelectorAll(s));
@@ -1152,6 +1164,14 @@ async function buildCatalogProgressive(onUpdate, refresh = false) {
       cats.push({ id: "douban:" + cid, name });
       part.forEach(it => items.push({ ...it, categoryId: "douban:" + cid }));
     }
+    /* 好好看是独立片源：并入同一个 parts 流程，chips 末尾多一个入口。
+       2026-09-30 之前只改了 buildCatalog，而实际首屏走的是本函数，
+       导致好好看入口根本没出现。 */
+    const hk = parts.get("hhkan");
+    if (hk) {
+      cats.push({ id: "hhkan:home", name: "好好看" });
+      hk.forEach(it => items.push({ ...it, categoryId: "hhkan:home" }));
+    }
     const seen = new Set(), dedupedItems = [];
     for (const it of items) {
       const k = (it.title || "").replace(/\s+/g, "").toLowerCase();
@@ -1170,6 +1190,14 @@ async function buildCatalogProgressive(onUpdate, refresh = false) {
       if (current) onUpdate(current);
     } catch (e) {}
   }));
+  /* 好好看：失败就静默跳过，不影响豆瓣五个分类的可用性。 */
+  try {
+    const d = await fetchJSONCached(
+      BASE + "/hhkan/home" + (refresh ? "?_=" + Date.now() : ""), 60000, 30000);
+    parts.set("hhkan", (d.sections || []).flatMap(s => s.items || []).map(normalizeHhkanItem));
+    const current = snapshot();
+    if (current) onUpdate(current);
+  } catch (e) {}
   return snapshot();
 }
 
@@ -1598,6 +1626,36 @@ function renderVodLib(refresh = false) {
   }
   const cid = sel.id.replace("douban:", "");
   const mySel = vod.catSel;
+  /* 好好看是独立源：走 /hhkan/channel-sections/ 的三栏，不与豆瓣目录混用。
+     之前这条分支不存在，点了 chip 只会当成豆瓣分类去查 /vod/home。 */
+  if (sel.id === "hhkan:home") {
+    const paintH = sections => {
+      if (vod.catSel !== mySel) return;
+      vod.sections = sections;
+      vod.libLoadedFor = sel.id;
+      if (!sections.length) { host.innerHTML = `<div class="page-loading">— 加载中 …</div>`; return; }
+      let h = "";
+      sections.forEach((s, si) => {
+        h += `<div class="row-sec-title" style="padding-top:${si === 0 ? 26 : 44}px">${esc(s.name)}</div>
+          ${s.items && s.items.length
+            ? `<div class="hscroll poster-row">${s.items.map(it => libCard(it)).join("")}</div>`
+            : `<div class="lib-empty">暂无${esc(s.name)}内容</div>`}`;
+      });
+      host.innerHTML = (h || `<div class="page-loading">暂无内容</div>`) + `<div style="height:80px"></div>`;
+      bindCards("#vodSections");
+    };
+    host.innerHTML = `<div class="page-loading">— 加载中 …</div>`;
+    fetchJSONCached(BASE + "/hhkan/channel-sections/1", 60000, 30000)
+      .then(d => {
+        const secs = (d.sections || []).map(s => ({
+          name: s.name || s.title,
+          items: (s.items || []).map(normalizeHhkanItem),
+        })).filter(s => s.name);
+        paintH(secs.length ? secs : completeLibBlocks({}));
+      })
+      .catch(() => paintH([]));
+    return;
+  }
   const paint = sections => {
     if (vod.catSel !== mySel) return;   /* 快速切分类防旧响应覆盖 */
     vod.sections = sections;
@@ -2398,8 +2456,13 @@ function renderSearch() {
   $("#searchGrid").innerHTML = shown.map(it => posterCard(it, 24)).join("");
   bindCards("#searchGrid"); registerGrid("#searchGrid", state.portrait ? 205 : 232, 20, state.portrait ? 40 : 70);
 }
-/* App 结果分类：目录内按 categoryId；目录外前 24 条拉详情归类（并发 6） */
+/* 已知目录分类直接采用；目录外前 24 条拉详情归类（并发 6） */
 async function classifyResults(items) {
+  const categories = { movie: "电影", tv: "电视剧", anime: "动漫", variety: "综艺", short: "短剧" };
+  for (const it of items) {
+    const m = /^douban:(movie|tv|anime|variety|short)$/.exec(it.categoryId || "");
+    if (m) search.catMap[it.id] = categories[m[1]];
+  }
   const targets = items.slice(0, 24).filter(it => search.catMap[it.id] === undefined);
   let i = 0;
   const worker = async () => {
@@ -2536,11 +2599,19 @@ async function renderVersionRow() {
   if (!h || !h.desktop) { el.hidden = true; el.innerHTML = ""; return; }
   const hot = Number(h.hotVersion || 0);
   el.hidden = false;
-  el.innerHTML = `
-    <span class="vi-text">${hot > 0 ? "已更新到 v" + hot : "已是最新版本"}</span>
-    <button class="vi-btn" id="viCheck"${verState.checking ? " disabled" : ""}>${
-      verState.checking ? "检查中…" : "检查更新"}</button>`;
-  $("#viCheck").addEventListener("click", checkForUpdate);
+  const label = hot > 0 ? "已更新到 v" + hot : "已是最新版本";
+  /* 只在结构缺失时建一次；之后只改文字与 disabled。
+     之前每次都重建 innerHTML，切页/轮询会把按钮从 DOM 里换掉，
+     光标形状（hover/pointer/disabled）在重建瞬间闪一下——
+     2026-09-30 用户反馈"更新弹窗的光标逻辑有问题"，根因在此。 */
+  if (!el.firstElementChild) {
+    el.innerHTML = `<span class="vi-text"></span><button class="vi-btn" id="viCheck"></button>`;
+    $("#viCheck").addEventListener("click", checkForUpdate);
+  }
+  el.querySelector(".vi-text").textContent = label;
+  const btn = $("#viCheck");
+  btn.textContent = verState.checking ? "检查中…" : "检查更新";
+  btn.disabled = !!verState.checking;
 }
 async function checkForUpdate() {
   if (verState.checking) return;
@@ -2548,7 +2619,11 @@ async function checkForUpdate() {
   hint("正在检查更新…");
   await renderVersionRow();
   // 桌面端后台线程会自行下载；等它一个周期再刷新显示。
-  setTimeout(() => { verState.checking = false; renderVersionRow(); }, 6000);
+  verState.timer = setTimeout(() => {
+    verState.checking = false;
+    verState.timer = null;
+    renderVersionRow();
+  }, 6000);
 }
 
 /* ---------------- 会员续费 / 兑换弹窗（需求④） ----------------
