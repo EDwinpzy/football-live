@@ -147,10 +147,10 @@ object HotUpdateManager {
             } catch (e: Exception) {
                 OtvLog.w("hotupdate: 检查失败（静默跳过）: ${e.message}")
             }
-            // 强更判定已出：先置阻断态再放门闸（防 awaitSettled 在 _force 置位前抢跑）
-            if (pending != null && isForced(pending.first)) {
-                _force.value = ForceState.Blocking(pending.second, "准备下载更新包…")
-            }
+            // 2026-10-01：强更也不再阻断进入。静默自动更新对强更/非强更一视同仁，
+            // 阻断屏（ForceState）随之停用——之前只在 check 后置位 Blocking、却把执行体
+            // 换成了 runSilent()，导致 _force 永不被清空，awaitSettled 的
+            // `_force.first { it == null }` 一直等不到，整个会话卡在「准备下载更新包…」转圈。
             checked.value = true
             // 后台静默更新（2026-10-01 用户明确要求：不需要弹窗让用户确认）：
             // check 完即后台下载，下载不阻塞 check/门闸，也不占 UI。
@@ -163,13 +163,17 @@ object HotUpdateManager {
         }
     }
 
-    /** 启动门闸挂起等待：首次 check 完成、且强制更新流结束（或超时放行） */
+    /**
+     * 启动门闸挂起等待：首次 check 完成即放行。
+     * 2026-10-01 起不再等 `_force == null`——强更已改为静默后台更新，阻断屏停用，
+     * 等一个永不会被清空的 _force 会让门闸挂到 FORCE_TIMEOUT_MS（300s）才超时放行，
+     * 表现为「强制更新页一直转圈进不去」。
+     */
     suspend fun awaitSettled() {
         if (!BuildConfig.HOTUPDATE_ENABLED) return
-        withTimeoutOrNull(FORCE_TIMEOUT_MS) {
+        withTimeoutOrNull(CHECK_TIMEOUT_MS + 3_000L) {
             checked.first { it }
-            _force.first { it == null }
-        } ?: OtvLog.w("hotupdate: 强制更新等待超时，放行进入（下次启动重查）")
+        } ?: OtvLog.w("hotupdate: 首次 check 未在门闸时限内完成，放行进入（下次启动重查）")
     }
 
     /**
