@@ -358,10 +358,9 @@ private fun AppRoot() {
         composable("paywall") { com.qiubo.optimaltv.ui.paywall.PaywallScreen(nav) }
         composable("activate") { com.qiubo.optimaltv.ui.paywall.ActivateScreen(nav) }
         }
-        // 全局浮层（最顶层，非模态——公告悬浮窗不拦内容导航；更新弹窗自带遮罩）
+        // 全局浮层（最顶层，非模态——公告悬浮窗不拦内容导航）
+        // 后端热更已改为后台静默自动更新，不再有热更弹窗/进度层
         com.qiubo.optimaltv.ui.components.AnnouncementBanner()
-        com.qiubo.optimaltv.ui.components.HotUpdateOfferDialog()
-        com.qiubo.optimaltv.ui.components.HotUpdateProgressLayer()
         com.qiubo.optimaltv.ui.components.ApkUpdateUi()
     }
 }

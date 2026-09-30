@@ -330,8 +330,7 @@ private fun AppRoot() {
                 composable("activate") { com.qiubo.optimaltv.ui.paywall.ActivateScreen(nav) }
         }
         // 全局浮层（最顶层，非模态）；需求⑪：公告已改系统通知，AnnouncementBanner 移除
-        com.qiubo.optimaltv.ui.components.HotUpdateOfferDialog()
-        com.qiubo.optimaltv.ui.components.HotUpdateProgressLayer()
+        // 后端热更已改为后台静默自动更新，不再有热更弹窗/进度层
         com.qiubo.optimaltv.ui.components.ApkUpdateUi()
     }
 }
