@@ -2527,16 +2527,21 @@ function vodLatLoad() {
   try { vodLatency = JSON.parse(localStorage.getItem(VOD_LAT_KEY) || "{}") || {}; } catch (e) { vodLatency = {}; }
 }
 function vodLatKey(s) { return String((s && (s.id || s.name)) || ""); }
-function vodLatSet(s, ok, ms) {
+function vodLatSet(s, ok, ms, note) {
   const key = vodLatKey(s);
   if (!key) return;
-  vodLatency[key] = { ok: !!ok, ms: Math.max(0, Math.round(ms || 0)), at: Date.now() };
+  vodLatency[key] = { ok: !!ok, ms: Math.max(0, Math.round(ms || 0)),
+                      note: note || "", at: Date.now() };
   try { localStorage.setItem(VOD_LAT_KEY, JSON.stringify(vodLatency)); } catch (e) {}
 }
 function vodLatCell(s) {
   const e = vodLatency[vodLatKey(s)];
   if (!e) return '<span class="dim">—</span>';
-  return e.ok ? `<b>${e.ms}ms</b>` : '<span class="st bad">失败</span>';
+  const head = e.ok ? `<b>${e.ms}ms</b>` : '<span class="st bad">失败</span>';
+  // 设备侧测速会额外给出线路健康度：接口通 ≠ 线路能播，这两件事必须分开显示，
+  // 否则「接口 200 但 83 条线路全 404」的源会被误判成可用。
+  if (!e.note) return head;
+  return `${head}<div class="dim" style="font-size:11px;margin-top:2px">${e.note}</div>`;
 }
 function vodSyncSortUi() {
   const sub = document.getElementById("vod-source-list-sub");
@@ -2620,7 +2625,14 @@ async function vodSourceSpeedOne(index, quiet) {
   const cell = document.getElementById("vod-lat-" + index);
   if (cell) cell.innerHTML = '<span class="dim">测速中…</span>';
   const d = await api("vod_source_speed", {source: s});
-  vodLatSet(s, !d.error && d.ok !== false, d.latency_ms);
+  let note = "";
+  if (d && d.via === "relay") {
+    // 设备侧测速：区分「源站不通」和「源站通但线路死」，这是两种不同的故障。
+    if (d.ok) note = `${d.lines || 0} 条线路可播`;
+    else if (/线路|probed|none played/.test(d.error || "")) note = "线路不可播";
+    else if (d.error) note = d.error.slice(0, 22);
+  }
+  vodLatSet(s, !d.error && d.ok !== false, d.latency_ms, note);
   if (quiet) { if (cell) cell.innerHTML = vodLatCell(s); }
   else vodRenderRows();
   return d;
@@ -2632,14 +2644,18 @@ async function vodSourceSpeedAll() {
   let done = 0;
   btn.disabled = true; btn.textContent = `测速中… 0/${total}`;
   const queue = vodSourceRows.map((s, i) => i);
+  // 串行测速。源站普遍限流：13 个源 3 并发同时打，红牛 / 豪华 / VN 会被
+  // 挤到 read timeout，明明能播却显示「失败」——那和本功能要消除的假失败
+  // 是同一类误导。串行慢几十秒，但每个数字都是真的。
   const run = async () => {
+    await new Promise(r => setTimeout(r, 400));
     while (queue.length) {
       await vodSourceSpeedOne(queue.shift(), true);
       done += 1;
       btn.textContent = `测速中… ${done}/${total}`;
     }
   };
-  await Promise.all([run(), run(), run()]);
+  await run();
   btn.disabled = false; btn.textContent = "全部测速";
   vodLatSortDir = "asc";
   vodRenderRows();

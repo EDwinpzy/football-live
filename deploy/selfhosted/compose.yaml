@@ -277,6 +277,11 @@ services:
       OTV_HU_OFF: ${OTV_HU_OFF:-0}
       OTV_OUT_DIR: /tmp/out
       OTV_ADMIN_NOAUTH: "1"
+      # 影视源测速走设备侧中继：本 VPS 只有中国大陆出口，直连 Cloudflare 段的
+      # 源必然超时，测出来的「失败」全是假的。中继由用户机器经 SSH 反向隧道
+      # 提供（见 tools/selfhosted/vod_probe_relay.py），端口绑在 docker 网桥上，
+      # 不对公网开放。没开隧道时这个地址连不上，测速会明确报中继不可达。
+      OTV_VOD_PROBE_RELAY_URL: http://192.168.16.1:18765
       PYTHONDONTWRITEBYTECODE: "1"
     volumes:
       - ../../tools/admin_server.py:/app/tools/admin_server.py:ro

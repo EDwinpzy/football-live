@@ -1868,7 +1868,7 @@ def h_vod_source_probe_device(d: dict) -> dict:
         return {"error": "bad_base"}
     target = base + "/vod/sources/probe"
     try:
-        req = urllib.request.Request(target, headers={"User-Agent": UA})
+        req = urllib.request.Request(target, headers=dict(_PROBE_UA))
         with urllib.request.build_opener(runtime_client.NoRedirect).open(req, timeout=90) as r:
             body = r.read()
     except Exception as exc:  # noqa: BLE001
@@ -1894,10 +1894,57 @@ def h_vod_source_rollback(d: dict) -> dict:
     return rpc("vod_source_admin_rollback", {"p_version": version})
 
 
+VOD_PROBE_RELAY_URL = os.environ.get("OTV_VOD_PROBE_RELAY_URL", "").strip().rstrip("/")
+"""Optional device-side probe relay (see tools/selfhosted/vod_probe_relay.py).
+
+The self-hosted VPS has no international egress, so a speed test run here
+reports "connection timeout" for every Cloudflare-hosted source — including
+ones that stream fine on the user's phone.  When a relay is configured the
+measurement is taken from the machine that actually has egress, which is the
+number the admin panel should show.  Empty config keeps the old in-VPS probe.
+"""
+
+
+def _relay_post(path: str, payload: dict, timeout: float) -> dict:
+    request = urllib.request.Request(
+        VOD_PROBE_RELAY_URL + path, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", **_PROBE_UA}, method="POST")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read(256 * 1024).decode("utf-8", "replace"))
+
+
+def _vod_source_speed_via_relay(raw: dict, title: str) -> dict:
+    """Measure one source through the relay: interface latency + playable line."""
+    api_url = str(raw.get("api_url") or "").strip()
+    if not api_url:
+        return {"ok": False, "latency_ms": 0, "error": "该源未配置 API 地址"}
+    try:
+        report = _relay_post("/probe-source", {"api_url": api_url, "title": title}, timeout=45)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "latency_ms": 0, "error": f"探活中继不可达: {str(exc)[:90]}"}
+    latency = report.get("search_latency_ms")
+    return {
+        "ok": bool(report.get("ok")),
+        "latency_ms": int(latency) if isinstance(latency, (int, float)) else 0,
+        "lines": report.get("lines") or 0,
+        "preview_url": report.get("preview_url") or "",
+        "via": "relay",
+        "error": str(report.get("error") or "")[:120],
+    }
+
+
 def h_vod_source_speed(d: dict) -> dict:
     """单源测速：只打一次该源最轻的请求，返回毫秒延时，供后台「全部测速」后按延时排序。
-    macms 取 `?ac=list`（接口探活）；其余适配器打站内搜索页（无 API，只能测页面）。"""
+    macms 取 `?ac=list`（接口探活）；其余适配器打站内搜索页（无 API，只能测页面）。
+
+    配了 OTV_VOD_PROBE_RELAY_URL 时改走设备侧中继：本 VPS 没有境外出口，
+    在这里测只会得到一堆假超时（Cloudflare 段的源全部连不上）。"""
     raw = d.get("source") if isinstance(d.get("source"), dict) else d
+    title = str(d.get("title") or "").strip() or "庆余年"
+    if VOD_PROBE_RELAY_URL:
+        # 中继不可达时不静默回落到 VPS 自测：那条路径对 Cloudflare 段的源
+        # 只会给出假超时，正是本函数要消除的误导。
+        return _vod_source_speed_via_relay(raw, title)
     adapter = str(raw.get("adapter_type") or "")
     if adapter.startswith("macms"):
         base = str(raw.get("api_url") or "").rstrip("/")
