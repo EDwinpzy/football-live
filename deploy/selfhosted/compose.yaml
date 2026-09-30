@@ -282,6 +282,14 @@ services:
       # 提供（见 tools/selfhosted/vod_probe_relay.py），端口绑在 docker 网桥上，
       # 不对公网开放。没开隧道时这个地址连不上，测速会明确报中继不可达。
       OTV_VOD_PROBE_RELAY_URL: http://192.168.16.1:18765
+      # 定时体检 + 自动降级：每 6 小时一轮，连续 3 轮不可用则自动停用该源
+      # （停用不是删除，可随时在后台恢复）。只在配了中继时生效。
+      OTV_VOD_HEALTH_ENABLED: "1"
+      OTV_VOD_HEALTH_INTERVAL: "21600"
+      OTV_VOD_HEALTH_FAILURES: "3"
+      # 失败计数必须活过容器重启：放 /tmp 的话每次重建 admin 容器都会把
+      # 所有源的连续失败清零，「连续 3 轮才降级」就永远攒不满。
+      OTV_VOD_HEALTH_STATE: /var/lib/mytv/vod-source-health.json
       PYTHONDONTWRITEBYTECODE: "1"
     volumes:
       - ../../tools/admin_server.py:/app/tools/admin_server.py:ro
@@ -291,6 +299,9 @@ services:
       - ../../tools/selfhosted/admin_config.py:/app/tools/selfhosted/admin_config.py:ro
       - ../../tools/selfhosted/runtime_client.py:/app/tools/selfhosted/runtime_client.py:ro
       - ../../tools/selfhosted/scheduler.py:/app/tools/selfhosted/scheduler.py:ro
+      - ../../tools/selfhosted/vod_probe_relay.py:/app/tools/selfhosted/vod_probe_relay.py:ro
+      - ../../tools/selfhosted/vod_source_health.py:/app/tools/selfhosted/vod_source_health.py:ro
+      - ${VOD_HEALTH_STATE_HOST_PATH:-./data/vod-health}:/var/lib/mytv
       - ../../tools/selfhosted/import_licenses.py:/app/tools/selfhosted/import_licenses.py:ro
       - ../../tools/backend-src:/app/tools/backend-src:ro
       - ${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}/admin-credentials.json:/run/secrets/admin-credentials.json:ro

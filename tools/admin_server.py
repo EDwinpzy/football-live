@@ -1904,6 +1904,80 @@ measurement is taken from the machine that actually has egress, which is the
 number the admin panel should show.  Empty config keeps the old in-VPS probe.
 """
 
+VOD_HEALTH_ENABLED = os.environ.get("OTV_VOD_HEALTH_ENABLED", "1") == "1"
+VOD_HEALTH_INTERVAL = int(os.environ.get("OTV_VOD_HEALTH_INTERVAL", str(6 * 3600)))
+VOD_HEALTH_FAILURES = int(os.environ.get("OTV_VOD_HEALTH_FAILURES", "3"))
+VOD_HEALTH_PROBE_TITLE = os.environ.get("OTV_VOD_HEALTH_TITLE", "庆余年").strip() or "庆余年"
+VOD_HEALTH_STATE_PATH = os.environ.get("OTV_VOD_HEALTH_STATE", "/tmp/vod_source_health.json")
+VOD_HEALTH_REGISTRY: "object | None" = None
+
+
+def _vod_health_registry():
+    global VOD_HEALTH_REGISTRY
+    if VOD_HEALTH_REGISTRY is None:
+        from selfhosted import vod_source_health
+
+        VOD_HEALTH_REGISTRY = vod_source_health.SourceHealthRegistry(
+            VOD_HEALTH_STATE_PATH, VOD_HEALTH_FAILURES)
+        VOD_HEALTH_REGISTRY.load()
+    return VOD_HEALTH_REGISTRY
+
+
+def h_vod_source_health_run(_d: dict | None = None) -> dict:
+    """One health round: probe every source, then demote repeat offenders.
+
+    Demotion is `set_enabled(false)` + publish, never delete — a station that
+    rotates its links can look dead for an hour and be fine tomorrow, and an
+    auto-delete would be unrecoverable.  A round where the probe itself could
+    not reach the relay is reported as `inconclusive` and changes nothing.
+    """
+    if not VOD_PROBE_RELAY_URL:
+        return {"error": "未配置 OTV_VOD_PROBE_RELAY_URL，无法在 VPS 侧测速"}
+    from selfhosted import vod_source_health
+
+    listing = h_vod_source_list({})
+    drafts = listing.get("drafts") if isinstance(listing, dict) else None
+    if drafts is None:
+        return listing or {"error": "读取源列表失败"}
+    targets = [s for s in drafts if s.get("enabled") and s.get("api_url")]
+    if not targets:
+        return {"ok": True, "checked": 0, "demoted": [], "note": "没有启用的源"}
+
+    verdicts = vod_source_health.probe_all(
+        VOD_PROBE_RELAY_URL, targets, VOD_HEALTH_PROBE_TITLE)
+    registry = _vod_health_registry()
+    demoted = registry.record(verdicts)
+
+    acted = []
+    for verdict in demoted:
+        try:
+            result = h_vod_source_set_enabled({"id": verdict.source_id, "enabled": False})
+        except Exception as exc:  # noqa: BLE001
+            acted.append({"name": verdict.name, "ok": False, "error": str(exc)[:80]})
+            continue
+        if isinstance(result, dict) and result.get("error"):
+            acted.append({"name": verdict.name, "ok": False, "error": result["error"][:80]})
+            continue
+        acted.append({"name": verdict.name, "ok": True, "error": ""})
+
+    published = False
+    if any(row.get("ok") for row in acted):
+        try:
+            h_vod_source_publish({})
+            published = True
+        except Exception as exc:  # noqa: BLE001
+            acted.append({"name": "publish", "ok": False, "error": str(exc)[:80]})
+
+    return {
+        "ok": True,
+        "checked": len(verdicts),
+        "healthy": sum(1 for v in verdicts if v.ok),
+        "inconclusive": sum(1 for v in verdicts if v.inconclusive),
+        "demoted": acted,
+        "published": published,
+        "failures_required": VOD_HEALTH_FAILURES,
+    }
+
 
 def _relay_post(path: str, payload: dict, timeout: float) -> dict:
     request = urllib.request.Request(
@@ -2026,6 +2100,7 @@ ROUTES = {
     "/api/vod_source_versions": h_vod_source_versions,
     "/api/vod_source_rollback": h_vod_source_rollback,
     "/api/vod_source_probe_device": h_vod_source_probe_device,
+    "/api/vod_source_health_run": h_vod_source_health_run,
     # v1.20 电视源管理
     "/api/iptv_list": h_iptv_list,
     "/api/iptv_save": h_iptv_save,
@@ -2255,6 +2330,7 @@ def main() -> None:
     bind = "0.0.0.0" if CONTAINER_MODE else "127.0.0.1"
     srv = ThreadingHTTPServer((bind, PORT), Handler)
     scheduler = None
+    health_scheduler = None
     if SELFHOSTED and os.environ.get("OTV_IPTV_SCHEDULER_ENABLED", "1") == "1":
         from selfhosted.scheduler import DailyIptvScheduler
 
@@ -2275,6 +2351,21 @@ def main() -> None:
         except ValueError:
             srv.server_close()
             raise ValueError("OTV_IPTV_DAILY_TIME must use HH:MM")
+    if SELFHOSTED and VOD_HEALTH_ENABLED and VOD_PROBE_RELAY_URL:
+        # 定时体检 + 自动降级。只在配了设备侧中继时启用：VPS 自己测出来的
+        # 「不可用」是假的（无境外出口），拿它自动禁用源等于批量砍线路。
+        from selfhosted.vod_source_health import SourceHealthScheduler
+
+        health_scheduler = SourceHealthScheduler(
+            lambda: h_vod_source_health_run(),
+            interval_seconds=VOD_HEALTH_INTERVAL,
+            logger=lambda msg: print(f"[vod-health] {msg}"),
+        )
+        health_scheduler.start()
+        print(f"影视源定时体检已启用：每 {VOD_HEALTH_INTERVAL // 60} 分钟一轮，"
+              f"连续 {VOD_HEALTH_FAILURES} 轮不可用则自动停用")
+    elif SELFHOSTED and VOD_HEALTH_ENABLED:
+        print("影视源定时体检未启用：未配置 OTV_VOD_PROBE_RELAY_URL（VPS 无境外出口）")
     url = f"http://127.0.0.1:{PORT}/" if not CONTAINER_MODE else f"http://0.0.0.0:{PORT}/（容器内监听地址）"
     print(f"My TV 后台管理系统 v1.20 已启动: {url}")
     print(f"功能: 卡密 · 补货 · 热更新 · APK 更新 · 公告 · 电视源管理（v1.20）")
@@ -2296,6 +2387,8 @@ def main() -> None:
     finally:
         if scheduler:
             scheduler.stop()
+        if health_scheduler:
+            health_scheduler.stop()
         srv.server_close()
 
 

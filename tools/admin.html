@@ -939,7 +939,7 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
     </div>
   </div>
   <div class="panel">
-<div class="secthead"><h2>源列表</h2><span class="sub" id="vod-source-list-sub">当前项目源按配置顺序显示</span><span class="spring"></span><button class="ghost mini" id="btn-vod-speed" onclick="vodSourceSpeedAll()">全部测速</button><button class="ghost mini" onclick="loadVodSources()">刷新</button></div>
+<div class="secthead"><h2>源列表</h2><span class="sub" id="vod-source-list-sub">当前项目源按配置顺序显示</span><span class="spring"></span><button class="ghost mini" id="btn-vod-health" onclick="vodSourceHealthRun()">定时体检</button><button class="ghost mini" id="btn-vod-speed" onclick="vodSourceSpeedAll()">全部测速</button><button class="ghost mini" onclick="loadVodSources()">刷新</button></div>
     <div class="gridwrap" id="vod-source-table"></div>
   </div>
 </section>
@@ -2673,6 +2673,25 @@ function vodSourceEdit(index) {
   document.getElementById("vse-enabled").checked = row.enabled !== false;
   document.getElementById("vod-source-edit-error").textContent = "";
   document.getElementById("vod-source-edit-veil").style.display = "flex";
+}
+async function vodSourceHealthRun() {
+  const btn = document.getElementById("btn-vod-health");
+  btn.disabled = true; btn.textContent = "体检中…";
+  try {
+    const d = await api("vod_source_health_run", {});
+    if (d.error) { toast(d.error, true); return; }
+    const parts = [`体检 ${d.checked} 个源，健康 ${d.healthy}`];
+    if (d.inconclusive) parts.push(`${d.inconclusive} 个未测出`);
+    if ((d.demoted || []).length) {
+      parts.push("已停用 " + d.demoted.filter(x => x.ok).map(x => x.name).join("、"));
+    }
+    toast(parts.join(" · "));
+    if ((d.demoted || []).some(x => x.ok)) await loadVodSources();
+  } catch (e) {
+    toast("体检失败：" + String(e.message || e).slice(0, 60), true);
+  } finally {
+    btn.disabled = false; btn.textContent = "定时体检";
+  }
 }
 function vodSourceEditClose() { document.getElementById("vod-source-edit-veil").style.display = "none"; }
 async function vodSourceSave() {
