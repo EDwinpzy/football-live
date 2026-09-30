@@ -310,6 +310,8 @@ def pyinstaller_argv(*, launcher: Path, dist_dir: Path, work_dir: Path,
         "--windowed",
         "--name", EXE_NAME,
         "--hidden-import", "webview.platforms.edgechromium",
+        # launcher.py 顶层 import updater；显式声明避免静态分析漏掉。
+        "--hidden-import", "updater",
         # pywebview 自带的 hook 已收集 Windows DLL 与 JS。整包 collect-all
         # 会把 Android/GTK/Qt/macOS 渲染器也收进来；构建机若装了 PySide6，
         # 单文件包会膨胀数百 MB，且无助于 Windows WebView2。

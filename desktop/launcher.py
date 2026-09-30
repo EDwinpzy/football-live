@@ -33,6 +33,8 @@ from urllib.parse import urlsplit
 
 import webview
 
+import updater as hotupdate
+
 
 APP_NAME = "MyTV"
 APP_TITLE = "My TV"
@@ -113,14 +115,19 @@ def resolve_backend_dir() -> Path:
     """返回可直接 import proxy 的后端目录（开发模式即仓库源码）。"""
     if not is_frozen():
         return resolve_backend_archive()
-    archive = resolve_backend_archive()
-    if not archive.is_file():
-        raise BackendStartError("frozen backend.zip is missing: %s" % archive)
-    digest = _sha256_file(archive)
-    target = local_app_data_root() / "backend" / digest
-    if not (target / ".extracted").is_file():
-        extract_backend_archive(archive, target)
-    return target
+    built_in = resolve_backend_archive()
+    if not built_in.is_file():
+        raise BackendStartError("frozen backend.zip is missing: %s" % built_in)
+    # 热更包优先：有校验通过的 pending 目录就用它，否则回退内置包。
+    source, is_update = hotupdate.resolve_backend_dir(
+        hotupdate.update_root(local_app_data_root()), built_in=built_in)
+    if not is_update:
+        digest = _sha256_file(source)
+        target = local_app_data_root() / "backend" / digest
+        if not (target / ".extracted").is_file():
+            extract_backend_archive(built_in, target)
+        return target
+    return source
 
 
 def _sha256_file(path: Path) -> str:
@@ -389,6 +396,11 @@ class BackendProcess:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         os.environ["OTV_DATA_DIR"] = str(self.data_dir)
         os.environ["OTV_WEB_ROOT"] = str(self.web_root)
+        # 供网页端识别「跑在本机 EXE 里」：非空才让前端渲染版本/检查更新行。
+        os.environ["OTV_DESKTOP"] = "1"
+        os.environ["OTV_DESKTOP_HOT_VERSION"] = str(
+            hotupdate.current_hot_version(
+                hotupdate.update_root(local_app_data_root())))
         # proxy 用 cwd 写 img_cache 等运行期产物；工作目录必须是可写 data。
         os.chdir(self.data_dir)
         if str(self.backend_dir) not in sys.path:
@@ -446,6 +458,32 @@ def _api_origin() -> str:
     return os.environ.get(API_ORIGIN_ENV, "").strip() or DEFAULT_API_ORIGIN
 
 
+def start_background_update(api_origin: str) -> None:
+    """窗口起来之后在后台检查/下载热更包，失败一律静默。"""
+    if not is_frozen():
+        return  # 开发模式直接用仓库源码，没有"更新"概念
+    try:
+        hot_version = hotupdate.current_hot_version(
+            hotupdate.update_root(local_app_data_root()))
+        service = hotupdate.BackgroundUpdater(
+            app_data_root=local_app_data_root(),
+            api_origin=api_origin,
+            # 服务端 hotupdate_check 只用 hotVersion/apkVersion 判定，
+            # 不校验 deviceId，所以这里给一个稳定的占位值即可。
+            device_id="desktop",
+            hot_version=hot_version,
+            apk_version=0,
+        )
+
+        def _log(stage: str, detail: str = "") -> None:
+            print("updater: %s %s" % (stage, detail), file=sys.stderr)
+
+        service.on_state = _log
+        service.start()
+    except Exception as exc:  # noqa: BLE001 - 更新绝不影响启动
+        print("updater init failed: %r" % (exc,), file=sys.stderr)
+
+
 def main(argv=None) -> int:
     ensure_std_streams()
     parser = argparse.ArgumentParser(description="My TV desktop launcher")
@@ -479,6 +517,7 @@ def main(argv=None) -> int:
             if not wait_for_backend(port):
                 raise BackendStartError("backend did not become healthy on port %d" % port)
 
+            start_background_update(_api_origin())
             storage_path = local_app_data_root() / "webview-profile"
             show_window("http://127.0.0.1:%d/" % port, storage_path)
             return 0

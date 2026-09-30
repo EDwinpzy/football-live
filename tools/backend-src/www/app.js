@@ -2520,6 +2520,37 @@ function renderMemberInline() {
   $("#miRenew").addEventListener("click", openMemberModal);
 }
 
+/* ---------------- Windows 桌面版版本 / 检查更新 ----------------
+ * 仅当后端 /api/health 返回 desktop:true 时渲染（由 EXE 注入 OTV_DESKTOP 决定）。
+ * 网页版不返回该字段，整行隐藏 —— 网页随服务器更新，没有"手动检查"这回事。
+ * 「检查更新」只读状态：真实下载/校验/生效由 launcher.py 的后台线程完成，
+ * 这里通过重新探测 /api/health 的 hotVersion 反映结果，避免前端重复实现下载链路。 */
+let verState = { checking: false };
+async function renderVersionRow() {
+  const el = $("#verInline");
+  if (!el) return;
+  let h = null;
+  try {
+    h = await fetchJSON(BASE + "/api/health", 0, 8000);
+  } catch (e) { /* 健康探测失败就不显示这一行，不影响其他功能 */ }
+  if (!h || !h.desktop) { el.hidden = true; el.innerHTML = ""; return; }
+  const hot = Number(h.hotVersion || 0);
+  el.hidden = false;
+  el.innerHTML = `
+    <span class="vi-text">${hot > 0 ? "已更新到 v" + hot : "已是最新版本"}</span>
+    <button class="vi-btn" id="viCheck"${verState.checking ? " disabled" : ""}>${
+      verState.checking ? "检查中…" : "检查更新"}</button>`;
+  $("#viCheck").addEventListener("click", checkForUpdate);
+}
+async function checkForUpdate() {
+  if (verState.checking) return;
+  verState.checking = true;
+  hint("正在检查更新…");
+  await renderVersionRow();
+  // 桌面端后台线程会自行下载；等它一个周期再刷新显示。
+  setTimeout(() => { verState.checking = false; renderVersionRow(); }, 6000);
+}
+
 /* ---------------- 会员续费 / 兑换弹窗（需求④） ----------------
  * App 对应物 = PaywallScreen：四张套餐卡（月/季/年/终身）+ 选中后「续费」按钮 + 底部
  * 「输入卡密激活」。两端 App 的续费按钮当前走 RenewalGateway（handler 未注入 → 返回 false），
@@ -2600,6 +2631,7 @@ async function mmSubmit() {
 
 function renderFav() {
   renderMemberInline();
+  renderVersionRow();
   const favs = getFavs(), hist = getHistory().slice(0, 10);
   $("#favEmpty").hidden = favs.length > 0;
   $("#favHistSec").hidden = hist.length === 0;   /* App：历史记录标题仅历史非空时渲染 */

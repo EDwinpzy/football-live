@@ -4152,10 +4152,16 @@ class Handler(SimpleHTTPRequestHandler):
             # assets 字段（2026-09-28）：当前内容寻址构建 + 归档保留的构建列表。
             # 归档降级（例如跳过损坏的历史档）必须在这里看得见，否则
             # compose healthcheck 与后台监控都无从发现「上一版本已丢失」。
-            body = json.dumps({"ok": True, "time": time.strftime("%H:%M:%S"),
-                               "vod": VOD_SERVICE is not None,
-                               "assets": _web_asset_health()},
-                              ensure_ascii=False).encode("utf-8")
+            payload = {"ok": True, "time": time.strftime("%H:%M:%S"),
+                       "vod": VOD_SERVICE is not None,
+                       "assets": _web_asset_health()}
+            # 桌面版（EXE）会注入这两个变量，让网页端只在 Windows 客户端里
+            # 渲染版本号与「检查更新」；网页版不注入，行为与从前完全一致。
+            if os.environ.get("OTV_DESKTOP"):
+                payload["desktop"] = True
+                payload["hotVersion"] = int(
+                    os.environ.get("OTV_DESKTOP_HOT_VERSION") or 0)
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
