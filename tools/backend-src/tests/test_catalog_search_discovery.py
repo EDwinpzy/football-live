@@ -1,0 +1,107 @@
+import pathlib
+import sys
+import tempfile
+import time
+import unittest
+import urllib.parse
+from unittest.mock import patch
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from douban_catalog import DoubanCatalog, JsonDiskCache, normalize_subject
+from media_index import MediaIndex
+
+
+class CatalogSearchDiscoveryTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.index = MediaIndex(pathlib.Path(self.tmp.name) / "media.db")
+        self.calls = []
+
+    def tearDown(self):
+        self.index.close()
+        self.tmp.cleanup()
+
+    def fetch(self, url):
+        self.calls.append(url)
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["q"], ["声生"])
+        return {"subjects": {"items": [
+            {"layout": "subject", "target_type": "tv", "target": {
+                "id": "35634451", "title": "声生不息", "year": "2022",
+                "card_subtitle": "中国大陆 中国香港 / 音乐 真人秀 / 洪啸 / 何炅 王祖蓝",
+                "cover_url": "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p2885762590.jpg",
+                "rating": {"value": 7.3, "count": 33623}}},
+            {"layout": "subject", "target_type": "music", "target": {
+                "id": "99", "title": "声生不息原声带"}},
+        ]}}
+
+    def catalog(self, fetch=None, snapshot=None):
+        return DoubanCatalog(fetch=fetch or self.fetch, snapshot=snapshot or {},
+                             cache=JsonDiskCache(pathlib.Path(self.tmp.name) / "cache"),
+                             media_index=self.index)
+
+    def test_missing_partial_title_discovers_and_indexes_douban_subject(self):
+        catalog = self.catalog()
+        result = catalog.search("声生")
+        self.assertEqual([item["id"] for item in result["items"]], ["douban:35634451"])
+        self.assertEqual(result["items"][0]["category"], "variety")
+        self.assertTrue(result["items"][0]["poster_url"])
+        self.assertEqual(catalog.search("声生不息")["items"][0]["douban_id"], "35634451")
+        self.assertEqual(catalog.search("shengsheng")["items"][0]["douban_id"], "35634451")
+        self.assertEqual(len(self.calls), 1)
+
+    def test_remote_failure_preserves_local_typo_matches_and_retries_after_cooldown(self):
+        self.index.upsert_many([normalize_subject({"id": "35634451", "title": "声生不息"}, "tv")])
+        def offline(url):
+            self.calls.append(url)
+            raise OSError("offline")
+        catalog = self.catalog(fetch=offline)
+        self.assertEqual(catalog.search("声声不息")["items"][0]["douban_id"], "35634451")
+        self.assertEqual(catalog.search("完全不存在的长片名")["items"], [])
+        self.assertEqual(len(self.calls), 1)
+        catalog._search_unavailable_until = 0
+        catalog.search("完全不存在的长片名")
+        self.assertEqual(len(self.calls), 2)
+
+    def test_warm_index_adds_new_snapshot_items_to_existing_database(self):
+        self.index.upsert_many([normalize_subject({"id": "1", "title": "旧影片"})])
+        item = normalize_subject({"id": "35634451", "title": "声生不息", "genres": ["真人秀"]})
+        catalog = self.catalog(snapshot={"index": [item]})
+        self.assertEqual(catalog.warm_index(), 1)
+        self.assertEqual(catalog.warm_index(), 0)
+        self.assertEqual(catalog.search("声生")["items"][0]["douban_id"], "35634451")
+        self.assertEqual(self.calls, [])
+
+    def test_empty_search_never_contacts_upstream(self):
+        self.assertEqual(self.catalog().search("  ")["items"], [])
+        self.assertEqual(self.calls, [])
+
+    def test_no_results_expire_after_one_minute_without_blocking_other_queries(self):
+        def fetch(url):
+            self.calls.append(url)
+            return {"subjects": {"items": []}}
+        catalog = self.catalog(fetch=fetch)
+        self.assertEqual(catalog.search("声生")["items"], [])
+        catalog.search("声生")
+        self.assertEqual(len(self.calls), 1)
+        catalog.cache.put("search-discovery:声生:empty", {"items": []}, fetched_at=time.time() - 61)
+        catalog.search("声生")
+        self.assertEqual(len(self.calls), 2)
+        catalog.search("别的片名")
+        self.assertEqual(len(self.calls), 3)
+
+    def test_discovery_network_timeout_fits_the_web_search_budget(self):
+        catalog = DoubanCatalog(snapshot={}, media_index=self.index)
+        with patch("douban_catalog.urllib.request.urlopen", side_effect=OSError("offline")) as opener:
+            catalog.search("声生")
+        self.assertEqual(opener.call_args.kwargs["timeout"], 4)
+
+    def test_blocked_response_is_not_persisted_as_a_successful_empty_search(self):
+        catalog = self.catalog(fetch=lambda url: {"banned": "blocked", "subjects": {"items": []}})
+        self.assertEqual(catalog.search("声生")["items"], [])
+        self.assertIsNone(catalog.cache.get_stale("search-discovery:声生"))
+        self.assertGreater(catalog._search_unavailable_until, time.monotonic())
+
+
+if __name__ == "__main__":
+    unittest.main()

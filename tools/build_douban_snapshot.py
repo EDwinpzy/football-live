@@ -141,12 +141,55 @@ def apply_details(items, details):
     return merged
 
 
-def previous_index_size():
+def _douban_id_of(item):
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("douban_id") or "").removeprefix("douban:") or str(
+        item.get("id") or "").removeprefix("douban:")
+
+
+def preserve_history(index, details, previous):
+    """保留未出现在本次榜单的历史搜索条目及详情；本次抓取优先。"""
+    if not isinstance(previous, dict):
+        return list(index or []), dict(details or {})
+    merged = list(index or [])
+    seen = {_douban_id_of(item) for item in merged}
+    seen.discard("")
+    fresh_ids = set(seen)
+    kept = 0
+    for item in previous.get("index") or []:
+        key = _douban_id_of(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+        kept += 1
+    merged_details = dict(details or {})
+    stale_details = previous.get("details")
+    if isinstance(stale_details, dict):
+        for key, item in stale_details.items():
+            skey = str(key or "").removeprefix("douban:")
+            if skey and skey not in merged_details and isinstance(item, dict):
+                merged_details[skey] = item
+    # 仅补历史条目的详情，旧评分/年份不能覆盖刚抓到的列表数据。
+    details_by_id = {_douban_id_of(item): item for item in merged_details.values()
+                     if isinstance(item, dict)}
+    merged = [item if _douban_id_of(item) in fresh_ids else
+              details_by_id.get(_douban_id_of(item)) or item for item in merged]
+    if kept:
+        print("HISTORY 保留上一版搜索池条目 %d 条" % kept)
+    return merged, merged_details
+
+
+def load_previous():
     try:
-        value = json.loads(OUT.read_text(encoding="utf-8"))
-        return len(value.get("index") or [])
+        return json.loads(OUT.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
-        return 0
+        return {}
+
+
+def previous_index_size():
+    return len(load_previous().get("index") or [])
 
 
 def snapshot_age_seconds():
@@ -183,14 +226,15 @@ def main():
         for section in home[category]["sections"]:
             section["items"] = apply_details(section["items"], details)
     index = apply_details(index, details)
-
     stats = {category: sum(len(section["items"]) for section in home[category]["sections"])
              for category, _tag in CATEGORIES}
     print("首页三段条数:", stats, "搜索池:", len(index), "详情:", len(details))
-    previous = previous_index_size()
+    previous_snapshot = load_previous()
+    previous = len(previous_snapshot.get("index") or [])
     if previous and len(index) < previous * 0.3 and not args.force:
         raise SystemExit("本次只抓到 %d 条（上次 %d 条），疑似被限流；确认无误可加 --force"
                          % (len(index), previous))
+    index, details = preserve_history(index, details, previous_snapshot)
 
     payload = {
         "schema": 1,

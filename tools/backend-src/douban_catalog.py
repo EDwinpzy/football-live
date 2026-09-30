@@ -21,6 +21,7 @@ CATEGORY_VALUES = {"movie", "tv", "anime", "variety", "short"}
 # 豆瓣 Explore 的搜索接口：`recent_hot` 会忽略 category/type 参数（三种排序拿到
 # 同一份列表），只有这个接口真正支持排序与类型/地区/年份/评分筛选。
 EXPLORE_API = "https://movie.douban.com/j/new_search_subjects"
+SEARCH_API = "https://m.douban.com/rexxar/api/v2/search/subjects"
 EXPLORE_PAGE_SIZE = 20
 EXPLORE_TAGS = {"movie": "电影", "tv": "电视剧", "anime": "动漫", "variety": "综艺", "short": "短剧"}
 SORT_CODES = {"hot": "U", "new": "R", "rating": "S"}  # U 热门 / R 最新 / S 高分
@@ -493,6 +494,7 @@ def _section_items(value, title):
 class DoubanCatalog:
     def __init__(self, fetch=None, cache=None, snapshot=None, media_index=None, matrix_path=None):
         self.fetch = fetch or self._fetch
+        self._search_fetch = fetch or (lambda url: self._fetch(url, timeout=4))
         self.cache = cache
         self.snapshot = snapshot if isinstance(snapshot, dict) else self._load_snapshot()
         self.media_index = media_index
@@ -501,6 +503,8 @@ class DoubanCatalog:
         self._matrix_path = Path(matrix_path) if matrix_path else FILTER_MATRIX_PATH
         self._matrix_cache = None
         self._unavailable_until = 0.0
+        self._search_unavailable_until = 0.0
+        self._index_warmed = False
 
     def _filter_matrix(self):
         """分类 → 上游是否可信该维度。缺文件/缺字段用保守缺省补齐，绝不抛错。"""
@@ -621,28 +625,24 @@ class DoubanCatalog:
         return options
 
     def warm_index(self):
-        """用内置快照预热搜索索引，冷实例无需触网即可本地搜索。
-
-        云端出口到不了豆瓣，`home()` 只能回落到快照；若访客直接搜索、从未打开
-        影视首页，索引就会是空的（v1.26 线上「搜索没有匹配的影片」）。索引里
-        已有数据时立刻返回，避免每次启动重复写入。
-        """
+        """补齐快照新增条目，保留设备上已抓到的更完整详情。"""
         if not self.media_index:
             return 0
-        try:
-            if self.media_index.count() > 0:
+        with self._condition_lock:
+            if self._index_warmed:
                 return 0
-        except Exception:
-            pass
-        items = self.snapshot_subjects()
-        self._ingest(items)
-        return len(items)
+            known = self.media_index.subject_ids()
+            items = [item for item in self.snapshot_subjects()
+                     if str(item.get("douban_id") or "") not in known]
+            self._ingest(items)
+            self._index_warmed = True
+            return len(items)
 
     @staticmethod
-    def _fetch(url):
+    def _fetch(url, timeout=12):
         request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json,text/html",
                                                        "Referer": "https://m.douban.com/"})
-        with urllib.request.urlopen(request, timeout=12) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8", "replace")
             content_type = response.headers.get("Content-Type", "").lower()
             return json.loads(body) if "json" in content_type or body.lstrip().startswith(("{", "[")) else body
@@ -1058,6 +1058,48 @@ class DoubanCatalog:
             return {"query": "", "page": int(page), "limit": int(limit), "items": [],
                     "total": 0, "has_more": False, "source": "local", "local": True}
         items = self.media_index.search(query, limit=limit) if self.media_index else []
+        # 本地片名/拼音/首字母命中直接返回；未收录或仅错字近似时发现新条目。
+        if not any(item.get("search_score", 120) >= 70 for item in items):
+            key = "search-discovery:" + query.casefold()
+
+            def discover():
+                try:
+                    payload = self._search_fetch(SEARCH_API + "?" + urllib.parse.urlencode(
+                        {"q": query, "type": "movie", "count": 100}))
+                    subjects = payload.get("subjects") if isinstance(payload, dict) else None
+                    rows = subjects.get("items") if isinstance(subjects, dict) else None
+                    if not isinstance(rows, list) or payload.get("banned"):
+                        raise DoubanUnavailable("unexpected Douban search payload")
+                    found = []
+                    for row in rows:
+                        if not isinstance(row, dict) or row.get("target_type") not in ("movie", "tv"):
+                            continue
+                        target = row.get("target")
+                        if not isinstance(target, dict) or not str(target.get("id") or "").isdigit():
+                            continue
+                        item = normalize_subject(target, row["target_type"])
+                        if item["title"]:
+                            found.append(item)
+                except (OSError, ValueError, TypeError, DoubanUnavailable):
+                    with self._condition_lock:
+                        self._search_unavailable_until = time.monotonic() + DOUBAN_UNAVAILABLE_COOLDOWN
+                    raise
+                if not found:
+                    if self.cache:
+                        self.cache.put(key + ":empty", {"items": []})
+                    return None
+                return {"items": found, "source": "douban-search"}
+
+            cached = self.cache.get(key, TTL["search"]) if self.cache else None
+            negative = self.cache.get(key + ":empty", 60) if self.cache else None
+            with self._condition_lock:
+                cooling = time.monotonic() < self._search_unavailable_until
+            if negative is None and (cached is not None or not cooling):
+                discovered = self._coalesced(key, "search", discover, {"items": []})
+                found = discovered.get("items") or []
+                if found:
+                    self._ingest(found)
+                    items = self.media_index.search(query, limit=limit) if self.media_index else found[:limit]
         return {"query": query, "page": int(page), "limit": int(limit), "items": items,
                 "total": len(items), "has_more": False, "source": "local", "local": True}
 

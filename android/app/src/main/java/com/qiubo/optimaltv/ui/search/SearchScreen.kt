@@ -95,8 +95,8 @@ import java.net.URLEncoder
  *
  * 搜索 = 目录内过滤 + 全站实时搜索（后端带 10 分钟缓存，防抖 300ms；触发规则见下）。
  */
-/** 搜索结果分类 tab（需求④：全部/电影/电视剧/动漫/短剧） */
-private val RESULT_CATS = listOf("全部", "电影", "电视剧", "动漫", "短剧")
+/** 搜索结果分类 tab（需求④）。「综艺」补齐：6 个，移动版竖屏每行 3 个刚好两整行。 */
+internal val RESULT_CATS = listOf("全部", "电影", "电视剧", "动漫", "综艺", "短剧")
 
 /** 详情 meta/集数 → 分类（源站频道 tag：欧美剧/国产剧等以「剧」结尾的类型 + 综艺/动漫/短剧直配） */
 private val TV_TAG_RE = Regex("欧美剧|国产剧|香港剧|台湾剧|韩国剧|日本剧|海外剧|泰剧|美剧|英剧|连续剧|电视剧|网剧")
@@ -113,6 +113,43 @@ internal fun classifyVod(meta: String, epCount: Int): String = when {
     TV_TAG_RE.containsMatchIn(meta) -> "电视剧"
     epCount > 1 -> "电视剧"
     else -> "电影"
+}
+
+/** categoryId → 分类；`douban:<mediaType>` 与旧 `hhkan:<频道号>` 都认，认不出返回 null。 */
+internal fun searchResultCategory(categoryId: String): String? =
+    when (categoryId.substringAfterLast(':').trim()) {
+        "movie", "1" -> "电影"
+        "tv", "2" -> "电视剧"
+        "anime", "3" -> "动漫"
+        "variety", "4" -> "综艺"
+        "short", "6" -> "短剧"
+        else -> null
+    }
+
+/** 认不出分类的条目才拉详情兜底，最多这么多条。 */
+private const val DETAIL_FALLBACK_LIMIT = 24
+
+/**
+ * 搜索结果 → (id → 分类)。categoryId 可认的对全部结果生效；认不出的才走
+ * [detailFallback] 拉详情，且最多 [DETAIL_FALLBACK_LIMIT] 条。
+ */
+internal suspend fun classifySearchResults(
+    items: List<com.qiubo.optimaltv.data.model.VodItem>,
+    detailFallback: suspend (com.qiubo.optimaltv.data.model.VodItem) -> String?,
+): Map<String, String> {
+    val map = HashMap<String, String>(items.size)
+    var fallbackBudget = DETAIL_FALLBACK_LIMIT
+    for (item in items) {
+        val known = searchResultCategory(item.categoryId)
+        if (known != null) {
+            map[item.id] = known
+            continue
+        }
+        if (fallbackBudget <= 0) continue
+        fallbackBudget--
+        detailFallback(item)?.let { map[item.id] = it }
+    }
+    return map
 }
 
 @Composable
@@ -286,24 +323,15 @@ fun SearchScreen(nav: NavController) {
         }
     }
 
-    // 结果分类（需求④）：目录内条目直接按频道归类；目录外拉详情归类（带缓存，前 24 条）
+    // 结果分类（需求④）：认 categoryId → 认不出才拉详情兜底（见 classifySearchResults）
     var catMap by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     LaunchedEffect(results) {
         if (results.isEmpty()) return@LaunchedEffect
-        val map = HashMap<String, String>()
-        results.take(24).forEach { item ->
-            val cat = Graph.repo.itemById(item.id)?.categoryId?.let { cid ->
-                when (cid.substringAfterLast(':')) {
-                    "1" -> "电影"; "2" -> "电视剧"; "3" -> "动漫"; "4" -> "综艺"; "6" -> "短剧"
-                    else -> null
-                }
-            } ?: run {
-                val d = runCatching { Graph.repo.resolveDetail(item.id) }.getOrNull() ?: return@run null
+        catMap = classifySearchResults(results) { item ->
+            runCatching { Graph.repo.resolveDetail(item.id) }.getOrNull()?.let { d ->
                 classifyVod(d.meta, d.episodes.size)
             }
-            if (cat != null) map[item.id] = cat
         }
-        catMap = map
     }
     var selectedCat by rememberSaveable { mutableStateOf("全部") }
     val shown = remember(results, catMap, selectedCat) {

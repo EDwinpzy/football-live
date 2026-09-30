@@ -86,9 +86,13 @@ class MediaIndex:
                 self._db = None
 
     def count(self):
-        """已索引条目数（快照预热据此判断是否还需要写入）。"""
+        """已索引条目数。"""
         with self._lock:
             return int(self._db.execute("SELECT COUNT(*) FROM media").fetchone()[0])
+
+    def subject_ids(self):
+        with self._lock:
+            return {row[0] for row in self._db.execute("SELECT douban_id FROM media")}
 
     def _migrate(self):
         with self._lock, self._db:
