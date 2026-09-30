@@ -274,8 +274,31 @@ object HotUpdateManager {
         val poisoned = poisonedVersion()
         if (code <= maxOf(active, local)) return null   // 已暂存/已生效（等下次冷启动生效）
         if (code == poisoned) return null               // 坏包已拉黑
+        // Reinstall wipes DataStore + filesDir, so local==0 and the client asks the server
+        // for an update; the server then returns the very zip already embedded in this APK
+        // (identical sha256), so the user re-downloads 40MB they already have, every time.
+        // When we have no local version recorded, hash the embedded zip once: a match means
+        // "already up to date". A genuinely newer server package (different sha) still downloads.
+        if (local == 0 && embeddedZipSha() == expectSha) {
+            OtvLog.i("hotupdate: v$code equals embedded backend zip, already up to date, skip download")
+            return null
+        }
         return Triple(pkg, code, dev)
     }
+
+    /** SHA-256 (lowercase hex) of the APK-embedded backend zip; null if unreadable. Only called when local==0. */
+    private fun embeddedZipSha(): String? = runCatching {
+        val digest = MessageDigest.getInstance("SHA-256")
+        appCtx.assets.open("backend/python-backend.zip").use { input ->
+            val buf = ByteArray(1 shl 16)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                digest.update(buf, 0, n)
+            }
+        }
+        digest.digest().joinToString("") { "%02x".format(it) }
+    }.getOrNull()
 
     /** 该包是否强制（阻断进入）。非强更为静默后台更新。 */
     private fun isForced(pkg: JSONObject): Boolean = pkg.optBoolean("forceApply")
