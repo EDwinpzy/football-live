@@ -56,6 +56,19 @@ class GeneralCatalogSearchTest(unittest.TestCase):
             with self.subTest(query=query):
                 self.assertEqual(catalog.search(query)["items"][0]["douban_id"], "200")
 
+    def test_category_query_prefers_matching_media_category_to_incidental_title_match(self):
+        self.index.upsert_many([
+            normalize_subject({"id": "101", "title": "奔跑吧", "genres": ["真人秀"]}, "variety"),
+            normalize_subject({"id": "102", "title": "声生不息", "genres": ["音乐", "真人秀"]}, "variety"),
+        ])
+        catalog = self.catalog([row("200", "云画的月光10周年综艺特辑")])
+
+        result = catalog.search("综艺")
+
+        varieties = [item for item in result["items"] if item["category"] == "variety"]
+        self.assertEqual({item["douban_id"] for item in varieties}, {"101", "102"})
+        self.assertEqual(result["items"][0]["category"], "variety")
+
     def test_cached_remote_results_continue_to_supplement_local_hits(self):
         self.index.upsert_many([normalize_subject({"id": "100", "title": "星际探索 第一季"}, "tv")])
         catalog = self.catalog([row("200", "星际探索 第二季", "tv")])

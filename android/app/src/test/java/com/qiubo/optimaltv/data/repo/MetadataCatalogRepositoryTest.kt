@@ -15,6 +15,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -106,6 +107,32 @@ class MetadataCatalogRepositoryTest {
             val detail = repository.resolveDetail(match!!.id)
             assertEquals(match.title, detail?.title)
             assertEquals(match.mytvId, detail?.mytvId)
+        } finally {
+            directory.deleteRecursively()
+            snapshot.delete()
+        }
+    }
+
+    @Test
+    fun `无SQLite首装种子不会把综艺热门和新上两栏折叠成一条`() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val directory = File(context.filesDir, "metadata-catalog")
+        directory.deleteRecursively()
+        val snapshot = File(context.filesDir, "catalog_snapshot.json")
+        snapshot.delete()
+        val settings = SettingsStore(context)
+        settings.setHhkanBase("")
+
+        try {
+            val repository = VodRepository(settings, OkHttpClient(), context)
+            assertTrue(repository.awaitLibBlocksContent("douban:variety", budgetMs = 1_000L))
+
+            val blocks = repository.libBlocksFlow.value[4].orEmpty()
+            val hotIds = blocks[0].items.map { it.id }
+            val newestIds = blocks[1].items.map { it.id }
+            assertTrue("无 mytv_id 的豆瓣种子也必须保留多条综艺", hotIds.size > 1)
+            assertTrue("最新上线不能只剩第一条种子", newestIds.size > 1)
+            assertNotEquals("热门与最新栏不能复用同一顺序", hotIds, newestIds)
         } finally {
             directory.deleteRecursively()
             snapshot.delete()
@@ -226,6 +253,34 @@ class MetadataCatalogRepositoryTest {
         assertTrue(libraryBlocks.first().items.isNotEmpty())
         assertTrue(libraryBlocks.first().items.all { it.id in localHomeIds })
         assertTrue(libraryBlocks.last().items.isEmpty())
+    }
+
+    @Test
+    fun `最近上线保留新片排序而不是热门顺序`() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val directory = File(context.filesDir, "metadata-catalog")
+        directory.deleteRecursively()
+        directory.mkdirs()
+        writeInstalledMetadataDatabase(
+            File(directory, "metadata.sqlite"),
+            listOf(
+                InstalledMedia(10000013L, "高热度影片", 2026, 100.0, 1_000L, "1291546"),
+                InstalledMedia(10000014L, "新上线影片", 2026, 50.0, 1_000L, "1291547"),
+            ),
+        )
+        val settings = SettingsStore(context)
+        settings.setHhkanBase("")
+
+        try {
+            val repository = VodRepository(settings, OkHttpClient(), context)
+            assertTrue(repository.awaitLibBlocksContent("douban:movie", budgetMs = 1_000L))
+
+            val blocks = repository.libBlocksFlow.value[1].orEmpty()
+            assertEquals(listOf("高热度影片", "新上线影片"), blocks[0].items.map { it.title })
+            assertEquals(listOf("新上线影片", "高热度影片"), blocks[1].items.map { it.title })
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 
     @Test
@@ -432,35 +487,68 @@ class MetadataCatalogRepositoryTest {
         db.close()
     }
 
-    private fun writeInstalledMetadataDatabase(file: File) {
+    private data class InstalledMedia(
+        val id: Long,
+        val title: String,
+        val year: Int,
+        val popularity: Double,
+        val updatedAt: Long,
+        val externalId: String,
+    )
+
+    private fun writeInstalledMetadataDatabase(
+        file: File,
+        media: List<InstalledMedia> = listOf(
+            InstalledMedia(10000013L, "本地影片", 1993, 5.0, 0L, "1291546"),
+        ),
+    ) {
         val db = SQLiteDatabase.openOrCreateDatabase(file, null)
         db.execSQL("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         db.execSQL("INSERT INTO meta VALUES ('schema_version', '3')")
         db.execSQL("INSERT INTO meta VALUES ('data_version', '2026092401')")
         db.execSQL("CREATE TABLE media (id INTEGER PRIMARY KEY, media_type TEXT, title TEXT, original_title TEXT, year INTEGER, runtime INTEGER, overview TEXT, status TEXT, language TEXT, country TEXT, release_date TEXT, episodes INTEGER, season INTEGER, popularity REAL, created_at INTEGER, updated_at INTEGER)")
-        db.execSQL("INSERT INTO media VALUES (10000013, 'movie', '本地影片', '', 1993, 100, '', 'released', 'zh', '中国大陆', '', NULL, NULL, 5.0, 0, 0)")
+        media.forEach { row ->
+            db.execSQL(
+                "INSERT INTO media VALUES (?, 'movie', ?, '', ?, 100, '', 'released', 'zh', '中国大陆', '', NULL, NULL, ?, 0, ?)",
+                arrayOf(row.id, row.title, row.year, row.popularity, row.updatedAt),
+            )
+        }
         db.execSQL("CREATE TABLE external_id (media_id INTEGER, provider TEXT, external_id TEXT, PRIMARY KEY(provider, external_id))")
-        db.execSQL("INSERT INTO external_id VALUES (10000013, 'douban', '1291546')")
+        media.forEach { row ->
+            db.execSQL("INSERT INTO external_id VALUES (?, 'douban', ?)", arrayOf(row.id, row.externalId))
+        }
         db.execSQL("CREATE TABLE media_title (id INTEGER PRIMARY KEY, media_id INTEGER, title TEXT, language TEXT, title_type TEXT, normalized TEXT, pinyin TEXT, pinyin_alts TEXT, pinyin_initials TEXT, pinyin_initials_alts TEXT)")
-        db.execSQL("INSERT INTO media_title VALUES (1, 10000013, '本地影片', 'zh', 'primary', '本地影片', 'bendianying', '', 'bdy', '')")
+        media.forEachIndexed { index, row ->
+            db.execSQL(
+                "INSERT INTO media_title VALUES (?, ?, ?, 'zh', 'primary', ?, '', '', '', '')",
+                arrayOf(index + 1, row.id, row.title, row.title),
+            )
+        }
         db.execSQL("CREATE TABLE person (id INTEGER PRIMARY KEY, name TEXT NOT NULL, original_name TEXT, profile_url TEXT)")
         db.execSQL("CREATE TABLE credit (media_id INTEGER, person_id INTEGER, department TEXT, role TEXT, character_name TEXT, credit_order INTEGER, PRIMARY KEY(media_id, person_id, department, role))")
         db.execSQL("CREATE TABLE genre (id INTEGER PRIMARY KEY, name TEXT UNIQUE)")
         db.execSQL("INSERT INTO genre VALUES (1, '剧情')")
         db.execSQL("CREATE TABLE media_genre (media_id INTEGER, genre_id INTEGER, PRIMARY KEY(media_id, genre_id))")
-        db.execSQL("INSERT INTO media_genre VALUES (10000013, 1)")
+        media.forEach { row -> db.execSQL("INSERT INTO media_genre VALUES (?, 1)", arrayOf(row.id)) }
         db.execSQL("CREATE TABLE region (id INTEGER PRIMARY KEY, name TEXT UNIQUE)")
         db.execSQL("INSERT INTO region VALUES (1, '中国大陆')")
         db.execSQL("CREATE TABLE media_region (media_id INTEGER, region_id INTEGER, PRIMARY KEY(media_id, region_id))")
-        db.execSQL("INSERT INTO media_region VALUES (10000013, 1)")
+        media.forEach { row -> db.execSQL("INSERT INTO media_region VALUES (?, 1)", arrayOf(row.id)) }
         db.execSQL("CREATE TABLE rating (media_id INTEGER, provider TEXT, score REAL, vote_count INTEGER, updated_at INTEGER, PRIMARY KEY(media_id, provider))")
-        db.execSQL("INSERT INTO rating VALUES (10000013, 'douban', 9.6, 1000, 0)")
+        media.forEach { row -> db.execSQL("INSERT INTO rating VALUES (?, 'douban', 9.6, 1000, 0)", arrayOf(row.id)) }
         db.execSQL("CREATE TABLE image (id INTEGER PRIMARY KEY, media_id INTEGER, image_type TEXT, original_url TEXT, cached_url TEXT, width INTEGER, height INTEGER, UNIQUE(media_id, image_type))")
         db.execSQL("CREATE TABLE search_doc (media_id INTEGER PRIMARY KEY, title_norm TEXT, aliases_norm TEXT, pinyin TEXT, pinyin_alts TEXT, initials TEXT, initials_alts TEXT, people_norm TEXT, people_pinyin TEXT, genres_norm TEXT, popularity REAL, year INTEGER)")
-        db.execSQL("INSERT INTO search_doc VALUES (10000013, '本地影片', '', 'bendianying', '', 'bdy', '', '', '', '剧情', 5.0, 1993)")
+        media.forEach { row ->
+            db.execSQL(
+                "INSERT INTO search_doc VALUES (?, ?, '', '', '', '', '', '', '', '剧情', ?, ?)",
+                arrayOf(row.id, row.title, row.popularity, row.year),
+            )
+        }
         runCatching {
             db.execSQL("CREATE VIRTUAL TABLE search_fts USING fts5(media_id UNINDEXED, title, aliases, pinyin, initials, people, genres, prefix='2 3 4')")
-            db.execSQL("INSERT INTO search_fts VALUES ('10000013', '本地影片', '', 'bendianying', 'bdy', '', '剧情')")
+            media.forEach { row ->
+                db.execSQL("INSERT INTO search_fts VALUES (?, ?, '', '', '', '', '剧情')", arrayOf(row.id.toString(), row.title))
+            }
         }
         db.close()
     }

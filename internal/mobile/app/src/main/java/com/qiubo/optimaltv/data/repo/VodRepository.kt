@@ -524,7 +524,7 @@ class VodRepository(
                 metadataCatalog.topRows("movie", "hot") +
                     metadataCatalog.topRows("movie", "new") +
                     metadataCatalog.topRows("movie", "rating")
-                ).distinctBy(CatalogMedia::mytvId)
+                ).distinctBy(::libraryRowKey)
                 .map { VodApiSource.fromCatalogMedia(it, settings.current().hhkanBaseUrl) }
             if (localItems.isNotEmpty()) {
                 val sections = localHomeSections(localItems)
@@ -593,30 +593,49 @@ class VodRepository(
         ).filter { it.items.isNotEmpty() }
     }
 
-    /** Local metadata source for the fixed library sections; metadata rows are read popularity-first. */
-    private fun localMetadataBlocks(category: String, rows: List<CatalogMedia>, imageProxyBase: String): List<HSec> {
-        val categoryRows = rows.filter { media -> metadataCategoryKey(media.mediaType) == category }
-        if (categoryRows.isEmpty()) return emptyList()
+    /**
+     * 片库固定三栏，每栏各自保留 [MetadataCatalogStore.topRows] 给这一栏的原始顺序。
+     *
+     * 2026-09-30 回归：旧实现先把 hot/new/updated 三路 topRows 合并去重，再按年份、
+     * updatedAt 对合并结果做一次稳定排序。同年份、同 updatedAt 时排序键全部相等，
+     * 「最新上线」沿用先拼入的热门顺序，于是「最近热门」和「最新上线」整栏完全一样
+     * （用户报障「两个栏看到的是同一部片子」）。这里改为三栏各读各的排序来源，
+     * 只保留「最近更新」不要没有更新时间的条目这一条既有口径。
+     */
+    private fun localMetadataBlocks(
+        category: String,
+        hotRows: List<CatalogMedia>,
+        newRows: List<CatalogMedia>,
+        updatedRows: List<CatalogMedia>,
+        imageProxyBase: String,
+    ): List<HSec> {
+        fun ofCategory(rows: List<CatalogMedia>) =
+            rows.filter { metadataCategoryKey(it.mediaType) == category }
+                .distinctBy(::libraryRowKey)
 
         fun section(name: String, selected: List<CatalogMedia>) = HSec(
             name,
             selected.take(24).map { VodApiSource.fromCatalogMedia(it, imageProxyBase) },
         )
 
-        val byRelease = categoryRows.sortedWith(
-            compareByDescending<CatalogMedia> { it.year.toIntOrNull() ?: 0 }
-                .thenByDescending { it.updatedAt },
-        )
-        val byUpdate = categoryRows.asSequence()
-            .filter { it.updatedAt > 0L }
-            .sortedByDescending(CatalogMedia::updatedAt)
-            .toList()
+        val hot = ofCategory(hotRows)
+        val fresh = ofCategory(newRows)
+        val recentlyUpdated = ofCategory(updatedRows).filter { it.updatedAt > 0L }
+        if (hot.isEmpty() && fresh.isEmpty() && recentlyUpdated.isEmpty()) return emptyList()
         return listOf(
-            section("最近热门", categoryRows),
-            section("最新上线", byRelease),
-            section("最近更新", byUpdate),
+            section("最近热门", hot),
+            section("最新上线", fresh),
+            section("最近更新", recentlyUpdated),
         )
     }
+
+    /**
+     * 片库三栏的去重键：已装库用 mytvId；随包 seed 的 268 条全都没有 mytv_id，
+     * 直接按 mytvId 去重会把整栏折叠成一条（用户报障「综艺只有一个」）。
+     * 因此回退 legacyRef，再回退标题，保证三栏都能铺满。
+     */
+    private fun libraryRowKey(media: CatalogMedia): String =
+        media.mytvId.trim().ifEmpty { media.legacyRef.orEmpty() }.ifEmpty { media.title.trim() }
 
     private fun metadataCategoryKey(mediaType: String): String = when (mediaType.trim().lowercase()) {
         "tv", "series", "tv_series", "show" -> "tv"
@@ -721,11 +740,15 @@ class VodRepository(
         if (!force && failAt != null && System.currentTimeMillis() - failAt < 60_000L) return
         libJobs[cid] = repoScope.launch {
             val base = settings.current().hhkanBaseUrl
-            val localRows = runCatching {
-                (metadataCatalog.topRows(category, "hot") + metadataCatalog.topRows(category, "new") + metadataCatalog.topRows(category, "updated"))
-                    .distinctBy(CatalogMedia::mytvId)
+            val localSections = runCatching {
+                localMetadataBlocks(
+                    category = category,
+                    hotRows = metadataCatalog.topRows(category, "hot"),
+                    newRows = metadataCatalog.topRows(category, "new"),
+                    updatedRows = metadataCatalog.topRows(category, "updated"),
+                    imageProxyBase = base,
+                )
             }.getOrDefault(emptyList())
-            val localSections = localMetadataBlocks(category, localRows, base)
             val hasLocalSections = localSections.any { it.items.isNotEmpty() }
             val installedMetadata = runCatching { metadataCatalog.hasInstalledDatabase() }.getOrDefault(false)
             _libBlocks.value = _libBlocks.value + (cid to completeBlocks(localSections))

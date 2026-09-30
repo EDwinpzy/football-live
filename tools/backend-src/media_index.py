@@ -27,6 +27,14 @@ PINYIN_PATH = Path(__file__).with_name("pinyin_map.json")
 STRONG_SCORE = 70
 # 强命中达到该条数就跳过全表模糊扫描（沿用原有门槛）。
 FUZZY_HIT_LIMIT = 8
+CATEGORY_SEARCH_TERMS = {
+    "电影": "movie", "movie": "movie",
+    "电视剧": "tv", "连续剧": "tv", "tv": "tv",
+    "动漫": "anime", "动画": "anime", "anime": "anime",
+    "综艺": "variety", "variety": "variety",
+    "短剧": "short", "short": "short",
+}
+CATEGORY_SEARCH_SCORE = 130
 
 SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS media (
@@ -387,19 +395,25 @@ class MediaIndex:
         normalized = normalize_text(query)
         if not normalized:
             return []
+        category = CATEGORY_SEARCH_TERMS.get(normalized)
         limit = max(1, min(MAX_LIMIT, int(limit or DEFAULT_LIMIT)))
         like = "%" + normalized + "%"
         with self._lock:
             # 不预先 LIMIT：截断在打分之前发生，最相关的那条常被丢掉。
             rows = self._db.execute("""
-                SELECT s.*, m.data_json, m.rating, m.rating_count
+                SELECT s.*, m.data_json, m.rating, m.rating_count, m.category
                 FROM media_search s JOIN media m USING(douban_id)
                 WHERE title_norm LIKE ? OR original_norm LIKE ? OR alias_norms LIKE ?
                    OR title_pinyin LIKE ? OR title_initials LIKE ? OR alias_pinyins LIKE ?
                    OR alias_initials LIKE ? OR people_norms LIKE ? OR people_pinyins LIKE ?
-                   OR people_initials LIKE ? OR genre_norms LIKE ?
-            """, (like,) * 11).fetchall()
-            ranked = [(self._score(row, normalized), row) for row in rows]
+                   OR people_initials LIKE ? OR genre_norms LIKE ? OR m.category = ?
+            """, (like,) * 11 + (category,)).fetchall()
+            ranked = []
+            for row in rows:
+                score = self._score(row, normalized)
+                if category and row["category"] == category:
+                    score = max(score, CATEGORY_SEARCH_SCORE)
+                ranked.append((score, row))
             ranked = [value for value in ranked if value[0] > 0]
             # 只数「强命中」再决定是否回退：类型/人员这类弱命中再多也不算数，
             # 但强命中仍保留原有的 8 条门槛，避免每次都全表扫描。

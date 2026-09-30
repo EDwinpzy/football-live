@@ -74,6 +74,9 @@ data class DoubanInfo(val found: Boolean, val rating: String, val desc: String, 
 
 private class SourceResult(val source: ContentSource, val snapshot: SourceSnapshot?, val error: Exception?)
 
+private fun CatalogMedia.localIdentityKey(): String =
+    mytvId.trim().takeIf(String::isNotEmpty) ?: legacyRef ?: title.trim()
+
 /**
  * 目录来源硬边界：浏览卡片只能由好好看产生。
  *
@@ -598,7 +601,7 @@ class VodRepository(
                 metadataCatalog.topRows("movie", "hot") +
                     metadataCatalog.topRows("movie", "new") +
                     metadataCatalog.topRows("movie", "rating")
-                ).distinctBy(CatalogMedia::mytvId)
+                ).distinctBy { it.localIdentityKey() }
                 .map { VodApiSource.fromCatalogMedia(it, settings.current().hhkanBaseUrl) }
             if (localItems.isNotEmpty()) {
                 val sections = localHomeSections(localItems)
@@ -667,28 +670,32 @@ class VodRepository(
         ).filter { it.items.isNotEmpty() }
     }
 
-    /** Local metadata source for the fixed library sections; metadata rows are read popularity-first. */
-    private fun localMetadataBlocks(category: String, rows: List<CatalogMedia>, imageProxyBase: String): List<HSec> {
-        val categoryRows = rows.filter { media -> metadataCategoryKey(media.mediaType) == category }
-        if (categoryRows.isEmpty()) return emptyList()
+    /** Local metadata source for fixed library sections, preserving each query's ranking. */
+    private fun localMetadataBlocks(
+        category: String,
+        hotRows: List<CatalogMedia>,
+        newRows: List<CatalogMedia>,
+        updatedRows: List<CatalogMedia>,
+        imageProxyBase: String,
+    ): List<HSec> {
+        fun inCategory(rows: List<CatalogMedia>) = rows
+            .filter { media -> metadataCategoryKey(media.mediaType) == category }
+            .distinctBy { it.localIdentityKey() }
+
+        val hot = inCategory(hotRows)
+        val newest = inCategory(newRows)
+        val updated = inCategory(updatedRows).filter { it.updatedAt > 0L }
+        if (hot.isEmpty() && newest.isEmpty() && updated.isEmpty()) return emptyList()
 
         fun section(name: String, selected: List<CatalogMedia>) = HSec(
             name,
             selected.take(24).map { VodApiSource.fromCatalogMedia(it, imageProxyBase) },
         )
 
-        val byRelease = categoryRows.sortedWith(
-            compareByDescending<CatalogMedia> { it.year.toIntOrNull() ?: 0 }
-                .thenByDescending { it.updatedAt },
-        )
-        val byUpdate = categoryRows.asSequence()
-            .filter { it.updatedAt > 0L }
-            .sortedByDescending(CatalogMedia::updatedAt)
-            .toList()
         return listOf(
-            section("最近热门", categoryRows),
-            section("最新上线", byRelease),
-            section("最近更新", byUpdate),
+            section("最近热门", hot),
+            section("最新上线", newest),
+            section("最近更新", updated),
         )
     }
 
@@ -795,11 +802,16 @@ class VodRepository(
         if (!force && failAt != null && System.currentTimeMillis() - failAt < 60_000L) return
         libJobs[cid] = repoScope.launch {
             val base = settings.current().hhkanBaseUrl
-            val localRows = runCatching {
-                (metadataCatalog.topRows(category, "hot") + metadataCatalog.topRows(category, "new") + metadataCatalog.topRows(category, "updated"))
-                    .distinctBy(CatalogMedia::mytvId)
-            }.getOrDefault(emptyList())
-            val localSections = localMetadataBlocks(category, localRows, base)
+            val rankedRows = runCatching {
+                Triple(
+                    metadataCatalog.topRows(category, "hot"),
+                    metadataCatalog.topRows(category, "new"),
+                    metadataCatalog.topRows(category, "updated"),
+                )
+            }.getOrNull()
+            val localSections = rankedRows?.let { (hot, newest, updated) ->
+                localMetadataBlocks(category, hot, newest, updated, base)
+            }.orEmpty()
             val hasLocalSections = localSections.any { it.items.isNotEmpty() }
             val installedMetadata = runCatching { metadataCatalog.hasInstalledDatabase() }.getOrDefault(false)
             _libBlocks.value = _libBlocks.value + (cid to completeBlocks(localSections))

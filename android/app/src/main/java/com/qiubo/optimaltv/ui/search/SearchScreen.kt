@@ -26,8 +26,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -56,6 +58,8 @@ import com.qiubo.optimaltv.ui.components.InitialFocusEffect
 import com.qiubo.optimaltv.ui.components.LocalNavOverride
 import com.qiubo.optimaltv.ui.components.MainTabBar
 import com.qiubo.optimaltv.ui.components.NAV_DOWN
+import com.qiubo.optimaltv.ui.components.NAV_LEFT
+import com.qiubo.optimaltv.ui.components.NAV_RIGHT
 import com.qiubo.optimaltv.ui.components.NAV_UP
 import com.qiubo.optimaltv.ui.components.OtvNav
 import com.qiubo.optimaltv.ui.components.PinyinIme
@@ -389,6 +393,21 @@ fun SearchScreen(nav: NavController) {
 
     // ---- 区域间定向跳转（需求⑤：严格相邻，只到最近的下个区域）----
     val candListState = rememberLazyListState()
+    // 候选词行内左右移动的落焦槽位（按候选内容存，候选重排时不错位）。
+    // 需求⑤ 原实现只给 i==0 挂了 firstCandFocus，栏内没有可落点，RIGHT 只能靠几何
+    // 搜索碰运气，实测第 5 个及以后的候选用方向键根本够不到。给每条候选都挂句柄，
+    // 栏内 LEFT/RIGHT 改为确定性索引跳转；UP/DOWN 仍按区域语义走键盘/分类栏。
+    // 注意候选栏是 LazyRow 懒加载的长列表，滚动会持续补入新候选，没有「末尾」，
+    // 所以不按「走到末尾才 DOWN」来改区域导航——那条路实测走不通。
+    val candFocus = remember { mutableStateMapOf<String, FocusRequester>() }
+    // 当前聚焦的候选**文本**（null = 不在候选行）。由各候选的 onFocusedChange 写入。
+    // 存文本而不是下标：候选随输入重排，下标会漂；文本是稳定业务 key（与 LazyRow 的 key 一致）。
+    var focusedCand by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(candidates) {
+        val live = candidates.toSet()
+        candFocus.keys.retainAll(live)
+        focusedCand = null
+    }
     LaunchedEffect(query, candidates) {
         if (candidates.isNotEmpty()) candListState.scrollToItem(0)
     }
@@ -399,6 +418,20 @@ fun SearchScreen(nav: NavController) {
             focusTarget(firstCandFocus)
         }
     }
+    /** 候选词行内按索引左右移动；越界返回 false，交回区域导航 */
+    fun focusCandidateIndex(from: Int, delta: Int): Boolean {
+        val next = from + delta
+        if (next !in candidates.indices) return false
+        val fr = candFocus[candidates[next]] ?: return false
+        scope.launch {
+            candListState.scrollToItem(next)
+            delay(40)
+            runCatching { fr.requestFocus() }
+        }
+        return true
+    }
+    val currentCandidateIndex: () -> Int =
+        { focusedCand?.let { candidates.indexOf(it) }?.takeIf { it >= 0 } ?: -1 }
     // 键盘 DOWN → 候选词行（无候选时跳过它直接到分类 tab；都没有则封锁）
     val keyDown: () -> Unit = {
         when {
@@ -407,9 +440,13 @@ fun SearchScreen(nav: NavController) {
             else -> {}
         }
     }
-    // 候选词 UP → 键盘；DOWN → 分类 tab（无结果也封锁，不放行几何搜索）
+    // 候选词 UP → 键盘；DOWN → 分类 tab（区域导航语义不变）
+    // LEFT/RIGHT → 栏内前后候选（需求⑤ 补齐：原实现栏内无落点，RIGHT 只能靠几何
+    // 搜索碰运气，实测第 5 个及以后的候选用方向键根本够不到）
     val candUp: () -> Unit = { focusTarget(keyboardFocus) }
     val candDown: () -> Unit = { if (results.isNotEmpty()) focusTarget(firstTabFocus) }
+    val candStep: (Int) -> Unit = { delta -> currentCandidateIndex().takeIf { it >= 0 }
+        ?.let { focusCandidateIndex(it, delta) } }
     // 分类 tab UP → 候选词行（无候选回键盘）；DOWN → 结果首卡
     val tabUp: () -> Unit = { if (candidates.isNotEmpty()) focusFirstCandidate() else focusTarget(keyboardFocus) }
     val tabDown: () -> Unit = { if (shown.isNotEmpty()) focusTarget(firstResultFocus) }
@@ -465,6 +502,8 @@ fun SearchScreen(nav: NavController) {
                         when (dir) {
                             NAV_UP -> { candUp(); true }
                             NAV_DOWN -> { candDown(); true }
+                            NAV_LEFT -> { candStep(-1); true }
+                            NAV_RIGHT -> { candStep(1); true }
                             else -> false
                         }
                     },
@@ -490,17 +529,25 @@ fun SearchScreen(nav: NavController) {
                     // candidates 已去重（.distinct()），候选词本身就是稳定业务 key。
                     items(candidates.size, key = { i -> "cand-${candidates[i]}" }) { i ->
                         val cand = candidates[i]
+                        // i==0 复用 firstCandFocus（键盘 DOWN 的落点），其余各挂自己的句柄
+                        val ownFr = remember(cand) { FocusRequester() }
                         var candFocused by remember { mutableStateOf(false) }
+                        SideEffect { candFocus[cand] = if (i == 0) firstCandFocus else ownFr }
                         Box(
                             contentAlignment = Alignment.Center,
                             modifier = Modifier
-                                .then(if (i == 0) Modifier.focusRequester(firstCandFocus) else Modifier)
+                                .then(if (i == 0) Modifier.focusRequester(firstCandFocus) else Modifier.focusRequester(ownFr))
                                 .dpadFocusable(
                                     scaleFocused = 1.08f, focusedBg = OtvColors.White,
                                     focusedBgRadius = 24f.sx(s),
                                     onFocusedChange = {
                                         candFocused = it
-                                        if (it) noteKeyGained() else noteKeyLost(null)
+                                        if (it) {
+                                            focusedCand = cand
+                                            noteKeyGained()
+                                        } else {
+                                            noteKeyLost(null)
+                                        }
                                     },
                                 ) {
                                     query = when {

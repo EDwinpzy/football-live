@@ -15,6 +15,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -226,6 +227,78 @@ class MetadataCatalogRepositoryTest {
         assertTrue(libraryBlocks.first().items.isNotEmpty())
         assertTrue(libraryBlocks.first().items.all { it.id in localHomeIds })
         assertTrue(libraryBlocks.last().items.isEmpty())
+    }
+
+    @Test
+    fun `同年份同更新时间的目录让最近热门与最新上线各按各自口径排序`() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val directory = File(context.filesDir, "metadata-catalog")
+        directory.deleteRecursively()
+        directory.mkdirs()
+        writeTiedYearAndUpdateCatalog(File(directory, "metadata.sqlite"))
+        val settings = SettingsStore(context)
+        settings.setHhkanBase("")
+
+        try {
+            val repository = VodRepository(settings, OkHttpClient(), context)
+
+            repository.awaitLibBlocks("douban:movie")
+            val blocks = repository.libBlocksFlow.value[1].orEmpty().associateBy { it.name }
+
+            assertEquals(listOf("最近热门", "最新上线", "最近更新"), blocks.keys.toList())
+            // year DESC, id DESC —— 同年份时由 id 决定，不能沿用先拼入的热门顺序
+            assertEquals(
+                "最新上线必须按年份/新片顺序排序",
+                listOf("10000040", "10000030", "10000020"),
+                blocks.getValue("最新上线").items.map { it.mytvId },
+            )
+            // popularity DESC, id DESC —— 与 id DESC 的新片顺序相反
+            assertEquals(
+                "最近热门必须按 popularity 排序",
+                listOf("10000020", "10000030", "10000040"),
+                blocks.getValue("最近热门").items.map { it.mytvId },
+            )
+            // updated_at DESC, id DESC —— 同更新时间时由 id 决定
+            assertEquals(
+                "最近更新必须按更新时间顺序排序",
+                listOf("10000040", "10000030", "10000020"),
+                blocks.getValue("最近更新").items.map { it.mytvId },
+            )
+            assertNotEquals(
+                "同年份、同 updatedAt 时最近热门和最新上线不能整栏相同",
+                blocks.getValue("最近热门").items.map { it.mytvId },
+                blocks.getValue("最新上线").items.map { it.mytvId },
+            )
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `无 SQLite 时综艺三栏不被空 mytvId 去重折叠成单条`() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val directory = File(context.filesDir, "metadata-catalog")
+        directory.deleteRecursively()
+        val snapshot = File(context.filesDir, "catalog_snapshot.json")
+        snapshot.delete()
+        val settings = SettingsStore(context)
+        settings.setHhkanBase("")
+
+        try {
+            val repository = VodRepository(settings, OkHttpClient(), context)
+
+            repository.awaitLibBlocks("douban:variety")
+            val blocks = repository.libBlocksFlow.value[4].orEmpty().associateBy { it.name }
+
+            val hot = blocks.getValue("最近热门").items.map { it.id }
+            val fresh = blocks.getValue("最新上线").items.map { it.id }
+            assertTrue("seed 条目都没有 mytv_id，去重键不能是 mytvId：$hot", hot.size > 1)
+            assertTrue("最新上线同样不能被折叠成单条：$fresh", fresh.size > 1)
+            assertNotEquals("热门与新片两栏不能整栏相同（用户报障「综艺只有一个」）", hot, fresh)
+        } finally {
+            directory.deleteRecursively()
+            snapshot.delete()
+        }
     }
 
     @Test
@@ -462,6 +535,45 @@ class MetadataCatalogRepositoryTest {
             db.execSQL("CREATE VIRTUAL TABLE search_fts USING fts5(media_id UNINDEXED, title, aliases, pinyin, initials, people, genres, prefix='2 3 4')")
             db.execSQL("INSERT INTO search_fts VALUES ('10000013', '本地影片', '', 'bendianying', 'bdy', '', '剧情')")
         }
+        db.close()
+    }
+
+    /**
+     * 同年份、同 updatedAt 的三部电影，popularity 排序与 id 排序（也就是新片顺序）相反。
+     * 用来暴露「热门栏顺序被新片栏沿用」的回归：只要三栏共用一份按年份/更新时间排序后的
+     * 合并列表，热门栏就会变成 40/30/20，与新片栏完全一致。
+     */
+    private fun writeTiedYearAndUpdateCatalog(file: File) {
+        val db = SQLiteDatabase.openOrCreateDatabase(file, null)
+        db.execSQL("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        db.execSQL("INSERT INTO meta VALUES ('schema_version', '3')")
+        db.execSQL("INSERT INTO meta VALUES ('data_version', '2026093001')")
+        db.execSQL(
+            "CREATE TABLE media (id INTEGER PRIMARY KEY, media_type TEXT, title TEXT, original_title TEXT, " +
+                "year INTEGER, runtime INTEGER, overview TEXT, status TEXT, language TEXT, country TEXT, " +
+                "release_date TEXT, episodes INTEGER, season INTEGER, popularity REAL, created_at INTEGER, updated_at INTEGER)"
+        )
+        // id DESC = 40/30/20；popularity DESC = 20/30/40 —— 两个口径顺序完全相反
+        db.execSQL("INSERT INTO media VALUES (10000020, 'movie', '同年份高分新片', '', 2024, 100, '', 'released', 'zh', '中国大陆', '', NULL, NULL, 99.0, 0, 1700000000)")
+        db.execSQL("INSERT INTO media VALUES (10000030, 'movie', '同年份中分新片', '', 2024, 100, '', 'released', 'zh', '中国大陆', '', NULL, NULL, 95.0, 0, 1700000000)")
+        db.execSQL("INSERT INTO media VALUES (10000040, 'movie', '同年份低分新片', '', 2024, 100, '', 'released', 'zh', '中国大陆', '', NULL, NULL, 90.0, 0, 1700000000)")
+        db.execSQL("CREATE TABLE external_id (media_id INTEGER, provider TEXT, external_id TEXT, PRIMARY KEY(provider, external_id))")
+        db.execSQL("CREATE TABLE media_title (id INTEGER PRIMARY KEY, media_id INTEGER, title TEXT, language TEXT, title_type TEXT, normalized TEXT, pinyin TEXT, pinyin_alts TEXT, pinyin_initials TEXT, pinyin_initials_alts TEXT)")
+        db.execSQL("CREATE TABLE person (id INTEGER PRIMARY KEY, name TEXT NOT NULL, original_name TEXT, profile_url TEXT)")
+        db.execSQL("CREATE TABLE credit (media_id INTEGER, person_id INTEGER, department TEXT, role TEXT, character_name TEXT, credit_order INTEGER, PRIMARY KEY(media_id, person_id, department, role))")
+        db.execSQL("CREATE TABLE genre (id INTEGER PRIMARY KEY, name TEXT UNIQUE)")
+        db.execSQL("CREATE TABLE media_genre (media_id INTEGER, genre_id INTEGER, PRIMARY KEY(media_id, genre_id))")
+        db.execSQL("CREATE TABLE region (id INTEGER PRIMARY KEY, name TEXT UNIQUE)")
+        db.execSQL("CREATE TABLE media_region (media_id INTEGER, region_id INTEGER, PRIMARY KEY(media_id, region_id))")
+        db.execSQL("CREATE TABLE rating (media_id INTEGER, provider TEXT, score REAL, vote_count INTEGER, updated_at INTEGER, PRIMARY KEY(media_id, provider))")
+        db.execSQL("CREATE TABLE image (id INTEGER PRIMARY KEY, media_id INTEGER, image_type TEXT, original_url TEXT, cached_url TEXT, width INTEGER, height INTEGER, UNIQUE(media_id, image_type))")
+        db.execSQL(
+            "CREATE TABLE search_doc (media_id INTEGER PRIMARY KEY, title_norm TEXT, aliases_norm TEXT, pinyin TEXT, pinyin_alts TEXT, " +
+                "initials TEXT, initials_alts TEXT, people_norm TEXT, people_pinyin TEXT, genres_norm TEXT, popularity REAL, year INTEGER)"
+        )
+        db.execSQL("INSERT INTO search_doc VALUES (10000020, '同年份高分新片', '', '', '', '', '', '', '', '', 99.0, 2024)")
+        db.execSQL("INSERT INTO search_doc VALUES (10000030, '同年份中分新片', '', '', '', '', '', '', '', '', 95.0, 2024)")
+        db.execSQL("INSERT INTO search_doc VALUES (10000040, '同年份低分新片', '', '', '', '', '', '', '', '', 90.0, 2024)")
         db.close()
     }
 }

@@ -14,6 +14,12 @@
 const VOD_CATEGORIES = [["movie", "电影"], ["tv", "电视剧"], ["anime", "动漫"], ["variety", "综艺"], ["short", "短剧"]];
 const VOD_SORTS = [["hot", "热门"], ["new", "最新上映"], ["rating", "豆瓣高分"]];
 
+/* 好好看的频道号（hhkan_snapshot.json 的 channels 键，与上面五个分类一一对应：
+   1 电影 / 2 电视剧 / 3 动漫 / 4 综艺 / 6 短剧）。
+   好好看是「唯一卡片源」——它不是第六个分类，而是这五个分类的片源后盾：
+   豆瓣某栏空/降级时就用它补位，所以 chips 仍然只有五类。 */
+const HHKAN_CHANNELS = { movie: 1, tv: 2, anime: 3, variety: 4, short: 6 };
+
 function normalizeDoubanItem(it, category) {
   return { ...it, id: String(it.id || ""), title: it.title || "", cover: it.poster_url || it.cover || "",
     hero: heroImg(it.hero_url || it.poster_url || it.cover || ""),
@@ -21,15 +27,16 @@ function normalizeDoubanItem(it, category) {
     area: (it.regions || []).join(" / "), tags: it.genres || it.tags || [], remark: it.remark || "" };
 }
 
-/* 好好看条目：线上 /hhkan/home 实测字段为 {id:number, title, cover, score, remark}，
+/* 好好看条目：线上 /hhkan/* 实测字段为 {id:number, title, cover, score, remark}，
    没有 hero/regions/genres。id 必须带 hhkan: 前缀，否则详情页会按豆瓣 id 去查
-   /vod/detail/ 拿不到东西（2026-09-30 接入时踩过）。 */
-function normalizeHhkanItem(it) {
+   /vod/detail/ 拿不到东西（2026-09-30 接入时踩过）。
+   categoryId 传当前分类（douban:movie 等），让它和同栏豆瓣条目行为一致。 */
+function normalizeHhkanItem(it, category) {
   const cover = it.cover || it.poster_url || "";
   const id = String(it.id == null ? "" : it.id);
   return { ...it, id: /^\d+$/.test(id) ? "hhkan:" + id : id, title: it.title || "",
     cover, hero: heroImg(cover), score: +it.score || 0,
-    categoryId: "hhkan:home", area: it.area || "", tags: it.tags || [],
+    categoryId: category ? "douban:" + category : "", area: it.area || "", tags: it.tags || [],
     remark: it.remark || "" };
 }
 
@@ -1164,14 +1171,6 @@ async function buildCatalogProgressive(onUpdate, refresh = false) {
       cats.push({ id: "douban:" + cid, name });
       part.forEach(it => items.push({ ...it, categoryId: "douban:" + cid }));
     }
-    /* 好好看是独立片源：并入同一个 parts 流程，chips 末尾多一个入口。
-       2026-09-30 之前只改了 buildCatalog，而实际首屏走的是本函数，
-       导致好好看入口根本没出现。 */
-    const hk = parts.get("hhkan");
-    if (hk) {
-      cats.push({ id: "hhkan:home", name: "好好看" });
-      hk.forEach(it => items.push({ ...it, categoryId: "hhkan:home" }));
-    }
     const seen = new Set(), dedupedItems = [];
     for (const it of items) {
       const k = (it.title || "").replace(/\s+/g, "").toLowerCase();
@@ -1190,14 +1189,6 @@ async function buildCatalogProgressive(onUpdate, refresh = false) {
       if (current) onUpdate(current);
     } catch (e) {}
   }));
-  /* 好好看：失败就静默跳过，不影响豆瓣五个分类的可用性。 */
-  try {
-    const d = await fetchJSONCached(
-      BASE + "/hhkan/home" + (refresh ? "?_=" + Date.now() : ""), 60000, 30000);
-    parts.set("hhkan", (d.sections || []).flatMap(s => s.items || []).map(normalizeHhkanItem));
-    const current = snapshot();
-    if (current) onUpdate(current);
-  } catch (e) {}
   return snapshot();
 }
 
@@ -1309,42 +1300,66 @@ async function fetchLibBlocks(cid, homeSections, refresh = false) {
     BASE + "/vod/home?category=" + cid + (refresh ? "&refresh=1" : ""),
     refresh ? 0 : 60000, 30000);
   if (doubanHome.stale) refreshStaleVodHome(cid);
-  return (doubanHome.sections || []).map(s => ({ name: s.title || s.name, items: (s.items || []).map(it => normalizeDoubanItem(it, cid)) }));
-  /* Legacy compatibility code below remains for old cached hhkan payloads. */
+  const blocks = (doubanHome.sections || []).map(s => ({
+    name: s.title || s.name,
+    items: (s.items || []).map(it => normalizeDoubanItem(it, cid)),
+  }));
+  /* 豆瓣三栏都在就不用碰好好看（省一次上游请求）。 */
+  if (blocks.length && blocks.every(b => b.items.length)) return blocks;
+
+  const hkCid = HHKAN_CHANNELS[cid];
+  if (!hkCid) return blocks;
+
+  /* 豆瓣缺栏（或整页降级）时用好好看补位。好好看是唯一卡片源，这里是它
+     在前端唯一的消费点——2026-09-30 之前这段是死代码（上面那行 return
+     把它整个跳过了），所以页面上从没出现过好好看的内容。 */
   let primary = null;
   try {
     /* 好好看频道页是唯一自带“三栏目 + 当前分类”语义的接口，优先且限时等待。 */
-    primary = await fetchJSONCached(BASE + "/hhkan/channel-sections/" + cid, 60000, 20000);
+    primary = await fetchJSONCached(BASE + "/hhkan/channel-sections/" + hkCid, 60000, 20000);
   } catch (e) {}
-  const blocks = libBlockMap(primary && primary.sections);
+  const hkBlocks = libBlockMap(primary && primary.sections);
+  /* 标题名对齐：好好看叫「最新上线/最近更新」，豆瓣叫「最新上映」。
+     补位时保留豆瓣那一栏的名字，避免用户看到栏名忽变。 */
+  const alias = { 最新上线: "最新上映", 最近更新: "最新上映" };
   const put = (name, items) => {
-    if (!blocks[name] && Array.isArray(items) && items.length) blocks[name] = items;
+    if (!Array.isArray(items) || !items.length) return;
+    const target = alias[name] || name;
+    const cur = blocks.find(b => b.name === target);
+    if (cur) { if (!cur.items.length) cur.items = items; }
+    else blocks.push({ name: target, items });
   };
 
-  /* 补位仍只请求好好看当前频道：其他信号源只能出现在详情播放线路，不能补卡。 */
+  const hk = items => (items || []).map(it => normalizeHhkanItem(it, cid));
+  put("最近热门", hk(hkBlocks["最近热门"]));
+  put("最新上线", hk(hkBlocks["最新上线"]));
+  put("最近更新", hk(hkBlocks["最近更新"]));
+
+  /* 三栏还缺就退到 /hhkan/show 的不同排序窗口，避免同栏重复。 */
   const tasks = [];
-  if (!blocks["最近热门"]) {
+  const has = n => blocks.some(b => b.name === n && b.items.length);
+  if (!has("最近热门")) {
     const hot = categoryHomeHot(cid, homeSections);
-    if (hot.length) put("最近热门", hot);
+    if (hot.length) put("最近热门", hot.map(it => normalizeDoubanItem(it, cid)));
     else {
-      tasks.push(fetchJSONCached(BASE + "/hhkan/show/" + cid + "?by=3&page=1")
-        .then(d => ["最近热门", d.items || []]));
+      tasks.push(fetchJSONCached(BASE + "/hhkan/show/" + hkCid + "?by=3&page=1")
+        .then(d => ["最近热门", (d.items || []).map(it => normalizeHhkanItem(it, cid))]));
     }
   }
-  if (!blocks["最新上线"]) {
-    tasks.push(fetchJSONCached(BASE + "/hhkan/channel/" + cid)
-      .then(d => ["最新上线", d.items || []]));
+  if (!has("最新上映")) {
+    tasks.push(fetchJSONCached(BASE + "/hhkan/channel/" + hkCid)
+      .then(d => ["最新上线", (d.items || []).map(it => normalizeHhkanItem(it, cid))]));
   }
-  if (!blocks["最近更新"]) {
+  if (!has("最近更新")) {
     /* 不再拿全站 /latest 混入别的分类，按当前频道的“最新”排序补位。 */
-    tasks.push(fetchJSONCached(BASE + "/hhkan/show/" + cid + "?by=2&page=1")
-      .then(d => ["最近更新", d.items || []]));
+    tasks.push(fetchJSONCached(BASE + "/hhkan/show/" + hkCid + "?by=2&page=1")
+      .then(d => ["最近更新", (d.items || []).map(it => normalizeHhkanItem(it, cid))]));
   }
   const settled = await Promise.allSettled(tasks);
   settled.forEach(result => {
     if (result.status === "fulfilled") put(result.value[0], result.value[1]);
   });
-  return completeLibBlocks(blocks);
+  return blocks;
 }
 
 /* 后端冷缓存先回快照并在后台抓当天数据；网页不能把 stale 响应当成最终结果。 */
@@ -1626,36 +1641,6 @@ function renderVodLib(refresh = false) {
   }
   const cid = sel.id.replace("douban:", "");
   const mySel = vod.catSel;
-  /* 好好看是独立源：走 /hhkan/channel-sections/ 的三栏，不与豆瓣目录混用。
-     之前这条分支不存在，点了 chip 只会当成豆瓣分类去查 /vod/home。 */
-  if (sel.id === "hhkan:home") {
-    const paintH = sections => {
-      if (vod.catSel !== mySel) return;
-      vod.sections = sections;
-      vod.libLoadedFor = sel.id;
-      if (!sections.length) { host.innerHTML = `<div class="page-loading">— 加载中 …</div>`; return; }
-      let h = "";
-      sections.forEach((s, si) => {
-        h += `<div class="row-sec-title" style="padding-top:${si === 0 ? 26 : 44}px">${esc(s.name)}</div>
-          ${s.items && s.items.length
-            ? `<div class="hscroll poster-row">${s.items.map(it => libCard(it)).join("")}</div>`
-            : `<div class="lib-empty">暂无${esc(s.name)}内容</div>`}`;
-      });
-      host.innerHTML = (h || `<div class="page-loading">暂无内容</div>`) + `<div style="height:80px"></div>`;
-      bindCards("#vodSections");
-    };
-    host.innerHTML = `<div class="page-loading">— 加载中 …</div>`;
-    fetchJSONCached(BASE + "/hhkan/channel-sections/1", 60000, 30000)
-      .then(d => {
-        const secs = (d.sections || []).map(s => ({
-          name: s.name || s.title,
-          items: (s.items || []).map(normalizeHhkanItem),
-        })).filter(s => s.name);
-        paintH(secs.length ? secs : completeLibBlocks({}));
-      })
-      .catch(() => paintH([]));
-    return;
-  }
   const paint = sections => {
     if (vod.catSel !== mySel) return;   /* 快速切分类防旧响应覆盖 */
     vod.sections = sections;

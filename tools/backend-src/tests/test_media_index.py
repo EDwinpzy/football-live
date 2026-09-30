@@ -81,6 +81,19 @@ class MediaIndexTest(unittest.TestCase):
             with self.subTest(query=query):
                 self.assert_first(query, "1" if query not in ("动画", "奇幻") else "2")
 
+    def test_category_name_search_returns_items_in_that_category(self):
+        self.index.upsert_many([
+            subject("v1", "奔跑吧", category="variety", genres=["真人秀"]),
+            subject("v2", "声生不息", category="variety", genres=["音乐", "真人秀"]),
+            subject("m1", "云画的月光10周年综艺特辑", category="movie"),
+        ])
+
+        rows = self.index.search("综艺", limit=10)
+
+        varieties = [row for row in rows if row["category"] == "variety"]
+        self.assertEqual({row["douban_id"] for row in varieties}, {"v1", "v2"})
+        self.assertEqual({row["category"] for row in rows[:2]}, {"variety"})
+
     def test_fuzzy_fallback_only_repairs_close_queries(self):
         self.assert_first("qinyunian")
         self.assert_first("斗罗大路", "2")

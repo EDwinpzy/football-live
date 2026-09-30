@@ -253,6 +253,11 @@ class MetadataCatalogStore internal constructor(
             .filter { types.isEmpty() || it.mediaType.lowercase() in types }
             .sortedWith(when (sort.lowercase(Locale.ROOT)) {
                 "new" -> compareByDescending<CatalogMedia> { it.year.toIntOrNull() ?: 0 }
+                    .thenByDescending {
+                        it.mytvId.toLongOrNull()
+                            ?: it.legacyRef?.substringAfterLast(':')?.toLongOrNull()
+                            ?: 0L
+                    }
                 "updated" -> compareByDescending(CatalogMedia::updatedAt)
                 "rating" -> compareByDescending(CatalogMedia::rating)
                 else -> compareByDescending(CatalogMedia::popularity)

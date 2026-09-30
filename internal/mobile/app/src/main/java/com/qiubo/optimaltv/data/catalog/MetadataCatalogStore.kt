@@ -252,7 +252,15 @@ class MetadataCatalogStore internal constructor(
         }.onFailure { fullRecoveryRequired.set(true) }.getOrNull() ?: readSeedCatalog()
             .filter { types.isEmpty() || it.mediaType.lowercase() in types }
             .sortedWith(when (sort.lowercase(Locale.ROOT)) {
+                // seed 没有 updated_at，综艺/短剧整类也没有年份：不补 tie-break 时
+                // 「最新上线」排序键全相等，只能照搬 JSON 顺序（＝热门顺序），两栏整栏相同。
+                // 用豆瓣 id 数字降序近似已装库的 `m.id DESC`，与热门栏真正区分开。
                 "new" -> compareByDescending<CatalogMedia> { it.year.toIntOrNull() ?: 0 }
+                    .thenByDescending {
+                        it.mytvId.toLongOrNull()
+                            ?: it.legacyRef?.substringAfterLast(':')?.toLongOrNull()
+                            ?: 0L
+                    }
                 "updated" -> compareByDescending(CatalogMedia::updatedAt)
                 "rating" -> compareByDescending(CatalogMedia::rating)
                 else -> compareByDescending(CatalogMedia::popularity)
