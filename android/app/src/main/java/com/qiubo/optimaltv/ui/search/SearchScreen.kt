@@ -130,6 +130,18 @@ internal fun searchResultCategory(categoryId: String): String? =
 private const val DETAIL_FALLBACK_LIMIT = 24
 
 /**
+ * 合并目录内命中与后端结果：remote 在前、local 补充，同 id 取先出现的那条。
+ *
+ * 本地目录按「首次出现的浏览频道」打 categoryId（那是分区不是真实分类），
+ * local 排在前面会让错分类的副本遮住后端已认定 douban:anime 的同名条目。
+ */
+internal fun mergeSearchResults(
+    localHits: List<com.qiubo.optimaltv.data.model.VodItem>,
+    remote: List<com.qiubo.optimaltv.data.model.VodItem>,
+): List<com.qiubo.optimaltv.data.model.VodItem> =
+    (remote + localHits).distinctBy { it.id }
+
+/**
  * 搜索结果 → (id → 分类)。categoryId 可认的对全部结果生效；认不出的才走
  * [detailFallback] 拉详情，且最多 [DETAIL_FALLBACK_LIMIT] 条。
  */
@@ -299,7 +311,7 @@ fun SearchScreen(nav: NavController) {
         else Graph.repo.search(query)
     }
     val results = remember(localHits, remote) {
-        (localHits + remote).distinctBy { it.id }
+        mergeSearchResults(localHits, remote)
     }
 
     // 键盘焦点守卫：候选/结果变化引发的重组会把焦点从软键盘/候选词上清掉（LOST 后无落点）。

@@ -180,6 +180,11 @@ class VodApiContractTest(unittest.TestCase):
         self.assertTrue(payload["local"])
         self.assertEqual(payload["limit"], 7)
 
+    def test_search_forwards_page_instead_of_repeating_first_page(self):
+        payload = self.fetch("/api/search?q=example&page=2&limit=7")
+        self.assertEqual(payload["page"], 2)
+        self.assertEqual(payload["limit"], 7)
+
     def test_filter_contract_has_no_language_row(self):
         payload = self.fetch("/vod/filters/movie")
         self.assertEqual(payload["filters"], ["类别", "类型", "地区", "年份", "评分", "排序"])

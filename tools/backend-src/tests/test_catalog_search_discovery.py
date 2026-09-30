@@ -24,7 +24,8 @@ class CatalogSearchDiscoveryTest(unittest.TestCase):
 
     def fetch(self, url):
         self.calls.append(url)
-        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["q"], ["声生"])
+        self.assertIn(urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["q"][0],
+                      ("声生", "声生不息", "shengsheng"))
         return {"subjects": {"items": [
             {"layout": "subject", "target_type": "tv", "target": {
                 "id": "35634451", "title": "声生不息", "year": "2022",
@@ -48,7 +49,7 @@ class CatalogSearchDiscoveryTest(unittest.TestCase):
         self.assertTrue(result["items"][0]["poster_url"])
         self.assertEqual(catalog.search("声生不息")["items"][0]["douban_id"], "35634451")
         self.assertEqual(catalog.search("shengsheng")["items"][0]["douban_id"], "35634451")
-        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(self.calls), 3)
 
     def test_remote_failure_preserves_local_typo_matches_and_retries_after_cooldown(self):
         self.index.upsert_many([normalize_subject({"id": "35634451", "title": "声生不息"}, "tv")])
@@ -58,10 +59,10 @@ class CatalogSearchDiscoveryTest(unittest.TestCase):
         catalog = self.catalog(fetch=offline)
         self.assertEqual(catalog.search("声声不息")["items"][0]["douban_id"], "35634451")
         self.assertEqual(catalog.search("完全不存在的长片名")["items"], [])
-        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(self.calls), 2)
         catalog._search_unavailable_until = 0
         catalog.search("完全不存在的长片名")
-        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.calls), 3)
 
     def test_warm_index_adds_new_snapshot_items_to_existing_database(self):
         self.index.upsert_many([normalize_subject({"id": "1", "title": "旧影片"})])
@@ -70,7 +71,7 @@ class CatalogSearchDiscoveryTest(unittest.TestCase):
         self.assertEqual(catalog.warm_index(), 1)
         self.assertEqual(catalog.warm_index(), 0)
         self.assertEqual(catalog.search("声生")["items"][0]["douban_id"], "35634451")
-        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.calls), 1)
 
     def test_empty_search_never_contacts_upstream(self):
         self.assertEqual(self.catalog().search("  ")["items"], [])
@@ -78,10 +79,14 @@ class CatalogSearchDiscoveryTest(unittest.TestCase):
 
     def test_no_results_expire_after_one_minute_without_blocking_other_queries(self):
         def fetch(url):
+            if "subject_suggest" in url:
+                return []
             self.calls.append(url)
             return {"subjects": {"items": []}}
         catalog = self.catalog(fetch=fetch)
-        self.assertEqual(catalog.search("声生")["items"], [])
+        result = catalog.search("声生")
+        self.assertEqual(result["items"], [])
+        self.assertTrue(result["upstream_available"])
         catalog.search("声生")
         self.assertEqual(len(self.calls), 1)
         catalog.cache.put("search-discovery:声生:empty", {"items": []}, fetched_at=time.time() - 61)
@@ -94,7 +99,7 @@ class CatalogSearchDiscoveryTest(unittest.TestCase):
         catalog = DoubanCatalog(snapshot={}, media_index=self.index)
         with patch("douban_catalog.urllib.request.urlopen", side_effect=OSError("offline")) as opener:
             catalog.search("声生")
-        self.assertEqual(opener.call_args.kwargs["timeout"], 4)
+        self.assertEqual([call.kwargs["timeout"] for call in opener.call_args_list], [4, 2])
 
     def test_blocked_response_is_not_persisted_as_a_successful_empty_search(self):
         catalog = self.catalog(fetch=lambda url: {"banned": "blocked", "subjects": {"items": []}})

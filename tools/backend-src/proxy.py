@@ -4180,7 +4180,8 @@ class Handler(SimpleHTTPRequestHandler):
             service = _get_vod_service()
             if path == "/api/search":
                 payload = service.search(
-                    (query.get("q") or [""])[0], page=1,
+                    (query.get("q") or [""])[0],
+                    page=_safe_int((query.get("page") or ["1"])[0], 1, lo=1, hi=100),
                     limit=_safe_int((query.get("limit") or ["30"])[0], 30, lo=1, hi=100))
             elif path == "/vod/home":
                 refresh = (query.get("refresh") or ["0"])[0].lower() in ("1", "true", "yes")

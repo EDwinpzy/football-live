@@ -15,14 +15,84 @@ from pathlib import Path
 
 
 SCHEMA_VERSION = 1
+# 归一化规则版本，与 PRAGMA user_version 相互独立。
+# 规则升级只递增它；user_version 保持不变，旧版回滚仍能打开同一个库。
+# 1 = NFKC 保留音符（Les Misérables -> lesmisrables），2 = 丢弃音符。
+NORMALIZATION_VERSION = 2
 DEFAULT_LIMIT = 30
 MAX_LIMIT = 100
 SEPARATOR = "\x1f"
 PINYIN_PATH = Path(__file__).with_name("pinyin_map.json")
+# 强命中门槛：片名/别名/原名精确与整片名包含都在 70 以上，人员 44~48、类型 35~45 在其下。
+STRONG_SCORE = 70
+# 强命中达到该条数就跳过全表模糊扫描（沿用原有门槛）。
+FUZZY_HIT_LIMIT = 8
+
+SCHEMA_SQL = """
+    CREATE TABLE IF NOT EXISTS media (
+        douban_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        original_title TEXT NOT NULL DEFAULT '',
+        year TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT 'movie',
+        season INTEGER NOT NULL DEFAULT 0,
+        rating REAL NOT NULL DEFAULT 0,
+        rating_count INTEGER NOT NULL DEFAULT 0,
+        data_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS media_alias (
+        douban_id TEXT NOT NULL REFERENCES media(douban_id) ON DELETE CASCADE,
+        alias TEXT NOT NULL,
+        normalized TEXT NOT NULL,
+        PRIMARY KEY (douban_id, alias)
+    );
+    CREATE TABLE IF NOT EXISTS media_person (
+        douban_id TEXT NOT NULL REFERENCES media(douban_id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        normalized TEXT NOT NULL,
+        pinyin TEXT NOT NULL,
+        initials TEXT NOT NULL,
+        PRIMARY KEY (douban_id, name, role)
+    );
+    CREATE TABLE IF NOT EXISTS media_genre (
+        douban_id TEXT NOT NULL REFERENCES media(douban_id) ON DELETE CASCADE,
+        genre TEXT NOT NULL,
+        normalized TEXT NOT NULL,
+        PRIMARY KEY (douban_id, genre)
+    );
+    CREATE TABLE IF NOT EXISTS media_search (
+        douban_id TEXT PRIMARY KEY REFERENCES media(douban_id) ON DELETE CASCADE,
+        title_norm TEXT NOT NULL,
+        original_norm TEXT NOT NULL,
+        alias_norms TEXT NOT NULL,
+        title_pinyin TEXT NOT NULL,
+        title_initials TEXT NOT NULL,
+        alias_pinyins TEXT NOT NULL,
+        alias_initials TEXT NOT NULL,
+        people_norms TEXT NOT NULL,
+        people_pinyins TEXT NOT NULL,
+        people_initials TEXT NOT NULL,
+        genre_norms TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS media_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_media_title ON media_search(title_norm);
+    CREATE INDEX IF NOT EXISTS idx_media_title_pinyin ON media_search(title_pinyin);
+    CREATE INDEX IF NOT EXISTS idx_media_title_initials ON media_search(title_initials);
+    PRAGMA user_version=1;
+"""
 
 
 def normalize_text(value):
-    text = unicodedata.normalize("NFKC", str(value or "")).lower().strip()
+    # NFD 拆出组合音符后丢弃：NFKC 会把 Amélie 留成 Amlie，导致用户输
+    # amelie 搜不到。索引与查询共用本函数，两侧一致即可互查。
+    text = unicodedata.normalize("NFD", str(value or "")).lower()
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = unicodedata.normalize("NFKC", text).strip()
     return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", text)
 
 
@@ -79,6 +149,24 @@ class MediaIndex:
         with self._lock:
             return int(self._db.execute("PRAGMA user_version").fetchone()[0])
 
+    @property
+    def normalization_version(self):
+        """已写入本库的归一化规则版本；旧库（没有标记）视为 1。"""
+        with self._lock:
+            return self._read_normalization_version()
+
+    def _read_normalization_version(self):
+        try:
+            row = self._db.execute(
+                "SELECT value FROM media_meta WHERE key='normalization_version'"
+            ).fetchone()
+        except sqlite3.Error:
+            return 1
+        try:
+            return int(row[0]) if row is not None else 1
+        except (TypeError, ValueError):
+            return 1
+
     def close(self):
         with self._lock:
             if self._db is not None:
@@ -94,65 +182,85 @@ class MediaIndex:
         with self._lock:
             return {row[0] for row in self._db.execute("SELECT douban_id FROM media")}
 
+    def get(self, subject_id):
+        with self._lock:
+            row = self._db.execute("SELECT data_json FROM media WHERE douban_id=?",
+                                   (str(subject_id).removeprefix("douban:"),)).fetchone()
+            return json.loads(row[0]) if row else None
+
     def _migrate(self):
         with self._lock, self._db:
             version = int(self._db.execute("PRAGMA user_version").fetchone()[0])
             if version > SCHEMA_VERSION:
                 raise RuntimeError("media index schema is newer than this backend")
             if version < 1:
-                self._db.executescript("""
-                    CREATE TABLE IF NOT EXISTS media (
-                        douban_id TEXT PRIMARY KEY,
-                        title TEXT NOT NULL,
-                        original_title TEXT NOT NULL DEFAULT '',
-                        year TEXT NOT NULL DEFAULT '',
-                        category TEXT NOT NULL DEFAULT 'movie',
-                        season INTEGER NOT NULL DEFAULT 0,
-                        rating REAL NOT NULL DEFAULT 0,
-                        rating_count INTEGER NOT NULL DEFAULT 0,
-                        data_json TEXT NOT NULL,
-                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    );
-                    CREATE TABLE IF NOT EXISTS media_alias (
-                        douban_id TEXT NOT NULL REFERENCES media(douban_id) ON DELETE CASCADE,
-                        alias TEXT NOT NULL,
-                        normalized TEXT NOT NULL,
-                        PRIMARY KEY (douban_id, alias)
-                    );
-                    CREATE TABLE IF NOT EXISTS media_person (
-                        douban_id TEXT NOT NULL REFERENCES media(douban_id) ON DELETE CASCADE,
-                        name TEXT NOT NULL,
-                        role TEXT NOT NULL,
-                        normalized TEXT NOT NULL,
-                        pinyin TEXT NOT NULL,
-                        initials TEXT NOT NULL,
-                        PRIMARY KEY (douban_id, name, role)
-                    );
-                    CREATE TABLE IF NOT EXISTS media_genre (
-                        douban_id TEXT NOT NULL REFERENCES media(douban_id) ON DELETE CASCADE,
-                        genre TEXT NOT NULL,
-                        normalized TEXT NOT NULL,
-                        PRIMARY KEY (douban_id, genre)
-                    );
-                    CREATE TABLE IF NOT EXISTS media_search (
-                        douban_id TEXT PRIMARY KEY REFERENCES media(douban_id) ON DELETE CASCADE,
-                        title_norm TEXT NOT NULL,
-                        original_norm TEXT NOT NULL,
-                        alias_norms TEXT NOT NULL,
-                        title_pinyin TEXT NOT NULL,
-                        title_initials TEXT NOT NULL,
-                        alias_pinyins TEXT NOT NULL,
-                        alias_initials TEXT NOT NULL,
-                        people_norms TEXT NOT NULL,
-                        people_pinyins TEXT NOT NULL,
-                        people_initials TEXT NOT NULL,
-                        genre_norms TEXT NOT NULL
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_media_title ON media_search(title_norm);
-                    CREATE INDEX IF NOT EXISTS idx_media_title_pinyin ON media_search(title_pinyin);
-                    CREATE INDEX IF NOT EXISTS idx_media_title_initials ON media_search(title_initials);
-                    PRAGMA user_version=1;
-                """)
+                self._db.executescript(SCHEMA_SQL)
+        self._migrate_normalization()
+
+    def _migrate_normalization(self):
+        """按标记重算检索列；不触碰 user_version，旧版回滚仍可读。"""
+        with self._lock, self._db:
+            self._db.execute("""CREATE TABLE IF NOT EXISTS media_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )""")
+            current = self._read_normalization_version()
+            if current < NORMALIZATION_VERSION:
+                self._rebuild_search_rows()
+                self._db.execute(
+                    "INSERT INTO media_meta(key,value) VALUES('normalization_version',?)"
+                    " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(NORMALIZATION_VERSION),))
+            elif current > NORMALIZATION_VERSION:
+                # 库由更新版本写出：只读不改，回滚后仍应可用。
+                return
+
+    def _rebuild_search_rows(self):
+        """按当前归一化/拼音规则重算全部检索列，保留 media 上的富元数据。"""
+        rows = self._db.execute(
+            "SELECT douban_id, title, original_title, data_json FROM media").fetchall()
+        for row in rows:
+            try:
+                item = json.loads(row["data_json"])
+            except (TypeError, ValueError):
+                item = {}
+            aliases = item.get("aliases") if isinstance(item, dict) else None
+            aliases = [str(v).strip() for v in (aliases or []) if str(v or "").strip()]
+            if not aliases:
+                # data_json 不可用时从别名表兜底，避免归一化列被清空。
+                aliases = [r[0] for r in self._db.execute(
+                    "SELECT alias FROM media_alias WHERE douban_id=?", (row["douban_id"],))]
+            people = [(r["name"], r["role"]) for r in self._db.execute(
+                "SELECT name, role FROM media_person WHERE douban_id=?", (row["douban_id"],))]
+            alias_romanized = [self._romanize(v) for v in aliases]
+            people_romanized = [self._romanize(v) for v, _role in people]
+            title_pinyin, title_initials = self._romanize(row["title"])
+            for alias, value in zip(aliases, (normalize_text(v) for v in aliases)):
+                self._db.execute(
+                    "UPDATE media_alias SET normalized=? WHERE douban_id=? AND alias=?",
+                    (value, row["douban_id"], alias))
+            for (name, role), norm, roman in zip(
+                    people,
+                    (normalize_text(v) for v, _ in people),
+                    people_romanized):
+                self._db.execute(
+                    "UPDATE media_person SET normalized=?, pinyin=?, initials=?"
+                    " WHERE douban_id=? AND name=? AND role=?",
+                    (norm, roman[0], roman[1], row["douban_id"], name, role))
+            self._db.execute("""
+                UPDATE media_search SET title_norm=?, original_norm=?, alias_norms=?,
+                    title_pinyin=?, title_initials=?, alias_pinyins=?, alias_initials=?,
+                    people_norms=?, people_pinyins=?, people_initials=?
+                 WHERE douban_id=?
+            """, (normalize_text(row["title"]), normalize_text(row["original_title"]),
+                  _join(normalize_text(v) for v in aliases),
+                  title_pinyin, title_initials,
+                  _join(v[0] for v in alias_romanized),
+                  _join(v[1] for v in alias_romanized),
+                  _join(normalize_text(v) for v, _ in people),
+                  _join(v[0] for v in people_romanized),
+                  _join(v[1] for v in people_romanized),
+                  row["douban_id"]))
 
     def _romanize(self, value):
         normalized = unicodedata.normalize("NFKC", str(value or "")).lower()
@@ -282,6 +390,7 @@ class MediaIndex:
         limit = max(1, min(MAX_LIMIT, int(limit or DEFAULT_LIMIT)))
         like = "%" + normalized + "%"
         with self._lock:
+            # 不预先 LIMIT：截断在打分之前发生，最相关的那条常被丢掉。
             rows = self._db.execute("""
                 SELECT s.*, m.data_json, m.rating, m.rating_count
                 FROM media_search s JOIN media m USING(douban_id)
@@ -289,11 +398,12 @@ class MediaIndex:
                    OR title_pinyin LIKE ? OR title_initials LIKE ? OR alias_pinyins LIKE ?
                    OR alias_initials LIKE ? OR people_norms LIKE ? OR people_pinyins LIKE ?
                    OR people_initials LIKE ? OR genre_norms LIKE ?
-                LIMIT 500
             """, (like,) * 11).fetchall()
             ranked = [(self._score(row, normalized), row) for row in rows]
             ranked = [value for value in ranked if value[0] > 0]
-            if len(ranked) < 8:
+            # 只数「强命中」再决定是否回退：类型/人员这类弱命中再多也不算数，
+            # 但强命中仍保留原有的 8 条门槛，避免每次都全表扫描。
+            if sum(score >= STRONG_SCORE for score, _row in ranked) < FUZZY_HIT_LIMIT:
                 seen = {row["douban_id"] for _score, row in ranked}
                 for row in self._db.execute("""
                     SELECT s.*, m.data_json, m.rating, m.rating_count

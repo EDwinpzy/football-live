@@ -15,6 +15,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from media_index import normalize_text
+
 
 HOME_SECTION_NAMES = ("最近热门", "最新上映", "豆瓣高分")
 CATEGORY_VALUES = {"movie", "tv", "anime", "variety", "short"}
@@ -22,6 +24,7 @@ CATEGORY_VALUES = {"movie", "tv", "anime", "variety", "short"}
 # 同一份列表），只有这个接口真正支持排序与类型/地区/年份/评分筛选。
 EXPLORE_API = "https://movie.douban.com/j/new_search_subjects"
 SEARCH_API = "https://m.douban.com/rexxar/api/v2/search/subjects"
+SUGGEST_API = "https://movie.douban.com/j/subject_suggest"
 EXPLORE_PAGE_SIZE = 20
 EXPLORE_TAGS = {"movie": "电影", "tv": "电视剧", "anime": "动漫", "variety": "综艺", "short": "短剧"}
 SORT_CODES = {"hot": "U", "new": "R", "rating": "S"}  # U 热门 / R 最新 / S 高分
@@ -69,7 +72,7 @@ SUBJECT_FIELDS = (
     "category", "genres", "regions", "season", "rating", "rating_count",
     "summary", "directors", "actors", "poster_url", "hero_url", "backdrop_url", "release_date",
 )
-TTL = {"home": 21600, "filters": 86400, "detail": 604800, "search": 1800, "show": 21600}
+TTL = {"home": 21600, "filters": 86400, "detail": 604800, "search": 1800, "suggest": 60, "show": 21600}
 CACHE_SCHEMA = 1
 CACHE_ENVELOPE_KEYS = {"schema", "fetched_at", "value"}
 SNAPSHOT_PATH = Path(__file__).with_name("douban_snapshot.json")
@@ -267,11 +270,12 @@ def parse_card_subtitle(value):
 
 def _merge_card_subtitle(raw):
     """仅在条目缺少结构化字段时用 `card_subtitle` 补齐（详情响应里的字段优先）。"""
-    if not raw.get("card_subtitle") or raw.get("genres") or raw.get("regions"):
+    if not raw.get("card_subtitle"):
         return raw
     merged = dict(raw)
     for key, value in parse_card_subtitle(raw.get("card_subtitle")).items():
-        merged.setdefault(key, value)
+        if not merged.get(key):
+            merged[key] = value
     return merged
 
 
@@ -495,6 +499,7 @@ class DoubanCatalog:
     def __init__(self, fetch=None, cache=None, snapshot=None, media_index=None, matrix_path=None):
         self.fetch = fetch or self._fetch
         self._search_fetch = fetch or (lambda url: self._fetch(url, timeout=4))
+        self._suggest_fetch = fetch or (lambda url: self._fetch(url, timeout=2))
         self.cache = cache
         self.snapshot = snapshot if isinstance(snapshot, dict) else self._load_snapshot()
         self.media_index = media_index
@@ -504,6 +509,7 @@ class DoubanCatalog:
         self._matrix_cache = None
         self._unavailable_until = 0.0
         self._search_unavailable_until = 0.0
+        self._suggest_unavailable_until = 0.0
         self._index_warmed = False
 
     def _filter_matrix(self):
@@ -1052,56 +1058,150 @@ class DoubanCatalog:
         self._ingest(result.get("items") or [])
         return result
 
+    def _search_suggestions(self, query):
+        key = "search-suggest:" + query.casefold()
+
+        def produce():
+            try:
+                rows = self._suggest_fetch(SUGGEST_API + "?" + urllib.parse.urlencode({"q": query}))
+                if not isinstance(rows, list):
+                    raise DoubanUnavailable("unexpected Douban suggestions payload")
+                rows = [row for row in rows if isinstance(row, dict)
+                        and str(row.get("id") or "").isdigit() and row.get("title")][:8]
+
+                def enrich(row):
+                    subject_id = str(row["id"])
+                    cached = self.cache.get_stale("detail:" + subject_id) if self.cache else None
+                    known = cached or self._snapshot_detail(subject_id)
+                    if not known and self.media_index:
+                        known = self.media_index.get(subject_id)
+                    if known and (known.get("genres") or known.get("episodes_count")):
+                        return known
+                    # Suggestions label TV as movie too; only canonical metadata can classify it.
+                    try:
+                        raw = self._suggest_fetch("https://m.douban.com/rexxar/api/v2/subject/" + subject_id)
+                        if isinstance(raw, dict):
+                            kind = "tv" if raw.get("type") == "tv" or raw.get("episodes_count") else "movie"
+                            item = normalize_subject(raw, kind)
+                        else:
+                            item = parse_subject_html(raw, subject_id)
+                        return item if item.get("title") and item.get("douban_id") == subject_id else None
+                    except (OSError, ValueError, TypeError, DoubanUnavailable):
+                        return None
+
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    items = [item for item in pool.map(enrich, rows) if item]
+                if rows and not items:
+                    raise DoubanUnavailable("suggestion metadata unavailable")
+                return {"items": items, "source": "douban-suggest"}
+            except (OSError, ValueError, TypeError, DoubanUnavailable):
+                with self._condition_lock:
+                    self._suggest_unavailable_until = time.monotonic() + DOUBAN_UNAVAILABLE_COOLDOWN
+                raise
+
+        cached = self.cache.get(key, TTL["suggest"]) if self.cache else None
+        with self._condition_lock:
+            cooling = time.monotonic() < self._suggest_unavailable_until
+        if cached is None and cooling:
+            return self._degraded(key, {"items": []})
+        return self._coalesced(key, "suggest", produce, {"items": []})
+
     def search(self, query, page=1, limit=30):
         query = str(query or "").strip()
+        page = max(1, int(page))
+        limit = max(1, min(100, int(limit)))
         if not query:
-            return {"query": "", "page": int(page), "limit": int(limit), "items": [],
+            return {"query": "", "page": page, "limit": limit, "items": [],
                     "total": 0, "has_more": False, "source": "local", "local": True}
-        items = self.media_index.search(query, limit=limit) if self.media_index else []
-        # 本地片名/拼音/首字母命中直接返回；未收录或仅错字近似时发现新条目。
-        if not any(item.get("search_score", 120) >= 70 for item in items):
-            key = "search-discovery:" + query.casefold()
+        key = "search-discovery:" + query.casefold()
 
-            def discover():
-                try:
-                    payload = self._search_fetch(SEARCH_API + "?" + urllib.parse.urlencode(
-                        {"q": query, "type": "movie", "count": 100}))
-                    subjects = payload.get("subjects") if isinstance(payload, dict) else None
-                    rows = subjects.get("items") if isinstance(subjects, dict) else None
-                    if not isinstance(rows, list) or payload.get("banned"):
-                        raise DoubanUnavailable("unexpected Douban search payload")
-                    found = []
-                    for row in rows:
-                        if not isinstance(row, dict) or row.get("target_type") not in ("movie", "tv"):
-                            continue
-                        target = row.get("target")
-                        if not isinstance(target, dict) or not str(target.get("id") or "").isdigit():
-                            continue
-                        item = normalize_subject(target, row["target_type"])
-                        if item["title"]:
-                            found.append(item)
-                except (OSError, ValueError, TypeError, DoubanUnavailable):
-                    with self._condition_lock:
-                        self._search_unavailable_until = time.monotonic() + DOUBAN_UNAVAILABLE_COOLDOWN
-                    raise
-                if not found:
-                    if self.cache:
-                        self.cache.put(key + ":empty", {"items": []})
+        def discover():
+            try:
+                payload = self._search_fetch(SEARCH_API + "?" + urllib.parse.urlencode(
+                    {"q": query, "type": "movie", "count": 100}))
+                subjects = payload.get("subjects") if isinstance(payload, dict) else None
+                rows = subjects.get("items") if isinstance(subjects, dict) else None
+                if not isinstance(rows, list) or payload.get("banned"):
+                    raise DoubanUnavailable("unexpected Douban search payload")
+                found = []
+                for row in rows:
+                    if not isinstance(row, dict) or row.get("target_type") not in ("movie", "tv"):
+                        continue
+                    target = row.get("target")
+                    if not isinstance(target, dict) or not str(target.get("id") or "").isdigit():
+                        continue
+                    item = normalize_subject(target, row["target_type"])
+                    if item["title"]:
+                        found.append(item)
+            except (OSError, ValueError, TypeError, DoubanUnavailable):
+                with self._condition_lock:
+                    self._search_unavailable_until = time.monotonic() + DOUBAN_UNAVAILABLE_COOLDOWN
+                raise
+            if not found:
+                if self.cache:
+                    self.cache.put(key + ":empty", {"items": []})
                     return None
-                return {"items": found, "source": "douban-search"}
+                return {"items": [], "source": "douban-search", "empty": True}
+            return {"items": found, "source": "douban-search"}
 
-            cached = self.cache.get(key, TTL["search"]) if self.cache else None
-            negative = self.cache.get(key + ":empty", 60) if self.cache else None
-            with self._condition_lock:
-                cooling = time.monotonic() < self._search_unavailable_until
-            if negative is None and (cached is not None or not cooling):
-                discovered = self._coalesced(key, "search", discover, {"items": []})
-                found = discovered.get("items") or []
-                if found:
-                    self._ingest(found)
-                    items = self.media_index.search(query, limit=limit) if self.media_index else found[:limit]
-        return {"query": query, "page": int(page), "limit": int(limit), "items": items,
-                "total": len(items), "has_more": False, "source": "local", "local": True}
+        cached = self.cache.get(key, TTL["search"]) if self.cache else None
+        negative = self.cache.get(key + ":empty", 60) if self.cache else None
+        with self._condition_lock:
+            cooling = time.monotonic() < self._search_unavailable_until
+        discovered = {"items": [], "source": "local", "upstream_available": not cooling}
+        if negative is None and (cached is not None or not cooling):
+            discovered = self._coalesced(key, "search", discover, {"items": []})
+        negative = self.cache.get(key + ":empty", 60) if self.cache else negative
+        if negative is not None and not discovered.get("items"):
+            discovered = {"items": [], "source": "douban-search", "upstream_available": True}
+        if negative is not None or discovered.get("empty") or not discovered.get("upstream_available", True):
+            backup = self._search_suggestions(query)
+            if backup.get("items") or (negative is None and not discovered.get("items") and not discovered.get("empty")):
+                discovered = backup
+        found = discovered.get("items") or []
+        if found and self.media_index:
+            enriched = []
+            changed = []
+            for item in found:
+                stored = self.media_index.get(item["douban_id"])
+                if stored:
+                    merged = dict(stored)
+                    for field, value in item.items():
+                        if not merged.get(field) and value:
+                            merged[field] = value
+                    if item.get("genres"):
+                        merged["category"] = item["category"]
+                    if merged != stored:
+                        changed.append(merged)
+                    item = merged
+                else:
+                    changed.append(item)
+                enriched.append(item)
+            self._ingest(changed)
+            found = enriched
+        items = self.media_index.search(query, limit=100) if self.media_index else []
+        combined = {item["douban_id"]: item for item in items}
+        normalized = normalize_text(query)
+        # 上游能按译名、别名、演员等命中；不能用本地标题包含规则再次丢弃这些结果。
+        remote_order = {item["douban_id"]: position for position, item in enumerate(found)}
+        for item in found:
+            title = normalize_text(item["title"])
+            score = 120 if title == normalized else 108 if title.startswith(normalized) else 82 if normalized in title else 70
+            existing = combined.get(item["douban_id"])
+            if existing is None:
+                combined[item["douban_id"]] = dict(item, search_score=score)
+            else:
+                existing["search_score"] = max(existing.get("search_score", 0), score)
+        items = sorted(combined.values(), key=lambda item: (
+            -(item.get("search_score", 0) >= 115),
+            remote_order.get(item["douban_id"], len(found)),
+            -item.get("search_score", 0), -float(item.get("rating") or 0),
+            -int(item.get("rating_count") or 0), item["douban_id"]))
+        offset = (page - 1) * limit
+        return {"query": query, "page": page, "limit": limit, "items": items[offset:offset + limit],
+                "total": len(items), "has_more": offset + limit < len(items),
+                "source": discovered.get("source", "local"), "local": True,
+                "upstream_available": discovered.get("upstream_available", True)}
 
     def detail(self, douban_id, force_refresh=False):
         douban_id = str(douban_id or "").removeprefix("douban:")

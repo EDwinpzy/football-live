@@ -142,13 +142,15 @@ class DoubanCatalogTest(unittest.TestCase):
         catalog = douban_catalog.DoubanCatalog(fetch=fetch)
         self.assertEqual(catalog.detail("1292052")["title"], "肖申克的救赎")
 
-    def test_search_reads_local_index_without_network(self):
+    def test_search_keeps_local_results_when_network_is_unavailable(self):
         class Index:
             def search(self, query, limit=30):
                 return [{"id": "douban:1292052", "douban_id": "1292052", "title": query}]
 
-        catalog = douban_catalog.DoubanCatalog(
-            fetch=lambda _url: self.fail("local search must not fetch the network"), media_index=Index())
+        def offline(_url):
+            raise OSError("offline")
+
+        catalog = douban_catalog.DoubanCatalog(fetch=offline, media_index=Index())
         result = catalog.search("肖申克", limit=7)
         self.assertTrue(result["local"])
         self.assertEqual(result["items"][0]["id"], "douban:1292052")

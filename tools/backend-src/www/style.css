@@ -282,6 +282,7 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
 .search-tabs .stab.on{background:rgba(255,255,255,.22);color:#fff}
 .search-tabs .stab .cnt{font-size:20px;color:rgba(255,255,255,.5)}
 .search-grid{display:grid;gap:36px 20px;padding:24px 0 60px}
+.search-grid .pcard{min-width:0}
 
 /* ===== 我的（App topPad150 / start90 / 卡行 86 gap24；历史 take10） ===== */
 .fav-body{padding:0 86px 80px}

@@ -2428,7 +2428,10 @@ function searchReset() {
   $("#searchHint").hidden = true;
 }
 function searchResults() {
-  const allr = search.local.concat(search.remote).filter((v, i, a) => a.findIndex(x => x.id === v.id) === i);
+  /* remote 在前、local 在后当补充：同 id 时后端已识别的分类/排序胜出。
+     本地目录按「首次出现的浏览频道」去重（buildCatalog），那是分区不是真实分类，
+     local 排在前面会让错分类的副本遮住后端已认定 douban:anime 的同名条目。 */
+  const allr = search.remote.concat(search.local).filter((v, i, a) => a.findIndex(x => x.id === v.id) === i);
   return allr;
 }
 function searchShown() {
