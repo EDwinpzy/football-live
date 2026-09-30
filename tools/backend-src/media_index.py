@@ -310,46 +310,75 @@ class MediaIndex:
         rows = [row for row in rows if row]
         if not rows:
             return 0
+        # 每条一个 savepoint：单条脏数据不得牵连整批（2026-10-01 线上事故就是
+        # 一条重复人员触发 UNIQUE 冲突，整批回滚后索引全空、搜索全无结果）。
+        written = 0
         with self._lock, self._db:
             for item in rows:
-                douban_id = item["douban_id"]
-                aliases = [str(value).strip() for value in item["aliases"] if str(value).strip()]
-                people = [(str(value).strip(), role) for role in ("director", "actor")
-                          for value in item["directors" if role == "director" else "actors"] if str(value).strip()]
-                genres = [str(value).strip() for value in item["genres"] if str(value).strip()]
-                title_pinyin, title_initials = self._romanize(item["title"])
-                alias_romanized = [self._romanize(value) for value in aliases]
-                people_romanized = [self._romanize(value) for value, _role in people]
-                self._db.execute("""
-                    INSERT INTO media(douban_id,title,original_title,year,category,season,rating,rating_count,data_json,updated_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
-                    ON CONFLICT(douban_id) DO UPDATE SET
-                      title=excluded.title, original_title=excluded.original_title, year=excluded.year,
-                      category=excluded.category, season=excluded.season, rating=excluded.rating,
-                      rating_count=excluded.rating_count, data_json=excluded.data_json, updated_at=CURRENT_TIMESTAMP
-                """, (douban_id, str(item.get("title") or ""), str(item.get("original_title") or ""),
-                      str(item.get("year") or ""), str(item.get("category") or "movie"), int(item.get("season") or 0),
-                      float(item.get("rating") or 0), int(item.get("rating_count") or 0),
-                      json.dumps(item, ensure_ascii=False, separators=(",", ":"))))
-                for table in ("media_alias", "media_person", "media_genre", "media_search"):
-                    self._db.execute("DELETE FROM %s WHERE douban_id=?" % table, (douban_id,))
-                self._db.executemany("INSERT INTO media_alias VALUES(?,?,?)",
-                                     [(douban_id, value, normalize_text(value)) for value in aliases])
-                self._db.executemany("INSERT INTO media_person VALUES(?,?,?,?,?,?)", [
-                    (douban_id, value, role, normalize_text(value), roman[0], roman[1])
-                    for (value, role), roman in zip(people, people_romanized)
-                ])
-                self._db.executemany("INSERT INTO media_genre VALUES(?,?,?)",
-                                     [(douban_id, value, normalize_text(value)) for value in genres])
-                self._db.execute("INSERT INTO media_search VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
-                    douban_id, normalize_text(item["title"]), normalize_text(item.get("original_title")),
-                    _join(normalize_text(value) for value in aliases), title_pinyin, title_initials,
-                    _join(value[0] for value in alias_romanized), _join(value[1] for value in alias_romanized),
-                    _join(normalize_text(value) for value, _role in people),
-                    _join(value[0] for value in people_romanized), _join(value[1] for value in people_romanized),
-                    _join(normalize_text(value) for value in genres),
-                ))
-        return len(rows)
+                self._db.execute("SAVEPOINT upsert_one")
+                try:
+                    self._upsert_one(item)
+                except Exception:
+                    self._db.execute("ROLLBACK TO upsert_one")
+                    self._db.execute("RELEASE upsert_one")
+                    continue
+                self._db.execute("RELEASE upsert_one")
+                written += 1
+        return written
+
+    def _upsert_one(self, item):
+            douban_id = item["douban_id"]
+            aliases = [str(value).strip() for value in item["aliases"] if str(value).strip()]
+            # 同名同角色的人员必须去重：`media_person` 对
+            # (douban_id, name, role) 有 UNIQUE 约束，而真实快照里同一部作品
+            # 偶尔会把同名导演/演员写两遍。撞上唯一键会让 executemany 整批
+            # 回滚，再被 DoubanCatalog._ingest() 的 `except: pass` 吞掉，
+            # 最终索引整张表空掉、所有离线搜索都返回空（2026-10-01 线上事故）。
+            people = []
+            seen_people = set()
+            for role in ("director", "actor"):
+                for value in item["directors" if role == "director" else "actors"]:
+                    name = str(value).strip()
+                    if not name:
+                        continue
+                    key = (name, role)
+                    if key in seen_people:
+                        continue
+                    seen_people.add(key)
+                    people.append((name, role))
+            genres = [str(value).strip() for value in item["genres"] if str(value).strip()]
+            title_pinyin, title_initials = self._romanize(item["title"])
+            alias_romanized = [self._romanize(value) for value in aliases]
+            people_romanized = [self._romanize(value) for value, _role in people]
+            self._db.execute("""
+                INSERT INTO media(douban_id,title,original_title,year,category,season,rating,rating_count,data_json,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                ON CONFLICT(douban_id) DO UPDATE SET
+                  title=excluded.title, original_title=excluded.original_title, year=excluded.year,
+                  category=excluded.category, season=excluded.season, rating=excluded.rating,
+                  rating_count=excluded.rating_count, data_json=excluded.data_json, updated_at=CURRENT_TIMESTAMP
+            """, (douban_id, str(item.get("title") or ""), str(item.get("original_title") or ""),
+                  str(item.get("year") or ""), str(item.get("category") or "movie"), int(item.get("season") or 0),
+                  float(item.get("rating") or 0), int(item.get("rating_count") or 0),
+                  json.dumps(item, ensure_ascii=False, separators=(",", ":"))))
+            for table in ("media_alias", "media_person", "media_genre", "media_search"):
+                self._db.execute("DELETE FROM %s WHERE douban_id=?" % table, (douban_id,))
+            self._db.executemany("INSERT INTO media_alias VALUES(?,?,?)",
+                                 [(douban_id, value, normalize_text(value)) for value in aliases])
+            self._db.executemany("INSERT INTO media_person VALUES(?,?,?,?,?,?)", [
+                (douban_id, value, role, normalize_text(value), roman[0], roman[1])
+                for (value, role), roman in zip(people, people_romanized)
+            ])
+            self._db.executemany("INSERT INTO media_genre VALUES(?,?,?)",
+                                 [(douban_id, value, normalize_text(value)) for value in genres])
+            self._db.execute("INSERT INTO media_search VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
+                douban_id, normalize_text(item["title"]), normalize_text(item.get("original_title")),
+                _join(normalize_text(value) for value in aliases), title_pinyin, title_initials,
+                _join(value[0] for value in alias_romanized), _join(value[1] for value in alias_romanized),
+                _join(normalize_text(value) for value, _role in people),
+                _join(value[0] for value in people_romanized), _join(value[1] for value in people_romanized),
+                _join(normalize_text(value) for value in genres),
+            ))
 
     @staticmethod
     def _field_score(value, query, exact, prefix, contains):

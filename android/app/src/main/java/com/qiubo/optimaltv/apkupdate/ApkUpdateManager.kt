@@ -35,6 +35,8 @@ sealed interface ApkUpdateState {
         val downloadedBytes: Long,
         val totalBytes: Long,
         val attempt: Int = 1,
+        /** 瞬时下载速度（字节/秒）；0 表示尚未测得，用于文案展示而非进度计算。 */
+        val bytesPerSecond: Long = 0L,
     ) : ApkUpdateState
 
     data object PermissionRequired : ApkUpdateState
@@ -73,9 +75,20 @@ object ApkUpdateManager {
     private const val MAX_ATTEMPTS = 3
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /**
+     * 超时取值针对真机实测的弱网链路（2026-10-01）。
+     *
+     * 原来 `readTimeout(90s)` 意味着：弱网下一个字节都收不到时，界面会静默
+     * 停留 90 秒且进度一直是 0%，实测真机就卡在「正在下载 0%」。
+     * 改成 20 秒后同样的卡顿最多 20 秒就进入重试，重试计数也会显示在文案里，
+     * 用户能看见「在重试第 N 次」而不是以为应用挂了。
+     * 同时打开 callTimeout 兜住「连接成功但迟迟不吐数据」这种最坏情况。
+     */
     private val http = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(90, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .callTimeout(15 * 60, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     private lateinit var appContext: Context
@@ -354,6 +367,10 @@ object ApkUpdateManager {
         val sources = artifact.parts.ifEmpty { listOf(ApkPart(artifact.url, artifact.sizeBytes, "")) }
         val total = if (artifact.sizeBytes > 0) artifact.sizeBytes else sources.sumOf { it.sizeBytes }
         var done = 0L
+        // 速度采样起点：弱网下速度是判断「还在动 / 已经卡死」的唯一依据。
+        val speedSampleStart = System.nanoTime()
+        var speedSampleBytes = 0L
+        var bytesPerSecond = 0L
         part.outputStream().use { output ->
             for ((index, source) in sources.withIndex()) {
                 val request = Request.Builder().url(source.url).build()
@@ -363,6 +380,7 @@ object ApkUpdateManager {
                     val digest = source.sha256.takeIf { it.isNotBlank() }
                         ?.let { MessageDigest.getInstance("SHA-256") }
                     var segment = 0L
+                    var lastEmit = 0L
                     body.byteStream().use { input ->
                         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                         while (true) {
@@ -372,14 +390,36 @@ object ApkUpdateManager {
                             digest?.update(buffer, 0, count)
                             segment += count
                             done += count
-                            _state.value = ApkUpdateState.Downloading(
-                                progress = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f,
-                                downloadedBytes = done,
-                                totalBytes = total,
-                                attempt = attempt,
-                            )
+                            speedSampleBytes += count
+
+                            // 每收到 256 KiB 或每 500 ms 推一次进度：
+                            // 弱网下逐字节推送只会让 StateFlow 疯狂触发，
+                            // 而长间隔又会让界面看着像卡住。
+                            val now = System.nanoTime()
+                            val elapsedMs = (now - speedSampleStart) / 1_000_000
+                            if (done - lastEmit >= 256L * 1024L || elapsedMs >= 500L) {
+                                if (elapsedMs > 0) {
+                                    bytesPerSecond = speedSampleBytes * 1000L / elapsedMs
+                                }
+                                lastEmit = done
+                                _state.value = ApkUpdateState.Downloading(
+                                    progress = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f,
+                                    downloadedBytes = done,
+                                    totalBytes = total,
+                                    attempt = attempt,
+                                    bytesPerSecond = bytesPerSecond,
+                                )
+                            }
                         }
                     }
+                    // 分片收尾立刻推一次，保证最后一段的进度不被节流吞掉。
+                    _state.value = ApkUpdateState.Downloading(
+                        progress = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f,
+                        downloadedBytes = done,
+                        totalBytes = total,
+                        attempt = attempt,
+                        bytesPerSecond = bytesPerSecond,
+                    )
                     if (source.sizeBytes > 0) {
                         check(segment == source.sizeBytes) { "第 ${index + 1} 段大小不匹配" }
                     }

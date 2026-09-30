@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qiubo.optimaltv.apkupdate.ApkUpdateManager
 import com.qiubo.optimaltv.apkupdate.ApkUpdateState
+import com.qiubo.optimaltv.apkupdate.ApkDownloadProgress
 
 /** 移动端 APK 更新弹窗：下载完成后自动调起系统安装器。 */
 @Composable
@@ -51,11 +52,12 @@ fun ApkUpdateUi() {
                             modifier = Modifier.fillMaxWidth(),
                         )
                         Text(
-                            if (downloading.attempt > 1) {
-                                "正在下载 ${(downloading.progress * 100).toInt()}%（自动重试第 ${downloading.attempt} 次）"
-                            } else {
-                                "正在下载 ${(downloading.progress * 100).toInt()}%"
-                            },
+                            ApkDownloadProgress.text(
+                                downloaded = downloading.downloadedBytes,
+                                total = downloading.totalBytes,
+                                bytesPerSecond = downloading.bytesPerSecond,
+                                attempt = downloading.attempt,
+                            ),
                         )
                     }
                     ApkUpdateState.PermissionRequired -> Text("请允许 My TV 安装未知应用，返回后会继续安装。")

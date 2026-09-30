@@ -71,6 +71,39 @@ class MediaIndexTest(unittest.TestCase):
         self.assertTrue(rows, query)
         self.assertEqual(rows[0]["douban_id"], douban_id, query)
 
+    def test_duplicate_people_do_not_abort_the_whole_batch(self):
+        """同名同角色的人员重复出现时，不能让整批 upsert 失败。
+
+        2026-10-01 线上事故：`media_person` 对 `(douban_id,name,role)` 有 UNIQUE
+        约束，而 `upsert_many` 用裸 `executemany` 插入。真实快照里存在同一部
+        作品把同名导演/演员写两遍的条目，一旦撞上唯一键，异常会把整个批次
+        回滚，`DoubanCatalog._ingest()` 又把它 `except: pass` 吞掉——
+        结果索引整张表空掉，「声生」「综艺」等**所有**离线搜索都返回空。
+        这里钉住：重复人员去重，且一条坏数据不得牵连其他条目。
+        """
+        self.index.upsert_many([
+            subject("90", "同人大作战", directors=["陈可辛", "陈可辛"], actors=["张三", "张三"]),
+            subject("91", "另一个作品", directors=["陈可辛"]),
+            subject("92", "声生不息", category="variety"),
+        ])
+        self.assertTrue(self.index.search("声生不息"), "同批次里的其他条目必须照常写入")
+        rows = self.index._db.execute(
+            "SELECT COUNT(*) FROM media WHERE douban_id='90'").fetchone()
+        self.assertEqual(rows[0], 1)
+        persons = self.index._db.execute(
+            "SELECT COUNT(*) FROM media_person WHERE douban_id='90'").fetchone()
+        self.assertEqual(persons[0], 2, "同名同角色应去重成 1 条导演 + 1 条演员")
+
+    def test_search_survives_a_batch_containing_bad_rows(self):
+        """单条写入异常不得让同批次的其他条目一起消失。"""
+        self.index.upsert_many([
+            subject("93", "可写入的作品", directors=["赵文"],
+                    aliases=["别名一"]),
+            {"id": "douban:94", "douban_id": "94"},  # 缺 title，构造异常路径
+            subject("95", "另一个可写入的作品"),
+        ])
+        self.assertTrue(self.index.search("另一个可写入的作品"))
+
     def test_searches_title_alias_full_pinyin_initials_and_season(self):
         for query in ("庆余年", "庆余", "余年", "qingyunian", "qingyu", "qyn", "qyn2", "庆余年2"):
             with self.subTest(query=query):

@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qiubo.optimaltv.apkupdate.ApkUpdateManager
 import com.qiubo.optimaltv.apkupdate.ApkUpdateState
+import com.qiubo.optimaltv.apkupdate.ApkDownloadProgress
 import com.qiubo.optimaltv.ui.theme.OtvColors
 import com.qiubo.optimaltv.ui.theme.rememberUiScale
 import com.qiubo.optimaltv.ui.theme.sx
@@ -122,11 +123,12 @@ private fun ApkUpdateStatus(state: ApkUpdateState?, s: Float) {
             )
             Spacer(Modifier.height(10f.sx(s)))
             androidx.compose.material3.Text(
-                if (state.attempt > 1) {
-                    "正在下载 ${(state.progress * 100).toInt()}%（自动重试第 ${state.attempt} 次）"
-                } else {
-                    "正在下载 ${(state.progress * 100).toInt()}%"
-                },
+                ApkDownloadProgress.text(
+                    downloaded = state.downloadedBytes,
+                    total = state.totalBytes,
+                    bytesPerSecond = state.bytesPerSecond,
+                    attempt = state.attempt,
+                ),
                 color = OtvColors.White60,
                 fontSize = 20f.sxs(s),
             )
