@@ -23,8 +23,10 @@ import json
 import os
 import re
 import shutil
+import ssl
 import tempfile
 import threading
+import time
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -41,6 +43,24 @@ DOWNLOAD_TIMEOUT = 180.0
 MANIFEST_MAX_BYTES = 256 * 1024
 
 _VERSION_RE = re.compile(r"(\d+)")
+_DEVICE_ID_RE = re.compile(r"^[a-f0-9]{64}$")
+
+
+def direct_opener(context: Optional[ssl.SSLContext] = None) -> urllib.request.OpenerDirector:
+    """不走系统代理的 opener。
+
+    2026-09-30 实测：本机开着 Clash（系统代理 127.0.0.1:4210），走代理访问
+    自建 VPS 的裸 IP（103.236.97.137:35208）会被拒（HTTP 502/连接被重置），
+    绕过代理直连则 200。热更与卡密都必须直连自己的服务器，不能让本地代理
+    决定能不能更新，所以这里显式清空 ProxyHandler。
+
+    context 由 launcher 传入（已装载仓库内迁移 CA），否则自建 VPS 的证书
+    会被判不受信任——绕过代理不能以牺牲证书校验为代价。
+    """
+    handlers = [urllib.request.ProxyHandler({})]
+    if context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    return urllib.request.build_opener(*handlers)
 
 
 class UpdateError(ValueError):
@@ -69,6 +89,36 @@ class UpdateCheckResult:
 def update_root(app_data_root: Path) -> Path:
     """更新状态目录：%LOCALAPPDATA%\\MyTV\\update。"""
     return Path(app_data_root) / "update"
+
+
+def device_id(app_data_root: Path) -> str:
+    """稳定的 64 位十六进制设备标识。
+
+    服务端 hotupdate/check 与 /activate 共用 ``[a-f0-9]{64}`` 校验
+    （api_service.py 的 bad_device 分支），所以这里必须产出同样的形状，
+    不能用 "desktop" 这类占位串。首次生成后落盘复用，保证多次启动同一台
+    机器始终是同一个 id——服务端按设备统计热更下发。
+    """
+    root = Path(app_data_root)
+    path = root / "device-id"
+    try:
+        cached = path.read_text(encoding="ascii").strip()
+        if _DEVICE_ID_RE.match(cached):
+            return cached
+    except OSError:
+        pass
+    seed = "%s|%s|%s" % (
+        root,
+        os.environ.get("COMPUTERNAME") or os.environ.get("USERNAME") or "mytv",
+        time.time_ns(),
+    )
+    generated = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        path.write_text(generated, encoding="ascii")
+    except OSError:
+        pass  # 落盘失败就用本次生成值，不影响本轮检查
+    return generated
 
 
 def _pending_file(root: Path) -> Path:
@@ -137,14 +187,17 @@ def _version_from_key(object_key: str, payload: dict) -> int:
     match = _VERSION_RE.search(str(object_key or ""))
     if match:
         return int(match.group(1))
-    for key in ("version", "hotVersion"):
-        value = payload.get(key)
-        if isinstance(value, int):
-            return value
+    pkg = payload.get("pkg") if isinstance(payload.get("pkg"), dict) else {}
+    for key in ("hotVersionCode", "version", "hotVersion"):
+        for source in (pkg, payload):
+            value = source.get(key)
+            if isinstance(value, int) and value > 0:
+                return value
     raise UpdateError("cannot determine update version from %r" % (object_key,))
 
 
-def post_check(origin: str, hot_version: int, apk_version: int, device_id: str) -> dict:
+def post_check(origin: str, hot_version: int, apk_version: int, device_id: str,
+               context: Optional[ssl.SSLContext] = None) -> dict:
     """POST /hotupdate/check，走 launcher 已装好的私有 CA opener。"""
     url = _normalize_origin(origin) + CHECK_PATH
     body = json.dumps({
@@ -157,7 +210,7 @@ def post_check(origin: str, hot_version: int, apk_version: int, device_id: str) 
         headers={"Content-Type": "application/json",
                  "Accept": "application/json",
                  "User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=CHECK_TIMEOUT) as response:
+    with direct_opener(context).open(request, timeout=CHECK_TIMEOUT) as response:
         raw = response.read(MANIFEST_MAX_BYTES)
     try:
         return json.loads(raw.decode("utf-8"))
@@ -166,9 +219,10 @@ def post_check(origin: str, hot_version: int, apk_version: int, device_id: str) 
 
 
 def check_for_update(origin: str, hot_version: int, apk_version: int,
-                     device_id: str) -> UpdateCheckResult:
+                     device_id: str,
+                     context: Optional[ssl.SSLContext] = None) -> UpdateCheckResult:
     base = _normalize_origin(origin)
-    payload = post_check(base, hot_version, apk_version, device_id)
+    payload = post_check(base, hot_version, apk_version, device_id, context)
     if not payload.get("hasUpdate"):
         return UpdateCheckResult(update_available=False)
     package = payload.get("pkg")
@@ -183,7 +237,11 @@ def check_for_update(origin: str, hot_version: int, apk_version: int,
     url = str(package.get("url") or "").strip()
     if not url:
         url = base + STORAGE_PREFIX + "/" + object_key.lstrip("/")
-    size = package.get("size")
+    # 服务端字段是 fileSize（2026-09-30 线上实测）；size 是早期自建桩用的名字，
+    # 两个都收，否则包大小校验会被静默跳过。
+    size = package.get("fileSize")
+    if not isinstance(size, int) or size <= 0:
+        size = package.get("size")
     return UpdateCheckResult(
         update_available=True,
         version=_version_from_key(object_key, payload),
@@ -193,10 +251,11 @@ def check_for_update(origin: str, hot_version: int, apk_version: int,
         object_key=object_key)
 
 
-def download_file(url: str, timeout: float = DOWNLOAD_TIMEOUT) -> bytes:
+def download_file(url: str, timeout: float = DOWNLOAD_TIMEOUT,
+                  context: Optional[ssl.SSLContext] = None) -> bytes:
     """下载到内存。桌面包约 8 MB，不必流式落盘。"""
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with direct_opener(context).open(request, timeout=timeout) as response:
         return response.read()
 
 
@@ -234,11 +293,12 @@ def _safe_extract(archive: zipfile.ZipFile, staging: Path) -> None:
             shutil.copyfileobj(source, sink)
 
 
-def stage_update(root: Path, info: UpdateInfo) -> Path:
+def stage_update(root: Path, info: UpdateInfo,
+                 context: Optional[ssl.SSLContext] = None) -> Path:
     """下载 -> 校验 -> 安全解压 -> 原子落盘 -> 写 pending。返回最终目录。"""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-    payload = download_file(info.url)
+    payload = download_file(info.url, context=context)
     digest = hashlib.sha256(payload).hexdigest()
     if digest != info.sha256:
         raise UpdateError("sha256 mismatch: expected %s, got %s" % (info.sha256, digest))
@@ -303,13 +363,15 @@ class BackgroundUpdater:
     """启动后放一条守护线程去检查/下载，不阻塞窗口显示。"""
 
     def __init__(self, app_data_root: Path, api_origin: str, device_id: str,
-                 hot_version: int, apk_version: int, on_state=None):
+                 hot_version: int, apk_version: int, on_state=None,
+                 context: Optional[ssl.SSLContext] = None):
         self.root = update_root(Path(app_data_root))
         self.api_origin = api_origin
         self.device_id = device_id
         self.hot_version = hot_version
         self.apk_version = apk_version
         self.on_state = on_state
+        self.context = context
         self._thread = None
         self._lock = threading.Lock()
         self.latest: Optional[UpdateCheckResult] = None
@@ -333,7 +395,8 @@ class BackgroundUpdater:
         try:
             self._emit("checking")
             result = check_for_update(
-                self.api_origin, self.hot_version, self.apk_version, self.device_id)
+                self.api_origin, self.hot_version, self.apk_version,
+                self.device_id, self.context)
             self.latest = result
             if not result.update_available:
                 self._emit("idle")
@@ -341,7 +404,8 @@ class BackgroundUpdater:
             self._emit("downloading", "v%s" % result.version)
             stage_update(self.root, UpdateInfo(
                 version=result.version, url=result.url, sha256=result.sha256,
-                size=result.size or 0, object_key=result.object_key))
+                size=result.size or 0, object_key=result.object_key),
+                context=self.context)
             prune_old_updates(self.root)
             self._emit("ready", "v%s" % result.version)
         except Exception as exc:  # noqa: BLE001 - 更新失败绝不冒泡到启动流程

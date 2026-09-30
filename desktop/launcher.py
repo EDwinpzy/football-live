@@ -200,7 +200,17 @@ def _remove_tree(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-def configure_api_environment(api_base_url: str, ca_path: Path) -> None:
+def build_api_ssl_context(ca_path: Path) -> ssl.SSLContext:
+    """装载仓库内迁移 CA，供直连自建 VPS 时校验证书。"""
+    ca_text = str(ca_path or "").strip()
+    if not ca_text or not os.path.isfile(ca_text):
+        raise ValueError("migration CA file is missing")
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=ca_text)
+    return context
+
+
+def configure_api_environment(api_base_url: str, ca_path: Path) -> ssl.SSLContext:
     """按 proxy_runner.configure_api_environment 的契约配置私有 CA 与云端 origin。"""
     origin = str(api_base_url or "").strip().rstrip("/")
     try:
@@ -213,12 +223,7 @@ def configure_api_environment(api_base_url: str, ca_path: Path) -> None:
             or (port is not None and not 1 <= port <= 65535)):
         raise ValueError("api_base_url must be an HTTPS origin")
     origin = "https://%s" % parsed.netloc
-    ca_text = str(ca_path or "").strip()
-    if not ca_text or not os.path.isfile(ca_text):
-        raise ValueError("migration CA file is missing")
-
-    context = ssl.create_default_context()
-    context.load_verify_locations(cafile=ca_text)
+    context = build_api_ssl_context(ca_path)
     urllib.request.install_opener(urllib.request.build_opener(
         urllib.request.HTTPSHandler(context=context)
     ))
@@ -230,6 +235,7 @@ def configure_api_environment(api_base_url: str, ca_path: Path) -> None:
     # 私有 nginx 暴露 /metadata/ 与 /v1/storages/object/；与网页版部署保持一致。
     os.environ["OTV_METADATA_API_URL"] = origin
     os.environ["OTV_VOD_LINE_INDEX_URL"] = origin + "/v1/storages/object/hotupdate/vod-lines.json"
+    return context
 
 
 def _port_is_free(port: int) -> bool:
@@ -458,7 +464,8 @@ def _api_origin() -> str:
     return os.environ.get(API_ORIGIN_ENV, "").strip() or DEFAULT_API_ORIGIN
 
 
-def start_background_update(api_origin: str) -> None:
+def start_background_update(api_origin: str,
+                            context: ssl.SSLContext) -> None:
     """窗口起来之后在后台检查/下载热更包，失败一律静默。"""
     if not is_frozen():
         return  # 开发模式直接用仓库源码，没有"更新"概念
@@ -468,11 +475,12 @@ def start_background_update(api_origin: str) -> None:
         service = hotupdate.BackgroundUpdater(
             app_data_root=local_app_data_root(),
             api_origin=api_origin,
-            # 服务端 hotupdate_check 只用 hotVersion/apkVersion 判定，
-            # 不校验 deviceId，所以这里给一个稳定的占位值即可。
-            device_id="desktop",
+            # 服务端要求 64 位十六进制设备标识（与卡密同一套校验），
+            # 本地持久化，保证同一台机器多次启动是同一个 id。
+            device_id=hotupdate.device_id(local_app_data_root()),
             hot_version=hot_version,
             apk_version=0,
+            context=context,
         )
 
         def _log(stage: str, detail: str = "") -> None:
@@ -498,7 +506,7 @@ def main(argv=None) -> int:
         if not (web_root / "app.js").is_file():
             raise BackendStartError("web assets missing: %s" % (web_root / "app.js"))
 
-        configure_api_environment(_api_origin(), resolve_ca_file())
+        api_context = configure_api_environment(_api_origin(), resolve_ca_file())
         port = select_backend_port()
 
         instance = SingleInstance(local_app_data_root() / "instance.lock")
@@ -517,7 +525,7 @@ def main(argv=None) -> int:
             if not wait_for_backend(port):
                 raise BackendStartError("backend did not become healthy on port %d" % port)
 
-            start_background_update(_api_origin())
+            start_background_update(_api_origin(), api_context)
             storage_path = local_app_data_root() / "webview-profile"
             show_window("http://127.0.0.1:%d/" % port, storage_path)
             return 0

@@ -49,6 +49,29 @@ class PathTests(unittest.TestCase):
         root = updater.update_root(Path(r"C:\Users\demo\AppData\Local\MyTV"))
         self.assertEqual(root.name, "update")
 
+    def test_device_id_matches_the_server_sha256_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dev = updater.device_id(Path(tmp) / "MyTV")
+        # 服务端 api_service.py 用 [a-f0-9]{64} 校验，任何别的形状都会被
+        # 判 bad_device —— 2026-09-30 上线实测踩过这个坑。
+        self.assertEqual(len(dev), 64)
+        self.assertTrue(all(c in "0123456789abcdef" for c in dev), dev)
+
+    def test_device_id_is_stable_across_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "MyTV"
+            first = updater.device_id(root)
+            second = updater.device_id(root)
+        self.assertEqual(first, second)
+
+    def test_device_id_replaces_a_corrupt_cached_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "MyTV"
+            root.mkdir(parents=True)
+            (root / "device-id").write_text("desktop", encoding="ascii")
+            dev = updater.device_id(root)
+        self.assertEqual(len(dev), 64)
+
     def test_pending_round_trips(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "update"
@@ -92,6 +115,26 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(
             r.url,
             "https://tv.example/v1/storages/object/hotupdate/backend-hu21.zip")
+
+    def test_reads_the_real_server_file_size_field(self):
+        # 服务端线上实际下发的是 fileSize（2026-09-30 实测 payload），
+        # 早期只认 size 会让包大小校验被静默跳过。
+        payload = {"ret": 0, "hasUpdate": True,
+                   "pkg": {"objectKey": "backend-hu29.zip",
+                           "sha256": "c" * 64, "fileSize": 40890308}}
+        with mock.patch.object(updater, "post_check", return_value=payload):
+            r = updater.check_for_update("https://tv.example", 0, 120, "d" * 64)
+        self.assertEqual(r.size, 40890308)
+        self.assertEqual(r.version, 29)
+
+    def test_reads_hot_version_code_when_the_key_has_no_digits(self):
+        payload = {"ret": 0, "hasUpdate": True,
+                   "pkg": {"objectKey": "backend.zip",
+                           "sha256": "d" * 64, "fileSize": 10},
+                   "hotVersionCode": 42}
+        with mock.patch.object(updater, "post_check", return_value=payload):
+            r = updater.check_for_update("https://tv.example", 0, 120, "d" * 64)
+        self.assertEqual(r.version, 42)
 
     def test_rejects_non_https(self):
         with self.assertRaises(ValueError):
@@ -215,12 +258,14 @@ class NetworkTests(unittest.TestCase):
             def __exit__(self, *a):
                 return False
 
-        def fake_urlopen(req, timeout=None):
+        def fake_open(req, timeout=None):
             captured["url"] = req.full_url
             captured["data"] = req.data
             return FakeResponse()
 
-        with mock.patch.object(updater.urllib.request, "urlopen", fake_urlopen):
+        fake_opener = mock.Mock()
+        fake_opener.open = fake_open
+        with mock.patch.object(updater, "direct_opener", return_value=fake_opener):
             updater.post_check("https://tv.example", 4, 2, "dev123")
         self.assertEqual(captured["url"], "https://tv.example/hotupdate/check")
         self.assertEqual(
@@ -231,9 +276,29 @@ class NetworkTests(unittest.TestCase):
         def boom(*_a, **_k):
             raise urllib.error.URLError("down")
 
-        with mock.patch.object(updater.urllib.request, "urlopen", boom):
+        fake_opener = mock.Mock()
+        fake_opener.open = boom
+        with mock.patch.object(updater, "direct_opener", return_value=fake_opener):
             with self.assertRaises(Exception):
                 updater.post_check("https://tv.example", 1, 1, "dev")
+
+    def test_direct_opener_ignores_the_system_proxy(self):
+        # 2026-09-30 实测：本机系统代理 127.0.0.1:4210（Clash）会拦掉
+        # 到裸 IP 的热更请求，直连才 200。热更必须绕过系统代理。
+        # build_opener 会消费传入的 ProxyHandler：proxies 为空 dict 时它直接
+        # 把自己从 opener 里摘掉，所以「handlers 里没有 ProxyHandler」就是
+        # 「不走代理」的证据。
+        opener = updater.direct_opener()
+        self.addCleanup(opener.close)
+        self.assertFalse([h for h in opener.handlers
+                          if isinstance(h, urllib.request.ProxyHandler)])
+
+    def test_direct_opener_keeps_the_supplied_ca_context(self):
+        import ssl as _ssl
+        ctx = _ssl.create_default_context()
+        opener = updater.direct_opener(ctx)
+        self.assertTrue(any(isinstance(h, urllib.request.HTTPSHandler)
+                            for h in opener.handlers))
 
 
 if __name__ == "__main__":
