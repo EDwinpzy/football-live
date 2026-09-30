@@ -47,7 +47,10 @@ import com.qiubo.optimaltv.ui.theme.sxs
  *   取消不打扰（同版本不再问）；确认进入后台下载。
  * - [HotUpdateProgressLayer]：确认后的下载进度浮层 → 完成自动重启（需求#11）。
  * 两者覆盖全屏（半透明遮罩保证可读），按钮聚焦走 dpadFocusable 焦点环。
+ * 按钮归入独立 navGroup：引擎组内搜索无候选即封锁，方向键焦点绝不逃逸到弹窗后内容。
  */
+private const val HOTUPDATE_DIALOG_GROUP = "hotupdate-dialog"
+
 @Composable
 fun HotUpdateOfferDialog() {
     val offer by HotUpdateManager.offer.collectAsStateWithLifecycle()
@@ -77,18 +80,20 @@ fun HotUpdateOfferDialog() {
                 Spacer(Modifier.height(14f.sx(s)))
                 val o = offer ?: return@Column
                 val sizeTxt = if (o.sizeBytes > 0) " · %.1f MB".format(o.sizeBytes / 1048576f) else ""
+                // 一步到位：跨版本时不逐级提示，明确「当前 vX → 最新 vY」
+                val jumpTxt = if (o.fromVersion in 1 until o.version) "当前 v${o.fromVersion} → 最新" else "最新"
                 Text("${o.name}$sizeTxt", color = OtvColors.White60, fontSize = 24f.sxs(s))
                 Spacer(Modifier.height(10f.sx(s)))
                 Text(
-                    "更新将在后台下载，完成后自动生效（无需重启 app）",
+                    "$jumpTxt v${o.version}，将一步更新到位\n后台下载，完成后自动生效（无需重启 app）",
                     color = OtvColors.White50, fontSize = 24f.sxs(s),
-                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    maxLines = 3, overflow = TextOverflow.Ellipsis,
                 )
                 Spacer(Modifier.height(40f.sx(s)))
                 Row(horizontalArrangement = Arrangement.spacedBy(26f.sx(s))) {
                     // 暂不更新：ghost 键（需求#12：非强更绝不影响使用）
-                    UpdateDialogKey("暂不更新", s, primary = false) { HotUpdateManager.declineUpdate() }
-                    UpdateDialogKey("立即更新", s, primary = true, focus = okFr) { HotUpdateManager.acceptUpdate() }
+                    UpdateDialogKey("暂不更新", s, primary = false, navGroup = HOTUPDATE_DIALOG_GROUP) { HotUpdateManager.declineUpdate() }
+                    UpdateDialogKey("立即更新", s, primary = true, focus = okFr, navGroup = HOTUPDATE_DIALOG_GROUP) { HotUpdateManager.acceptUpdate() }
                 }
             }
         }
@@ -101,6 +106,7 @@ private fun UpdateDialogKey(
     s: Float,
     primary: Boolean,
     focus: FocusRequester? = null,
+    navGroup: String? = null,
     onTap: () -> Unit,
 ) {
     var f by remember { mutableStateOf(false) }
@@ -109,6 +115,7 @@ private fun UpdateDialogKey(
         modifier = Modifier
             .then(if (focus != null) Modifier.focusRequester(focus) else Modifier)
             .dpadFocusable(
+                navGroup = navGroup,
                 scaleFocused = 1.04f,
                 focusedBg = if (primary) OtvColors.White else null,
                 focusedBgRadius = 30f.sx(s),

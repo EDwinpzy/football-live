@@ -38,6 +38,8 @@ import com.qiubo.optimaltv.ui.theme.sx
 import com.qiubo.optimaltv.ui.theme.sxs
 
 /** APK 更新确认、下载进度和“允许安装未知应用”提示（TV 遥控器可操作）。 */
+private const val APKUPDATE_DIALOG_GROUP = "apkupdate-dialog"
+
 @Composable
 fun ApkUpdateUi() {
     val offer by ApkUpdateManager.offer.collectAsStateWithLifecycle()
@@ -88,7 +90,7 @@ fun ApkUpdateUi() {
                 Spacer(Modifier.height(34f.sx(s)))
                 Row(horizontalArrangement = Arrangement.spacedBy(26f.sx(s))) {
                     if (!current.required) {
-                        ApkUpdateKey("稍后更新", s, primary = false) { ApkUpdateManager.declineUpdate() }
+                        ApkUpdateKey("稍后更新", s, primary = false, navGroup = APKUPDATE_DIALOG_GROUP) { ApkUpdateManager.declineUpdate() }
                     }
                     val primaryLabel = when (state) {
                         ApkUpdateState.PermissionRequired -> "打开安装权限"
@@ -100,6 +102,7 @@ fun ApkUpdateUi() {
                         s = s,
                         primary = true,
                         focus = requester,
+                        navGroup = APKUPDATE_DIALOG_GROUP,
                     ) {
                         when (state) {
                             ApkUpdateState.PermissionRequired -> ApkUpdateManager.openUnknownAppSettings()
@@ -164,6 +167,7 @@ private fun ApkUpdateKey(
     s: Float,
     primary: Boolean,
     focus: FocusRequester? = null,
+    navGroup: String? = null,
     onTap: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -172,6 +176,7 @@ private fun ApkUpdateKey(
         modifier = Modifier
             .then(if (focus != null) Modifier.focusRequester(focus) else Modifier)
             .dpadFocusable(
+                navGroup = navGroup,
                 scaleFocused = 1.04f,
                 focusedBg = if (primary) OtvColors.White else null,
                 focusedBgRadius = 30f.sx(s),
