@@ -162,6 +162,11 @@ object EmbeddedBackend {
                 File(dir, "$HU_ZIP.bad").delete()
                 zip.renameTo(File(dir, "$HU_ZIP.bad"))
             }
+            // 2026-09-30：坏包的解压目录必须一并作废。原来只删热更 marker，
+            // 而 embedded_backend/.extracted 仍写着 `hot|<code>|<len>`，于是下次
+            // 启动 extractZipIfNeeded 命中标记直接复用这份坏包解压目录，
+            // 内置 assets 后端永远不生效（现场：APK 已升级但设备仍跑旧搜索逻辑）。
+            EmbeddedBackendPolicy.invalidateAfterQuarantine(backendDir(ctx))
             com.qiubo.optimaltv.hotupdate.HotUpdateManager.notifyApplyFailed(ctx, code, reason)
         }
         Log.w(TAG, "热更包已隔离 ($reason)，本次及下次启动使用 assets 内置包")
@@ -211,10 +216,11 @@ object EmbeddedBackend {
     /** 通用解压：.extracted 标记记录「源签名」，不一致（换源/升级）就清目录重解压 */
     private fun extractZipTo(ctx: Context, input: InputStream, signature: String): File {
         val dir = backendDir(ctx)
-        val flag = File(dir, ".extracted")
+        val flag = File(dir, EmbeddedBackendPolicy.MARKER_NAME)
         // 旧版仅凭 .extracted 标记跳过解压：后端 zip 升级后设备仍跑旧 proxy。
         // 现在标记里记录源签名（assets 版本号+大小 / hot 版本号+大小），不一致就重解压。
-        if (flag.exists() && flag.readText() == signature) return dir
+        val currentMarker = if (flag.isFile) runCatching { flag.readText() }.getOrNull() else null
+        if (EmbeddedBackendPolicy.canReuse(currentMarker, signature)) return dir
         dir.deleteRecursively()
         dir.mkdirs()
         input.use { ins ->
