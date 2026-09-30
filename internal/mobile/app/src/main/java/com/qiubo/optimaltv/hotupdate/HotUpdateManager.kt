@@ -42,6 +42,8 @@ data class UpdateOffer(
     val version: Int,
     val name: String,
     val sizeBytes: Long,
+    /** 弹窗时本机已暂存/生效的热更版本（0 = 首次进热更）；用于展示「当前 vX → 最新 vY」 */
+    val fromVersion: Int = 0,
 )
 
 /** 用户确认更新后的执行态（弹窗进度 → 完成自动重启） */
@@ -164,22 +166,29 @@ object HotUpdateManager {
                     delay(6 * 60 * 60_000L)
                 }
             }
-            var pending: Triple<JSONObject, Int, String>? = null
+            var forced: Triple<JSONObject, Int, String>? = null
             try {
                 // P1 修复（2026-09-04）：12s 超时只包 check 元数据——旧版把强更的
                 // 分钟级下载也包进 withTimeoutOrNull，慢网下载>12s 协程被取消后
                 // runForced 在下载后的首个挂起点中止，_force 永卡「下载X%」阻断屏
                 // 整会话不释放（且 .hotversion 未落盘，重启同版本再卡，循环复现）
-                pending = withTimeoutOrNull(CHECK_TIMEOUT_MS) { checkLatest() }
+                forced = withTimeoutOrNull(CHECK_TIMEOUT_MS) { checkLatest() }
             } catch (e: Exception) {
                 OtvLog.w("hotupdate: 检查失败（静默跳过）: ${e.message}")
             }
             // 强更判定已出：先置阻断态再放门闸（防 awaitSettled 在 _force 置位前抢跑）
+            if (forced != null) {
+                _force.value = ForceState.Blocking(forced.second, "准备下载更新包…")
+            }
             checked.value = true
-            if (pending != null) {
-                runCatching { runSilent(pending.first, pending.second, pending.third) }
+            if (forced != null) {
+                runCatching { runForced(forced.first, forced.second, forced.third) }
                     .onFailure {
-                        OtvLog.w("hotupdate: 静默更新失败，下次启动重试: ${it.message}")
+                        OtvLog.w("hotupdate: 强更下载异常: ${it.message}")
+                        _force.value = ForceState.Blocking(
+                            forced.second, "下载失败，将不影响本次使用（下次启动重试）")
+                        delay(2500)
+                        _force.value = null
                     }
             }
         }
@@ -297,6 +306,11 @@ object HotUpdateManager {
 
     /** 仅 check 元数据（不做任何下载）：强更 → 返回 (pkg, code, deviceId) 交由调用方在
      *  check 超时作用域【外】执行阻断下载（P1 修复 2026-09-04）；非强更新版本 → 弹提案，返回 null */
+    /**
+     *  一步到位（2026-10-01 用户明确要求）：服务端 hotupdate_check 恒取最高已发布版本
+     *  （order by hot_version_code desc limit 1），所以本地 v15 收到的是 v18 的包，
+     *  一次下载即跨过中间版本——不存在 v15→v16→v17→v18 逐级跳。
+     */
     private suspend fun checkLatest(): Triple<JSONObject, Int, String>? {
         val endpoint = BuildConfig.HOTUPDATE_ENDPOINT
         if (endpoint.isBlank()) return null
@@ -316,18 +330,23 @@ object HotUpdateManager {
 
         val active = activeVersion()
         val poisoned = poisonedVersion()
-        if (code > maxOf(active, local) && code != poisoned) {
+        val forced = pkg.optBoolean("forceApply")
+        if (forced && code > maxOf(active, local) && code != poisoned) {
             return Triple(pkg, code, dev)
         }
         if (code <= local) return null                 // 已暂存过（等下次冷启动生效/已生效）
-        return Triple(pkg, code, dev)
-    }
+        if (code == dismissedVersion()) return null    // 用户已对该版本点过「取消」
 
-    private suspend fun runSilent(pkg: JSONObject, code: Int, dev: String) {
-        val ok = downloadStage(code, pkg.optString("url"), pkg.optString("sha256").lowercase(), pkg.optLong("fileSize", 0L))
-        if (!ok) { report(dev, code, "failed", "silent_download"); return }
-        OtvLog.i("hotupdate: v$code 已静默校验完成，重启后端资源进程")
-        restartApp()
+        // 非强更：弹窗提案，用户决定是否下载（需求#12/#13）
+        _offer.value = UpdateOffer(
+            version = code,
+            name = pkg.optString("hotVersionName").ifBlank { "v$code" },
+            sizeBytes = expectSize,
+            fromVersion = maxOf(active, local),
+        )
+        OtvLog.i("hotupdate: 发现可选更新 v$code（${pkg.optString("hotVersionName")}，" +
+            "${if (expectSize > 0) "${expectSize / 1048576}MB" else "?"}），等待用户选择")
+        return null
     }
 
     /** 下载 → 校验 → 暂存（用户确认/强更共用）。失败返回 false（phase 由调用方定）。 */
@@ -354,7 +373,7 @@ object HotUpdateManager {
     }
 
     /** 用户确认后的完整链路：进度上报 → 下载暂存 → 自动重启（需求#11/#13） */
-    private suspend fun downloadStageRestart(code: Int, name: String) {
+    private suspend fun downloadStageRestart(offeredCode: Int, name: String) {
         val endpoint = BuildConfig.HOTUPDATE_ENDPOINT
         if (endpoint.isBlank()) return
         // 重新 check 拿最新包元数据（提案里不存 url/sha，避免过期签名链接）
@@ -363,11 +382,17 @@ object HotUpdateManager {
             .put("apkVersion", BuildConfig.VERSION_CODE)
             .put("deviceId", deviceId())) ?: throw IllegalStateException("check 失败，请稍后重试")
         val pkg = resp.optJSONObject("pkg") ?: throw IllegalStateException("更新包信息获取失败")
+        val code = pkg.optInt("hotVersionCode", 0)
         val url = pkg.optString("url")
         val expectSha = pkg.optString("sha256").lowercase()
         val expectSize = pkg.optLong("fileSize", 0L)
-        if (url.isBlank() || expectSha.length != 64) throw IllegalStateException("更新包信息不完整")
+        if (code <= 0 || url.isBlank() || expectSha.length != 64) {
+            throw IllegalStateException("更新包信息不完整")
+        }
 
+        if (code != offeredCode) {
+            OtvLog.i("hotupdate: 弹窗期间有新版本，v$offeredCode → v$code 一步到位")
+        }
         OtvLog.i("hotupdate: 用户确认更新 v$code（$name），开始下载")
         val ok = downloadStage(code, url, expectSha, expectSize) { done, total ->
             _userUpdate.value = UserUpdateState.Downloading(

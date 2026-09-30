@@ -87,12 +87,14 @@ fun HotUpdateOfferDialog() {
                 Spacer(Modifier.height(12f.sx(s)))
                 val o = offer ?: return@Column
                 val sizeTxt = if (o.sizeBytes > 0) " · %.1f MB".format(o.sizeBytes / 1048576f) else ""
+                // 一步到位：跨版本时不逐级提示，明确「当前 vX → 最新 vY」
+                val jumpTxt = if (o.fromVersion in 1 until o.version) "当前 v${o.fromVersion} → 最新" else "最新"
                 Text("${o.name}$sizeTxt", color = OtvColors.White60, fontSize = 22f.sxs(s))
                 Spacer(Modifier.height(8f.sx(s)))
                 Text(
-                    "更新将在后台下载，完成后自动生效（无需重启 app）",
+                    "$jumpTxt v${o.version}，将一步更新到位\n后台下载，完成后自动生效（无需重启 app）",
                     color = OtvColors.White50, fontSize = 22f.sxs(s),
-                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    maxLines = 3, overflow = TextOverflow.Ellipsis,
                 )
                 Spacer(Modifier.height(34f.sx(s)))
                 Row {
