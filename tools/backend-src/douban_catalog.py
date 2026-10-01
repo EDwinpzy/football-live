@@ -294,6 +294,32 @@ def hero_poster_url(url):
     return "%s/view/photo/large/public/%s" % (match.group(1), match.group(2))
 
 
+# 豆瓣在该条目没有剧照时不给空串，而是回一张「默认占位图」。两种形态实测（2026-10-01）：
+#   asset.doubanio.com/cuphead/{movie,tv}-static/pics/{movie,tv}_default_large.png
+#   imgN.doubanio.com/f/frodo/<hash>/pics/subject/{movie,tv}_large.jpg
+# 两者都返回 HTTP 200 + 真图片，客户端无法与真海报区分，只能安静地显示成灰卡片
+# （线上图片代理实测：占位图 69B~6591B，真海报 100KB+，全部 200）。
+# 所以这里在**入库前**就把它识别成「没有海报」存空串，让卡片走占位样式而不是假图。
+_PLACEHOLDER_POSTER_TOKENS = (
+    "default_large", "default_poster", "movie_large", "tv_large",
+    "/f/frodo/", "cuphead/movie-static", "cuphead/tv-static",
+)
+
+
+def is_placeholder_poster(url):
+    """True 表示这是豆瓣的默认占位图而非真实剧照。"""
+    text = _text(url).lower()
+    if not text:
+        return True
+    return any(token in text for token in _PLACEHOLDER_POSTER_TOKENS)
+
+
+def real_poster_url(url):
+    """占位图→空串；真海报原样返回（`_text` 归一）。"""
+    text = _text(url)
+    return "" if is_placeholder_poster(text) else text
+
+
 def normalize_subject(raw, requested_category="movie"):
     raw = _merge_card_subtitle(raw if isinstance(raw, dict) else {})
     subject_id = _text(raw.get("douban_id") or raw.get("id")).removeprefix("douban:")
@@ -301,6 +327,8 @@ def normalize_subject(raw, requested_category="movie"):
     poster = raw.get("poster_url") or raw.get("cover_url") or raw.get("image")
     if isinstance(raw.get("pic"), dict):
         poster = poster or raw["pic"].get("large") or raw["pic"].get("normal")
+    # 占位图当空串存（见 is_placeholder_poster）：否则灰卡片会被当成真海报下发给所有端。
+    poster = real_poster_url(poster)
     result = {
         "id": "douban:" + subject_id if subject_id else "",
         "douban_id": subject_id,
@@ -320,8 +348,8 @@ def normalize_subject(raw, requested_category="movie"):
         "summary": _text(raw.get("summary") or raw.get("description") or raw.get("intro")),
         "directors": _list(raw.get("directors") or raw.get("director")),
         "actors": _list(raw.get("actors") or raw.get("actor")),
-        "poster_url": _text(poster),
-        "hero_url": hero_poster_url(poster) or _text(raw.get("backdrop_url")) or _text(poster),
+        "poster_url": poster,
+        "hero_url": hero_poster_url(poster) or real_poster_url(raw.get("backdrop_url")) or poster,
         "backdrop_url": _text(raw.get("backdrop_url")),
         "release_date": _text((raw.get("release_date") or raw.get("pubdate") or raw.get("datePublished") or [""])[0]
                               if isinstance(raw.get("release_date") or raw.get("pubdate"), list)

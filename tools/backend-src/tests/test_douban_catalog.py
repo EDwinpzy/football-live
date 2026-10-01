@@ -765,6 +765,54 @@ class DoubanCatalogTest(unittest.TestCase):
         plain = douban_catalog.normalize_subject({"id": "1", "title": "片", "poster_url": "https://img.example/a.jpg"})
         self.assertEqual(plain["hero_url"], "https://img.example/a.jpg")
 
+    def test_douban_default_poster_is_not_stored_as_a_real_poster(self):
+        """豆瓣无剧照时回默认占位图（HTTP 200 + 真图），客户端分不出 → 卡片长期显示灰图。
+
+        实测两种形态（2026-10-01，线上图片代理）：占位图 69B~6591B 且全部 200，
+        真海报 100KB+，所以必须在**入库前**识别成「无海报」存空串。
+        """
+        placeholders = (
+            "https://asset.doubanio.com/cuphead/movie-static/pics/movie_default_large.png",
+            "https://asset.doubanio.com/cuphead/tv-static/pics/tv_default_large.png",
+            "https://img2.doubanio.com/f/frodo/753fa1e93c945e533e52dddab73b2b55a1083083"
+            "/pics/subject/movie_large.jpg",
+        )
+        for url in placeholders:
+            with self.subTest(url=url):
+                self.assertTrue(douban_catalog.is_placeholder_poster(url))
+                self.assertEqual(douban_catalog.real_poster_url(url), "")
+                item = douban_catalog.normalize_subject(
+                    {"id": "1", "title": "片", "poster_url": url})
+                # 占位图不能出现在 poster/hero 任何一个字段里，否则端侧照样渲染灰卡片。
+                self.assertEqual(item["poster_url"], "")
+                self.assertEqual(item["hero_url"], "")
+                # 空串同样是「没有海报」
+                self.assertTrue(douban_catalog.is_placeholder_poster(""))
+        # 快照抓取走 normalize_explore_row（cover 字段），同样要拦住
+        self.assertEqual(
+            douban_catalog.normalize_explore_row(
+                {"id": "1", "title": "片", "cover": placeholders[0]}, "movie")["poster_url"],
+            "")
+
+    def test_real_douban_posters_survive_placeholder_filtering(self):
+        """反例：真海报不能被误判成占位图（占位图判定过宽会把整片墙变成空卡）。"""
+        for url in (
+            "https://img9.doubanio.com/view/photo/m_ratio_poster/public/p2934583425.jpg",
+            "https://img3.doubanio.com/view/photo/s_ratio_poster/public/p2935109312.jpg",
+            "https://img2.doubanio.com/view/photo/l_ratio_poster/public/p123.jpg",
+            "https://img.example/cover.webp",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(douban_catalog.is_placeholder_poster(url))
+                self.assertEqual(douban_catalog.real_poster_url(url), url)
+        item = douban_catalog.normalize_subject(
+            {"id": "2", "title": "年会不能停！2",
+             "poster_url": "https://img9.doubanio.com/view/photo/m_ratio_poster/public/p2934583425.jpg"})
+        self.assertEqual(item["poster_url"],
+                         "https://img9.doubanio.com/view/photo/m_ratio_poster/public/p2934583425.jpg")
+        self.assertEqual(item["hero_url"],
+                         "https://img9.doubanio.com/view/photo/large/public/p2934583425.jpg")
+
 
 if __name__ == "__main__":
     unittest.main()

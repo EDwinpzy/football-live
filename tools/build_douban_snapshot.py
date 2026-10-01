@@ -105,11 +105,27 @@ def dedupe(items):
 
 
 def priority_ids(home, pool):
-    """详情抓取优先级：首页三段在前（用户直接看得到），其余按取数顺序补齐。"""
+    """详情抓取优先级：**首页每一段都先各拿一份配额**（用户直接看得到），再按取数顺序补齐。
+
+    2026-10-01：旧实现按 `CATEGORIES` 顺序把整段列表顺序拼接，movie 三个段（4+3+3=10 页）
+    就把 `--details 160` 的预算吃光，tv/anime 之后每段只能拿到个位数，variety/short 直接为 0。
+    后果实测（见 douban_catalog.is_placeholder_poster 注释同批排查）：
+      - variety/short 的条目没补到详情 → genres/tags 判不出来 → 全被归成 movie；
+      - 「最新上映」多为本年度新片，补详情优先级又排在最后 → poster 留豆瓣默认占位图；
+      - 元数据残缺（year/aliases 空）→ 详情页 match_score 拿不到标题交集 → 0 条片源。
+    现在改成轮转发车：第 1 轮每段各 1 条，第 2 轮每段各 1 条……保证 5 分类 × 3 段
+    = 15 段都拿到基础覆盖，预算有余再回头加厚。
+    """
     ordered = []
-    for category, _tag in CATEGORIES:
-        for section in home[category]["sections"]:
-            ordered.extend(str(item.get("douban_id") or "") for item in section["items"])
+    sections = [section
+                for category, _tag in CATEGORIES
+                for section in home[category]["sections"]]
+    depth = max((len(section["items"]) for section in sections), default=0)
+    for rank in range(depth):
+        for section in sections:
+            items = section["items"]
+            if rank < len(items):
+                ordered.append(str(items[rank].get("douban_id") or ""))
     ordered.extend(str(item.get("douban_id") or "") for item in pool)
     seen, unique = set(), []
     for key in ordered:
@@ -188,6 +204,44 @@ def load_previous():
         return {}
 
 
+def write_snapshot(payload):
+    temp = OUT.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    temp.replace(OUT)
+
+
+def scrub_placeholder_posters(payload):
+    """把已入库的豆瓣默认占位海报清成空串。
+
+    `normalize_subject` 已在写入时拦住占位图，但库里可能还留着修复前抓到的旧数据
+    （且 `--max-age` 让本脚本在 24h 内直接跳过重建）。占位图会一路下发到所有端，
+    所以每次构建都无条件扫一遍，成本只是一次本地遍历。
+    """
+    cleared = 0
+
+    def scrub(item):
+        nonlocal cleared
+        if not isinstance(item, dict):
+            return
+        for key in ("poster_url", "hero_url", "backdrop_url"):
+            value = item.get(key)
+            if value and douban_catalog.is_placeholder_poster(value):
+                item[key] = ""
+                cleared += 1
+
+    for category in (payload.get("home") or {}).values():
+        for section in (category or {}).get("sections") or []:
+            for item in section.get("items") or []:
+                scrub(item)
+    for item in payload.get("index") or []:
+        scrub(item)
+    for item in (payload.get("details") or {}).values():
+        scrub(item)
+    if cleared:
+        print("SCRUB 清理豆瓣默认占位海报 %d 处" % cleared)
+    return cleared
+
+
 def previous_index_size():
     return len(load_previous().get("index") or [])
 
@@ -203,7 +257,10 @@ def snapshot_age_seconds():
 def main():
     parser = argparse.ArgumentParser(description="刷新 douban_snapshot.json")
     parser.add_argument("--sleep", type=float, default=0.4, help="请求间隔秒数（豆瓣会限流）")
-    parser.add_argument("--details", type=int, default=160, help="补详情的条数上限（首页三段优先）")
+    # 300 = 5 分类 × 3 段 × 20 条，正好把 15 段全部首页条目补满（轮转发车，见 priority_ids）。
+    # 旧默认 160 在顺序发车下只够 movie+tv，variety/short 一条都补不到。
+    parser.add_argument("--details", type=int, default=300,
+                        help="补详情的条数上限（首页 15 段轮转发车，每段先各拿一份配额）")
     parser.add_argument("--max-age", type=float, default=24 * 3600.0,
                         help="快照比这还新就跳过抓取（0 = 每次强制重建）")
     parser.add_argument("--force", action="store_true", help="即使结果明显缩水也写入")
@@ -212,6 +269,10 @@ def main():
     age = snapshot_age_seconds()
     if args.max_age > 0 and age is not None and age < args.max_age:
         print("SKIP 现有快照 %.1f 小时前生成，加 --max-age 0 可强制重建" % (age / 3600.0))
+        # 跳过重抓 ≠ 跳过修复：占位图是本地数据问题，不该等下次豆瓣抓取才清掉。
+        previous_snapshot = load_previous()
+        if scrub_placeholder_posters(previous_snapshot):
+            write_snapshot(previous_snapshot)
         return
 
     home, pool = collect(args.sleep)
@@ -245,9 +306,8 @@ def main():
         "details": details,
         "stats": {"home": stats, "index": len(index), "details": len(details)},
     }
-    temp = OUT.with_suffix(".json.tmp")
-    temp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    temp.replace(OUT)
+    scrub_placeholder_posters(payload)
+    write_snapshot(payload)
     print("WROTE", OUT, OUT.stat().st_size, payload["stats"])
 
 
