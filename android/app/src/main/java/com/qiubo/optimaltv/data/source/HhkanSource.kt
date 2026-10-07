@@ -16,7 +16,7 @@ import org.json.JSONObject
  * 复用 web/backend/python/proxy.py 的 hhkan 系列 API，后端零改动。
  *
  * 目录懒解析策略（hhkan 直链必须逐集解析，无法静态枚举）：
- * - snapshot() 只拉各频道列表（元数据 + detailRef=vid），episodes 留空；
+ * - snapshot() 只拉各频道列表（元数据 + detailRef=hhkan:vid），episodes 留空；
  * - 详情时 fetchDetail() 解析多线路选集（原版同款：站内线路即「线路」概念）；
  * - 起播/换线时 fetchPlay() 把 {vodid}-{pid}-{vid} 解析成直链 m3u8。
  */
@@ -182,7 +182,7 @@ class HhkanSource(
                     rating = o.optDouble("score", 0.0),
                     posterUrl = if (base.isBlank()) o.optString("cover") else relayed(base, o.optString("cover")),
                     remark = com.qiubo.optimaltv.data.model.normalizeRemark(o.optString("remark")),
-                    detailRef = vid.toString(),
+                    detailRef = "hhkan:$vid",
                 ).takeIf { it.title.isNotBlank() }
             }
 

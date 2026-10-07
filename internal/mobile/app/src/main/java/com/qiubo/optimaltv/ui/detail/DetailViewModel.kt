@@ -46,12 +46,18 @@ class DetailViewModel(private val vodId: String) : ViewModel() {
             Graph.repo.state.collect { st ->
                 // 目录外条目（实时搜索结果）兜底：hhkan: 前缀构造裸 item 走懒解析
                 val item = st.catalog?.groups?.values?.flatten()?.firstOrNull { it.id == vodId }
-                    ?: if (vodId.startsWith("douban:")) com.qiubo.optimaltv.data.model.VodItem(
-                        id = vodId, sourceId = "douban", title = "", categoryId = "",
-                        detailRef = vodId.removePrefix("douban:"),
-                    ) else return@collect
+                    ?: when {
+                        vodId.startsWith("hhkan:") -> com.qiubo.optimaltv.data.model.VodItem(
+                            id = vodId, sourceId = "hhkan", title = "", categoryId = "", detailRef = vodId,
+                        )
+                        vodId.startsWith("douban:") -> com.qiubo.optimaltv.data.model.VodItem(
+                            id = vodId, sourceId = "douban", title = "", categoryId = "",
+                            detailRef = vodId.removePrefix("douban:"),
+                        )
+                        else -> return@collect
+                    }
                 if (_ui.value.item == item) return@collect
-                val lines = st.catalog!!.groups[item.normTitle].orEmpty()
+                val lines = st.catalog?.groups?.get(item.normTitle).orEmpty()
                 /* 2026-09-17 详情提速：目录条目自带标题/海报/评分/简介，先把这一版上屏
                    （主按钮落「正在查找片源」），再等下面的 resolveDetail 完成多源匹配。
                    旧版要等整段匹配跑完才第一次赋值 → 详情页只有一个「加载中…」，

@@ -89,6 +89,83 @@ class MetadataCatalogRepositoryTest {
     }
 
     @Test
+    fun resolveDetailRoutesCatalogMissHhkanIds() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val directory = File(context.filesDir, "metadata-catalog")
+        directory.deleteRecursively()
+        val snapshot = File(context.filesDir, "catalog_snapshot.json")
+        snapshot.delete()
+        val settings = SettingsStore(context)
+        settings.setHhkanBase("http://catalog.test")
+        val requestedPaths = mutableListOf<String>()
+        val detailBody = """
+            {"title":"好好看测试片","year":"2026","desc":"测试简介","sources":[
+                {"name":"线路甲","episodes":[{"ep":"第1集","pid":45,"vid":6}]}
+            ]}
+        """.trimIndent()
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            requestedPaths += request.url.encodedPath
+            Response.Builder()
+                .request(request)
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(detailBody.toResponseBody("application/json".toMediaType()))
+                .build()
+        }.build()
+
+        try {
+            val repository = VodRepository(settings, client, context)
+            val detail = repository.resolveDetail("hhkan:721")
+
+            assertEquals(listOf("/hhkan/detail/721"), requestedPaths)
+            assertEquals("好好看测试片", detail?.title)
+            assertEquals(listOf("第1集"), detail?.episodes?.map { it.name })
+        } finally {
+            directory.deleteRecursively()
+            snapshot.delete()
+        }
+    }
+
+    @Test
+    fun vodBriefFetchesDirectHhkanIdsOutsideCatalog() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val directory = File(context.filesDir, "metadata-catalog")
+        directory.deleteRecursively()
+        val snapshot = File(context.filesDir, "catalog_snapshot.json")
+        snapshot.delete()
+        val settings = SettingsStore(context)
+        settings.setHhkanBase("http://catalog.test")
+        val requestedPaths = mutableListOf<String>()
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            requestedPaths += request.url.encodedPath
+            Response.Builder()
+                .request(request)
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(
+                    """{"title":"好好看测试片","year":"2026","meta":"2026 / 中国","desc":"测试简介","score":8.2}"""
+                        .toResponseBody("application/json".toMediaType()),
+                )
+                .build()
+        }.build()
+
+        try {
+            val repository = VodRepository(settings, client, context)
+            val brief = repository.vodBrief("hhkan:721")
+
+            assertEquals(listOf("/hhkan/detail/721"), requestedPaths)
+            assertEquals(Triple("2026 / 中国", "测试简介", 8.2), brief)
+        } finally {
+            directory.deleteRecursively()
+            snapshot.delete()
+        }
+    }
+
+    @Test
     fun `无 SQLite 时 v3 seed 驱动离线搜索与详情恢复`() = runBlocking {
         val context: Context = RuntimeEnvironment.getApplication()
         val directory = File(context.filesDir, "metadata-catalog")

@@ -867,6 +867,7 @@ class VodRepository(
         briefCache[vodId]?.let { return@withContext it }
         val item = itemById(vodId)
         val ref = item?.detailRef?.takeIf { it.isNotBlank() }
+            ?: vodId.takeIf { it.startsWith("hhkan:") }
             ?: vodId.removePrefix("douban:").takeIf { vodId.startsWith("douban:") }
             ?: return@withContext null
         val itemMeta = item
@@ -1037,12 +1038,16 @@ class VodRepository(
             else -> null
         }
         val item = itemById(vodId) ?: localMedia?.let { VodApiSource.fromCatalogMedia(it, settings.current().hhkanBaseUrl) }
-            ?: if (vodId.startsWith("douban:")) {
-            com.qiubo.optimaltv.data.model.VodItem(
-                id = vodId, sourceId = "douban", title = "", categoryId = "",
-                detailRef = vodId.removePrefix("douban:"),
-            )
-        } else return@withContext null
+            ?: when {
+                vodId.startsWith("hhkan:") -> com.qiubo.optimaltv.data.model.VodItem(
+                    id = vodId, sourceId = "hhkan", title = "", categoryId = "", detailRef = vodId,
+                )
+                vodId.startsWith("douban:") -> com.qiubo.optimaltv.data.model.VodItem(
+                    id = vodId, sourceId = "douban", title = "", categoryId = "",
+                    detailRef = vodId.removePrefix("douban:"),
+                )
+                else -> return@withContext null
+            }
         if (item.detailRef.isBlank()) return@withContext item
         val d = fetchDetailCached(item.detailRef, forceRefresh) ?: return@withContext (cached ?: item)
         // 集数网格展示默认线路（第一条）的选集；全部线路在播放器内换线

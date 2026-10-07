@@ -315,6 +315,14 @@ class VodApiSource(
             deferSources: Boolean = false,
             refresh: Boolean = false,
         ): HhkanSource.Companion.DetailInfo {
+            if (id.startsWith("hhkan:")) {
+                return HhkanSource.fetchDetail(
+                    base = base,
+                    okHttp = client,
+                    vid = id.removePrefix("hhkan:"),
+                    enrich = refresh && !deferSources,
+                )
+            }
             val json = fetchJson(base, VodRoutes.detail(id, deferSources, refresh), client)
             val lineArray = json.optJSONArray("sources")
             val lines = (0 until (lineArray?.length() ?: 0)).mapNotNull lineMap@ { lineIndex ->
@@ -338,6 +346,15 @@ class VodApiSource(
         }
 
         fun fetchPlay(base: String, client: OkHttpClient, id: String, lineId: String, episode: String): List<String> {
+            if (id.startsWith("hhkan:")) {
+                return HhkanSource.fetchPlay(
+                    base = base,
+                    okHttp = client,
+                    vodId = id.removePrefix("hhkan:"),
+                    pid = lineId,
+                    vid = episode,
+                ).takeIf(String::isNotBlank)?.let(::listOf).orEmpty()
+            }
             val path = "/vod/play/${id.removePrefix("douban:")}/${URLEncoder.encode(lineId, "UTF-8")}/${episode.toIntOrNull() ?: 0}"
             val json = fetchJson(base, path, client)
             return listOfNotNull(json.optString("url").takeIf(String::isNotBlank))

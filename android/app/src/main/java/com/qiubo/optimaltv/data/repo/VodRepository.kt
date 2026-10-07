@@ -930,6 +930,7 @@ class VodRepository(
         val item = itemById(vodId)
         val ref = item?.detailRef?.takeIf { it.isNotBlank() }
             ?: vodId.removePrefix("douban:").takeIf { vodId.startsWith("douban:") }
+            ?: vodId.takeIf { it.startsWith("hhkan:") }
             ?: return@withContext null
         val itemMeta = item
             ?.let { (listOf(it.year, it.area).filter { b -> b.isNotBlank() } + it.tags).joinToString(" / ") }
@@ -1118,12 +1119,17 @@ class VodRepository(
             else -> null
         }
         val item = itemById(vodId) ?: localMedia?.let { VodApiSource.fromCatalogMedia(it, settings.current().hhkanBaseUrl) }
-            ?: if (vodId.startsWith("douban:")) {
-            com.qiubo.optimaltv.data.model.VodItem(
-                id = vodId, sourceId = "douban", title = "", categoryId = "",
-                detailRef = vodId.removePrefix("douban:"),
-            )
-        } else return@withContext null
+            ?: when {
+                vodId.startsWith("douban:") -> com.qiubo.optimaltv.data.model.VodItem(
+                    id = vodId, sourceId = "douban", title = "", categoryId = "",
+                    detailRef = vodId.removePrefix("douban:"),
+                )
+                vodId.startsWith("hhkan:") -> com.qiubo.optimaltv.data.model.VodItem(
+                    id = vodId, sourceId = "hhkan", title = "", categoryId = "",
+                    detailRef = vodId,
+                )
+                else -> return@withContext null
+            }
         if (item.detailRef.isBlank()) return@withContext item
         val d = fetchDetailCached(item.detailRef, forceRefresh) ?: return@withContext (cached ?: item)
         // 集数网格展示默认线路（第一条）的选集；全部线路在播放器内换线

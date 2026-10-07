@@ -1,0 +1,112 @@
+package com.qiubo.optimaltv.data.source
+
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
+import okhttp3.OkHttpClient
+import org.junit.Assert.assertEquals
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
+class VodApiSourceHhkanRoutingTest {
+    @Test
+    fun `好好看首页条目保留明确的 HHKan detailRef 前缀`() {
+        withJsonServer(
+            """{"sections":[{"title":"最近更新","items":[{"id":721,"title":"测试剧"}]}]}""",
+        ) { base, requestedPath ->
+            val home = HhkanSource.fetchHome(base, OkHttpClient())
+
+            assertEquals("/hhkan/home", requestedPath.get())
+            assertEquals("hhkan:721", home.sections.single().items.single().detailRef)
+        }
+    }
+
+    @Test
+    fun `带 HHKan 引用的详情请求走原版路由并保留 pid 与 vid`() {
+        withJsonServer(
+            """{"title":"测试剧","year":"2025","sources":[{"name":"线路A","episodes":[{"ep":"第1集","pid":23,"vid":45}]}]}""",
+        ) { base, requestedPath ->
+            val detail = VodApiSource.fetchDetail(base, OkHttpClient(), "hhkan:721")
+
+            assertEquals("/hhkan/detail/721", requestedPath.get())
+            assertEquals(Triple("第1集", "23", "45"), detail.lines.single().episodes.single())
+        }
+    }
+
+    @Test
+    fun `刷新 HHKan 详情请求补充线路`() {
+        withJsonServer("""{"title":"测试剧","sources":[]}""") { base, requestedPath ->
+            VodApiSource.fetchDetail(base, OkHttpClient(), "hhkan:721", refresh = true)
+
+            assertEquals("/hhkan/detail/721?enrich=1", requestedPath.get())
+        }
+    }
+
+    @Test
+    fun `延迟片源的 HHKan 详情不请求补充线路`() {
+        withJsonServer("""{"title":"测试剧","sources":[]}""") { base, requestedPath ->
+            VodApiSource.fetchDetail(
+                base,
+                OkHttpClient(),
+                "hhkan:721",
+                deferSources = true,
+                refresh = true,
+            )
+
+            assertEquals("/hhkan/detail/721", requestedPath.get())
+        }
+    }
+
+    @Test
+    fun `带 HHKan 引用的播放请求传递 vodid pid vid 三段`() {
+        withJsonServer(
+            """{"sources":[{"url":"https://media.example/episode.m3u8"}]}""",
+        ) { base, requestedPath ->
+            val urls = VodApiSource.fetchPlay(base, OkHttpClient(), "hhkan:721", "23", "45")
+
+            assertEquals("/hhkan/play/721/23/45", requestedPath.get())
+            assertEquals(listOf("https://media.example/episode.m3u8"), urls)
+        }
+    }
+
+    private fun withJsonServer(
+        responseBody: String,
+        block: (base: String, requestedPath: AtomicReference<String>) -> Unit,
+    ) {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val requestedPath = AtomicReference("")
+        val serverThread = thread(isDaemon = true) {
+            runCatching {
+                server.accept().use { socket -> serve(socket, responseBody, requestedPath) }
+            }
+        }
+        try {
+            block("http://127.0.0.1:${server.localPort}", requestedPath)
+        } finally {
+            server.close()
+            serverThread.join(1_000)
+        }
+    }
+
+    private fun serve(socket: Socket, body: String, requestedPath: AtomicReference<String>) {
+        val input = socket.getInputStream().bufferedReader(Charsets.US_ASCII)
+        val requestLine = input.readLine().orEmpty()
+        requestedPath.set(requestLine.split(' ').getOrNull(1).orEmpty())
+        while (input.readLine()?.isNotEmpty() == true) Unit
+
+        val bytes = body.toByteArray(Charsets.UTF_8)
+        socket.getOutputStream().apply {
+            write("HTTP/1.1 200 OK\r\n".toByteArray(Charsets.US_ASCII))
+            write("Content-Type: application/json; charset=utf-8\r\n".toByteArray(Charsets.US_ASCII))
+            write("Content-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray(Charsets.US_ASCII))
+            write(bytes)
+            flush()
+        }
+    }
+}
