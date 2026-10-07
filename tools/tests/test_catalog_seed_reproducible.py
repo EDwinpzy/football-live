@@ -3,6 +3,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from urllib.parse import unquote
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,14 +52,14 @@ class CatalogSeedReproducibleTests(unittest.TestCase):
         self.assertLessEqual(count, 400, "种子条目异常膨胀（%d）" % count)
 
     def test_every_seed_item_is_structurally_complete(self):
-        """规模之外还要守结构：每条都得有 id/标题/分类/海报，否则首装卡片是空的。"""
+        """规模之外还要守结构；真实无封面条目允许 p/h 为空，不能伪造海报。"""
         payload = json.loads(TARGETS[0].read_text(encoding="utf-8"))
         items = payload["items"]
         known = {c["id"] for c in payload["categories"]}
 
         self.assertTrue(items, "种子不能为空")
         for item in items:
-            for field in ("id", "t", "c", "p"):
+            for field in ("id", "t", "c"):
                 self.assertTrue(
                     item.get(field), "条目缺 %s：%r" % (field, item.get("id"))
                 )
@@ -66,6 +67,37 @@ class CatalogSeedReproducibleTests(unittest.TestCase):
                 item["c"], known,
                 "条目分类 %r 不在 categories 里：%r" % (item["c"], item.get("id")),
             )
+
+    def test_seed_keeps_only_real_snapshot_posters(self):
+        """按豆瓣 ID 对照快照：有真图必须传入种子，无图/默认图必须保持空。"""
+        snapshot = json.loads(
+            (ROOT / "tools" / "backend-src" / "douban_snapshot.json").read_text(encoding="utf-8"))
+        snapshot_items = {}
+        for category in (snapshot.get("home") or {}).values():
+            for section in category.get("sections") or []:
+                for item in section.get("items") or []:
+                    raw_id = str(item.get("douban_id") or item.get("id") or "").removeprefix("douban:")
+                    if raw_id:
+                        snapshot_items["douban:" + raw_id] = item
+
+        seed = json.loads(TARGETS[0].read_text(encoding="utf-8"))
+        for item in seed["items"]:
+            source = snapshot_items[item["id"]]
+            for seed_field, source_field in (("p", "poster_url"), ("h", "hero_url")):
+                expected = str(source.get(source_field) or "")
+                if seed_field == "h" and not expected:
+                    expected = str(source.get("poster_url") or "")
+                seeded = str(item.get(seed_field) or "")
+                if not expected:
+                    self.assertEqual(seeded, "", "%s 无豆瓣封面，不应伪造" % item["id"])
+                    continue
+                self.assertIn("/hhkan/proxy?u=", seeded, "%s 必须经过内置中继" % item["id"])
+                actual = unquote(seeded).partition("u=")[2]
+                self.assertEqual(actual, expected, "%s 的 %s 应按豆瓣 ID 原样匹配" % (item["id"], seed_field))
+                self.assertFalse(any(token in actual.lower() for token in (
+                    "default_large", "default_poster", "movie_large", "tv_large", "/f/frodo/",
+                    "cuphead/movie-static", "cuphead/tv-static",
+                )), "%s 的 %s 不能是默认占位图" % (item["id"], seed_field))
 
     def test_seed_covers_every_category(self):
         """5 个分类都要有内容，否则首装某一栏是空的。"""

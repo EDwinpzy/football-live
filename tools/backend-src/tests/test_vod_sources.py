@@ -82,6 +82,45 @@ class VodSourcesTest(unittest.TestCase):
         candidate["title"] = "肖申克的救赎 2 The Shawshank Redemption"
         self.assertEqual(vod_sources.match_score(subject, candidate), 0)
 
+    def test_matching_metadata_year_suffix_is_not_part_of_the_source_title(self):
+        subject = {
+            "title": "奥德赛", "original_title": "The Odyssey", "year": "2026",
+            "category": "movie", "season": 0,
+        }
+        candidate = {"title": "奥德赛2026", "year": "2026", "category": "movie", "season": 0}
+        wrong_year = dict(candidate, year="2025")
+
+        self.assertEqual(vod_sources.match_score(subject, candidate), 100)
+        self.assertEqual(vod_sources.match_score(subject, wrong_year), 0)
+
+    def test_maccms_keeps_a_title_with_its_matching_metadata_year_suffix(self):
+        source = vod_sources.VodSource(
+            "demo", "演示", "https://example.test",
+            "https://example.test/api.php/provide/vod/", "macms_json")
+        calls = []
+
+        def fake_fetch(url):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("wd", [""])[0]
+            calls.append(query)
+            if query == "奥德赛":
+                return {"body": '{"list":[{"vod_id":42,"vod_name":"奥德赛2026",'
+                                 '"vod_year":"2026","type_name":"电影",'
+                                 '"vod_play_from":"line-a",'
+                                 '"vod_play_url":"正片$https://v.example/odyssey.m3u8"}]}'}
+            return {"body": '{"list":[]}'}
+
+        subject = {
+            "title": "奥德赛", "original_title": "The Odyssey", "year": "2026",
+            "category": "movie", "season": 0,
+        }
+        adapter = vod_sources.MacCmsAdapter(source, fetch=fake_fetch)
+
+        candidates = adapter.search(subject)
+
+        self.assertEqual([item["title"] for item in candidates], ["奥德赛2026"])
+        self.assertEqual(vod_sources.match_score(subject, candidates[0]), 100)
+        self.assertEqual(calls, ["奥德赛"])
+
     def test_rank_prefers_quality_latency_and_reliability(self):
         ranked = vod_sources.rank_lines([
             {"id": "slow-1080", "height": 1080, "latency_ms": 5000, "alive": True},

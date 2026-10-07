@@ -13,6 +13,7 @@ FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures" / "douban"
 sys.path.insert(0, str(BACKEND))
 
 import douban_catalog  # noqa: E402
+import media_index  # noqa: E402
 
 
 def fixture_json(name):
@@ -91,6 +92,32 @@ class DoubanCatalogTest(unittest.TestCase):
         titles = [item["title"] for section in result["sections"] for item in section["items"]]
         self.assertEqual(titles, ["快照片"])
 
+    def test_first_run_scrubs_legacy_snapshot_posters_before_serving(self):
+        """旧 APK 随包快照可能带默认图；首装读取要清理返回副本而不改源数据。"""
+        placeholder = "https://img2.doubanio.com/f/frodo/753fa1e93c945e533e52dddab73b2b55a1083083/pics/subject/movie_large.jpg"
+        actual = "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p2885762590.jpg"
+        snapshot = {"home": {"movie": {"category": "movie", "sections": [
+            {"title": title, "items": [
+                {"douban_id": "1", "title": "旧快照占位图", "poster_url": placeholder,
+                 "hero_url": placeholder, "backdrop_url": placeholder},
+                {"douban_id": "2", "title": "旧快照真海报", "poster_url": actual, "hero_url": actual},
+            ]} for title in douban_catalog.HOME_SECTION_NAMES]}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog = douban_catalog.DoubanCatalog(
+                fetch=lambda *_args: (_ for _ in ()).throw(OSError("offline")),
+                cache=douban_catalog.JsonDiskCache(tmp), snapshot=snapshot,
+            )
+            catalog._refresh_async = lambda *_args: None
+
+            result = catalog.home("movie")
+
+        first_items = result["sections"][0]["items"]
+        self.assertEqual(first_items[0]["poster_url"], "")
+        self.assertEqual(first_items[0]["hero_url"], "")
+        self.assertEqual(first_items[0]["backdrop_url"], "")
+        self.assertEqual(first_items[1]["poster_url"], actual)
+        self.assertEqual(snapshot["home"]["movie"]["sections"][0]["items"][0]["poster_url"], placeholder)
+
     def test_empty_snapshot_with_dead_upstream_reports_unavailable(self):
         catalog = douban_catalog.DoubanCatalog(
             fetch=lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")),
@@ -154,6 +181,28 @@ class DoubanCatalogTest(unittest.TestCase):
         result = catalog.search("肖申克", limit=7)
         self.assertTrue(result["local"])
         self.assertEqual(result["items"][0]["id"], "douban:1292052")
+
+    def test_search_cleans_legacy_placeholder_from_media_index(self):
+        """历史 SQLite 索引里的默认图不能在后续离线搜索中继续显示。"""
+        placeholder = "https://img2.doubanio.com/f/frodo/753fa1e93c945e533e52dddab73b2b55a1083083/pics/subject/movie_large.jpg"
+        with tempfile.TemporaryDirectory() as tmp:
+            index = media_index.MediaIndex(pathlib.Path(tmp) / "media.db")
+            try:
+                index.upsert_many([{
+                    "id": "douban:123456", "douban_id": "123456", "title": "旧缓存电影",
+                    "category": "movie", "poster_url": placeholder, "hero_url": placeholder,
+                }])
+                catalog = douban_catalog.DoubanCatalog(
+                    fetch=lambda _url: (_ for _ in ()).throw(OSError("offline")), media_index=index)
+
+                result = catalog.search("旧缓存电影")
+
+                self.assertEqual(len(result["items"]), 1)
+                self.assertEqual(result["items"][0]["poster_url"], "")
+                self.assertEqual(result["items"][0]["hero_url"], "")
+                self.assertEqual(index.get("123456")["poster_url"], "")
+            finally:
+                index.close()
 
     def test_successful_scrapes_are_ingested(self):
         class Index:
@@ -793,6 +842,67 @@ class DoubanCatalogTest(unittest.TestCase):
             douban_catalog.normalize_explore_row(
                 {"id": "1", "title": "片", "cover": placeholders[0]}, "movie")["poster_url"],
             "")
+
+    def test_legacy_disk_cache_does_not_serve_douban_default_posters(self):
+        """修复前的 detail/home 磁盘缓存可能保留豆瓣默认图，读取时也必须清掉。"""
+        placeholder = "https://asset.doubanio.com/cuphead/movie-static/pics/movie_default_large.png"
+        actual = "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p2885762590.jpg"
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = douban_catalog.JsonDiskCache(tmp)
+            cached_home = {
+                "category": "movie",
+                "sections": [{
+                    "title": title,
+                    "items": [
+                        {"id": "douban:1", "title": "旧缓存占位图", "poster_url": placeholder,
+                         "hero_url": placeholder, "backdrop_url": placeholder},
+                        {"id": "douban:2", "title": "旧缓存真海报", "poster_url": actual,
+                         "hero_url": actual, "backdrop_url": ""},
+                    ],
+                } for title in douban_catalog.HOME_SECTION_NAMES],
+            }
+            cached_detail = {
+                "id": "douban:1", "douban_id": "1", "title": "旧详情占位图",
+                "poster_url": placeholder, "hero_url": placeholder, "backdrop_url": placeholder,
+            }
+            cache.put("home:movie", cached_home)
+            cache.put("detail:1", cached_detail)
+            home_fetched_at = cache.envelope("home:movie")["fetched_at"]
+            detail_fetched_at = cache.envelope("detail:1")["fetched_at"]
+            catalog = douban_catalog.DoubanCatalog(
+                fetch=lambda *_args: (_ for _ in ()).throw(AssertionError("fresh cache should not fetch")),
+                cache=cache, snapshot={},
+            )
+
+            home = catalog.home("movie")
+            detail = catalog.detail("1")
+            self.assertEqual(cache.get_stale("home:movie")["sections"][0]["items"][0]["poster_url"], "")
+            self.assertEqual(cache.get_stale("detail:1")["poster_url"], "")
+            self.assertEqual(cache.envelope("home:movie")["fetched_at"], home_fetched_at)
+            self.assertEqual(cache.envelope("detail:1")["fetched_at"], detail_fetched_at)
+            stale_fetched_at = time.time() - douban_catalog.TTL["home"] - 60
+            cache.put("home:tv", {
+                "category": "tv",
+                "sections": [{"title": title, "items": [
+                    {"id": "douban:3", "title": "过期缓存占位图", "poster_url": placeholder,
+                     "hero_url": placeholder}
+                ]} for title in douban_catalog.HOME_SECTION_NAMES],
+            }, fetched_at=stale_fetched_at)
+            catalog._refresh_async = lambda *_args: None
+            stale_home = catalog.home("tv")
+            self.assertEqual(stale_home["source"], "douban-cache")
+            self.assertEqual(stale_home["sections"][0]["items"][0]["poster_url"], "")
+            self.assertEqual(cache.get_stale("home:tv")["sections"][0]["items"][0]["poster_url"], "")
+            self.assertEqual(cache.envelope("home:tv")["fetched_at"], stale_fetched_at)
+
+        home_items = home["sections"][0]["items"]
+        self.assertEqual(home_items[0]["poster_url"], "")
+        self.assertEqual(home_items[0]["hero_url"], "")
+        self.assertEqual(home_items[0]["backdrop_url"], "")
+        self.assertEqual(home_items[1]["poster_url"], actual)
+        self.assertEqual(detail["poster_url"], "")
+        self.assertEqual(detail["hero_url"], "")
+        self.assertEqual(detail["backdrop_url"], "")
 
     def test_real_douban_posters_survive_placeholder_filtering(self):
         """反例：真海报不能被误判成占位图（占位图判定过宽会把整片墙变成空卡）。"""

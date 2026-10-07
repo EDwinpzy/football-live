@@ -320,6 +320,23 @@ def real_poster_url(url):
     return "" if is_placeholder_poster(text) else text
 
 
+def _scrub_placeholder_poster_fields(value):
+    """递归清理旧缓存/本地索引里已持久化的豆瓣默认海报。"""
+    changed = False
+    if isinstance(value, dict):
+        for field in ("poster_url", "hero_url", "backdrop_url"):
+            url = value.get(field)
+            if url and is_placeholder_poster(url):
+                value[field] = ""
+                changed = True
+        for nested in value.values():
+            changed = _scrub_placeholder_poster_fields(nested) or changed
+    elif isinstance(value, list):
+        for item in value:
+            changed = _scrub_placeholder_poster_fields(item) or changed
+    return changed
+
+
 def normalize_subject(raw, requested_category="movie"):
     raw = _merge_card_subtitle(raw if isinstance(raw, dict) else {})
     subject_id = _text(raw.get("douban_id") or raw.get("id")).removeprefix("douban:")
@@ -350,7 +367,7 @@ def normalize_subject(raw, requested_category="movie"):
         "actors": _list(raw.get("actors") or raw.get("actor")),
         "poster_url": poster,
         "hero_url": hero_poster_url(poster) or real_poster_url(raw.get("backdrop_url")) or poster,
-        "backdrop_url": _text(raw.get("backdrop_url")),
+        "backdrop_url": real_poster_url(raw.get("backdrop_url")),
         "release_date": _text((raw.get("release_date") or raw.get("pubdate") or raw.get("datePublished") or [""])[0]
                               if isinstance(raw.get("release_date") or raw.get("pubdate"), list)
                               else raw.get("release_date") or raw.get("datePublished")),
@@ -570,7 +587,10 @@ class DoubanCatalog:
         if not self.media_index:
             return
         try:
-            self.media_index.upsert_many([item for item in items or [] if isinstance(item, dict)])
+            normalized = [copy.deepcopy(item) for item in items or [] if isinstance(item, dict)]
+            for item in normalized:
+                _scrub_placeholder_poster_fields(item)
+            self.media_index.upsert_many(normalized)
         except Exception:
             # Search indexing must never make the catalogue response unavailable.
             pass
@@ -724,7 +744,9 @@ class DoubanCatalog:
         且 source 为 douban-unavailable，客户端显示「暂时获取不到，请重试」。
         """
         stale = self.cache.get_stale(key) if self.cache else None
-        fallback = stale if stale is not None else copy.deepcopy(snapshot_value)
+        fallback = copy.deepcopy(stale if stale is not None else snapshot_value)
+        if _scrub_placeholder_poster_fields(fallback) and stale is not None:
+            self._rewrite_scrubbed_cache(key, fallback)
         if not isinstance(fallback, dict):
             fallback = {}
         fallback["source"] = ("douban-cache" if stale is not None else "douban-snapshot") \
@@ -738,6 +760,8 @@ class DoubanCatalog:
         if self.cache and not force_refresh:
             fresh = self.cache.get(key, TTL[kind])
             if fresh is not None:
+                if _scrub_placeholder_poster_fields(fresh):
+                    self._rewrite_scrubbed_cache(key, fresh)
                 return fresh
             # 过期值先上屏、后台刷新：首页 6h TTL 一过（冷实例换了缓存目录更常见）旧实现
             # 要用户原地等三栏抓完（本机冷态实测 2.3s，弱网更久）。带 stale 标记返回，
@@ -746,6 +770,8 @@ class DoubanCatalog:
             if isinstance(stale, dict):
                 self._refresh_async(key, producer)
                 fallback = copy.deepcopy(stale)
+                if _scrub_placeholder_poster_fields(fallback):
+                    self._rewrite_scrubbed_cache(key, fallback)
                 fallback["stale"] = True
                 fallback["source"] = "douban-cache"
                 return fallback
@@ -758,6 +784,7 @@ class DoubanCatalog:
                     and isinstance(snapshot_value, dict) and snapshot_value):
                 self._refresh_async(key, producer)
                 fallback = copy.deepcopy(snapshot_value)
+                _scrub_placeholder_poster_fields(fallback)
                 fallback["stale"] = True
                 fallback["source"] = "douban-snapshot"
                 return fallback
@@ -771,6 +798,8 @@ class DoubanCatalog:
                 condition.wait_for(lambda: not getattr(condition, "_running", False), timeout=15)
                 fresh = self.cache.get(key, TTL[kind]) if self.cache else None
                 if fresh is not None:
+                    if _scrub_placeholder_poster_fields(fresh):
+                        self._rewrite_scrubbed_cache(key, fresh)
                     return fresh
             condition._running = True
         try:
@@ -779,6 +808,7 @@ class DoubanCatalog:
                 raise ValueError("empty Douban response")
             if isinstance(value, dict):
                 value.setdefault("upstream_available", True)
+            _scrub_placeholder_poster_fields(value)
             if self.cache:
                 self.cache.put(key, value)
             return value
@@ -790,6 +820,19 @@ class DoubanCatalog:
             with condition:
                 condition._running = False
                 condition.notify_all()
+
+    def _rewrite_scrubbed_cache(self, key, value):
+        """Write cleaned cache data back without extending its original TTL."""
+        envelope = getattr(self.cache, "envelope", None)
+        put = getattr(self.cache, "put", None)
+        if not callable(envelope) or not callable(put):
+            return
+        try:
+            current = envelope(key)
+            if current:
+                put(key, value, fetched_at=current.get("fetched_at"))
+        except Exception:
+            pass
 
     def _explore(self, category, sort, page=1, genre="", region="", year="", rating="",
                  strict=False, send=FILTER_DIMENSIONS):
@@ -1208,6 +1251,10 @@ class DoubanCatalog:
             self._ingest(changed)
             found = enriched
         items = self.media_index.search(query, limit=100) if self.media_index else []
+        if items and _scrub_placeholder_poster_fields(items):
+            # Older backend builds persisted default images in SQLite. Repair rows as
+            # they are encountered so offline search stops returning them thereafter.
+            self._ingest(items)
         combined = {item["douban_id"]: item for item in items}
         normalized = normalize_text(query)
         # 上游能按译名、别名、演员等命中；不能用本地标题包含规则再次丢弃这些结果。

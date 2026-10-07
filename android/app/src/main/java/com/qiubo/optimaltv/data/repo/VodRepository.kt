@@ -22,6 +22,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -759,10 +760,13 @@ class VodRepository(
         val deadline = System.currentTimeMillis() + budgetMs
         while (true) {
             libBlocks(categoryId, force = true)
-            libJobs[cid]?.join()
             if (libBlocksHaveContent(cid)) return true
-            if (System.currentTimeMillis() + LIB_CONTENT_POLL_MS >= deadline) return false
-            kotlinx.coroutines.delay(LIB_CONTENT_POLL_MS)
+            val waitMs = (deadline - System.currentTimeMillis()).coerceAtMost(LIB_CONTENT_POLL_MS)
+            if (waitMs <= 0L) return false
+            val appeared = withTimeoutOrNull(waitMs) {
+                libBlocksFlow.first { libBlocksHaveContent(cid) }
+            }
+            if (appeared != null) return true
         }
     }
 
@@ -815,19 +819,40 @@ class VodRepository(
             val hasLocalSections = localSections.any { it.items.isNotEmpty() }
             val installedMetadata = runCatching { metadataCatalog.hasInstalledDatabase() }.getOrDefault(false)
             _libBlocks.value = _libBlocks.value + (cid to completeBlocks(localSections))
-            if (hasLocalSections && installedMetadata) {
+            if (hasLocalSections) markHotSettled(cid)
+
+            val onlineUpdated = if (base.isBlank()) {
+                emptyList()
+            } else {
+                runCatching { HhkanSource.fetchChannelSections(base, okHttp, cid) }
+                    .onFailure { android.util.Log.w("OTV", "分类 $cid 最近更新拉取失败: ${it.message}") }
+                    .getOrNull()
+                    ?.firstOrNull { it.name == "最近更新" }
+                    ?.items
+                    .orEmpty()
+                    .take(24)
+            }
+            val hasOnlineUpdates = onlineUpdated.isNotEmpty()
+            if (hasOnlineUpdates) {
+                val sections = localSections.filterNot { it.name == "最近更新" } + HSec("最近更新", onlineUpdated)
+                _libBlocks.value = _libBlocks.value + (cid to completeBlocks(sections))
+                markHotSettled(cid)
+            }
+
+            if (hasOnlineUpdates || (base.isBlank() && hasLocalSections && installedMetadata)) {
                 libDone += cid
                 libFailAt.remove(cid)
                 libRetries.remove(cid)
             } else if (hasLocalSections) {
                 // The packaged seed is an immediate offline fallback. Re-read after catalogue refresh
                 // so an installed SQLite package replaces those seed rows without delaying first paint.
+                if (base.isNotBlank()) libFailAt[cid] = System.currentTimeMillis()
                 scheduleLibRetry(cid)
             } else {
                 libFailAt[cid] = System.currentTimeMillis()
                 scheduleLibRetry(cid)
             }
-            markHotSettled(cid)
+            if (!hasLocalSections) markHotSettled(cid)
         }
         // Timeout marker remains as a guard if catalogue access stalls during storage recovery.
         repoScope.launch {

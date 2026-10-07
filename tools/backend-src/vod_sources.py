@@ -823,11 +823,28 @@ def _year(value):
     return int(match.group(0)) if match else None
 
 
+def _candidate_base_title_for_matching_year(candidate, expected_year):
+    """Strip a trailing release-year tag only when source metadata confirms it."""
+    if not expected_year or _year(candidate.get("year")) != expected_year:
+        return ""
+    title = str(candidate.get("title") or "").strip()
+    suffix = re.search(r"(\d{4})\s*$", title)
+    if not suffix or int(suffix.group(1)) != expected_year:
+        return ""
+    return title[:suffix.start()].rstrip(" \t._-–—:：/·")
+
+
 def match_score(subject, candidate):
-    if not (_titles(subject) & _titles(candidate)):
+    subject_titles = _titles(subject)
+    candidate_titles = _titles(candidate)
+    subject_year, candidate_year = _year(subject.get("year")), _year(candidate.get("year"))
+    title_match = bool(subject_titles & candidate_titles)
+    if not title_match and subject_year and candidate_year == subject_year:
+        base_title = _candidate_base_title_for_matching_year(candidate, subject_year)
+        title_match = bool(base_title and normalize_title(base_title) in subject_titles)
+    if not title_match:
         return 0
     score = 60
-    subject_year, candidate_year = _year(subject.get("year")), _year(candidate.get("year"))
     hard_year_conflict = bool(subject_year and candidate_year and abs(subject_year - candidate_year) > 1)
     if subject_year and candidate_year:
         score += 20 if subject_year == candidate_year else 10 if abs(subject_year - candidate_year) == 1 else 0

@@ -275,6 +275,50 @@ class MetadataCatalogRepositoryTest {
     }
 
     @Test
+    fun `最近更新来自好好看分类真实更新栏`() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val directory = File(context.filesDir, "metadata-catalog")
+        directory.deleteRecursively()
+        val snapshot = File(context.filesDir, "catalog_snapshot.json")
+        snapshot.delete()
+        val settings = SettingsStore(context)
+        settings.setHhkanBase("http://catalog.test")
+        val requestedPaths = mutableListOf<String>()
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            requestedPaths += chain.request().url.encodedPath
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(
+                    """{"sections":[
+                        {"name":"最近热门","items":[{"id":101,"title":"接口热门"}]},
+                        {"name":"最新上线","items":[{"id":102,"title":"接口新片"}]},
+                        {"name":"最近更新","items":[
+                            {"id":901,"title":"真实更新一"},
+                            {"id":902,"title":"真实更新二"}
+                        ]}
+                    ]}""".toResponseBody("application/json".toMediaType()),
+                )
+                .build()
+        }.build()
+
+        try {
+            val repository = VodRepository(settings, client, context)
+            repository.awaitLibBlocks("douban:movie")
+
+            val blocks = repository.libBlocksFlow.value[1].orEmpty().associateBy { it.name }
+            assertEquals(listOf("/hhkan/channel-sections/1"), requestedPaths)
+            assertEquals(listOf("hhkan:901", "hhkan:902"), blocks.getValue("最近更新").items.map { it.id })
+            assertEquals(listOf("真实更新一", "真实更新二"), blocks.getValue("最近更新").items.map { it.title })
+        } finally {
+            directory.deleteRecursively()
+            snapshot.delete()
+        }
+    }
+
+    @Test
     fun `无 SQLite 时综艺三栏不被空 mytvId 去重折叠成单条`() = runBlocking {
         val context: Context = RuntimeEnvironment.getApplication()
         val directory = File(context.filesDir, "metadata-catalog")
