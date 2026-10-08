@@ -92,7 +92,8 @@ final class MyTVUITests: XCTestCase {
     }
 
     private func attachScreenshot(of app: XCUIApplication, named name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
+        let screenshot = name.contains("landscape") ? XCUIDevice.shared.screenshot() : app.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
