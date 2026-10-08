@@ -28,7 +28,7 @@ sys.path.insert(0, str(BACKEND))
 
 import douban_catalog  # noqa: E402
 
-CATEGORIES = (("movie", "电影"), ("tv", "电视剧"), ("anime", "动漫"),
+CATEGORIES = (("movie", "电影"), ("tv", "电视剧"), ("anime", "3D国漫"),
               ("variety", "综艺"), ("short", "短剧"))
 SNAPSHOT_VERSION = 3                      # = VodRepository.CatalogOriginPolicy.SNAPSHOT_VERSION
 RELAY_BASE = "http://127.0.0.1:8090"      # App 默认内置后端（海报中继）

@@ -42,6 +42,11 @@ class CatalogSeedReproducibleTests(unittest.TestCase):
         self.assertEqual(payload["v"], 3)
         self.assertIsInstance(payload["ts"], int)
         self.assertEqual(len(payload["categories"]), 5)
+        self.assertEqual(
+            next(c["name"] for c in payload["categories"] if c["id"] == "douban:anime"),
+            "3D国漫",
+            "首装种子也应使用更新后的国漫分类名",
+        )
         # 条目数**不做硬编码**：种子由 build_catalog_seed.py 从豆瓣快照生成，而
         # 快照每天都在滚动（榜单换新），实测 606 -> 605、270 -> 268 都属正常波动。
         # 原先写死 270，于是每次 `release_all.py` 刷快照后这条都会红；而它想守的
@@ -72,28 +77,35 @@ class CatalogSeedReproducibleTests(unittest.TestCase):
         """按豆瓣 ID 对照快照：有真图必须传入种子，无图/默认图必须保持空。"""
         snapshot = json.loads(
             (ROOT / "tools" / "backend-src" / "douban_snapshot.json").read_text(encoding="utf-8"))
+        # 同一豆瓣条目在不同首页栏可能使用不同尺寸的同一张图
+        # （例如 s_ratio_poster 与 m_ratio_poster）；种子取首次出现的版本，
+        # 所以按 ID 收集所有快照中真实出现过的 URL，而不是让后一个栏目覆盖前一个。
         snapshot_items = {}
         for category in (snapshot.get("home") or {}).values():
             for section in category.get("sections") or []:
                 for item in section.get("items") or []:
                     raw_id = str(item.get("douban_id") or item.get("id") or "").removeprefix("douban:")
                     if raw_id:
-                        snapshot_items["douban:" + raw_id] = item
+                        entry = snapshot_items.setdefault("douban:" + raw_id, {"p": set(), "h": set()})
+                        poster = str(item.get("poster_url") or "")
+                        hero = str(item.get("hero_url") or poster)
+                        if poster:
+                            entry["p"].add(poster)
+                        if hero:
+                            entry["h"].add(hero)
 
         seed = json.loads(TARGETS[0].read_text(encoding="utf-8"))
         for item in seed["items"]:
             source = snapshot_items[item["id"]]
-            for seed_field, source_field in (("p", "poster_url"), ("h", "hero_url")):
-                expected = str(source.get(source_field) or "")
-                if seed_field == "h" and not expected:
-                    expected = str(source.get("poster_url") or "")
+            for seed_field in ("p", "h"):
+                expected = source[seed_field]
                 seeded = str(item.get(seed_field) or "")
                 if not expected:
                     self.assertEqual(seeded, "", "%s 无豆瓣封面，不应伪造" % item["id"])
                     continue
                 self.assertIn("/hhkan/proxy?u=", seeded, "%s 必须经过内置中继" % item["id"])
                 actual = unquote(seeded).partition("u=")[2]
-                self.assertEqual(actual, expected, "%s 的 %s 应按豆瓣 ID 原样匹配" % (item["id"], seed_field))
+                self.assertIn(actual, expected, "%s 的 %s 必须使用该豆瓣条目的快照海报" % (item["id"], seed_field))
                 self.assertFalse(any(token in actual.lower() for token in (
                     "default_large", "default_poster", "movie_large", "tv_large", "/f/frodo/",
                     "cuphead/movie-static", "cuphead/tv-static",
