@@ -71,6 +71,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
 
+internal enum class FavoritesDownTarget { MEMBER, CONTENT, UPDATE }
+
+internal fun favoritesDownTarget(licenseEnabled: Boolean, hasFavorites: Boolean, hasHistory: Boolean) = when {
+    licenseEnabled -> FavoritesDownTarget.MEMBER
+    hasFavorites || hasHistory -> FavoritesDownTarget.CONTENT
+    else -> FavoritesDownTarget.UPDATE
+}
+
 /**
  * 我的页（2026-08-28 需求重排）：
  * 收藏行 + 「历史记录」标题 + 观看记录行；卡片样式与影视页一致（232 竖版海报卡），
@@ -92,6 +100,7 @@ fun FavoritesScreen(nav: NavController) {
     // 会员行专用焦点句柄：tab DOWN 定向落会员行（可 OK 续费 / 再 DOWN 几何进收藏卡）——
     // 旧版会员小块仅内容全空时可达（contentFocus 条件挂载），有收藏/历史时无法续费
     val memberFocus = remember { FocusRequester() }
+    val updateFocus = remember { FocusRequester() }
     val cardReg = remember { FocusRegistry() }
     InitialFocusEffect(tabFocus, "fav-tab", enabled = returnKey == null)
     var restoredFocus by remember { mutableStateOf(false) }
@@ -161,6 +170,7 @@ fun FavoritesScreen(nav: NavController) {
                 // 需求⑥（2026-09-11）：会员信息并入「我的收藏」标题行靠右——旧版悬浮
                 // 右上与标题不同行；光标只能选中行尾「续费」两字（整行不可聚焦）
                 favHisItems(s, favItems, history, contentFocus, cardReg, nav, titleTop = 120f,
+                    updateFocus = updateFocus,
                     memberRow = if (com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED) {
                         { MemberInlineInfo(s = s, renewFocus = memberFocus) { nav.navigate("paywall") } }
                     } else null)
@@ -168,7 +178,11 @@ fun FavoritesScreen(nav: NavController) {
         } // ProvideNavScrolls(favScroll)
         MainTabBar(
             "favorites", { key -> navigateToTab(nav, key) }, { nav.navigate("search") }, tabFocus,
-            contentDownFocus = memberFocus,
+            contentDownFocus = when (favoritesDownTarget(com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED, hasFav, hasHis)) {
+                FavoritesDownTarget.MEMBER -> memberFocus
+                FavoritesDownTarget.CONTENT -> contentFocus
+                FavoritesDownTarget.UPDATE -> updateFocus
+            },
             contentDownScrollTop = { favListState.scrollToItem(0) },
             onTabFocused = { tabFocused = it },
             autoHide = true,   // v1.16：光标下移进内容区隐藏顶栏，回顶部显示
@@ -416,6 +430,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.favHisItems(
     cardReg: FocusRegistry,
     nav: androidx.navigation.NavController,
     titleTop: Float,
+    updateFocus: FocusRequester,
     memberRow: (@Composable () -> Unit)? = null,
 ) {
     val hasFav = favItems.isNotEmpty()
@@ -515,7 +530,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.favHisItems(
     }
     // 2026-09-22：手动「检查更新」入口——遥控 OK 直接查 APK 清单，
     // 结果行内回显（用户报「收不到更新提示」后加的手动通道）。
-    item(key = "update-row") { UpdateCheckRow(s) }
+    item(key = "update-row") { UpdateCheckRow(s, updateFocus) }
 }
 
 
@@ -524,7 +539,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.favHisItems(
  * 手动检查会忽略「稍后更新」记忆，因此点过稍后的版本也能重新拉起更新弹窗。
  */
 @Composable
-private fun UpdateCheckRow(s: Float) {
+private fun UpdateCheckRow(s: Float, focusRequester: FocusRequester) {
     val check by com.qiubo.optimaltv.apkupdate.ApkUpdateManager.checkState.collectAsStateWithLifecycle()
     var focused by remember { mutableStateOf(false) }
     Row(
@@ -554,6 +569,7 @@ private fun UpdateCheckRow(s: Float) {
                     scaleFocused = 1f,
                     focusedBg = null,
                     drawRing = false,
+                    externalFocusRequester = focusRequester,
                     onFocusedChange = { focused = it },
                 ) { com.qiubo.optimaltv.apkupdate.ApkUpdateManager.checkForUpdatesManually() }
                 .clip(RoundedCornerShape(50))
