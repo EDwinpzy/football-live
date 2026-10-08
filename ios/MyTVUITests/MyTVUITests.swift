@@ -61,6 +61,26 @@ final class MyTVUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testFixtureUnlicensedEpisodeShowsPlayerGateWithoutStreamRequest() {
+        let app = fixtureApp()
+        app.launch()
+
+        let firstCard = app.buttons["media-card-fixture-movie-1"]
+        XCTAssertTrue(firstCard.waitForExistence(timeout: 10))
+        firstCard.tap()
+
+        let summary = app.staticTexts["detail-summary"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 10))
+        let episode = app.buttons["episode-fixture-source-fixture-episode-1"]
+        XCTAssertTrue(episode.waitForExistence(timeout: 10))
+        episode.tap()
+
+        let licenseGate = app.descendants(matching: .any)["player-license-gate"]
+        XCTAssertTrue(licenseGate.waitForExistence(timeout: 10), "An unlicensed fixture playback route must stop at the activation gate.")
+        XCTAssertFalse(app.descendants(matching: .any)["native-video-player"].exists, "The activation gate must appear before AVPlayer is created.")
+        attachScreenshot(of: app, named: "fixture-player-license-gate")
+    }
+
     private func fixtureApp() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments.append("--ui-test-fixtures")

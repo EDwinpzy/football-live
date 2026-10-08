@@ -115,6 +115,7 @@ final class CoreTests: XCTestCase {
 
         XCTAssertEqual(components.path, "/web/api/relay")
         XCTAssertEqual(requests.all.first?.url?.path, "/web/vod/play/1292052/12/0")
+        XCTAssertEqual(stream.directURL?.absoluteString, "https://cdn.example.test/vod/playlist.m3u8?token=a+b&part=one")
         XCTAssertEqual(components.queryItems?.first(where: { $0.name == "u" })?.value, "https://cdn.example.test/vod/playlist.m3u8?token=a+b&part=one")
         XCTAssertEqual(components.queryItems?.first(where: { $0.name == "ref" })?.value, "none")
         XCTAssertTrue(components.percentEncodedQuery?.contains("token%3Da%2Bb%26part%3Done") == true)

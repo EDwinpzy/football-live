@@ -129,8 +129,10 @@ public struct FootballMatch: Identifiable, Codable, Hashable {
 
 public struct PlayableStream: Codable, Hashable {
     public var url: URL
+    public var directURL: URL?
 
-    public init(url: URL) {
+    public init(url: URL, directURL: URL? = nil) {
         self.url = url
+        self.directURL = directURL
     }
 }

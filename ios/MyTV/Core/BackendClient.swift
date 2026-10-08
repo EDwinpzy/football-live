@@ -161,7 +161,11 @@ public struct BackendClient {
               ["https", "http"].contains(streamURL.scheme?.lowercased() ?? "") else {
             throw BackendError.malformedPayload("服务器没有返回可播放地址。")
         }
-        return PlayableStream(url: relayURL(for: streamURL.absoluteString, ref: "none"))
+        let directURL = Self.isDirectPlaybackURL(streamURL) ? streamURL : nil
+        return PlayableStream(
+            url: relayURL(for: streamURL.absoluteString, ref: "none"),
+            directURL: directURL
+        )
     }
 
     public func channels() async throws -> [TVChannel] {
@@ -281,6 +285,14 @@ public struct BackendClient {
 
     private static func effectivePort(_ components: URLComponents) -> Int? {
         components.port ?? (components.scheme?.lowercased() == "https" ? 443 : 80)
+    }
+
+    private static func isDirectPlaybackURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased() else { return false }
+        return host != "localhost"
+            && host != "::1"
+            && !host.hasPrefix("127.")
     }
 
     func postLicense(
