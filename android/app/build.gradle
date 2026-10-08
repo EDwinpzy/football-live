@@ -132,8 +132,8 @@ android {
     // 必须严格递增：客户端 ApkUpdatePolicy 只比较 versionCode（manifest.versionCode
     // <= 本机 versionCode 即视为无更新），系统安装也不允许降级覆盖。V1.0 取 100 而不是
     // 10，是为了同时高于重置前的 42，已装 1.4x 的设备仍能收到 V1.0 的更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 110)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.1")
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 220)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "2.1")
         // 方案 §5：双 ABI split 思路——真机 arm64/v7a + 模拟器 x86_64（开发验证用）
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
         // AOSP 谷歌拼音解码器（搜索页拼音候选，2026-08-29）；默认 c++_static（new/delete 需要 libc++）
@@ -209,12 +209,8 @@ android {
             signingConfig signingConfigs.release
             // 正式包卡密门禁：默认开（2026-09-18 起）。
             //
-            // 2026-09-29 用户要求「暂时隐藏门禁、不需要激活」→ 置 false。
-            // 这是**临时**状态，不是废弃门禁：整套授权链路（LicenseManager /
-            // PaywallShared / activate 端点 / 卡密库）都还在，只是不再拦人。
-            // 恢复只需把下面改回 'true' 并重打 APK，无需动任何业务代码。
-            // ⚠️ 上架前务必确认这一行是 'true'（§11.4 的 Release 门槛不管这个）。
-            buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'
+            // 正式 APK 恢复卡密门禁（上架要求；2026-10-08）。
+            buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'
         }
         debug {
             // v1.20 QA：debug 也用发布签名——可覆盖安装 release（保激活/收藏等数据），

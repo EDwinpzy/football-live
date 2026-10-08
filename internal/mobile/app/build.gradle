@@ -127,14 +127,14 @@ android {
     // v1.35（2026-09-21）：长按画面左右两侧 = 3.0x 倍速播放；并含播放器渲染层 key
     // 失配修复（黑屏只剩声音 / 错误卡弹窗后音频仍响 / 切信号源无效）。
     // v1.36（2026-09-22）：「我的」页新增「检查更新」手动入口（手动检查忽略「稍后更新」记忆）。
-    // ---- 版本号规则（2026-09-22 重置，与 TV 版同一基线）----
+    // ---- 版本号规则（2026-09-22 重置；各渠道按各自已发布版本递增）----
     // 用户要求：APK 版本与更新记录清零，从 V1.0 重新开始，之后每版 +0.1。
     //   versionName = V1.0 / V1.1 / V1.2 …（界面展示用）
     //   versionCode = 主版本×100 + 次版本×10 → V1.0=100、V1.1=110、V1.2=120、V2.0=200
     // 必须严格递增：客户端只比较 versionCode，系统安装也不允许降级覆盖。V1.0 取 100
     // 而非 10，是为了高于重置前的 42，已装 1.4x 的设备仍能收到 V1.0 的更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 110)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "1.1")
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 200)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "2.0")
         // 与 TV 版一致的三 ABI（Chaquopy/libVLC so 需要）；移动版无 cpp 拼音解码器
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
 
@@ -195,12 +195,8 @@ android {
             signingConfig signingConfigs.release
         // 正式包卡密门禁：默认开（2026-09-18 起）。
         //
-        // 2026-09-29 用户要求「暂时隐藏门禁、不需要激活」→ 置 false。
-        // 这是**临时**状态，不是废弃门禁：整套授权链路（LicenseManager /
-        // PaywallShared / activate 端点 / 卡密库）都还在，只是不再拦人。
-        // 恢复只需把下面改回 'true' 并重打 APK，无需动任何业务代码。
-        // ⚠️ 上架前务必确认这一行是 'true'（§11.4 的 Release 门槛不管这个）。
-        buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'
+        // 正式 APK 恢复卡密门禁（上架要求；2026-10-08）。
+        buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'
         }
         debug {
             // v1.20 QA：debug 也用发布签名（同 TV 版）——可覆盖安装 release 保数据
