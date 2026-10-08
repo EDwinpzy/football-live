@@ -90,18 +90,18 @@ struct PlaybackView: View {
                   status.item === player?.currentItem else { return }
             recoverOrShowFailure(for: status.item)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemFailedToPlayToEndTime)) { notification in
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemFailedToPlayToEndTime).receive(on: DispatchQueue.main)) { notification in
             guard let failedItem = notification.object as? AVPlayerItem,
                   failedItem === player?.currentItem else { return }
             recoverOrShowFailure(for: failedItem)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemNewErrorLogEntry)) { notification in
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemNewErrorLogEntry).receive(on: DispatchQueue.main)) { notification in
             guard isDirectAttempt,
                   let failedItem = notification.object as? AVPlayerItem,
                   failedItem === player?.currentItem else { return }
             recoverOrShowFailure(for: failedItem)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemPlaybackStalled)) { notification in
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemPlaybackStalled).receive(on: DispatchQueue.main)) { notification in
             guard isDirectAttempt,
                   let stalledItem = notification.object as? AVPlayerItem,
                   stalledItem === player?.currentItem else { return }
@@ -259,6 +259,7 @@ struct PlaybackView: View {
         }
         return item.publisher(for: \.status, options: [.initial, .new])
             .map { (item: item, status: $0) }
+            .receive(on: DispatchQueue.main)
             .eraseToAnyPublisher()
     }
 
