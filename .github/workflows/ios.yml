@@ -31,16 +31,28 @@ jobs:
       - name: Diagnose real service connectivity with standard TLS
         run: |
           mkdir -p ios/build/delivery
-          curl --connect-timeout 15 --max-time 25 --cacert android/app/src/main/res/raw/mytv_migration_ca.pem \
+          if curl --connect-timeout 15 --max-time 25 --cacert android/app/src/main/res/raw/mytv_migration_ca.pem \
             --fail --show-error 'https://103.236.97.137:35208/web/vod/home?category=movie' \
-            -o ios/build/delivery/live-home.json 2>ios/build/delivery/live-network.log || cat ios/build/delivery/live-network.log
+            -o ios/build/delivery/live-home.json 2>ios/build/delivery/live-network.log; then
+            echo 'MYTV_LIVE_AVAILABLE=1' >> "$GITHUB_ENV"
+          else
+            echo 'MYTV_LIVE_AVAILABLE=0' >> "$GITHUB_ENV"
+            cat ios/build/delivery/live-network.log
+            echo '::warning::Cloud runner cannot reach the real service. Live UI acceptance remains unverified; deterministic native tests still run.'
+            echo 'Live service UI test excluded: cloud network preflight failed. See live-network.log; phone network/playback remains unverified.' > ios/build/delivery/LIVE-ACCEPTANCE.txt
+          fi
       - name: Native unit, UI, and live API tests
         run: |
           set -o pipefail
           mkdir -p ios/build/delivery
+          LIVE_TEST_ARGS=()
+          if [ "$MYTV_LIVE_AVAILABLE" != '1' ]; then
+            LIVE_TEST_ARGS=(-skip-testing:MyTVUITests/MyTVUITests/testRealServiceHomeLoadsWithoutActivationAndCapturesPortrait)
+          fi
           xcodebuild test -project ios/MyTV.xcodeproj -scheme MyTV \
             -destination "platform=iOS Simulator,id=$IOS_DEVICE_ID" \
             -parallel-testing-enabled NO -resultBundlePath ios/build/Tests.xcresult \
+            "${LIVE_TEST_ARGS[@]}" \
             CODE_SIGNING_ALLOWED=NO | tee ios/build/delivery/tests.log
       - name: Build unsigned device app for local free-account signing
         run: |
