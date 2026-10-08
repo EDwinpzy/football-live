@@ -225,7 +225,11 @@ class MainActivity : ComponentActivity() {
         com.qiubo.optimaltv.announcement.AnnouncementManager.onForegroundChanged(false)
         com.qiubo.optimaltv.hotupdate.HotUpdateManager.onForegroundChanged(false)
     }
-    override fun onStop() { super.onStop(); com.qiubo.optimaltv.OtvLog.w("activity ON_STOP（黑屏若发生在此后，见播放器/焦点日志上下文）") }
+    override fun onStop() {
+        com.qiubo.optimaltv.apkupdate.ApkUpdateManager.onForegroundChanged(false)
+        super.onStop()
+        com.qiubo.optimaltv.OtvLog.w("activity ON_STOP（黑屏若发生在此后，见播放器/焦点日志上下文）")
+    }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
