@@ -51,17 +51,13 @@ const BASE = (location.pathname.replace(/\/[^/]*$/, "") || "").replace(/\/+$/, "
    海报整片不出图。统一首选 img9，加载失败再按序轮换其他图床主机，哪个可达用哪个。 */
 const DOUBAN_IMG_HOSTS = ["img9.doubanio.com", "img3.doubanio.com", "img2.doubanio.com", "img1.doubanio.com"];
 const DOUBAN_IMG_RE = /^(https?:\/\/)img\d+\.doubanio\.com/i;
-/* asset.doubanio.com（默认海报/剧照）既没有 imgN 镜像可轮换，浏览器也发不出豆瓣 Referer，
-   直连一律回 HTML 被 ORB 拦掉（详情页左侧海报整片空白）。这类改走中继，由服务端补
-   豆瓣 Referer（ref=douban）。 */
+/* Douban CDN 图片走 /hhkan/proxy：服务端补豆瓣 Referer、轮换镜像并缓存海报。 */
 const DOUBAN_ANY_RE = /^(https?:\/\/)([a-z0-9-]+\.)*douban(io)?\.com/i;
-const DOUBAN_RELAY_PREFIX = "/api/relay?u=";
+const DOUBAN_RELAY_PREFIX = "/hhkan/proxy?u=";
 function doubanImg(u) {
-  /* 豆瓣 imgN 与 asset 图床都要求豆瓣 Referer；浏览器从网页版直连时会拿到
-     418/HTML（甚至被 ORB 拦截），所以统一走同源中继，由服务端补 Referer、轮换
-     镜像并校验 Content-Type。不要只改 imgN 主机：同一主机对不同访问来源仍会拒绝。 */
+  /* imgN 与 asset 图床都要求豆瓣 Referer；/hhkan/proxy 同时提供服务端镜像轮换和海报缓存。 */
   if (DOUBAN_ANY_RE.test(u))
-    return DOUBAN_RELAY_PREFIX + encodeURIComponent(u) + "&ref=douban";
+    return DOUBAN_RELAY_PREFIX + encodeURIComponent(u) + "&poster_cache=2";
   return u;
 }
 document.addEventListener("error", ev => {
@@ -98,7 +94,7 @@ const IS_LOCAL_BACKEND = (() => {
 function img(u) {
   u = doubanImg((u || "").trim());
   if (!u || u.startsWith("data:")) return u || "";
-  /* 豆瓣非 imgN 图床的中继路径：已经是本服务地址，不能再套一层代理 */
+  /* 豆瓣图床的中继路径：已经是本服务地址，不能再套一层代理 */
   if (u.startsWith(DOUBAN_RELAY_PREFIX)) return BASE + u;
   /* 本地内嵌后端：一律走中继（镜像轮换 + 磁盘缓存 + Referer 兜底）。
      2026-09-19 修：vres.* 封面原先被直接放行给浏览器直连，CDN 偶发拒连/超时后
@@ -1253,6 +1249,16 @@ const LIB_HOT_SECS = {
 };
 const BLOCK_ORDER = ["最近热门", "最新上映", "豆瓣高分"];
 const SOURCE_BLOCK_ORDER = ["最近热门", "最新上映", "豆瓣高分"];
+const VOD_LIB_PAGED_CATEGORIES = new Set(["movie", "tv", "anime", "variety", "short"]);
+const VOD_LIB_PAGE_STATE = new Map();
+
+function displayLibSectionName(name) {
+  return name === "最新上映" ? "最近更新" : name;
+}
+
+function displayVodCategoryName(id, name) {
+  return /(?:^|:)anime$/.test(String(id || "")) ? "3D国漫" : name;
+}
 
 function canonicalLibBlockName(raw) {
   const name = os(raw).replace(/\s+/g, "");
@@ -1309,8 +1315,11 @@ async function fetchLibBlocks(cid, homeSections, refresh = false) {
 
   const hkCid = HHKAN_CHANNELS[cid];
   if (!hkCid) return blocks;
+  /* 动漫目录严格只使用 /vod/home?category=anime 的内容；HHKan 频道无法保证国漫语义。 */
+  if (cid === "anime") return blocks;
 
-  /* 豆瓣缺栏（或整页降级）时用好好看补位。好好看是唯一卡片源，这里是它
+  /* 豆瓣缺栏（或整页降级）时用好好看补位。所有路径均绑定 hkCid；
+     不调用 /hhkan/latest 或 /hhkan/show/0，避免跨分类混入内容。好好看是唯一卡片源，这里是它
      在前端唯一的消费点——2026-09-30 之前这段是死代码（上面那行 return
      把它整个跳过了），所以页面上从没出现过好好看的内容。 */
   let primary = null;
@@ -1382,7 +1391,7 @@ function refreshStaleVodHome(cid) {
 
 /* v1.25 需求①：板块 SWR 持久缓存（localStorage，10min 新鲜阈值）——
    旧值先上屏秒渲染；足够新鲜（≤10min 且含最近热门）不再回源，否则后台刷新覆盖 */
-function libCacheKey(cid) { return "otvw:lib:v4:" + cid; }
+function libCacheKey(cid) { return "otvw:lib:v5:" + cid; }
 async function fetchLibBlocksSWR(cid, homeSections, cb, refresh = false) {
   const cached = store.get(libCacheKey(cid), null);
   if (cached && cached.sections && cached.sections.length) {
@@ -1600,7 +1609,7 @@ async function initVod() {
 
 /* App VodScreen chips：目录 categories + 末尾「全部 ›」；记住上次分类；点分类切三块，点「全部›」开全部页 */
 function vodCategories() {
-  return vod.cat ? vod.cat.cats.map(c => ({ id: c.id, name: c.name })).concat([{ id: "", name: "全部 ›" }])
+  return vod.cat ? vod.cat.cats.map(c => ({ id: c.id, name: displayVodCategoryName(c.id, c.name) })).concat([{ id: "", name: "全部 ›" }])
     : [{ id: "", name: "全部 ›" }];
 }
 function renderCatChips() {
@@ -1641,6 +1650,8 @@ function renderVodLib(refresh = false) {
   }
   const cid = sel.id.replace("douban:", "");
   const mySel = vod.catSel;
+  const paged = VOD_LIB_PAGED_CATEGORIES.has(cid);
+  const columns = state.portrait ? 3 : 7;
   const paint = sections => {
     if (vod.catSel !== mySel) return;   /* 快速切分类防旧响应覆盖 */
     vod.sections = sections;
@@ -1649,17 +1660,159 @@ function renderVodLib(refresh = false) {
     if (!sections.length) { host.innerHTML = `<div class="page-loading">— 加载中 …</div>`; return; }
     let html = "";
     sections.forEach((s, si) => {
-      html += `<div class="row-sec-title" style="padding-top:${si === 0 ? 26 : 44}px">${esc(s.name)}</div>
-        ${s.items && s.items.length
-          ? `<div class="hscroll poster-row">${s.items.map(it => libCard(it)).join("")}</div>`
-          : `<div class="lib-empty">暂无${esc(s.name)}内容</div>`}`;
+      const displayName = displayLibSectionName(s.name);
+      const items = Array.isArray(s.items) ? s.items : [];
+      if (paged && items.length) {
+        const key = `${cid}:${si}:${s.name}`;
+        let pageState = VOD_LIB_PAGE_STATE.get(key);
+        if (!pageState) pageState = { page: 0 };
+        pageState.items = items;
+        pageState.columns = columns;
+        pageState.pageSize = columns * 2;
+        pageState.page = Math.min(pageState.page, Math.max(0, Math.ceil(items.length / pageState.pageSize) - 1));
+        VOD_LIB_PAGE_STATE.set(key, pageState);
+        html += `<section class="lib-section" data-lib-key="${esc(key)}">
+          <div class="row-sec-title" style="padding-top:${si === 0 ? 26 : 44}px">${esc(displayName)}</div>
+          <div class="lib-page-grid"></div>
+          <div class="lib-pager">
+            <button type="button" class="lib-page-btn" data-lib-page-prev aria-label="上一页">上一页</button>
+            <span class="lib-page-count" data-lib-page-count aria-live="polite"></span>
+            <button type="button" class="lib-page-btn" data-lib-page-next aria-label="下一页">下一页</button>
+          </div>
+        </section>`;
+        return;
+      }
+      html += `<div class="row-sec-title" style="padding-top:${si === 0 ? 26 : 44}px">${esc(displayName)}</div>
+        ${items.length
+          ? `<div class="hscroll poster-row">${items.map(it => libCard(it)).join("")}</div>`
+          : `<div class="lib-empty">暂无${esc(displayName)}内容</div>`}`;
     });
     host.innerHTML = (html || `<div class="page-loading">暂无内容</div>`) + `<div style="height:80px"></div>`;
     bindCards("#vodSections");
+    if (paged) {
+      bindVodLibPager(host);
+      host.querySelectorAll(".lib-section").forEach(section => bindVodLibPage(section, null));
+    }
   };
   host.innerHTML = `<div class="page-loading">— 加载中 …</div>`;
   fetchLibBlocksSWR(cid, vod.homeSections, paint, refresh);
 }
+
+function bindVodLibPager(host) {
+  host.querySelectorAll(".lib-section").forEach(section => {
+    const key = section.dataset.libKey;
+    const state = VOD_LIB_PAGE_STATE.get(key);
+    if (!state) return;
+    section.querySelector("[data-lib-page-prev]").addEventListener("click", () => bindVodLibPage(section, state.page - 1));
+    section.querySelector("[data-lib-page-next]").addEventListener("click", () => bindVodLibPage(section, state.page + 1));
+  });
+  if (host.dataset.libPagerInteractionsBound) return;
+  host.dataset.libPagerInteractionsBound = "true";
+  host.addEventListener("keydown", event => {
+    const card = event.target.closest && event.target.closest(".lib-page-grid .pcard");
+    if (!card) return;
+    const section = card.closest(".lib-section");
+    const state = section && VOD_LIB_PAGE_STATE.get(section.dataset.libKey);
+    const grid = card.closest(".lib-page-grid");
+    if (!state || !grid) return;
+    const cards = Array.from(grid.querySelectorAll(".pcard"));
+    const index = cards.indexOf(card);
+    if (index < 0) return;
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      card.click();
+      return;
+    }
+    let target = -1;
+    if (event.key === "ArrowLeft") {
+      if (index % state.columns > 0) target = index - 1;
+      else if (state.page > 0) {
+        event.preventDefault();
+        const previousStart = (state.page - 1) * state.pageSize;
+        const previousLength = Math.min(state.pageSize, state.items.length - previousStart);
+        const row = Math.floor(index / state.columns);
+        bindVodLibPage(section, state.page - 1, Math.min(row * state.columns + state.columns - 1, previousLength - 1));
+        return;
+      }
+    } else if (event.key === "ArrowRight") {
+      if (index % state.columns < state.columns - 1 && index + 1 < cards.length) target = index + 1;
+      else if (state.page + 1 < Math.ceil(state.items.length / state.pageSize)) {
+        event.preventDefault();
+        const row = Math.floor(index / state.columns);
+        bindVodLibPage(section, state.page + 1, row * state.columns);
+        return;
+      }
+    } else if (event.key === "ArrowUp" && index >= state.columns) target = index - state.columns;
+    else if (event.key === "ArrowDown" && index + state.columns < cards.length) target = index + state.columns;
+    else if (event.key === "PageUp" && state.page > 0) {
+      event.preventDefault();
+      bindVodLibPage(section, state.page - 1, Number.MAX_SAFE_INTEGER);
+      return;
+    } else if (event.key === "PageDown" && state.page + 1 < Math.ceil(state.items.length / state.pageSize)) {
+      event.preventDefault();
+      bindVodLibPage(section, state.page + 1, 0);
+      return;
+    }
+    if (target >= 0) {
+      event.preventDefault();
+      cards[target].focus();
+    }
+  });
+  let swipeStart = null;
+  host.addEventListener("touchstart", event => {
+    const grid = event.target.closest && event.target.closest(".lib-page-grid");
+    if (!grid || event.touches.length !== 1) { swipeStart = null; return; }
+    const touch = event.touches[0];
+    swipeStart = { grid, x: touch.clientX, y: touch.clientY };
+  }, { passive: true });
+  host.addEventListener("touchend", event => {
+    if (!swipeStart) return;
+    const start = swipeStart;
+    swipeStart = null;
+    const touch = event.changedTouches[0];
+    if (!touch) return;
+    const dx = touch.clientX - start.x, dy = touch.clientY - start.y;
+    if (Math.abs(dx) < 48 || Math.abs(dx) < Math.abs(dy) * 1.3) return;
+    const section = start.grid.closest(".lib-section");
+    const state = section && VOD_LIB_PAGE_STATE.get(section.dataset.libKey);
+    if (!state) return;
+    const nextPage = state.page + (dx < 0 ? 1 : -1);
+    if (nextPage < 0 || nextPage >= Math.ceil(state.items.length / state.pageSize)) return;
+    bindVodLibPage(section, nextPage);
+  }, { passive: true });
+}
+
+function bindVodLibPage(section, page, focusIndex) {
+  const state = VOD_LIB_PAGE_STATE.get(section.dataset.libKey);
+  if (!state) return;
+  const pages = Math.max(1, Math.ceil(state.items.length / state.pageSize));
+  if (page !== null && page !== undefined) state.page = Math.max(0, Math.min(page, pages - 1));
+  const start = state.page * state.pageSize;
+  const items = state.items.slice(start, start + state.pageSize);
+  const grid = section.querySelector(".lib-page-grid");
+  grid.innerHTML = items.map(it => libCard(it, state.columns === 3 ? 21 : 24)).join("");
+  const cards = Array.from(grid.querySelectorAll(".pcard"));
+  cards.forEach(card => { card.tabIndex = 0; card.setAttribute("role", "button"); });
+  bindCardElements(cards);
+  section.querySelector("[data-lib-page-count]").textContent = `${state.page + 1} / ${pages}`;
+  section.querySelector("[data-lib-page-prev]").disabled = state.page <= 0;
+  section.querySelector("[data-lib-page-next]").disabled = state.page >= pages - 1;
+  if (focusIndex !== null && focusIndex !== undefined && cards.length) {
+    const index = focusIndex === Number.MAX_SAFE_INTEGER ? cards.length - 1 : Math.min(focusIndex, cards.length - 1);
+    cards[index].focus();
+  }
+}
+
+let vodLibPortrait = state.portrait;
+addEventListener("resize", () => {
+  if (vodLibPortrait === state.portrait) return;
+  vodLibPortrait = state.portrait;
+  setTimeout(() => {
+    if (state.tab !== "vod" || !vod.sections) return;
+    const selected = vodCategories()[vod.catSel];
+    if (selected && VOD_LIB_PAGED_CATEGORIES.has(selected.id.replace("douban:", ""))) renderVodLib();
+  }, 80);
+});
 
 /* 海报竖卡（232×352 r12 + remark 角标）。
  * 2026-09-17 用户要求：卡片下方不再有副行（年份/豆瓣评分），只留海报 + 片名；
@@ -1672,7 +1825,10 @@ function posterCard(it, titleSize) {
 }
 function libCard(it, titleSize) { return posterCard(it, titleSize); }
 function bindCards(sel) {
-  $$(sel + " .pcard").forEach(c => c.addEventListener("click", () => {
+  bindCardElements($$(sel + " .pcard"));
+}
+function bindCardElements(cards) {
+  cards.forEach(c => c.addEventListener("click", () => {
     const t = c.querySelector(".pc-title");
     const im = c.querySelector(".pc-img img");
     openDetail(c.dataset.vid, { title: t ? t.textContent.trim() : "", cover: im ? im.src : "" });
@@ -1775,7 +1931,7 @@ const all = {
   /* 筛选面板收起态（2026-09-18 需求）：记忆上次选择，默认展开 */
   filterOpen: store.get("otvw:filterOpen", true) !== false,
 };
-const ALL_CATS = [["movie", "电影"], ["tv", "电视剧"], ["anime", "动漫"], ["variety", "综艺"], ["short", "短剧"]];
+const ALL_CATS = [["movie", "电影"], ["tv", "电视剧"], ["anime", "3D国漫"], ["variety", "综艺"], ["short", "短剧"]];
 
 async function openAll(cid) {
   /* App：无路由参数——进页恢复上次类别（allLastCat，默认「全部」） */
@@ -2392,13 +2548,13 @@ function startPlayAt(idx, resumePos) {
 /* ================================================================
  * 搜索（SearchScreen 复刻：本地目录 + 全站搜索，中文自动搜/字母显式搜）
  * ================================================================ */
-const RESULT_CATS = ["全部", "电影", "电视剧", "动漫", "综艺", "短剧"];
+const RESULT_CATS = ["全部", "电影", "电视剧", "3D国漫", "综艺", "短剧"];
 const TV_TAG_RE = /欧美剧|国产剧|香港剧|台湾剧|韩国剧|日本剧|海外剧|泰剧|美剧|英剧|连续剧|电视剧|网剧/;
 /* App classifyVod：meta 正则 + 集数 */
 function classifyVod(meta, epCount) {
   meta = meta || "";
   if (meta.includes("短剧")) return "短剧";
-  if (meta.includes("动漫")) return "动漫";
+  if (meta.includes("动漫")) return "3D国漫";
   if (meta.includes("综艺")) return "综艺";
   if (TV_TAG_RE.test(meta)) return "电视剧";
   if (epCount > 1) return "电视剧";
@@ -2446,7 +2602,7 @@ function renderSearch() {
 }
 /* 已知目录分类直接采用；目录外前 24 条拉详情归类（并发 6） */
 async function classifyResults(items) {
-  const categories = { movie: "电影", tv: "电视剧", anime: "动漫", variety: "综艺", short: "短剧" };
+  const categories = { movie: "电影", tv: "电视剧", anime: "3D国漫", variety: "综艺", short: "短剧" };
   for (const it of items) {
     const m = /^douban:(movie|tv|anime|variety|short)$/.exec(it.categoryId || "");
     if (m) search.catMap[it.id] = categories[m[1]];
@@ -2459,7 +2615,7 @@ async function classifyResults(items) {
       let cat = null;
       const m = /^hhkan:(\d)$/.exec(it.categoryId || "");
       if (m && ["1", "2", "3", "4", "6"].includes(m[1])) {
-        cat = { "1": "电影", "2": "电视剧", "3": "动漫", "4": "综艺", "6": "短剧" }[m[1]];
+        cat = { "1": "电影", "2": "电视剧", "3": "3D国漫", "4": "综艺", "6": "短剧" }[m[1]];
       } else {
         try {
           const d = await fetchJSON(BASE + "/hhkan/detail/" + it.id, { timeout: 45000 });

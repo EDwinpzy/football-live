@@ -155,7 +155,7 @@ fun VodScreen(nav: NavController) {
                 )
                 val libGap = if (portrait) 12f else 20f
                 // 片库状态提升到组合作用域（LazyColumn builder 非组合上下文）
-                val categories = remember(cat) { cat.categories.map { it.id to it.name } + ("" to "全部 ›") }
+                val categories = remember(cat) { cat.categories.map { it.id to if (it.id.removePrefix("douban:") == "anime") "3D国漫" else it.name } + ("" to "全部 ›") }
                 // v1.17 需求：进页恢复上次选中的分类 chip（按分类 ID 持久化），不回「电影」
                 var catSel by remember(cat) { mutableStateOf(0) }
                 LaunchedEffect(cat) {
@@ -167,24 +167,19 @@ fun VodScreen(nav: NavController) {
                 // 分类 tab 下三块（原版 LIB_BLOCKS 数据源：最近热门=home 板块 / 最新上线=channel / 最近更新=latest；
                 // home/channel/latest 全挂时降级频道页三栏目 channel-sections）。「全部 ›」独立跳转 all 页
                 val selCatId = categories.getOrNull(catSel)?.first.orEmpty()
-                LaunchedEffect(selCatId) { Graph.repo.libBlocks(selCatId, force = true) }
-                val libBlocks by Graph.repo.libBlocksFlow.collectAsStateWithLifecycle()
-                val fallbackSections by Graph.repo.sectionsFlow.collectAsStateWithLifecycle()
-                val hotSettled by Graph.repo.hotSettledFlow.collectAsStateWithLifecycle()
+                var sectionLoading by remember(selCatId) { mutableStateOf(true) }
+                LaunchedEffect(selCatId) {
+                    try { Graph.repo.channelSections(selCatId, force = true) } finally { sectionLoading = false }
+                }
                 /* 分类 id 现为 `douban:movie` 形态；用与 libBlocks 同一套解析，
                    否则恒为 null → 三栏恒空（影视 tab 一直「暂无内容」）。 */
                 val selCid = com.qiubo.optimaltv.data.repo.VodRepository.categoryCid(selCatId)
                 /* 需求④（与 TV 版同款）：热门块就绪前不渲染部分板块/兜底网格，
                  * 防「兜底网格→部分板块→热门插最前」结构顶替导致的列表跳动 */
-                val sections = if (selCid == null) emptyList()
-                    else if (selCid !in hotSettled) emptyList()
-                    else libBlocks[selCid].orEmpty().ifEmpty { fallbackSections[selCid].orEmpty() }
-                val showLibLoading = selCid != null && selCid !in hotSettled
-                // 无板块数据兜底：合并网格（原版同为 lib-row 换行结构）
-                val gridItems = remember(cat, catSel) {
-                    val sel = selCatId
-                    cat.dedupedItems.filter { sel.isBlank() || it.categoryId == sel }
-                }.take(18)
+                val doubanSections by Graph.repo.sectionsFlow.collectAsStateWithLifecycle()
+                val sections = if (selCid == null) emptyList() else doubanSections[selCid].orEmpty()
+
+                val showLibLoading = sectionLoading && sections.isEmpty()
 
                 LazyColumn(
                     state = vodListState,
@@ -270,7 +265,7 @@ fun VodScreen(nav: NavController) {
                         sections.forEachIndexed { si, sec ->
                             item(key = "lib-sec-h-${sec.name}") {
                                 Text(
-                                    sec.name, color = OtvColors.White.copy(alpha = 0.92f),
+                                    (if (sec.name == "最新上映") "最近更新" else sec.name), color = OtvColors.White.copy(alpha = 0.92f),
                                     fontSize = 38f.sxs(s), fontWeight = FontWeight.Bold,
                                     modifier = Modifier
                                         .padding(start = homePad, end = homePad)
@@ -278,33 +273,14 @@ fun VodScreen(nav: NavController) {
                                         .padding(bottom = 18f.sx(s)),
                                 )
                             }
-                            sec.items.chunked(libCols).forEachIndexed { ri, rowItems ->
-                                item(key = "lib-sec-${sec.name}-r$ri") {
-                                    Row(
-                                        horizontalArrangement = Arrangement.spacedBy(libGap.sx(s)),
-                                        modifier = Modifier
-                                            .padding(start = homePad, end = homePad)
-                                            .padding(top = if (ri == 0) 0f.sx(s) else 34f.sx(s)),
-                                    ) {
-                                        rowItems.forEach { LibCard(nav, it, s, compact = portrait) }
-                                        repeat(libCols - rowItems.size) { Spacer(Modifier.weight(1f)) }
-                                    }
-                                }
+                            item(key = "lib-pages-$selCid-${sec.name}") {
+                                PagedMobileLibSection(nav, sec.items, s, portrait, libCols, libGap, homePad)
                             }
                         }
                     } else {
-                        gridItems.chunked(libCols).forEachIndexed { ri, rowItems ->
-                            item(key = "lib-fb-r$ri") {
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(libGap.sx(s)),
-                                    modifier = Modifier
-                                        .padding(start = homePad, end = homePad)
-                                        .padding(top = if (ri == 0) 26f.sx(s) else 34f.sx(s)),
-                                ) {
-                                    rowItems.forEach { LibCard(nav, it, s, compact = portrait) }
-                                    repeat(libCols - rowItems.size) { Spacer(Modifier.weight(1f)) }
-                                }
-                            }
+                        item(key = "lib-empty") {
+                            Text("暂无豆瓣栏目内容", color = OtvColors.White50, fontSize = 26f.sxs(s),
+                                modifier = Modifier.padding(start = homePad, top = 26f.sx(s)))
                         }
                     }
                     item(key = "lib-pad") { Spacer(Modifier.height(80f.sx(s))) }
@@ -526,6 +502,40 @@ private fun VodHeroBand(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun PagedMobileLibSection(nav: NavController, items: List<VodItem>, s: Float, compact: Boolean, cols: Int, gap: Float, sidePadding: androidx.compose.ui.unit.Dp) {
+    val pages = remember(items, cols) { items.chunked(cols * 2) }
+    val pager = rememberPagerState(pageCount = { pages.size })
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    if (pages.isEmpty()) return
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = sidePadding)) {
+        val cardWidth = (maxWidth - gap.sx(s) * (cols - 1)) / cols
+        val rowHeight = cardWidth * (352f / 232f) + 42f.sx(s)
+        Column {
+            HorizontalPager(state = pager, modifier = Modifier.fillMaxWidth()) { page ->
+                Column(verticalArrangement = Arrangement.spacedBy(24f.sx(s))) {
+                    repeat(2) { row ->
+                        Row(Modifier.fillMaxWidth().height(rowHeight), horizontalArrangement = Arrangement.spacedBy(gap.sx(s))) {
+                            repeat(cols) { col ->
+                                val item = pages[page].getOrNull(row * cols + col)
+                                if (item == null) Spacer(Modifier.weight(1f)) else LibCard(nav, item, s, compact)
+                            }
+                        }
+                    }
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                Text("上一页", color = if (pager.currentPage > 0) OtvColors.White else OtvColors.White30, fontSize = 24f.sxs(s),
+                    modifier = Modifier.tapCard { scope.launch { if (pager.currentPage > 0) pager.animateScrollToPage(pager.currentPage - 1) } }.padding(16f.sx(s)))
+                Text("${pager.currentPage + 1} / ${pages.size}", color = OtvColors.White, fontSize = 24f.sxs(s))
+                Text("下一页", color = if (pager.currentPage < pages.lastIndex) OtvColors.White else OtvColors.White30, fontSize = 24f.sxs(s),
+                    modifier = Modifier.tapCard { scope.launch { if (pager.currentPage < pages.lastIndex) pager.animateScrollToPage(pager.currentPage + 1) } }.padding(16f.sx(s)))
             }
         }
     }

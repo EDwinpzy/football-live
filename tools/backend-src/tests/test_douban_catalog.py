@@ -40,8 +40,12 @@ def home_fetch(rows_by_sort, details):
             sid = url.rstrip("/").rsplit("/", 1)[-1]
             return details.get(sid, {})
         query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-        rows = rows_by_sort.get((query.get("sort") or ["U"])[0]) or []
-        start = int((query.get("start") or ["0"])[0])
+        order = (query.get("sort") or ["U"])[0]
+        if order == "recommend":
+            order = {"最新": "R", "豆瓣高分": "S"}.get((query.get("tag") or [""])[0], "U")
+        order = {"time": "R", "rank": "S"}.get(order, order)
+        rows = rows_by_sort.get(order) or []
+        start = int((query.get("start") or query.get("page_start") or ["0"])[0])
         return search_payload(rows[start:start + douban_catalog.EXPLORE_PAGE_SIZE])
     return fetch
 
@@ -73,8 +77,8 @@ class DoubanCatalogTest(unittest.TestCase):
     def test_failed_refresh_keeps_last_success(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache = douban_catalog.JsonDiskCache(tmp)
-            cache.put("home:movie", {"sections": [1]}, fetched_at=100)
-            self.assertEqual(cache.get_stale("home:movie", now=999999)["sections"], [1])
+            cache.put("home:cn3d-v2:movie", {"sections": [1]}, fetched_at=100)
+            self.assertEqual(cache.get_stale("home:cn3d-v2:movie", now=999999)["sections"], [1])
 
     def test_first_run_uses_bundled_snapshot(self):
         """首装 + 上游离线：随包快照必须顶上来（有内容才算「用了快照」，空快照是
@@ -228,7 +232,7 @@ class DoubanCatalogTest(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmp:
             cache = douban_catalog.JsonDiskCache(tmp)
-            cache.put("home:variety", {
+            cache.put("home:cn3d-v2:variety", {
                 "category": "variety", "stale": False, "source": "douban",
                 "sections": [
                     {"title": "最近热门", "items": [{"douban_id": "1", "title": "上一版热门"}]},
@@ -239,7 +243,7 @@ class DoubanCatalogTest(unittest.TestCase):
             result = catalog.home("variety")
             self.assertTrue(result["stale"])
             self.assertEqual([len(section["items"]) for section in result["sections"]], [1, 1, 1])
-            cached = cache.get_stale("home:variety")
+            cached = cache.get_stale("home:cn3d-v2:variety")
             self.assertEqual([len(section["items"]) for section in cached["sections"]], [1, 1, 1])
 
     def test_throttled_home_without_cache_falls_back_to_snapshot(self):
@@ -260,7 +264,7 @@ class DoubanCatalogTest(unittest.TestCase):
             {"title": "豆瓣高分", "items": [{"douban_id": "3", "title": "快照高分"}]}]}}}
 
         def fetch(url):
-            if "sort=U" in url:
+            if "tag=" + urllib.parse.quote("热门") in url:
                 return search_payload([{"id": "9", "title": "新鲜热门", "rate": "9.0"}])
             return {"data": []}
 
@@ -692,7 +696,7 @@ class DoubanCatalogTest(unittest.TestCase):
         """TTL 过期不能把用户扣在请求上：旧值先上屏，抓取转后台，下一次读到新值。"""
         with tempfile.TemporaryDirectory() as tmp:
             cache = douban_catalog.JsonDiskCache(tmp)
-            cache.put("home:variety", {
+            cache.put("home:cn3d-v2:variety", {
                 "category": "variety", "stale": False, "source": "douban",
                 "sections": [{"title": title, "items": [{"douban_id": "1", "title": "上一版"}]}
                              for title in douban_catalog.HOME_SECTION_NAMES],
@@ -708,17 +712,17 @@ class DoubanCatalogTest(unittest.TestCase):
             # 后台刷新不受 time.sleep 补丁影响：借 Event.wait 当真实等待。
             tick = threading.Event()
             for _ in range(250):
-                refreshed = cache.get_stale("home:variety")
+                refreshed = cache.get_stale("home:cn3d-v2:variety")
                 if refreshed["sections"][0]["items"][0]["title"] == "新一版":
                     break
                 tick.wait(0.02)
-            self.assertEqual(cache.get_stale("home:variety")["sections"][0]["items"][0]["title"], "新一版")
+            self.assertEqual(cache.get_stale("home:cn3d-v2:variety")["sections"][0]["items"][0]["title"], "新一版")
 
     def test_explicit_home_refresh_bypasses_still_fresh_cache(self):
         """用户再次打开影视页时，即使六小时 TTL 未到也必须检查新增影片。"""
         with tempfile.TemporaryDirectory() as tmp:
             cache = douban_catalog.JsonDiskCache(tmp)
-            cache.put("home:variety", {
+            cache.put("home:cn3d-v2:variety", {
                 "category": "variety", "stale": False, "source": "douban",
                 "sections": [{"title": title, "items": [{"douban_id": "1", "title": "缓存旧片"}]}
                              for title in douban_catalog.HOME_SECTION_NAMES],
@@ -773,11 +777,11 @@ class DoubanCatalogTest(unittest.TestCase):
             # 后台刷新（真实等待：time.sleep 已被本用例补丁成空操作）
             tick = threading.Event()
             for _ in range(250):
-                refreshed = cache.get_stale("home:variety")
+                refreshed = cache.get_stale("home:cn3d-v2:variety")
                 if refreshed and refreshed["sections"][0]["items"][0]["title"] == "新一版":
                     break
                 tick.wait(0.02)
-            self.assertEqual(cache.get_stale("home:variety")["sections"][0]["items"][0]["title"], "新一版")
+            self.assertEqual(cache.get_stale("home:cn3d-v2:variety")["sections"][0]["items"][0]["title"], "新一版")
             # 后台写入后，后续请求直接吃新值（源站结果，不再是快照）
             self.assertEqual(catalog.home("variety")["source"], "douban")
 
@@ -865,9 +869,9 @@ class DoubanCatalogTest(unittest.TestCase):
                 "id": "douban:1", "douban_id": "1", "title": "旧详情占位图",
                 "poster_url": placeholder, "hero_url": placeholder, "backdrop_url": placeholder,
             }
-            cache.put("home:movie", cached_home)
+            cache.put("home:cn3d-v2:movie", cached_home)
             cache.put("detail:1", cached_detail)
-            home_fetched_at = cache.envelope("home:movie")["fetched_at"]
+            home_fetched_at = cache.envelope("home:cn3d-v2:movie")["fetched_at"]
             detail_fetched_at = cache.envelope("detail:1")["fetched_at"]
             catalog = douban_catalog.DoubanCatalog(
                 fetch=lambda *_args: (_ for _ in ()).throw(AssertionError("fresh cache should not fetch")),
@@ -876,12 +880,12 @@ class DoubanCatalogTest(unittest.TestCase):
 
             home = catalog.home("movie")
             detail = catalog.detail("1")
-            self.assertEqual(cache.get_stale("home:movie")["sections"][0]["items"][0]["poster_url"], "")
+            self.assertEqual(cache.get_stale("home:cn3d-v2:movie")["sections"][0]["items"][0]["poster_url"], "")
             self.assertEqual(cache.get_stale("detail:1")["poster_url"], "")
-            self.assertEqual(cache.envelope("home:movie")["fetched_at"], home_fetched_at)
+            self.assertEqual(cache.envelope("home:cn3d-v2:movie")["fetched_at"], home_fetched_at)
             self.assertEqual(cache.envelope("detail:1")["fetched_at"], detail_fetched_at)
             stale_fetched_at = time.time() - douban_catalog.TTL["home"] - 60
-            cache.put("home:tv", {
+            cache.put("home:cn3d-v2:tv", {
                 "category": "tv",
                 "sections": [{"title": title, "items": [
                     {"id": "douban:3", "title": "过期缓存占位图", "poster_url": placeholder,
@@ -892,8 +896,8 @@ class DoubanCatalogTest(unittest.TestCase):
             stale_home = catalog.home("tv")
             self.assertEqual(stale_home["source"], "douban-cache")
             self.assertEqual(stale_home["sections"][0]["items"][0]["poster_url"], "")
-            self.assertEqual(cache.get_stale("home:tv")["sections"][0]["items"][0]["poster_url"], "")
-            self.assertEqual(cache.envelope("home:tv")["fetched_at"], stale_fetched_at)
+            self.assertEqual(cache.get_stale("home:cn3d-v2:tv")["sections"][0]["items"][0]["poster_url"], "")
+            self.assertEqual(cache.envelope("home:cn3d-v2:tv")["fetched_at"], stale_fetched_at)
 
         home_items = home["sections"][0]["items"]
         self.assertEqual(home_items[0]["poster_url"], "")

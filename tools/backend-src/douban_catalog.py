@@ -23,6 +23,8 @@ CATEGORY_VALUES = {"movie", "tv", "anime", "variety", "short"}
 # 豆瓣 Explore 的搜索接口：`recent_hot` 会忽略 category/type 参数（三种排序拿到
 # 同一份列表），只有这个接口真正支持排序与类型/地区/年份/评分筛选。
 EXPLORE_API = "https://movie.douban.com/j/new_search_subjects"
+HOME_API = "https://movie.douban.com/j/search_subjects"
+HOME_CACHE_PREFIX = "home:cn3d-v2:"
 SEARCH_API = "https://m.douban.com/rexxar/api/v2/search/subjects"
 SUGGEST_API = "https://movie.douban.com/j/subject_suggest"
 EXPLORE_PAGE_SIZE = 20
@@ -58,10 +60,53 @@ SHORT_FORM_GENRES = ("短片", "短剧", "微短剧", "竖屏剧", "迷你剧")
 SHORT_EPISODE_MINUTES = 5    # 单集 ≤ 5 分钟 → 竖屏短剧（例：152 集 × 2 分钟）
 # original_title 也要并进来：现场演出品牌常常只出现在原名里（例：National Theatre Live: …）
 DETAIL_MERGE_FIELDS = ("genres", "regions", "year", "aliases", "tags", "durations", "episodes_count",
-                       "original_title")
+                       "original_title", "summary")
 ENRICH_WORKERS = 8           # 补详情的并发数
 ENRICH_MAX_EXTRA_PAGES = 2   # 剔除后不足一栏时，最多再翻 2 页补足
-SECTION_POLICIES = {"movie": "stage", "tv": "short"}
+CN3D_MAX_HOME_PAGES = 12     # 国产 3D 动画首页多翻页，避免 2D/日漫挤掉候选
+CN3D_MAX_SHOW_PAGES = 12     # 片库筛掉 2D/日漫后，继续取豆瓣后续页补满
+SECTION_POLICIES = {"movie": "stage", "tv": "short", "anime": "cn3d"}
+# 国产 3D 动画系列白名单，按制作形态维护；单有「中国大陆 + 动画」不足以判断 3D。
+# Douban 有些条目不标注 CG/三维，需用系列名补全；仍强制校验地区和动画类型。
+CN3D_SERIES = (
+    "凡人修仙传", "斗破苍穹", "斗罗大陆", "吞噬星空", "完美世界", "仙逆",
+    "牧神记", "遮天", "剑来", "武动乾坤", "灵笼", "师兄啊师兄", "沧元图",
+    "神印王座", "诛仙", "眷思量", "少年歌行", "少年白马醉春风", "百炼成神",
+    "斩神", "紫川", "神墓", "光阴之外", "星辰变", "雪鹰领主", "秦时明月",
+    "天行九歌", "画江湖", "超神学院", "雄兵连", "武庚纪", "太乙仙魔录",
+    "纳米核心", "墓王之王", "西行纪", "绝命响应", "逆转次元", "侠岚",
+    "天宝伏妖录", "真阳武神", "元尊", "大主宰", "龙蛇演义", "永生",
+    "精灵王座", "深海", "星骸骑士", "枪神记", "双月之城", "镜·双城",
+    "镜双城", "长剑风云", "龙之谷", "新神榜", "白蛇", "王者荣耀",
+    "幻梦山海谣", "元龙", "还击45秒", "芯觉", "我是大神仙", "仙武传",
+    "无上神帝", "万界仙踪", "万界独尊", "武神主宰", "九天玄帝诀", "绝世武魂",
+    "逆天至尊", "真武巅峰", "绝世战魂", "天荒战神", "妖神记", "冰火魔厨",
+    "修罗武神", "独步逍遥", "盖世帝尊", "百炼飞升录", "哪吒之魔童",
+    "西游记之大圣归来", "熊出没", "镖人", "狂王", "超兽武装", "后西游记",
+    "万妖图录传", "聚宝仙盆", "神兽学院", "大夏守墓人", "绝世武神", "甲武神",
+    "天道第一序列", "风水天师", "牛大力作妖记", "三千庇护", "零号小队",
+    "末日觉醒", "仙眼", "游戏入侵", "从杂役到符仙人",
+)
+CN3D_SERIES_PREFIXES = tuple(sorted(CN3D_SERIES, key=len, reverse=True))
+CN3D_STYLE_RE = re.compile(r"(?:3\s*d|三维|三\s*d|立体建模|全\s*cg)", re.I)
+CN2D_STYLE_RE = re.compile(r"(?:2\s*d|二维|手绘动画)", re.I)
+
+
+def cn3d_series_key(item):
+    title = _text(item.get("title") if isinstance(item, dict) else item)
+    return next((name for name in CN3D_SERIES_PREFIXES if title.startswith(name)), title)
+
+
+def is_cn3d_anime(item):
+    regions = set(_list(item.get("regions")))
+    genres = set(_list(item.get("genres")))
+    if not regions.intersection({"中国大陆", "中国", "大陆"}) or "动画" not in genres:
+        return False
+    title = _text(item.get("title"))
+    if any(title.startswith(name) for name in CN3D_SERIES_PREFIXES):
+        return True
+    style = " ".join(_list(item.get("tags")) + [_text(item.get("summary"))])
+    return bool(CN3D_STYLE_RE.search(style) and not CN2D_STYLE_RE.search(style))
 # 三栏并行后详情会同时从三个方向打过来（3 栏 × 8 池），上游却是同一个豆瓣；
 # 用一个全局闸把「在飞的详情请求」压回 ENRICH_WORKERS，避免把自己打成限流。
 # 2026-09-17 实测（冷缓存 home(movie)）：闸=8 → 6.95s，闸=16 → 4.99s，
@@ -197,6 +242,8 @@ def section_excluded(category, item):
         return is_stage_performance(item)
     if policy == "short":
         return looks_like_short_drama(item)
+    if policy == "cn3d":
+        return not is_cn3d_anime(item)
     return False
 
 
@@ -613,6 +660,77 @@ class DoubanCatalog:
                     items.append(item)
         return items
 
+    def _cn3d_snapshot_items(self, sort_code):
+        """国产 3D 动画从完整快照索引兜底，不局限于首页某一栏的少量结果。"""
+        items = [item for item in self.snapshot_subjects()
+                 if item.get("category") == "anime" and is_cn3d_anime(item)]
+        if sort_code == "S":
+            items.sort(key=lambda item: -float(item.get("rating") or 0))
+        elif sort_code == "U":
+            items.sort(key=lambda item: (-int(item.get("rating_count") or 0),
+                                         -float(item.get("rating") or 0)))
+        else:
+            items.sort(key=lambda item: str(item.get("year") or ""), reverse=True)
+        primary, repeats, franchises = [], [], set()
+        for item in items:
+            franchise = cn3d_series_key(item)
+            (primary if franchise not in franchises else repeats).append(item)
+            franchises.add(franchise)
+        return primary + repeats
+
+    def _fill_cn3d_home(self, value):
+        """网络栏位偏少或限流时，用完整 3D 国漫快照索引补到两页内容。"""
+        if not isinstance(value, dict):
+            return value
+        result = dict(value)
+        sections = []
+        changed = False
+        sort_by_title = {"最近热门": "U", "最新上映": "R", "豆瓣高分": "S"}
+        for section in result.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            original = list(section.get("items") or [])
+            candidates, seen = [], set()
+            for item in original:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("douban_id") or item.get("id") or "")
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                candidates.append(item)
+            supplements = self._cn3d_snapshot_items(sort_by_title.get(section.get("title"), "U"))
+            for item in supplements:
+                key = str(item.get("douban_id") or item.get("id") or "")
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                candidates.append(copy.deepcopy(item))
+            unique, repeats, franchises = [], [], set()
+            for item in candidates:
+                franchise = cn3d_series_key(item)
+                (unique if franchise not in franchises else repeats).append(item)
+                franchises.add(franchise)
+            current = unique[:EXPLORE_PAGE_SIZE]
+            if len(current) < EXPLORE_PAGE_SIZE:
+                current.extend(repeats[:EXPLORE_PAGE_SIZE - len(current)])
+            old_ids = [str(item.get("douban_id") or item.get("id") or "")
+                       for item in original if isinstance(item, dict)]
+            new_ids = [str(item.get("douban_id") or item.get("id") or "") for item in current]
+            if old_ids != new_ids:
+                changed = True
+            section_copy = dict(section)
+            section_copy["items"] = current[:EXPLORE_PAGE_SIZE]
+            sections.append(section_copy)
+        result["sections"] = sections
+        if changed:
+            result["stale"] = True
+            if result.get("source") == "douban":
+                result["source"] = "douban-partial"
+        return result
+
     def _snapshot_detail(self, douban_id):
         """快照里预存的详情（云端出口到不了豆瓣，详情页只能靠它）。
 
@@ -904,6 +1022,32 @@ class DoubanCatalog:
         except (DoubanThrottled, DoubanUnavailable):
             return []
 
+    def _home_list(self, category, sort, page=1, strict=False):
+        if category in ("anime", "short"):
+            return self._explore(category, sort, page=page, strict=strict,
+                                 genre="动画" if category == "anime" else "",
+                                 region="中国大陆" if category == "anime" else "")
+        kind = "movie" if category == "movie" else "tv"
+        tag = ({"U": "热门", "R": "最新", "S": "豆瓣高分"}[sort]
+               if kind == "movie" else "综艺" if category == "variety" else "热门")
+        order = "recommend" if kind == "movie" else {"U": "recommend", "R": "time", "S": "rank"}[sort]
+        query = {"type": kind, "tag": tag, "sort": order, "page_limit": EXPLORE_PAGE_SIZE,
+                 "page_start": max(0, int(page) - 1) * EXPLORE_PAGE_SIZE}
+        rows = []
+        for attempt in range(len(EXPLORE_RETRY_DELAYS) + 1):
+            payload = self.fetch(HOME_API + "?" + urllib.parse.urlencode(query))
+            if isinstance(payload, dict) and isinstance(payload.get("subjects"), list):
+                rows = payload["subjects"]
+            else:
+                rows = explore_rows(payload)
+            if rows or not strict:
+                break
+            if attempt < len(EXPLORE_RETRY_DELAYS):
+                time.sleep(EXPLORE_RETRY_DELAYS[attempt])
+        if strict and not rows:
+            raise DoubanThrottled("empty Douban homepage tag for %s" % category)
+        return [normalize_explore_row(row, category) for row in rows if isinstance(row, dict)]
+
     def _section_items(self, category, sort):
         """首页一栏的条目：拉列表 → 补详情 → 按分类规则剔除 → 不够就翻页补足。
 
@@ -911,31 +1055,59 @@ class DoubanCatalog:
         继续翻页，避免电影高分栏被演唱会占掉大半后只剩几部片子。
         """
         if category not in SECTION_POLICIES:
-            return self._explore(category, sort, strict=True)
+            return self._home_list(category, sort, strict=True)
         accepted, seen = [], set()
-        for page in range(1, 2 + ENRICH_MAX_EXTRA_PAGES):
+        max_pages = (CN3D_MAX_HOME_PAGES if category == "anime"
+                     else 1 + ENRICH_MAX_EXTRA_PAGES)
+        for page in range(1, max_pages + 1):
             # 第一页沿用严格模式（空 data = 限流，要回落）；翻页时空 data 是正常的列表末尾。
-            if page == 1:
-                rows = self._explore(category, sort, strict=True)
-            else:
-                rows = self._explore(category, sort, page=page)
+            try:
+                if page == 1:
+                    rows = self._home_list(category, sort, strict=True)
+                else:
+                    rows = self._home_list(category, sort, page=page)
+            except (DoubanThrottled, DoubanUnavailable):
+                if accepted:
+                    break
+                raise
             if not rows:
                 break
-            for item in self._enrich(rows):
+            fresh_rows = []
+            for item in rows:
                 key = str(item.get("douban_id") or item.get("id") or "")
                 if key and key in seen:
                     continue
-                seen.add(key)
+                if key:
+                    seen.add(key)
+                fresh_rows.append(item)
+            if not fresh_rows:
+                break
+            # 国产动画只在列表行缺少产地或类型时补详情，避免为筛掉的 2D/日漫逐条抓全文。
+            enriched = (self._enrich(fresh_rows, ("regions", "genres"))
+                        if category == "anime" else self._enrich(fresh_rows))
+            for item in enriched:
                 if not section_excluded(category, item):
                     accepted.append(item)
-            if len(accepted) >= EXPLORE_PAGE_SIZE:
+            if category == "anime":
+                # 先收不同系列，避免首页被同一部长篇的续季占满；有余量再放回续季。
+                franchise_count = len({cn3d_series_key(item) for item in accepted})
+                if franchise_count >= EXPLORE_PAGE_SIZE:
+                    break
+            elif len(accepted) >= EXPLORE_PAGE_SIZE:
                 break
+        if category == "anime":
+            primary, repeats, franchises = [], [], set()
+            for item in accepted:
+                franchise = cn3d_series_key(item)
+                (primary if franchise not in franchises else repeats).append(item)
+                franchises.add(franchise)
+            accepted = primary + repeats
         return accepted[:EXPLORE_PAGE_SIZE]
 
     def home(self, category, force_refresh=False):
         if category not in CATEGORY_VALUES:
             raise ValueError("unsupported category")
-        key = "home:" + category
+        key = HOME_CACHE_PREFIX + category
         snapshot_value = ((self.snapshot.get("home") or {}).get(category))
 
         def produce():
@@ -973,6 +1145,8 @@ class DoubanCatalog:
             result["sections"] = [{"title": title, "items": []} for title in HOME_SECTION_NAMES]
         # 快照/缓存兜底路径没有经过 [_section_items]，这里再套一次规则。
         result = _apply_section_policy(category, result)
+        if category == "anime":
+            result = self._fill_cn3d_home(result)
         self._ingest([item for section in (result.get("sections") or []) for item in (section.get("items") or [])])
         return result
 
@@ -1057,7 +1231,7 @@ class DoubanCatalog:
         if category not in CATEGORY_VALUES:
             raise ValueError("unsupported category")
         sort_code = SORT_CODES.get(sort, "U")
-        key = "show:%s:%s:%s:%s:%s:%s:%s" % (category, genre, region, year, rating, sort_code, page)
+        key = ("show:cn3d-v2:" if category == "anime" else "show:") + "%s:%s:%s:%s:%s:%s:%s" % (category, genre, region, year, rating, sort_code, page)
         filtered = any(v and v != "全部" for v in (genre, region, year, rating))
         # 矩阵决定每个维度由谁负责：可信的交给上游（本地不再判，避免误杀），不可信的
         # 一律本地判，且**不发该参数给上游** —— 某些分类收到 `genres=` 会直接回空页。
@@ -1071,13 +1245,30 @@ class DoubanCatalog:
         needs = tuple(LOCAL_FIELDS[name] for name in local if name in LOCAL_FIELDS)
 
         def produce():
-            # 上游回来的一页可能被本地筛掉一些，多抓两页把一页补足。
-            pages = [int(page)]
-            if filtered:
-                pages += [int(page) + i for i in range(1, SHOW_FILTER_EXTRA_PAGES + 1)]
+            page_no = max(1, int(page))
+            if category == "anime":
+                # 该分类固定为中国大陆 3D 动画。上游先按产地/类型缩小候选，本地再按 3D
+                # 系列表过滤；从第一页累计到目标页，避免过滤补页后翻页重复或漏页。
+                query_genre = genre if genre and genre != "全部" else "动画"
+                query_region = region if region and region != "全部" else "中国大陆"
+                query_send = tuple(dict.fromkeys(send + ("genre", "region")))
+                pages = range(1, CN3D_MAX_SHOW_PAGES * page_no + 1)
+                target_count = page_no * EXPLORE_PAGE_SIZE
+            else:
+                query_genre, query_region, query_send = genre, region, send
+                pages = [page_no]
+                if filtered:
+                    pages += [page_no + i for i in range(1, SHOW_FILTER_EXTRA_PAGES + 1)]
+                target_count = EXPLORE_PAGE_SIZE
             collected, seen, rows, last_full = [], set(), [], False
             for p in pages:
-                rows = self._explore(category, sort_code, p, genre, region, year, rating, send=send)
+                try:
+                    rows = self._explore(category, sort_code, p, query_genre, query_region,
+                                         year, rating, send=query_send)
+                except (DoubanThrottled, DoubanUnavailable):
+                    if category == "anime" and collected:
+                        break
+                    raise
                 last_full = len(rows) >= EXPLORE_PAGE_SIZE
                 if not rows:
                     break
@@ -1089,33 +1280,56 @@ class DoubanCatalog:
                     if key_id:
                         seen.add(key_id)
                     fresh.append(item)
-                candidates = self._enrich(fresh, needs) if needs else fresh
+                if category == "anime":
+                    candidates = self._enrich(fresh, tuple(dict.fromkeys(needs + ("regions", "genres"))))
+                else:
+                    candidates = self._enrich(fresh, needs) if needs else fresh
                 for item in candidates:
+                    if category == "anime" and not is_cn3d_anime(item):
+                        continue
                     if self._matches(item,
                                      genre if "genre" in local else "",
                                      region if "region" in local else "",
                                      year if "year" in local else "",
                                      rating if "rating" in local else ""):
                         collected.append(item)
-                if not filtered or len(collected) >= EXPLORE_PAGE_SIZE:
+                if category == "anime":
+                    franchise_count = len({cn3d_series_key(item) for item in collected})
+                    if franchise_count >= target_count:
+                        break
+                elif not filtered or len(collected) >= EXPLORE_PAGE_SIZE:
                     break
-            items = collected[:EXPLORE_PAGE_SIZE]
+            if category == "anime":
+                primary, repeats, franchises = [], [], set()
+                for item in collected:
+                    franchise = cn3d_series_key(item)
+                    (primary if franchise not in franchises else repeats).append(item)
+                    franchises.add(franchise)
+                ordered = primary + repeats
+                offset = (page_no - 1) * EXPLORE_PAGE_SIZE
+                items = ordered[offset:offset + EXPLORE_PAGE_SIZE]
+            else:
+                items = collected[:EXPLORE_PAGE_SIZE]
             # 诚实：只有「最后一次上游请求拿到满页」才说明还有下一页。旧实现带筛选时用
             # `bool(rows)`（拿到任意一行就算有更多），于是「加载更多」点下去常常是空的。
-            has_more = last_full
-            return {"category": category, "page": int(page), "items": items,
+            has_more = last_full or (category == "anime" and len(primary) > page_no * EXPLORE_PAGE_SIZE)
+            return {"category": category, "page": page_no, "items": items,
                     "has_more": has_more, "source": "douban", "stale": False}
 
         # 快照兜底也遵守筛选与分页契约：否则云端「全部」页会忽略用户筛选、
         # 并在一次响应里吐出整份快照。
-        snapshot_items = [item for item in self._snapshot_section_items(category)
-                          if self._matches(item, genre, region, year, rating)]
-        if sort_code == "S":
-            snapshot_items.sort(key=lambda item: -float(item.get("rating") or 0))
-        elif sort_code == "U":
-            snapshot_items.sort(key=lambda item: -int(item.get("rating_count") or 0))
+        if category == "anime":
+            snapshot_items = [item for item in self._cn3d_snapshot_items(sort_code)
+                              if self._matches(item, genre, region, year, rating)]
         else:
-            snapshot_items.sort(key=lambda item: str(item.get("year") or ""), reverse=True)
+            snapshot_items = [item for item in self._snapshot_section_items(category)
+                              if self._matches(item, genre, region, year, rating)]
+            if sort_code == "S":
+                snapshot_items.sort(key=lambda item: -float(item.get("rating") or 0))
+            elif sort_code == "U":
+                snapshot_items.sort(key=lambda item: -int(item.get("rating_count") or 0))
+            else:
+                snapshot_items.sort(key=lambda item: str(item.get("year") or ""), reverse=True)
         page_size = EXPLORE_PAGE_SIZE
         page_no = max(1, int(page))
         offset = (page_no - 1) * page_size

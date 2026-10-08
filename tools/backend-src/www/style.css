@@ -178,6 +178,19 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
 
 /* ===== 片库「全部」网格 ===== */
 .lib-grid{display:grid;gap:34px 20px;padding:26px 80px 0}
+/* 分类片库每页固定两行：横屏 7 列×2 行，竖屏在后面的 portrait 规则改为 3 列×2 行。 */
+.lib-page-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));
+  grid-template-rows:repeat(2,minmax(394px,auto));gap:30px 20px;padding:0 86px;touch-action:pan-y}
+.lib-page-grid .pcard{width:auto;min-width:0}
+.lib-page-grid .pcard .pc-img{width:100%;height:auto;aspect-ratio:232/352}
+.lib-page-grid .pcard:focus-visible{outline:3px solid #fff;outline-offset:6px;border-radius:12px}
+.lib-pager{display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:22px 86px 0}
+.lib-page-btn{min-width:88px;height:46px;padding:0 16px;border-radius:24px;
+  background:rgba(255,255,255,.1);font-size:18px;font-weight:600;color:rgba(255,255,255,.8)}
+.lib-page-btn:hover:not(:disabled){background:rgba(255,255,255,.2);color:#fff}
+.lib-page-btn:disabled{opacity:.32;cursor:default}
+.lib-page-btn:focus-visible{outline:3px solid #fff;outline-offset:3px}
+.lib-page-count{min-width:60px;text-align:center;font-size:20px;color:rgba(255,255,255,.55);font-variant-numeric:tabular-nums}
 
 /* ===== 海报网格（全部影视/搜索结果） ===== */
 .poster-grid{display:grid;gap:30px 20px;padding:0 60px 80px}
@@ -718,6 +731,12 @@ body.portrait .hscroll.poster-row{display:grid;grid-template-columns:repeat(3,mi
 body.portrait .hscroll.poster-row .pcard{width:auto}
 body.portrait .hscroll.poster-row .pcard .pc-img{width:100%;height:auto;aspect-ratio:232/352}
 body.portrait .hscroll.poster-row .pcard .pc-title{font-size:21px}
+body.portrait .lib-page-grid{grid-template-columns:repeat(3,minmax(0,1fr));
+  grid-template-rows:repeat(2,minmax(366px,auto));gap:24px 12px;padding:0 40px}
+body.portrait .lib-page-grid .pcard .pc-title{font-size:21px}
+body.portrait .lib-pager{gap:10px;padding:20px 40px 0}
+body.portrait .lib-page-btn{min-width:92px;height:48px;padding:0 14px;font-size:20px}
+body.portrait .lib-page-count{min-width:64px;font-size:22px}
 /* 「我的」页收藏/历史行同样改 3 列网格（需求②：不再横向滑动） */
 body.portrait .hscroll.fav-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));
   gap:24px 12px;padding:22px 0 0;overflow:visible}

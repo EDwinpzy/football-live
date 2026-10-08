@@ -470,7 +470,7 @@ class VodRepository(
             Category("douban:$key", when (key) {
                 "movie" -> "电影"
                 "tv" -> "电视剧"
-                "anime" -> "动漫"
+                "anime" -> "3D国漫"
                 "variety" -> "综艺"
                 "short" -> "短剧"
                 else -> key
@@ -488,12 +488,14 @@ class VodRepository(
     private val _sections = MutableStateFlow<Map<Int, List<HSec>>>(emptyMap())
     val sectionsFlow: StateFlow<Map<Int, List<HSec>>> = _sections.asStateFlow()
 
-    suspend fun channelSections(categoryId: String) {
+    suspend fun channelSections(categoryId: String, force: Boolean = false) {
         val key = categoryId.removePrefix("douban:")
         val cid = categoryNumber(key) ?: return
-        if (_sections.value.containsKey(cid)) return
+        if (!force && _sections.value.containsKey(cid)) return
         val base = settings.current().hhkanBaseUrl
-        val secs = runCatching { VodApiSource.fetchHome(base, okHttp, key).sections }.getOrDefault(emptyList())
+        val secs = withContext(Dispatchers.IO) {
+            runCatching { VodApiSource.fetchHome(base, okHttp, key, refresh = force).sections }.getOrDefault(emptyList())
+        }
         if (secs.any { it.items.isNotEmpty() }) _sections.value = _sections.value + (cid to secs)
     }
 

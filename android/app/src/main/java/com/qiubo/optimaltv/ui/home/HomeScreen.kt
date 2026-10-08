@@ -202,7 +202,7 @@ fun VodScreen(nav: NavController) {
             }
             else -> {
                 // 片库状态提升到组合作用域（LazyColumn builder 非组合上下文，remember/LaunchedEffect 不可写在其内）
-                val categories = remember(cat) { cat.categories.map { it.id to it.name } + ("" to "全部 ›") }
+                val categories = remember(cat) { cat.categories.map { it.id to if (it.id.removePrefix("douban:") == "anime") "3D国漫" else it.name } + ("" to "全部 ›") }
                 // v1.17 需求：进页恢复上次选中的分类 chip（按分类 ID 持久化），不回「电影」
                 var catSel by remember(cat) { mutableIntStateOf(0) }
                 val selectedCatChipFocus = remember { FocusRequester() }
@@ -214,21 +214,20 @@ fun VodScreen(nav: NavController) {
                 }
                 // 分类 tab 固定三块，以好好看频道页的当前分类三栏目为主；「全部 ›」独立跳转 all 页。
                 val selCatId = categories.getOrNull(catSel)?.first.orEmpty()
-                LaunchedEffect(selCatId) { Graph.repo.libBlocks(selCatId, force = true) }
-                val libBlocks by Graph.repo.libBlocksFlow.collectAsStateWithLifecycle()
-                val hotSettled by Graph.repo.hotSettledFlow.collectAsStateWithLifecycle()
+                var sectionLoading by remember(selCatId) { mutableStateOf(true) }
+                LaunchedEffect(selCatId) {
+                    try { Graph.repo.channelSections(selCatId, force = true) } finally { sectionLoading = false }
+                }
                 /* 分类 id 现为 `douban:movie` 形态；用与 libBlocks 同一套解析，
                    否则恒为 null → 三栏恒空（影视 tab 一直「暂无内容」）。 */
                 val selCid = com.qiubo.optimaltv.data.repo.VodRepository.categoryCid(selCatId)
                 /* 需求④（光标跳行修复）：三栏就绪前不渲染任何板块——
                  * 否则「空态 → 部分板块 → 热门插最前」两次结构顶替会把焦点
                  * 甩到「最新上线」（用户看到按一下下键就滚过最近热门）。 */
-                val sections = if (selCid == null) emptyList()
-                    else if (selCid !in hotSettled) emptyList()
-                    else libBlocks[selCid].orEmpty().ifEmpty {
-                        HhkanSource.LIB_BLOCK_ORDER.map { HhkanSource.ChannelSection(it, emptyList()) }
-                    }
-                val showLibLoading = selCid != null && selCid !in hotSettled && sections.isEmpty()
+                val doubanSections by Graph.repo.sectionsFlow.collectAsStateWithLifecycle()
+                val sections = if (selCid == null) emptyList() else doubanSections[selCid].orEmpty()
+                val showLibLoading = sectionLoading && sections.isEmpty()
+
                 // 2026-09-19 跳行修复（用户报障「电视剧→动漫后往下光标乱跑」）：
                 // 分类 chip 的 DOWN 不再交给引擎几何+滚动找回——
                 // ① 切分类后板块未就绪时 chips 下方无可聚焦目标，滚动找回会把整页下滚、
@@ -243,10 +242,11 @@ fun VodScreen(nav: NavController) {
                 /** chip DOWN 定向：滚到首板块标题（首行随之入视口）→ 落首卡（重试覆盖组合时延） */
                 fun dropToLibFirstCard() {
                     val first = libFirstCard ?: return
+                    val focusKey = "lib:${sections.first { it.items.isNotEmpty() }.name}:${first.id}"
                     chipScope.launch {
                         runCatching { vodListState.scrollToItem(3) }   // 0 hero / 1 history / 2 chips / 3 首板块标题
                         repeat(20) {
-                            if (runCatching { cardReg.fr(first.id).requestFocus() }.isSuccess) return@launch
+                            if (runCatching { cardReg.fr(focusKey).requestFocus() }.isSuccess) return@launch
                             delay(60)
                         }
                     }
@@ -473,7 +473,7 @@ fun VodScreen(nav: NavController) {
                     sections.forEachIndexed { si, sec ->
                         item(key = "lib-sec-h-${sec.name}") {
                             Text(
-                                sec.name, color = OtvColors.White.copy(alpha = 0.92f),
+                                (if (sec.name == "最新上映") "最近更新" else sec.name), color = OtvColors.White.copy(alpha = 0.92f),
                                 fontSize = 38f.sxs(s), fontWeight = FontWeight.Bold,
                                 modifier = Modifier
                                     .padding(start = 80f.sx(s), end = 80f.sx(s))
@@ -489,18 +489,8 @@ fun VodScreen(nav: NavController) {
                                 )
                             }
                         } else {
-                            sec.items.chunked(7).forEachIndexed { ri, rowItems ->
-                                item(key = "lib-sec-${sec.name}-r$ri") {
-                                    Row(
-                                        horizontalArrangement = Arrangement.spacedBy(20f.sx(s)),
-                                        modifier = Modifier
-                                            .padding(start = 80f.sx(s), end = 80f.sx(s))
-                                            .padding(top = if (ri == 0) 0f.sx(s) else 34f.sx(s)),
-                                    ) {
-                                        rowItems.forEach { LibCard(nav, it, s, cardReg) }
-                                        repeat(7 - rowItems.size) { Spacer(Modifier.width(232f.sx(s))) }
-                                    }
-                                }
+                            item(key = "lib-pages-$selCid-${sec.name}") {
+                                PagedLibSection(nav, sec.items, s, cardReg, returnKey, sec.name)
                             }
                         }
                     }
@@ -771,17 +761,66 @@ private fun VodHeroBand(
     }
 }
 
+@Composable
+private fun PagedLibSection(nav: NavController, items: List<VodItem>, s: Float, cardReg: FocusRegistry, returnKey: String?, sectionName: String) {
+    val pages = remember(items) { items.chunked(14) }
+    var page by remember(items) { mutableIntStateOf(pages.indexOfFirst { rows -> rows.any { "lib:$sectionName:${it.id}" == returnKey } }.coerceAtLeast(0)) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    if (pages.isEmpty()) return
+    val current = pages[page]
+    fun turn(next: Int, slot: Int) {
+        if (next !in pages.indices) return
+        page = next
+        val target = "lib:$sectionName:${pages[next][slot.coerceIn(0, pages[next].lastIndex)].id}"
+        scope.launch {
+            repeat(20) {
+                delay(40)
+                if (runCatching { cardReg.fr(target).requestFocus() }.isSuccess) return@launch
+            }
+        }
+    }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 80f.sx(s)), verticalArrangement = Arrangement.spacedBy(24f.sx(s))) {
+        repeat(2) { row ->
+            Row(Modifier.fillMaxWidth().height(402f.sx(s)), horizontalArrangement = Arrangement.spacedBy(20f.sx(s))) {
+                repeat(7) { col ->
+                    val slot = row * 7 + col
+                    val item = current.getOrNull(slot)
+                    if (item == null) Spacer(Modifier.width(232f.sx(s))) else LibCard(nav, item, s, cardReg, "lib:$sectionName:${item.id}") { dir ->
+                        when {
+                            dir == NAV_RIGHT && (col == 6 || slot == current.lastIndex) -> { turn(page + 1, row * 7); true }
+                            dir == NAV_LEFT && col == 0 -> { turn(page - 1, row * 7 + 6); true }
+                            dir == NAV_DOWN && row == 0 && current.size > 7 -> {
+                                runCatching { cardReg.fr("lib:$sectionName:${current[(slot + 7).coerceAtMost(current.lastIndex)].id}").requestFocus() }; true
+                            }
+                            dir == NAV_UP && row == 1 -> { runCatching { cardReg.fr("lib:$sectionName:${current[col].id}").requestFocus() }; true }
+                            else -> false
+                        }
+                    }
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+            Text("上一页", color = if (page > 0) OtvColors.White else OtvColors.White30, fontSize = 24f.sxs(s),
+                modifier = Modifier.dpadFocusable { turn(page - 1, 0) }.padding(16f.sx(s)))
+            Text("${page + 1} / ${pages.size}", color = OtvColors.White, fontSize = 24f.sxs(s))
+            Text("下一页", color = if (page < pages.lastIndex) OtvColors.White else OtvColors.White30, fontSize = 24f.sxs(s),
+                modifier = Modifier.dpadFocusable { turn(page + 1, 0) }.padding(16f.sx(s)))
+        }
+    }
+}
+
 /** 片库竖卡（poster 232×352 r12 + remark 右下 + vname 24 白；副行已按用户要求去掉）
  *  需求 影视#3：选中环紧贴卡片边缘。需求 影视#11：remark 徽章高度降为 2/3。 */
 @Composable
-private fun LibCard(nav: NavController, item: VodItem, s: Float, cardReg: FocusRegistry? = null) {
+private fun LibCard(nav: NavController, item: VodItem, s: Float, cardReg: FocusRegistry? = null, focusKey: String = item.id, navOverride: ((Int) -> Boolean)? = null) {
     Column(Modifier.width(232f.sx(s))) {
         Box(
             Modifier
                 .dpadFocusable(
                     scaleFocused = 1.05f,
-                    onFocusedChange = { if (it) ReturnFocus.mark("vod", item.id) },
-                    externalFocusRequester = cardReg?.fr(item.id),
+                    onFocusedChange = { if (it) ReturnFocus.mark("vod", focusKey) },
+                    externalFocusRequester = cardReg?.fr(focusKey),
+                    navOverride = navOverride,
                 ) {
                     nav.navigate("detail/" + URLEncoder.encode(item.id, "UTF-8"))
                 }

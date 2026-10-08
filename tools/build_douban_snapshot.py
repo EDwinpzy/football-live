@@ -4,11 +4,10 @@
 为什么必须有这个文件：云端 otv-web 的出口到不了豆瓣，douban_catalog 只能回落
 到随包快照；快照为空时影视首页、详情与本地搜索全都会是空的（v1.26 线上现象）。
 
-取数用豆瓣 Explore 的搜索接口（真正支持排序与类型筛选；`recent_hot` 会忽略
-这些参数）。首页三段取自每个分类的排序首页，其余条目进 `index` 搜索池，再按
-优先级给限定条数补详情——详情同时是云端详情页的唯一数据来源。
+首页直接复用 douban_catalog 的列表与分类规则；搜索池继续从 Explore 分页收集。
+详情按优先级给限定条数补齐，也是云端详情页的唯一数据来源。
 
-用法: python tools/build_douban_snapshot.py
+用法: python tools/build_douban_snapshot.py [--home-only]
 """
 from __future__ import annotations
 
@@ -33,7 +32,7 @@ CATEGORIES = (("movie", "电影"), ("tv", "电视剧"), ("anime", "动漫"),
               ("variety", "综艺"), ("short", "短剧"))
 SORTS = (("U", "最近热门"), ("R", "最新上映"), ("S", "豆瓣高分"))
 PAGES = {"movie": {"U": 4, "R": 3, "S": 3}, "tv": {"U": 4, "R": 3, "S": 3},
-         "anime": {"U": 2, "R": 1, "S": 1}, "variety": {"U": 2, "R": 1, "S": 1},
+         "anime": {"U": 6, "R": 6, "S": 6}, "variety": {"U": 2, "R": 1, "S": 1},
          "short": {"U": 2, "R": 1, "S": 1}}
 DETAIL_API = "https://m.douban.com/rexxar/api/v2/subject/%s"
 
@@ -72,24 +71,93 @@ def explore_page(category, tag, sort_code, page, sleep):
     return None
 
 
-def collect(sleep):
-    home, pool = {}, []
-    for category, tag in CATEGORIES:
+def _previous_section_items(previous, category, title):
+    category_value = ((previous or {}).get("home") or {}).get(category) or {}
+    for section in category_value.get("sections") or []:
+        if isinstance(section, dict) and section.get("title") == title:
+            return list(section.get("items") or [])
+    return []
+
+
+def collect_home(sleep, previous=None, details_out=None, source_out=None,
+                 require_fresh_movie_tv=False):
+    """用在线目录相同的取数路径生成首页；过滤/补页规则由 douban_catalog 维护。"""
+    previous = previous if isinstance(previous, dict) else {}
+    catalog = douban_catalog.DoubanCatalog(
+        fetch=lambda url: get(url, sleep, attempts=1), snapshot=previous)
+    previous_details = {}
+    for key, item in (previous.get("details") or {}).items():
+        normalized_key = str(key or "").removeprefix("douban:")
+        if normalized_key and isinstance(item, dict) and item.get("title"):
+            previous_details[normalized_key] = item
+    fetch_detail = catalog.detail
+
+    def detail_from_snapshot_first(douban_id, force_refresh=False):
+        key = str(douban_id or "").removeprefix("douban:")
+        cached = previous_details.get(key)
+        if cached is not None:
+            return cached
+        detail = fetch_detail(douban_id, force_refresh=force_refresh)
+        if details_out is not None and isinstance(detail, dict) and detail.get("title"):
+            details_out[key] = {field: value for field, value in detail.items()
+                                if field not in ("source", "stale")}
+        return detail
+
+    # 首页规则需要详情判断演出/短剧；3D 动画使用系列目录并仅在列表行缺少产地/类型时补详情。
+    catalog.detail = detail_from_snapshot_first
+    home = {}
+    for category, _tag in CATEGORIES:
         sections = []
+        section_sources = {}
         for sort_code, title in SORTS:
-            first_page = []
+            source = ("douban-home-api" if category in ("movie", "tv", "variety")
+                      else "douban-explore")
+            try:
+                items = catalog._section_items(category, sort_code)
+            except (douban_catalog.DoubanThrottled, douban_catalog.DoubanUnavailable) as exc:
+                if require_fresh_movie_tv and category in ("movie", "tv"):
+                    raise SystemExit("首页 %s/%s 未能从豆瓣首页接口刷新，拒绝使用旧栏" %
+                                     (category, title))
+                items = _previous_section_items(previous, category, title)
+                if not items:
+                    raise SystemExit("首页 %s/%s 抓取失败，且没有可用的旧条目: %s" %
+                                     (category, title, type(exc).__name__))
+                source = "snapshot-fallback"
+                print("HOME_FALLBACK %s/%s 保留旧条目 %d 条" %
+                      (category, title, len(items)))
+            sections.append({"title": title, "items": items})
+            section_sources[title] = source
+        home[category] = {"category": category, "sections": sections}
+        if category == "anime":
+            ids_before = {section["title"]: [str(item.get("douban_id") or item.get("id") or "")
+                                              for item in section["items"]]
+                          for section in sections}
+            home[category] = catalog._fill_cn3d_home(home[category])
+            sections = home[category]["sections"]
+            for section in sections:
+                ids_after = [str(item.get("douban_id") or item.get("id") or "")
+                             for item in section["items"]]
+                if ids_after != ids_before.get(section["title"], []):
+                    section_sources[section["title"]] = "douban-explore+snapshot-index"
+        if source_out is not None:
+            source_out[category] = section_sources
+        print("CATEGORY %-8s %s" % (category, [len(section["items"]) for section in sections]))
+    return home
+
+
+def collect(sleep, previous=None, home_source_out=None):
+    """刷新首页与 Explore 搜索池；首页请求和过滤复用在线目录实现。"""
+    home = collect_home(sleep, previous, source_out=home_source_out)
+    pool = []
+    for category, tag in CATEGORIES:
+        for sort_code, title in SORTS:
             for page in range(1, PAGES[category][sort_code] + 1):
                 items = explore_page(category, tag, sort_code, page, sleep)
                 if items is None:
                     break
-                if page == 1:
-                    first_page = items
                 pool.extend(items)
                 if len(items) < douban_catalog.EXPLORE_PAGE_SIZE:
                     break
-            sections.append({"title": title, "items": first_page})
-        home[category] = {"category": category, "sections": sections}
-        print("CATEGORY %-8s %s" % (category, [len(section["items"]) for section in sections]))
     return home, pool
 
 
@@ -150,10 +218,28 @@ def fetch_details(ids, limit, sleep, category_of):
 
 
 def apply_details(items, details):
-    """详情比列表行字段全，能替换就替换（地区/类型/年份/简介/主演都靠它）。"""
+    """用详情补齐列表行，同时保留列表接口刚返回的标题、评分与封面。"""
     merged = []
     for item in items:
-        merged.append(details.get(str(item.get("douban_id") or "")) or item)
+        detail = details.get(str(item.get("douban_id") or ""))
+        if not isinstance(detail, dict):
+            merged.append(item)
+            continue
+        value = dict(detail)
+        # 列表接口反映首页当前展示值；详情接口可能暂时滞后，不能把新标题、评分、
+        # 或封面回滚。空字段仍由详情补齐（例如没有新评分/剧照的条目）。
+        for key in ("title", "year", "rating", "rating_count",
+                    "poster_url", "hero_url", "backdrop_url"):
+            fresh = item.get(key)
+            if key in ("rating", "rating_count"):
+                has_fresh = fresh not in (None, "", 0, 0.0)
+            elif key in ("poster_url", "hero_url", "backdrop_url"):
+                has_fresh = bool(fresh) and not douban_catalog.is_placeholder_poster(fresh)
+            else:
+                has_fresh = bool(str(fresh or "").strip())
+            if has_fresh:
+                value[key] = fresh
+        merged.append(value)
     return merged
 
 
@@ -162,6 +248,30 @@ def _douban_id_of(item):
         return ""
     return str(item.get("douban_id") or "").removeprefix("douban:") or str(
         item.get("id") or "").removeprefix("douban:")
+
+
+def append_home_to_index(index, home, details):
+    """把首页新条目追加到索引末尾；历史行与顺序不动，跨栏 ID 只存一次。"""
+    home_items = []
+    for category, _tag in CATEGORIES:
+        for section in ((home.get(category) or {}).get("sections") or []):
+            if isinstance(section, dict):
+                home_items.extend(item for item in (section.get("items") or [])
+                                  if isinstance(item, dict))
+    details_by_id = {str(key or "").removeprefix("douban:"): item
+                     for key, item in (details or {}).items() if isinstance(item, dict)}
+    home_items = apply_details(home_items, details_by_id)
+    for item in home_items:
+        item.pop("detail_meta", None)
+
+    merged, seen = [], set()
+    for item in list(index or []) + home_items:
+        key = _douban_id_of(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
 
 
 def preserve_history(index, details, previous):
@@ -254,6 +364,39 @@ def snapshot_age_seconds():
     return (datetime.now(timezone.utc) - stamped).total_seconds()
 
 
+def home_stats(home):
+    return {category: sum(len(section.get("items") or [])
+                          for section in ((home.get(category) or {}).get("sections") or []))
+            for category, _tag in CATEGORIES}
+
+
+def refresh_home_only(previous, sleep):
+    """只刷新首页栏，index/details 保持上一份快照内容。"""
+    if not isinstance(previous, dict) or not previous:
+        raise SystemExit("--home-only 需要一份现有快照")
+    payload = dict(previous)
+    fetched_details = {}
+    home_sources = {}
+    payload["home"] = collect_home(sleep, previous, details_out=fetched_details,
+                                   source_out=home_sources, require_fresh_movie_tv=True)
+    payload["homeSource"] = home_sources
+    details = dict(payload.get("details") or {})
+    for key, item in fetched_details.items():
+        details.setdefault(key, item)
+    payload["details"] = details
+    payload["index"] = append_home_to_index(payload.get("index"), payload["home"], details)
+    payload["homeGeneratedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    stats = dict(payload.get("stats") or {})
+    stats.update({"home": home_stats(payload["home"]),
+                  "index": len(payload.get("index") or []),
+                  "details": len(payload.get("details") or {})})
+    payload["stats"] = stats
+    scrub_placeholder_posters(payload)
+    write_snapshot(payload)
+    print("WROTE HOME", OUT, OUT.stat().st_size, payload["stats"])
+    return payload
+
+
 def main():
     parser = argparse.ArgumentParser(description="刷新 douban_snapshot.json")
     parser.add_argument("--sleep", type=float, default=0.4, help="请求间隔秒数（豆瓣会限流）")
@@ -263,19 +406,26 @@ def main():
                         help="补详情的条数上限（首页 15 段轮转发车，每段先各拿一份配额）")
     parser.add_argument("--max-age", type=float, default=24 * 3600.0,
                         help="快照比这还新就跳过抓取（0 = 每次强制重建）")
+    parser.add_argument("--home-only", action="store_true",
+                        help="只刷新首页三段，保留现有 index 和 details")
     parser.add_argument("--force", action="store_true", help="即使结果明显缩水也写入")
     args = parser.parse_args()
+
+    previous_snapshot = load_previous()
+    if args.home_only:
+        refresh_home_only(previous_snapshot, args.sleep)
+        return
 
     age = snapshot_age_seconds()
     if args.max_age > 0 and age is not None and age < args.max_age:
         print("SKIP 现有快照 %.1f 小时前生成，加 --max-age 0 可强制重建" % (age / 3600.0))
         # 跳过重抓 ≠ 跳过修复：占位图是本地数据问题，不该等下次豆瓣抓取才清掉。
-        previous_snapshot = load_previous()
         if scrub_placeholder_posters(previous_snapshot):
             write_snapshot(previous_snapshot)
         return
 
-    home, pool = collect(args.sleep)
+    home_sources = {}
+    home, pool = collect(args.sleep, previous_snapshot, home_source_out=home_sources)
     index = dedupe(pool)
     if not index:
         # 宁可保留旧快照让发布继续，也不要写入空快照把线上影视搬空。
@@ -287,10 +437,8 @@ def main():
         for section in home[category]["sections"]:
             section["items"] = apply_details(section["items"], details)
     index = apply_details(index, details)
-    stats = {category: sum(len(section["items"]) for section in home[category]["sections"])
-             for category, _tag in CATEGORIES}
+    stats = home_stats(home)
     print("首页三段条数:", stats, "搜索池:", len(index), "详情:", len(details))
-    previous_snapshot = load_previous()
     previous = len(previous_snapshot.get("index") or [])
     if previous and len(index) < previous * 0.3 and not args.force:
         raise SystemExit("本次只抓到 %d 条（上次 %d 条），疑似被限流；确认无误可加 --force"
@@ -301,7 +449,9 @@ def main():
         "schema": 1,
         "source": "douban",
         "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "homeGeneratedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "home": home,
+        "homeSource": home_sources,
         "index": index,
         "details": details,
         "stats": {"home": stats, "index": len(index), "details": len(details)},
