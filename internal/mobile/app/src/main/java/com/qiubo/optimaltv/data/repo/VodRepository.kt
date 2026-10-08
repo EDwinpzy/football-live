@@ -47,6 +47,41 @@ data class CatalogState(
     val sourceStates: List<SourceState> = emptyList(),
 )
 
+/** 豆瓣有数据时按豆瓣板块顺序显示；豆瓣某个板块为空时才回退到同名本地板块。 */
+internal fun preferUpstreamHomeSections(local: List<HSec>, upstream: List<HSec>): List<HSec> {
+    val result = local.toMutableList()
+    upstream.filter { it.items.isNotEmpty() }.forEach { section ->
+        val index = result.indexOfFirst { it.name == section.name }
+        if (index < 0) result += section else result[index] = section
+    }
+    return result
+}
+
+/** 把豆瓣首页的非空热门/新片栏写进片库栏位，空栏继续保留当前本地或快照数据。 */
+internal fun mergeDoubanHomeIntoLibraryBlocks(
+    current: List<HSec>,
+    upstream: List<HSec>,
+    hotAliases: List<String>,
+): List<HSec> {
+    var result = current
+    val hot = upstream.firstOrNull { it.name == "最近热门" }
+        ?: upstream.firstOrNull { section -> hotAliases.any { alias -> section.name.contains(alias) } }
+    if (hot != null && hot.items.isNotEmpty()) {
+        result = replaceLibrarySection(result, HSec("最近热门", hot.items))
+    }
+    val latest = upstream.firstOrNull { it.name == "最新上映" && it.items.isNotEmpty() }
+    if (latest != null) {
+        result = replaceLibrarySection(result, HSec("最新上线", latest.items))
+    }
+    return result
+}
+
+/** 仅替换目标栏，调用方可用它更新 HHKan 的「最近更新」而保留豆瓣前两栏。 */
+internal fun replaceLibrarySection(current: List<HSec>, replacement: HSec): List<HSec> {
+    val index = current.indexOfFirst { it.name == replacement.name }
+    return if (index < 0) current + replacement else current.toMutableList().also { it[index] = replacement }
+}
+
 /** hero 条目（三来源归一：carousel 横版大图 / 首页热门板块竖版封面 / 目录竖版封面） */
 data class HeroRef(val id: String, val title: String, val bg: String, val tag: String)
 
@@ -528,7 +563,7 @@ class VodRepository(
                     metadataCatalog.topRows("movie", "rating")
                 ).distinctBy(::libraryRowKey)
                 .map { VodApiSource.fromCatalogMedia(it, settings.current().hhkanBaseUrl) }
-            if (localItems.isNotEmpty()) {
+            if (localItems.isNotEmpty() && _home.value.sections.isEmpty()) {
                 val sections = localHomeSections(localItems)
                 _home.value = HomeState(loading = false, sections = sections)
             }
@@ -537,46 +572,46 @@ class VodRepository(
                 _home.value = _home.value.copy(loading = false)
                 return@launch
             }
-            val d = runCatching { VodApiSource.fetchHome(base, okHttp, "movie", refresh = force) }
-                .onFailure { android.util.Log.w("OTV", "home 拉取失败: ${it.javaClass.simpleName} ${it.message}") }
-                .getOrNull()
-            if (d == null || (d.sections.isEmpty() && d.carousel.isEmpty())) {
-                android.util.Log.w("OTV", "home 空结果（源站不可达或解析为空），保留空态等待重试")
+            val result = fetchHomeWithRevalidation(base, "movie", force, "首页") { d ->
+                applyHomeData(d)
             }
-            _home.value = if (d != null && (d.sections.isNotEmpty() || d.carousel.isNotEmpty())) {
-                // 本地目录先上屏不能被上游整段覆盖：已装库时上游只补内容，不清掉本地板块。
-                HomeState(
-                    loading = false,
-                    sections = mergeHomeSections(_home.value.sections, d.sections),
-                    carousel = d.carousel,
-                )
-            } else {
-                _home.value.copy(loading = false)
+            if (result == null || (result.sections.isEmpty() && result.carousel.isEmpty())) {
+                android.util.Log.w("OTV", "home 空结果（源站不可达或解析为空），保留当前内容")
             }
+            _home.value = _home.value.copy(loading = false)
         }
     }
 
-    /**
-     * 本地板块优先保留，板块内按 item id 去重合并上游条目。
-     * 保持 fire-and-forget：上游结果异步追加，本地渲染路径不等待网络。
-     */
-    private fun mergeHomeSections(local: List<HSec>, upstream: List<HSec>): List<HSec> {
-        if (local.isEmpty()) return upstream
-        if (upstream.isEmpty()) return local
-        val merged = local.toMutableList()
-        upstream.forEach { section ->
-            val index = merged.indexOfFirst { it.name == section.name }
-            if (index < 0) {
-                merged += section
-            } else {
-                val existing = merged[index]
-                val seen = existing.items.mapTo(HashSet()) { it.id }
-                merged[index] = existing.copy(
-                    items = existing.items + section.items.filter { seen.add(it.id) },
-                )
-            }
+    private fun applyHomeData(data: HhkanSource.HomeData) {
+        if (data.sections.isEmpty() && data.carousel.isEmpty()) return
+        val current = _home.value
+        _home.value = HomeState(
+            loading = true,
+            sections = preferUpstreamHomeSections(current.sections, data.sections),
+            carousel = data.carousel,
+        )
+    }
+
+    /** stale 快照先通过 callback 上屏，再做一次 refresh=1 复核；强制刷新本身不再递归。 */
+    private suspend fun fetchHomeWithRevalidation(
+        base: String,
+        category: String,
+        force: Boolean,
+        label: String,
+        onData: (HhkanSource.HomeData) -> Unit,
+    ): HhkanSource.HomeData? {
+        fun fetch(refresh: Boolean) = runCatching {
+            VodApiSource.fetchHome(base, okHttp, category, refresh = refresh)
+        }.onFailure {
+            android.util.Log.w("OTV", "$label 拉取失败: ${it.javaClass.simpleName} ${it.message}")
+        }.getOrNull()
+
+        val snapshot = fetch(force)
+        snapshot?.let(onData)
+        if (snapshot?.stale == true && !force) {
+            return fetch(refresh = true)?.also(onData) ?: snapshot
         }
-        return merged
+        return snapshot
     }
 
     /** 等待进行中的首页拉取结束（libBlocks「最近热门」块依赖 home sections） */
@@ -756,8 +791,29 @@ class VodRepository(
             }.getOrDefault(emptyList())
             val hasLocalSections = localSections.any { it.items.isNotEmpty() }
             val installedMetadata = runCatching { metadataCatalog.hasInstalledDatabase() }.getOrDefault(false)
-            _libBlocks.value = _libBlocks.value + (cid to completeBlocks(localSections))
+            if (!libBlocksHaveContent(cid)) {
+                _libBlocks.value = _libBlocks.value + (cid to completeBlocks(localSections))
+            }
             if (hasLocalSections) markHotSettled(cid)
+
+            val doubanHome = if (base.isBlank()) null else fetchHomeWithRevalidation(
+                base = base,
+                category = category,
+                force = force,
+                label = "分类 $cid 豆瓣首页",
+            ) { data ->
+                val current = _libBlocks.value[cid].orEmpty()
+                val merged = mergeDoubanHomeIntoLibraryBlocks(
+                    current = current,
+                    upstream = data.sections,
+                    hotAliases = LIB_HOT_SECS[cid].orEmpty(),
+                )
+                _libBlocks.value = _libBlocks.value + (cid to completeBlocks(merged))
+                if (data.sections.any { it.items.isNotEmpty() }) markHotSettled(cid)
+            }
+            val hasFreshDouban = doubanHome?.let { data ->
+                !data.stale && data.sections.any { it.name == "最近热门" && it.items.isNotEmpty() }
+            } == true
 
             val onlineUpdated = if (base.isBlank()) {
                 emptyList()
@@ -772,18 +828,19 @@ class VodRepository(
             }
             val hasOnlineUpdates = onlineUpdated.isNotEmpty()
             if (hasOnlineUpdates) {
-                val sections = localSections.filterNot { it.name == "最近更新" } + HSec("最近更新", onlineUpdated)
+                // 最近更新仍取 HHKan，但以当前三栏为基底，保留已落入的豆瓣热门与最新上映。
+                val current = _libBlocks.value[cid].orEmpty()
+                val sections = replaceLibrarySection(current, HSec("最近更新", onlineUpdated))
                 _libBlocks.value = _libBlocks.value + (cid to completeBlocks(sections))
                 markHotSettled(cid)
             }
 
-            if (hasOnlineUpdates || (base.isBlank() && hasLocalSections && installedMetadata)) {
+            if (hasFreshDouban || (base.isBlank() && hasLocalSections && installedMetadata)) {
                 libDone += cid
                 libFailAt.remove(cid)
                 libRetries.remove(cid)
             } else if (hasLocalSections) {
-                // The packaged seed is an immediate offline fallback. Re-read after catalogue refresh
-                // so an installed SQLite package replaces those seed rows without delaying first paint.
+                // Stale 豆瓣首页必须留有下一次补抓机会；本地目录继续作为空栏兜底。
                 if (base.isNotBlank()) libFailAt[cid] = System.currentTimeMillis()
                 scheduleLibRetry(cid)
             } else {

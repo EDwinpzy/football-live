@@ -352,6 +352,43 @@ class MetadataCatalogRepositoryTest {
     }
 
     @Test
+    fun `豆瓣后台新榜单替换本地热门且好好看更新不覆盖榜单`() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val directory = File(context.filesDir, "metadata-catalog")
+        directory.deleteRecursively()
+        val settings = SettingsStore(context)
+        settings.setHhkanBase("http://catalog.test")
+        val queries = mutableListOf<String?>()
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val url = chain.request().url
+            val body = if (url.encodedPath == "/vod/home") {
+                queries += url.queryParameter("refresh")
+                val fresh = url.queryParameter("refresh") == "1"
+                val id = if (fresh) "42" else "41"
+                """{"stale":${!fresh},"source":"douban","sections":[
+                    {"title":"最近热门","items":[{"id":"$id","title":"豆瓣热门$id"}]},
+                    {"title":"最新上映","items":[{"id":"43","title":"豆瓣新片"}]}
+                ]}"""
+            } else {
+                """{"sections":[{"name":"最近更新","items":[{"id":901,"title":"真实更新"}]}]}"""
+            }
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody("application/json".toMediaType())).build()
+        }.build()
+        try {
+            val repository = VodRepository(settings, client, context)
+            repository.awaitLibBlocks("douban:movie")
+            val sections = repository.libBlocksFlow.value[1].orEmpty().associateBy { it.name }
+            assertEquals(listOf(null, "1"), queries)
+            assertEquals(listOf("douban:42"), sections.getValue("最近热门").items.map { it.id })
+            assertEquals(listOf("douban:43"), sections.getValue("最新上线").items.map { it.id })
+            assertEquals(listOf("hhkan:901"), sections.getValue("最近更新").items.map { it.id })
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `最近更新来自好好看分类真实更新栏`() = runBlocking {
         val context: Context = RuntimeEnvironment.getApplication()
         val directory = File(context.filesDir, "metadata-catalog")
@@ -386,7 +423,7 @@ class MetadataCatalogRepositoryTest {
             repository.awaitLibBlocks("douban:movie")
 
             val blocks = repository.libBlocksFlow.value[1].orEmpty().associateBy { it.name }
-            assertEquals(listOf("/hhkan/channel-sections/1"), requestedPaths)
+            assertEquals(listOf("/vod/home", "/hhkan/channel-sections/1"), requestedPaths)
             assertEquals(listOf("hhkan:901", "hhkan:902"), blocks.getValue("最近更新").items.map { it.id })
             assertEquals(listOf("真实更新一", "真实更新二"), blocks.getValue("最近更新").items.map { it.title })
         } finally {
@@ -423,7 +460,7 @@ class MetadataCatalogRepositoryTest {
     }
 
     @Test
-    fun `装库后首页仍会拉取上游并保留本地板块`() = runBlocking {
+    fun `装库后首页使用豆瓣榜单替换本地热门`() = runBlocking {
         val context: Context = RuntimeEnvironment.getApplication()
         val directory = File(context.filesDir, "metadata-catalog")
         directory.deleteRecursively()
@@ -431,7 +468,7 @@ class MetadataCatalogRepositoryTest {
         writeInstalledMetadataDatabase(File(directory, "metadata.sqlite"))
         val homeBody = """
             {"sections":[
-                {"title":"近期热门电影","items":[
+                {"title":"最近热门","items":[
                     {"id":"1291546","title":"上游热门影片","rating":8.8,"mytv_id":"10000013"},
                     {"id":"1299999","title":"上游独家","rating":7.7,"mytv_id":"10009999"}
                 ]},
@@ -443,7 +480,6 @@ class MetadataCatalogRepositoryTest {
         val server = StubServer(mapOf("/vod/home" to homeBody))
         server.start()
         val origin = server.origin
-        var upstreamCalls = 0
         val settings = SettingsStore(context)
         settings.setHhkanBase(origin)
 
@@ -458,11 +494,11 @@ class MetadataCatalogRepositoryTest {
             val home = repository.homeFlow.value
 
             assertTrue("已装库时也必须请求上游首页", (server.counts["/vod/home"] ?: 0) > 0)
-            assertTrue("本地板块必须保留", home.sections.any { it.name == "最近热门" })
+            assertTrue("热门栏必须存在", home.sections.any { it.name == "最近热门" })
             assertTrue("上游板块必须并入", home.sections.any { it.name == "上游新片" })
             assertTrue(
-                "上游同名板块内按 id 去重合并",
-                home.sections.first { it.name == "近期热门电影" }.items.map { it.title } ==
+                "上游同名板块完全替换本地热门且保持榜单顺序",
+                home.sections.first { it.name == "最近热门" }.items.map { it.title } ==
                     listOf("上游热门影片", "上游独家"),
             )
         } finally {

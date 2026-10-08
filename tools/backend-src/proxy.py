@@ -3104,14 +3104,32 @@ def _img_cache_load(url: str):
             return None
         data = p.read_bytes()
         ctype = tp.read_text(encoding="ascii").strip() or "image/jpeg"
+        # 老版本曾将豆瓣抓取失败时的 1×1 PNG 当作成功海报缓存。遇到旧条目时
+        # 删除两份文件并重新抓取，不能继续把占位图命中为正常图片。
+        if _is_cached_poster_placeholder(data):
+            _img_cache_remove(url)
+            return None
         os.utime(str(p), None)  # LRU 触点
         return data, ctype
     except Exception:
         return None
 
 
+def _img_cache_remove(url: str):
+    try:
+        p, tp = _img_cache_paths(url)
+        p.unlink(missing_ok=True)
+        tp.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _img_cache_store(url: str, data: bytes, ctype: str):
     try:
+        # 缓存层本身也拒绝旧版/未来调用方传入失败占位图，防止它重新变成
+        # 永久成功缓存。
+        if _is_cached_poster_placeholder(data):
+            return
         _IMG_CACHE.mkdir(parents=True, exist_ok=True)
         p, tp = _img_cache_paths(url)
         p.write_bytes(data)
@@ -3187,20 +3205,23 @@ DOUBAN_IMG_REFERER = "https://movie.douban.com/"
 # 旧规则只认 img\d+.doubanio.com，导致默认海报带 hhkan Referer 抓到 HTML 直接判失败
 # （线上日志：url=asset.doubanio.com/.../movie_default_large.png err=ctype=text/html）。
 DOUBAN_IMG_ANY_RE = re.compile(r"(?i)^https?://([a-z0-9-]+\.)*douban(io)?\.com/")
-# 豆瓣对非浏览器 TLS 指纹的客户端会回一段 JS 反爬页（HTTP 200 + text/html，实测 988B），
-# asset.doubanio.com 的默认海报尤其明显：换 Referer/换镜像都拿不到图。这时回一张内置
-# 深灰占位图（1×1 可拉伸），宁可中性空卡，也不要客户端拿到 502 后整片空白。
+# 保留旧版本失败占位图字节以便识别并清理设备上的历史磁盘缓存。新请求不再把这张
+# 1×1 PNG 当成功图片返回；HTTP 失败会让 Coil 保持卡片底图并在之后重新请求。
 PLACEHOLDER_POSTER_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mPQ1jcDAAEZAJGsvJXRAAAAAElFTkSuQmCC")
 
 
+def _is_cached_poster_placeholder(data: bytes) -> bool:
+    return data == PLACEHOLDER_POSTER_PNG
+
+
 def _img_fetch_with_mirrors(url: str):
     """vres.* 按 IMG_DOMAINS、豆瓣图床按 DOUBAN_IMG_HOSTS 轮换镜像抓取；
-    其余域只试原地址。返回 (bytes, ctype) 或 None（全部失败——调用方回落通用 urllib 路径）。
+    其余域只试原地址。返回 (bytes, ctype)；失败返回 None，由调用方决定重试或返回错误。
 
     Referer 兜底：豆瓣系图床一律先带豆瓣 Referer（第三方 Referer 会被判防盗链回 HTML），
     再依次退到「不带 Referer」「hhkan Referer」；判定标准始终是 Content-Type 真的是图片，
-    而不是 HTTP 200。"""
+    而不是 HTTP 200。失败返回 None，由代理返回 no-store 错误，避免 Coil 把占位图片当成功缓存。"""
     from urllib.parse import urlunsplit
     sp = urlparse(url)
     candidates = [url]
@@ -3233,8 +3254,6 @@ def _img_fetch_with_mirrors(url: str):
     # 诊断留痕：失败原因只在这里可见（调用方只回 502，不写日志）。
     print("[img] 抓取失败 url=%s referer=%s err=%s" % (url[:96], last_referer, last_err or "no-candidate"),
           flush=True)
-    if is_douban:
-        return PLACEHOLDER_POSTER_PNG, "image/png"
     return None
 
 
@@ -3255,7 +3274,7 @@ def _img_prefetch_one(url: str):
         if _img_cache_load(url) is not None:
             return
         got = _img_fetch_with_mirrors(url)
-        if got is not None:
+        if got is not None and not _is_cached_poster_placeholder(got[0]):
             _img_cache_store(url, got[0], got[1])
     except Exception:
         pass  # 预取失败无副作用（客户端请求时走通用路径）
@@ -4590,6 +4609,19 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
         rng = self.headers.get("Range")
+        is_douban_image = bool(DOUBAN_IMG_ANY_RE.match(url))
+
+        def send_image_unavailable():
+            # 失败不能以 200 + 可解码占位图返回：Coil 会把它写入自己的磁盘缓存，
+            # 上游恢复后同 URL 仍可能长期显示空海报。no-store 同时约束 HTTP 中间缓存。
+            body = b"poster temporarily unavailable"
+            self.send_response(502)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         # ---- 图片磁盘缓存命中（仅整文件 GET，Range/流媒体不走缓存）----
         if not rng:
             hit = _img_cache_load(url)
@@ -4609,6 +4641,9 @@ class Handler(SimpleHTTPRequestHandler):
             got = _img_fetch_with_mirrors(url)
             if got is not None:
                 data, ctype = got
+                if _is_cached_poster_placeholder(data):
+                    _img_cache_remove(url)
+                    return send_image_unavailable()
                 _img_cache_store(url, data, ctype)
                 self.send_response(200)
                 self.send_header("Content-Type", ctype)
@@ -4617,8 +4652,10 @@ class Handler(SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            if is_douban_image:
+                return send_image_unavailable()
         headers = {"User-Agent": hhkan.UA,
-                   "Referer": DOUBAN_IMG_REFERER if DOUBAN_IMG_RE.match(url) else hhkan.BASE + "/"}
+                   "Referer": DOUBAN_IMG_REFERER if is_douban_image else hhkan.BASE + "/"}
         if rng:
             headers["Range"] = rng
         try:
@@ -4644,11 +4681,18 @@ class Handler(SimpleHTTPRequestHandler):
                 _opener = urlreq.build_opener(urlreq.ProxyHandler({"http": _px, "https": _px}))
                 resp = _opener.open(req, timeout=30)
             ctype = resp.headers.get("Content-Type", "application/octet-stream")
+            if is_douban_image and not ctype.lower().startswith("image/"):
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                return send_image_unavailable()
             is_m3u8 = "mpegurl" in ctype or "m3u8" in url
         except Exception as e:
             body = ("proxy fail: %s" % str(e)[:200]).encode("utf-8")
             self.send_response(502)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -4684,6 +4728,8 @@ class Handler(SimpleHTTPRequestHandler):
             return
         # 媒体分片：转发（保留 Range 语义）
         data = resp.read()
+        if is_douban_image and _is_cached_poster_placeholder(data):
+            return send_image_unavailable()
         status = resp.status if resp.status in (200, 206) else 200
         # 图片（海报/封面）落磁盘缓存：下次同 URL 直接本地回源（需求 影视#1）
         if status == 200 and not rng and ctype.startswith("image/") and len(data) < 8 * 1024 * 1024:

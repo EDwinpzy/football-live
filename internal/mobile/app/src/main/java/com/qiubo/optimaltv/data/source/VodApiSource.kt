@@ -201,7 +201,7 @@ class VodApiSource(
             val u = raw.trim()
             if (u.length < 10 || !u.startsWith("http")) return u
             return if (base.isBlank() || !DOUBAN_IMG_RE.containsMatchIn(u)) u
-            else base.trimEnd('/') + "/hhkan/proxy?u=" + URLEncoder.encode(u, "UTF-8")
+            else base.trimEnd('/') + "/hhkan/proxy?u=" + URLEncoder.encode(u, "UTF-8") + "&poster_cache=2"
         }
 
         /** 豆瓣同一张剧照有多个尺寸前缀，列表接口只给最小号（s_ratio_poster ≈ 240×360）。

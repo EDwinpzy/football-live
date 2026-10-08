@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 from xml.etree import ElementTree
@@ -19,7 +20,7 @@ class EndpointMigrationContractTests(unittest.TestCase):
                 self.assertIn("IPTV_LATEST_URL", gradle)
                 self.assertIn("APK_UPDATE_URL", gradle)
 
-    def test_release_defaults_target_the_vps_and_next_forced_migration_version(self):
+    def test_release_defaults_require_the_vps_opt_in_and_do_not_regress_migration_version(self):
         for module in (APP_CONFIG, MOBILE_CONFIG):
             with self.subTest(module=module):
                 gradle = (module / "build.gradle").read_text(encoding="utf-8")
@@ -28,8 +29,13 @@ class EndpointMigrationContractTests(unittest.TestCase):
                 self.assertNotIn("def defaultApiBaseUrl", gradle)
                 self.assertIn("otvMigrationTestOrigin = 'https://103.236.97.137:35208'", gradle)
                 self.assertIn("OTV_RELEASE_API_BASE_URL", gradle)
-                self.assertIn("Integer.parseInt(apkVersionCodeOverride.toString()) : 110", gradle)
-                self.assertIn("apkVersionNameOverride.toString() : \"1.1\"", gradle)
+                # 后续正式发布必须可以递增，不能被迁移当时的 V1.1/110 锁住。
+                code = re.search(r"Integer\.parseInt\(apkVersionCodeOverride\.toString\(\)\)\s*:\s*(\d+)", gradle)
+                name = re.search(r'apkVersionNameOverride\.toString\(\)\s*:\s*"(\d+)\.(\d+)"', gradle)
+                self.assertIsNotNone(code)
+                self.assertIsNotNone(name)
+                self.assertGreaterEqual(int(code.group(1)), 110)
+                self.assertGreaterEqual(tuple(map(int, name.groups())), (1, 1))
 
     def test_network_security_keeps_local_http_backend_working(self):
         for module in (APP_CONFIG, MOBILE_CONFIG):

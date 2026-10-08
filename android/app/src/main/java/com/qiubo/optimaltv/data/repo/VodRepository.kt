@@ -78,6 +78,16 @@ private class SourceResult(val source: ContentSource, val snapshot: SourceSnapsh
 private fun CatalogMedia.localIdentityKey(): String =
     mytvId.trim().takeIf(String::isNotEmpty) ?: legacyRef ?: title.trim()
 
+/** A populated Douban section replaces the fallback completely, preserving its ranking. */
+internal fun preferDoubanSections(local: List<HSec>, upstream: List<HSec>): List<HSec> {
+    val result = local.toMutableList()
+    upstream.filter { it.items.isNotEmpty() }.forEach { section ->
+        val index = result.indexOfFirst { it.name == section.name }
+        if (index < 0) result += section else result[index] = section
+    }
+    return result
+}
+
 /**
  * 目录来源硬边界：浏览卡片只能由好好看产生。
  *
@@ -604,7 +614,7 @@ class VodRepository(
                     metadataCatalog.topRows("movie", "rating")
                 ).distinctBy { it.localIdentityKey() }
                 .map { VodApiSource.fromCatalogMedia(it, settings.current().hhkanBaseUrl) }
-            if (localItems.isNotEmpty()) {
+            if (localItems.isNotEmpty() && _home.value.sections.isEmpty()) {
                 val sections = localHomeSections(localItems)
                 _home.value = HomeState(loading = false, sections = sections)
             }
@@ -620,39 +630,26 @@ class VodRepository(
                 android.util.Log.w("OTV", "home 空结果（源站不可达或解析为空），保留空态等待重试")
             }
             _home.value = if (d != null && (d.sections.isNotEmpty() || d.carousel.isNotEmpty())) {
-                // 本地目录先上屏不能被上游整段覆盖：已装库时上游只补内容，不清掉本地板块。
+                // 豆瓣有内容就替换对应本地栏，不把旧列表追加到新榜单。
                 HomeState(
                     loading = false,
-                    sections = mergeHomeSections(_home.value.sections, d.sections),
+                    sections = preferDoubanSections(_home.value.sections, d.sections),
                     carousel = d.carousel,
                 )
             } else {
                 _home.value.copy(loading = false)
             }
-        }
-    }
-
-    /**
-     * 本地板块优先保留，板块内按 item id 去重合并上游条目。
-     * 保持 fire-and-forget：上游结果异步追加，本地渲染路径不等待网络。
-     */
-    private fun mergeHomeSections(local: List<HSec>, upstream: List<HSec>): List<HSec> {
-        if (local.isEmpty()) return upstream
-        if (upstream.isEmpty()) return local
-        val merged = local.toMutableList()
-        upstream.forEach { section ->
-            val index = merged.indexOfFirst { it.name == section.name }
-            if (index < 0) {
-                merged += section
-            } else {
-                val existing = merged[index]
-                val seen = existing.items.mapTo(HashSet()) { it.id }
-                merged[index] = existing.copy(
-                    items = existing.items + section.items.filter { seen.add(it.id) },
-                )
+            if (d?.stale == true && !force) {
+                val refreshed = runCatching { VodApiSource.fetchHome(base, okHttp, "movie", refresh = true) }
+                    .getOrNull()
+                if (refreshed != null) {
+                    _home.value = _home.value.copy(
+                        sections = preferDoubanSections(_home.value.sections, refreshed.sections),
+                        carousel = refreshed.carousel,
+                    )
+                }
             }
         }
-        return merged
     }
 
     /** 等待进行中的首页拉取结束（libBlocks「最近热门」块依赖 home sections） */
@@ -818,8 +815,39 @@ class VodRepository(
             }.orEmpty()
             val hasLocalSections = localSections.any { it.items.isNotEmpty() }
             val installedMetadata = runCatching { metadataCatalog.hasInstalledDatabase() }.getOrDefault(false)
-            _libBlocks.value = _libBlocks.value + (cid to completeBlocks(localSections))
+            if (!libBlocksHaveContent(cid)) {
+                _libBlocks.value = _libBlocks.value + (cid to completeBlocks(localSections))
+            }
             if (hasLocalSections) markHotSettled(cid)
+
+            fun applyDouban(data: HhkanSource.HomeData) {
+                val sections = data.sections.mapNotNull { section ->
+                    when (section.name) {
+                        "最近热门" -> section
+                        "最新上映" -> section.copy(name = "最新上线")
+                        else -> null
+                    }
+                }
+                _libBlocks.value = _libBlocks.value + (cid to completeBlocks(
+                    preferDoubanSections(_libBlocks.value[cid].orEmpty(), sections),
+                ))
+                if (sections.any { it.items.isNotEmpty() }) markHotSettled(cid)
+            }
+            var douban = if (base.isBlank()) null else runCatching {
+                VodApiSource.fetchHome(base, okHttp, category, refresh = force)
+            }.onFailure { android.util.Log.w("OTV", "分类 $cid 豆瓣目录拉取失败: ${it.message}") }.getOrNull()
+            douban?.let(::applyDouban)
+            if (douban?.stale == true && !force) {
+                val refreshed = runCatching { VodApiSource.fetchHome(base, okHttp, category, refresh = true) }
+                    .getOrNull()
+                if (refreshed != null) {
+                    douban = refreshed
+                    applyDouban(refreshed)
+                }
+            }
+            val hasFreshDouban = douban?.let { data ->
+                !data.stale && data.sections.any { it.name == "最近热门" && it.items.isNotEmpty() }
+            } == true
 
             val onlineUpdated = if (base.isBlank()) {
                 emptyList()
@@ -834,12 +862,12 @@ class VodRepository(
             }
             val hasOnlineUpdates = onlineUpdated.isNotEmpty()
             if (hasOnlineUpdates) {
-                val sections = localSections.filterNot { it.name == "最近更新" } + HSec("最近更新", onlineUpdated)
+                val sections = _libBlocks.value[cid].orEmpty().filterNot { it.name == "最近更新" } + HSec("最近更新", onlineUpdated)
                 _libBlocks.value = _libBlocks.value + (cid to completeBlocks(sections))
                 markHotSettled(cid)
             }
 
-            if (hasOnlineUpdates || (base.isBlank() && hasLocalSections && installedMetadata)) {
+            if (hasFreshDouban || (base.isBlank() && hasLocalSections && installedMetadata)) {
                 libDone += cid
                 libFailAt.remove(cid)
                 libRetries.remove(cid)
