@@ -11,8 +11,8 @@ TvScreen / PlayerScreen / FavoritesScreen / PaywallShared 共 10 处）本来就
 滚动 / 详情 / 播放 / 遥控器焦点这些 UI 回归，每次都得消耗一个正式卡密槽位
 （一张卡上限 2 台设备）。测试基础设施反过来绑架了正式资源。
 
-Debug 跳过门控不影响分发：Release 仍为 true，且 Release 另有已验收正式域名的
-硬门槛（`otvApiOriginProblem`），不会因这个改动而放宽。
+Debug 跳过门控独立于正式包配置：两端 Release 当前也按用户要求保持 false；
+Release 另有已验收正式域名的硬门槛（`otvApiOriginProblem`），不会因这个改动而放宽。
 """
 
 import pathlib
@@ -20,10 +20,9 @@ import re
 import unittest
 
 
-# 2026-09-29 用户要求「暂时隐藏 app 门禁、不需要激活」→ 两端 release 都改为
-# 'false'。整套授权链路（LicenseManager / PaywallShared / activate 端点 / 卡密库）
-# 都还在，只是不再拦人；改回 'true' 即可恢复，无需动业务代码。
-# 上架（应用商店）前必须改回 "true"。
+# 2026-10-08 用户再次确认对外分发 APK 也应免激活 → 两端 Release 保持 'false'。
+# 整套授权链路（LicenseManager / PaywallShared / activate 端点 / 卡密库）都还在，
+# 只是不再拦人。仅按用户明确要求更改该发布策略。
 EXPECTED_RELEASE_GATE = "false"
 
 
@@ -58,16 +57,12 @@ class DebugLicenseGateTest(unittest.TestCase):
                     "Debug 包无法跳过卡密门控，全新安装的 UI 回归测试做不了。",
                 )
 
-    def test_release_keeps_the_gate_on(self):
-        """Release 的卡密门禁必须**显式**声明（值本身可以是 true 或 false）。
+    def test_release_declares_the_current_gate_policy(self):
+        """Release 的卡密门禁必须**显式**声明，并遵循当前用户选择的关闭口径。
 
-        2026-09-29 用户要求「暂时隐藏门禁、不需要激活」，两端 release 的
-        LICENSE_ENABLED 都被显式改成 'false'。本测试守住的是「**显式**声明」
-        这条性质——不接受有人删掉这行让 release 悄悄继承 defaultConfig 的值，
-        那才是真正的「无声」。
-
-        ⚠️ 上架前必须把两端 release 的 LICENSE_ENABLED 改回 'true'，
-        并把下面的 EXPECTED_RELEASE_GATE 一并改回 "true"。
+        2026-10-08 用户确认正式分发版也应免激活，所以当前期望值是 'false'。
+        本测试同时守住显式声明与所选值，避免 Release 静默继承默认值或意外重开门禁。
+        只有用户明确要求改变发布策略时，才同步修改 EXPECTED_RELEASE_GATE。
         """
         for gradle in (TV_GRADLE, MOBILE_GRADLE):
             with self.subTest(gradle=gradle.name):
@@ -87,7 +82,7 @@ class DebugLicenseGateTest(unittest.TestCase):
                 self.assertEqual(
                     match.group(1), EXPECTED_RELEASE_GATE,
                     f"{gradle.name}: release 的卡密门禁当前应为 {EXPECTED_RELEASE_GATE}。"
-                    "上架前要恢复门禁的话，把两端 build.gradle 的这一行和本常量一起改回 true。",
+                    "若用户明确要求启用门禁，应同步修改两端 build.gradle 和本常量。",
                 )
 
     def test_debug_builds_explicitly_disable_the_gate(self):
