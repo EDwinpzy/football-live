@@ -128,7 +128,10 @@ def main() -> None:
 
     blob = json.dumps(seed, ensure_ascii=False, separators=(",", ":")) + "\n"
     for target in TARGETS:
-        target.write_text(blob, encoding="utf-8")
+        # Keep seed bytes platform-independent; Path.write_text translates `\n`
+        # to CRLF on Windows unless newline is specified explicitly.
+        with target.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(blob)
         print("已写入 %s（%d 条 / %d 分类，%.1f KB）"
               % (target.relative_to(ROOT), len(seed["items"]), len(seed["categories"]),
                  len(blob.encode("utf-8")) / 1024))
