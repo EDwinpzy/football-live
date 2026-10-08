@@ -174,9 +174,9 @@ public struct BackendClient {
         guard let groups = object["groups"] as? [[String: Any]] else {
             throw BackendError.malformedPayload("电视频道列表格式不正确。")
         }
-        return groups.flatMap { group in
+        return groups.flatMap { group -> [TVChannel] in
             let groupName = Self.string(group["name"]).ifBlank("其他")
-            return (group["channels"] as? [[String: Any]] ?? []).compactMap { channel in
+            return (group["channels"] as? [[String: Any]] ?? []).compactMap { channel -> TVChannel? in
                 let name = Self.string(channel["name"]).trimmingCharacters(in: .whitespacesAndNewlines)
                 let urls = (channel["urls"] as? [Any] ?? []).map(Self.string).filter { !$0.isEmpty }
                 guard !name.isEmpty, !urls.isEmpty else { return nil }

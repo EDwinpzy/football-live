@@ -14,6 +14,10 @@ struct PlaybackView: View {
     @State private var isLoading = true
     @State private var errorMessage: String?
     @State private var isLocked = false
+    @State private var requestGeneration = 0
+    @State private var relayFallbackURL: URL?
+    @State private var isDirectAttempt = false
+    @State private var relayFallbackAttempted = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -75,21 +79,51 @@ struct PlaybackView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task(id: route.id) { await startPlayback() }
         .onDisappear {
+            requestGeneration += 1
+            relayFallbackURL = nil
+            isDirectAttempt = false
             player?.pause()
             player = nil
         }
         .onReceive(playerStatusPublisher) { status in
             guard status.status == .failed,
                   status.item === player?.currentItem else { return }
-            presentPlaybackFailure()
+            recoverOrShowFailure(for: status.item)
         }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemFailedToPlayToEndTime)) { notification in
             guard let failedItem = notification.object as? AVPlayerItem,
                   failedItem === player?.currentItem else { return }
-            presentPlaybackFailure()
+            recoverOrShowFailure(for: failedItem)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemNewErrorLogEntry)) { notification in
+            guard isDirectAttempt,
+                  let failedItem = notification.object as? AVPlayerItem,
+                  failedItem === player?.currentItem else { return }
+            recoverOrShowFailure(for: failedItem)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemPlaybackStalled)) { notification in
+            guard isDirectAttempt,
+                  let stalledItem = notification.object as? AVPlayerItem,
+                  stalledItem === player?.currentItem else { return }
+            let generation = requestGeneration
+            Task { @MainActor in
+                do {
+                    try await Task.sleep(nanoseconds: 4_000_000_000)
+                } catch {
+                    return
+                }
+                guard generation == requestGeneration,
+                      isDirectAttempt,
+                      stalledItem === player?.currentItem,
+                      player?.timeControlStatus == .waitingToPlayAtSpecifiedRate else { return }
+                recoverOrShowFailure(for: stalledItem)
+            }
         }
         .onChange(of: license.isActive) { active in
             guard !active else { return }
+            requestGeneration += 1
+            relayFallbackURL = nil
+            isDirectAttempt = false
             player?.pause()
             player = nil
             isLoading = false
@@ -101,10 +135,15 @@ struct PlaybackView: View {
 
     @MainActor
     private func startPlayback() async {
+        requestGeneration += 1
+        let generation = requestGeneration
         player?.pause()
         player = nil
         errorMessage = nil
         isLocked = false
+        relayFallbackURL = nil
+        isDirectAttempt = false
+        relayFallbackAttempted = false
 
         guard license.isActive else {
             isLoading = false
@@ -128,7 +167,16 @@ struct PlaybackView: View {
                       let episode = route.episode {
                 let stream = try await client.play(detailRef: detailRef, source: source, episode: episode)
                 try Task.checkCancellation()
-                upstreamURL = stream.url
+                let directURL = stream.directURL.flatMap { url in
+                    url.scheme?.lowercased() == "https" ? url : nil
+                }
+                if let directURL {
+                    upstreamURL = directURL
+                    relayFallbackURL = stream.url
+                    isDirectAttempt = true
+                } else {
+                    upstreamURL = stream.url
+                }
             } else if let match = route.footballMatch,
                       let sourceIndex = route.footballSourceIndex {
                 let stream = try await client.matchStream(match: match, sourceIndex: sourceIndex)
@@ -138,27 +186,65 @@ struct PlaybackView: View {
                 throw PlaybackError.missingRoute
             }
             try Task.checkCancellation()
+            guard generation == requestGeneration else { return }
             guard license.isActive else {
                 isLoading = false
                 isLocked = true
                 return
             }
-            let item = AVPlayerItem(url: upstreamURL)
-            let newPlayer = AVPlayer(playerItem: item)
-            newPlayer.automaticallyWaitsToMinimizeStalling = true
-            player = newPlayer
+            installPlayer(url: upstreamURL, generation: generation)
             if let item = route.item {
                 library.recordWatching(item: item)
             }
-            isLoading = false
-            newPlayer.play()
         } catch is CancellationError {
             return
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, generation == requestGeneration else { return }
             errorMessage = userFacingNetworkMessage(error)
             isLoading = false
         }
+    }
+
+    @MainActor
+    private func installPlayer(url: URL, generation: Int) {
+        guard generation == requestGeneration else { return }
+        guard license.isActive else {
+            isLoading = false
+            isLocked = true
+            return
+        }
+        let item = AVPlayerItem(url: url)
+        let newPlayer = AVPlayer(playerItem: item)
+        newPlayer.automaticallyWaitsToMinimizeStalling = true
+        player = newPlayer
+        isLoading = false
+        newPlayer.play()
+    }
+
+    @MainActor
+    private func recoverOrShowFailure(for failedItem: AVPlayerItem) {
+        guard failedItem === player?.currentItem else { return }
+        guard license.isActive else {
+            player?.pause()
+            player = nil
+            isLoading = false
+            isLocked = true
+            return
+        }
+        if isDirectAttempt,
+           !relayFallbackAttempted,
+           let relayFallbackURL {
+            relayFallbackAttempted = true
+            isDirectAttempt = false
+            self.relayFallbackURL = nil
+            player?.pause()
+            player = nil
+            isLoading = true
+            errorMessage = nil
+            installPlayer(url: relayFallbackURL, generation: requestGeneration)
+            return
+        }
+        presentPlaybackFailure()
     }
 
     private var playerDescription: String {
@@ -180,6 +266,8 @@ struct PlaybackView: View {
     private func presentPlaybackFailure() {
         errorMessage = "当前线路无法播放或已中断。返回后可以选择其他线路。"
         isLoading = false
+        relayFallbackURL = nil
+        isDirectAttempt = false
         player?.pause()
         player = nil
     }
