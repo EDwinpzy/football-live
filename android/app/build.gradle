@@ -132,8 +132,8 @@ android {
     // 必须严格递增：客户端 ApkUpdatePolicy 只比较 versionCode（manifest.versionCode
     // <= 本机 versionCode 即视为无更新），系统安装也不允许降级覆盖。V1.0 取 100 而不是
     // 10，是为了同时高于重置前的 42，已装 1.4x 的设备仍能收到 V1.0 的更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 220)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "2.1")
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 230)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "2.2")
         // 方案 §5：双 ABI split 思路——真机 arm64/v7a + 模拟器 x86_64（开发验证用）
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
         // AOSP 谷歌拼音解码器（搜索页拼音候选，2026-08-29）；默认 c++_static（new/delete 需要 libc++）
@@ -146,8 +146,8 @@ android {
         // 可以共存，但桌面会出现两个同名图标），分发时按设备类型二选一。
         resValue 'string', 'app_name', 'My TV'
         // 卡密门控由 buildType 决定（见 buildTypes 里的 licenseEnabled）：
-        // Release 保持 true 生效；Debug 默认 false，好让全新安装的调试包能直接进主界面
-        // 做 UI 回归，不必每跑一次回归就消耗一个正式卡密槽位（一卡限 2 台设备）。
+        // 默认值为 false；是否启用卡密门禁由具体 buildType 的覆盖值决定。
+        // Debug 默认可直接进入主界面，做 UI 回归不消耗正式卡密槽位（一卡限 2 台设备）。
         // 需要在 Debug 上验证真实卡密流程时：-PdebugLicenseEnabled=true 覆盖。
         buildConfigField 'boolean', 'LICENSE_ENABLED',
                 (project.findProperty('debugLicenseEnabled') ?: 'false').toString()
@@ -207,10 +207,8 @@ android {
         release {
             minifyEnabled false   // Chaquopy + 反射（引擎/Room）保守不混淆
             signingConfig signingConfigs.release
-            // 正式包卡密门禁：默认开（2026-09-18 起）。
-            //
-            // 正式 APK 恢复卡密门禁（上架要求；2026-10-08）。
-            buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'
+            // 2026-10-08 按用户要求隐藏正式 APK 的卡密门禁，免激活进入主界面。
+            buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'
         }
         debug {
             // v1.20 QA：debug 也用发布签名——可覆盖安装 release（保激活/收藏等数据），
@@ -251,7 +249,7 @@ chaquopy {
 }
 
 // 统一产物到项目目录（v1.19 版本重规划定稿）：apk/TV版/ 固定名 MyTV-TV版.apk，
-// 由 assembleRelease 复制（对外分发=签名+卡密+热更新正式链路）。
+// 由 assembleRelease 复制（对外分发=签名+热更新正式链路）。
 // debug 测试包不进 apk/——直接用项目根 build 构建输出目录。
 tasks.register("copyTvApk", Copy) {
     from(layout.buildDirectory.file("outputs/apk/release/app-release.apk"))

@@ -133,8 +133,8 @@ android {
     //   versionCode = 主版本×100 + 次版本×10 → V1.0=100、V1.1=110、V1.2=120、V2.0=200
     // 必须严格递增：客户端只比较 versionCode，系统安装也不允许降级覆盖。V1.0 取 100
     // 而非 10，是为了高于重置前的 42，已装 1.4x 的设备仍能收到 V1.0 的更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 200)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "2.0")
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 210)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "2.1")
         // 与 TV 版一致的三 ABI（Chaquopy/libVLC so 需要）；移动版无 cpp 拼音解码器
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
 
@@ -146,8 +146,8 @@ android {
         // 可以共存，但桌面会出现两个同名图标），分发时按设备类型二选一。
         resValue 'string', 'app_name', 'My TV'
         // 卡密门控由 buildType 决定（见 buildTypes 里的 licenseEnabled）：
-        // Release 保持 true 生效；Debug 默认 false，好让全新安装的调试包能直接进主界面
-        // 做 UI 回归，不必每跑一次回归就消耗一个正式卡密槽位（一卡限 2 台设备）。
+        // 默认值为 false；是否启用卡密门禁由具体 buildType 的覆盖值决定。
+        // Debug 默认可直接进入主界面，做 UI 回归不消耗正式卡密槽位（一卡限 2 台设备）。
         // 需要在 Debug 上验证真实卡密流程时：-PdebugLicenseEnabled=true 覆盖。
         buildConfigField 'boolean', 'LICENSE_ENABLED',
                 (project.findProperty('debugLicenseEnabled') ?: 'false').toString()
@@ -193,10 +193,8 @@ android {
         release {
             minifyEnabled false   // Chaquopy + 反射（引擎/Room）保守不混淆
             signingConfig signingConfigs.release
-        // 正式包卡密门禁：默认开（2026-09-18 起）。
-        //
-        // 正式 APK 恢复卡密门禁（上架要求；2026-10-08）。
-        buildConfigField 'boolean', 'LICENSE_ENABLED', 'true'
+            // 2026-10-08 按用户要求隐藏正式 APK 的卡密门禁，免激活进入主界面。
+            buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'
         }
         debug {
             // v1.20 QA：debug 也用发布签名（同 TV 版）——可覆盖安装 release 保数据
@@ -236,7 +234,7 @@ chaquopy {
 }
 
 // 统一产物到项目目录（v1.19 版本重规划定稿）：apk/移动版/ 固定名 MyTV-移动版.apk，
-// 由 assembleRelease 复制（对外分发=签名+卡密+热更新正式链路）。
+// 由 assembleRelease 复制（对外分发=签名+热更新正式链路）。
 // debug 测试包不进 apk/——直接用项目根 build 构建输出目录。
 tasks.register("copyMobileApk", Copy) {
     from(layout.buildDirectory.file("outputs/apk/release/app-release.apk"))
