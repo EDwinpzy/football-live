@@ -14,7 +14,10 @@ final class MyTVUITests: XCTestCase {
         let firstCard = app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "media-card-")
         ).firstMatch
-        XCTAssertTrue(firstCard.waitForExistence(timeout: 45), "The real service should load at least one movie card without activation.")
+        XCTAssertTrue(
+            firstCard.waitForExistence(timeout: 45),
+            "The real service should load at least one movie card without activation.\n\(app.debugDescription)"
+        )
         assertFrame(of: app, landscape: false)
 
         let posterLoaded = NSPredicate(format: "value == %@", "海报已加载")
@@ -22,7 +25,7 @@ final class MyTVUITests: XCTestCase {
         XCTAssertEqual(
             XCTWaiter.wait(for: [posterExpectation], timeout: 30),
             .completed,
-            "The first movie poster should finish loading before capture."
+            "The first movie poster should finish loading before capture.\n\(app.debugDescription)"
         )
         attachScreenshot(of: app, named: "real-service-home-portrait")
     }
@@ -51,12 +54,12 @@ final class MyTVUITests: XCTestCase {
         let firstCard = app.buttons["media-card-fixture-movie-1"]
         XCTAssertTrue(firstCard.waitForExistence(timeout: 10))
         firstCard.tap()
-        XCTAssertTrue(app.staticTexts["detail-summary"].waitForExistence(timeout: 10))
+        let summary = app.staticTexts["detail-summary"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 10))
 
         XCUIDevice.shared.orientation = .landscapeLeft
         let title = app.staticTexts["detail-title"]
-        XCTAssertTrue(title.waitForExistence(timeout: 8))
-        assertFrame(of: app, landscape: true)
+        waitForStableLandscapeDetailLayout(app: app, title: title, summary: summary)
         attachScreenshot(of: app, named: "fixture-detail-landscape")
         XCUIDevice.shared.orientation = .portrait
     }
@@ -75,8 +78,9 @@ final class MyTVUITests: XCTestCase {
         XCTAssertTrue(episode.waitForExistence(timeout: 10))
         episode.tap()
 
-        let licenseGate = app.descendants(matching: .any)["player-license-gate"]
+        let licenseGate = app.staticTexts["播放需要激活"]
         XCTAssertTrue(licenseGate.waitForExistence(timeout: 10), "An unlicensed fixture playback route must stop at the activation gate.")
+        XCTAssertTrue(licenseGate.isHittable, "The activation gate should be visible to the user.")
         XCTAssertFalse(app.descendants(matching: .any)["native-video-player"].exists, "The activation gate must appear before AVPlayer is created.")
         attachScreenshot(of: app, named: "fixture-player-license-gate")
     }
@@ -100,5 +104,137 @@ final class MyTVUITests: XCTestCase {
         }
         let orientationExpectation = XCTNSPredicateExpectation(predicate: orientationPredicate, object: app)
         XCTAssertEqual(XCTWaiter.wait(for: [orientationExpectation], timeout: 8), .completed, file: file, line: line)
+    }
+
+    private func waitForStableLandscapeDetailLayout(
+        app: XCUIApplication,
+        title: XCUIElement,
+        summary: XCUIElement,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let navigationBar = app.navigationBars.firstMatch
+        let backButton = navigationBar.buttons.element(boundBy: 0)
+        let layoutReady = NSPredicate { _, _ in
+            self.landscapeDetailGeometry(
+                app: app,
+                title: title,
+                summary: summary,
+                navigationBar: navigationBar,
+                backButton: backButton
+            ) != nil
+        }
+        let layoutExpectation = XCTNSPredicateExpectation(predicate: layoutReady, object: app)
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [layoutExpectation], timeout: 15),
+            .completed,
+            "Landscape detail title, summary, and back button should be visible before capture.\n\(app.debugDescription)",
+            file: file,
+            line: line
+        )
+
+        var lastGeometry: [CGRect]?
+        var stableSamples = 0
+        let stabilityDeadline = Date().addingTimeInterval(5)
+        while Date() < stabilityDeadline && stableSamples < 3 {
+            if let geometry = landscapeDetailGeometry(
+                app: app,
+                title: title,
+                summary: summary,
+                navigationBar: navigationBar,
+                backButton: backButton
+            ) {
+                if let lastGeometry, rectsAreStable(lastGeometry, geometry) {
+                    stableSamples += 1
+                } else {
+                    stableSamples = 1
+                }
+                lastGeometry = geometry
+            } else {
+                stableSamples = 0
+                lastGeometry = nil
+            }
+
+            if stableSamples < 3 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+            }
+        }
+
+        XCTAssertGreaterThanOrEqual(
+            stableSamples,
+            3,
+            "Landscape detail geometry should remain stable across repeated samples.\n\(app.debugDescription)",
+            file: file,
+            line: line
+        )
+
+        // XCTest can observe the new frame before UIKit finishes the rotation animation.
+        RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+        let settledGeometry = landscapeDetailGeometry(
+            app: app,
+            title: title,
+            summary: summary,
+            navigationBar: navigationBar,
+            backButton: backButton
+        )
+        XCTAssertNotNil(
+            settledGeometry,
+            "Landscape detail content should remain in bounds after the rotation settles.\n\(app.debugDescription)",
+            file: file,
+            line: line
+        )
+        if let lastGeometry, let settledGeometry {
+            XCTAssertTrue(
+                rectsAreStable(lastGeometry, settledGeometry),
+                "Landscape detail geometry should stay stable through the final screenshot settle.\n\(app.debugDescription)",
+                file: file,
+                line: line
+            )
+        }
+    }
+
+    private func landscapeDetailGeometry(
+        app: XCUIApplication,
+        title: XCUIElement,
+        summary: XCUIElement,
+        navigationBar: XCUIElement,
+        backButton: XCUIElement
+    ) -> [CGRect]? {
+        let screen = app.frame
+        guard screen.width > screen.height,
+              title.exists,
+              summary.exists,
+              navigationBar.exists,
+              backButton.exists,
+              title.isHittable,
+              summary.isHittable,
+              backButton.isHittable else {
+            return nil
+        }
+
+        let titleFrame = title.frame
+        let summaryFrame = summary.frame
+        let navigationBarFrame = navigationBar.frame
+        let backButtonFrame = backButton.frame
+        guard screen.contains(titleFrame),
+              titleFrame.height < screen.height,
+              screen.intersects(summaryFrame),
+              screen.contains(navigationBarFrame),
+              screen.contains(backButtonFrame) else {
+            return nil
+        }
+
+        return [screen, titleFrame, summaryFrame, navigationBarFrame, backButtonFrame]
+    }
+
+    private func rectsAreStable(_ lhs: [CGRect], _ rhs: [CGRect], tolerance: CGFloat = 1) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).allSatisfy { pair in
+            let (first, second) = pair
+            return abs(first.minX - second.minX) <= tolerance &&
+                abs(first.minY - second.minY) <= tolerance &&
+                abs(first.width - second.width) <= tolerance &&
+                abs(first.height - second.height) <= tolerance
+        }
     }
 }

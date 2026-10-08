@@ -28,6 +28,12 @@ jobs:
           xcrun simctl boot "$DEVICE_ID"
           xcrun simctl bootstatus "$DEVICE_ID" -b
           xcrun simctl keychain "$DEVICE_ID" add-root-cert ios/Certificates/MyTV-Root-CA.cer
+      - name: Diagnose real service connectivity with standard TLS
+        run: |
+          mkdir -p ios/build/delivery
+          curl --connect-timeout 15 --max-time 25 --cacert android/app/src/main/res/raw/mytv_migration_ca.pem \
+            --fail --show-error 'https://103.236.97.137:35208/web/vod/home?category=movie' \
+            -o ios/build/delivery/live-home.json 2>ios/build/delivery/live-network.log || cat ios/build/delivery/live-network.log
       - name: Native unit, UI, and live API tests
         run: |
           set -o pipefail

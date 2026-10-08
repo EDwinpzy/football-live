@@ -312,6 +312,7 @@ public struct BackendClient {
         let url = try endpointURL(segments: ["activate"], webRoot: false)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = body
@@ -364,6 +365,7 @@ public struct BackendClient {
     private func get(segments: [String], query: [URLQueryItem]) async throws -> Data {
         let url = try endpointURL(segments: segments, query: query)
         var request = URLRequest(url: url)
+        request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("MyTV iOS", forHTTPHeaderField: "User-Agent")
         let data: Data

@@ -130,7 +130,6 @@ struct PlaybackView: View {
             errorMessage = nil
             isLocked = true
         }
-        .accessibilityIdentifier("playback-screen")
     }
 
     @MainActor
