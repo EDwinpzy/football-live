@@ -1,0 +1,5 @@
+build/
+MyTV.xcodeproj/
+*.xcuserstate
+*.ipa
+*.xcresult/

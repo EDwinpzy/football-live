@@ -1,0 +1,57 @@
+name: MyTV
+options:
+  bundleIdPrefix: com.qiubo
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16.4"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    CODE_SIGNING_ALLOWED: NO
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  MyTV:
+    type: application
+    platform: iOS
+    sources:
+      - path: MyTV
+        excludes:
+          - Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.qiubo.mytv.ios
+        INFOPLIST_FILE: MyTV/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: NO
+  MyTVTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: MyTVTests
+    dependencies:
+      - target: MyTV
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+  MyTVUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: MyTVUITests
+    dependencies:
+      - target: MyTV
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  MyTV:
+    build:
+      targets:
+        MyTV: all
+    test:
+      targets:
+        - MyTVTests
+        - MyTVUITests
+      gatherCoverageData: false

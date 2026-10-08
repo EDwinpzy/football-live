@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+	<key>PayloadIdentifier</key>
+	<string>com.qiubo.mytv.ios.ca</string>
+	<key>PayloadUUID</key>
+	<string>ea7ffe6a-aad4-5e29-9811-58fa9e71e6cb</string>
+	<key>PayloadDisplayName</key>
+	<string>My TV HTTPS Certificate</string>
+	<key>PayloadDescription</key>
+	<string>Contains only the public My TV root CA. After installation, enable full trust in Settings &gt; General &gt; About &gt; Certificate Trust Settings.</string>
+	<key>PayloadOrganization</key>
+	<string>My TV</string>
+	<key>PayloadRemovalDisallowed</key>
+	<false/>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadType</key>
+			<string>com.apple.security.root</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>PayloadIdentifier</key>
+			<string>com.qiubo.mytv.ios.ca.certificate</string>
+			<key>PayloadUUID</key>
+			<string>f5e5df72-91f5-5e93-a8a5-af1bb6f4c9de</string>
+			<key>PayloadDisplayName</key>
+			<string>My TV Root CA</string>
+			<key>PayloadDescription</key>
+			<string>Public root certificate for the existing My TV HTTPS service.</string>
+			<key>PayloadCertificateFileName</key>
+			<string>MyTV-Root-CA.cer</string>
+			<key>PayloadContent</key>
+			<data>
+			MIIELjCCApagAwIBAgIUGHKiktXrvTlzY8k0z3tuwnD0cNswDQYJ
+			KoZIhvcNAQELBQAwHTEbMBkGA1UEAwwSTXkgVFYgTWlncmF0aW9u
+			IENBMB4XDTI2MDkyMzA5MzYwNloXDTM2MDkyMDA5MzYwNlowHTEb
+			MBkGA1UEAwwSTXkgVFYgTWlncmF0aW9uIENBMIIBojANBgkqhkiG
+			9w0BAQEFAAOCAY8AMIIBigKCAYEA15xKMkk3pSiDvc+lTbbRNqU/
+			XOewFZbrWnFAZ+W7DmA0RU61+v20LscNwS8l3luO2jR9qbkPUN4G
+			xcQcymuTOosKENjIgelyfo/ptpklv0fL9o/+mSV116Q8msBv7wGF
+			FFexBJKdbJZsWhfn6meazZ/FwEpLz3UBmu1jziM1ShZl2tSfzo3C
+			yvyzNauy2rqAjrEiCKTYBeL1sbXRJ1oGuydz3AUkscchonWvI4TK
+			wyyNXd8DyTVCsAWZcdZlZKrOAhl7sg+1dTQXeecg42XmjX9wiMZw
+			re56ArHW5xPeMt6WcbkM5GzSVZyiSm/XfKVlBVHwFCKE8lxPOwwS
+			f+carOEV8D6LcwORtACXjawzO3CimhS7ICF+otvFOH9j5p+WtAXi
+			eQumrLe/Jwd4GOanJBm57+7j1Ozwgtyak0Qg+3GehRpyqAIiclM0
+			qLHMXYFKwntRO+OseeOcHQG9X2gWjNcPkwKbBn2lVKk17pUmYT7i
+			+w2e+HfRp6Y4NkH/8kVVAgMBAAGjZjBkMB0GA1UdDgQWBBR00y9j
+			ruRZTHHZaRnhMTroXo78KTAfBgNVHSMEGDAWgBR00y9jruRZTHHZ
+			aRnhMTroXo78KTASBgNVHRMBAf8ECDAGAQH/AgEAMA4GA1UdDwEB
+			/wQEAwIBBjANBgkqhkiG9w0BAQsFAAOCAYEAqSblZhnrBwxQdKjO
+			gC1SME6/ZGmU3GpB4JhXHalB8bp5U07UerUknm4NEIQih+vOL4fl
+			GaPQ7vx1SnXZIVB9tg3eCywYdGo7GKsvoHgv7yY+sBX1qd8ZK8Me
+			sopf0eAnnycnSAnACMRarukeIiG/YU1/jGdTSS3irZxYdHapfZ2W
+			qDoQ5N6UeHQMxeZjxvlouh1p2XPfSrpWg2q9oaia5yEyKHHgPqwN
+			IbAx9QVeuCtRbBqv91scHnj8chDQLl73YKCXhgCWTFIAbZ9eQDX9
+			vUdzFRXSt/5DLAr+h8r63gyPOXUJgW/bgbEAlkve4wTKM0moKyGZ
+			mG8dLuIXIlqVdRVlAdSk3KIZEE/+pSMx+KIVoEdXUyGKDqc8Xt70
+			AXTJXLrjfqWytoFa4EP/jtvWAYBwZ/oxNtjV6MvYuMFaH61AkB8T
+			WiN4BQs0b21mDAOoVmFDYfPdspYoFuLZSeBPRQl7Op12M/4q/f2m
+			2tG7jcBToUrBMb6VoNGdgOus0G89
+			</data>
+		</dict>
+	</array>
+</dict>
+</plist>
