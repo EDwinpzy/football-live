@@ -40,6 +40,7 @@ final class MyTVUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["home-title"].exists)
         XCTAssertEqual(app.buttons["category-tv"].label, "电视剧")
         XCTAssertEqual(app.buttons["category-anime"].label, "国漫")
+        assertPosterLoaded(firstCard)
         attachScreenshot(of: app, named: "fixture-home-portrait")
 
         firstCard.tap()
@@ -62,10 +63,12 @@ final class MyTVUITests: XCTestCase {
 
         let secondPage = app.buttons["home-page-fixture-featured-2"]
         XCTAssertTrue(secondPage.waitForExistence(timeout: 10))
+        assertPosterLoaded(firstCard)
         secondPage.tap()
         let laterCard = app.buttons["media-card-fixture-movie-7"]
         XCTAssertTrue(laterCard.waitForExistence(timeout: 10))
         XCTAssertTrue(laterCard.isHittable)
+        assertPosterLoaded(laterCard)
         attachScreenshot(of: app, named: "fixture-home-second-page-portrait")
     }
 
@@ -119,6 +122,22 @@ final class MyTVUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func assertPosterLoaded(
+        _ card: XCUIElement,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let predicate = NSPredicate(format: "value == %@", "海报已加载")
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: card)
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [expectation], timeout: 15),
+            .completed,
+            "The fixture poster should be decoded and displayed before capture.",
+            file: file,
+            line: line
+        )
     }
 
     private func assertFrame(of app: XCUIApplication, landscape: Bool, file: StaticString = #filePath, line: UInt = #line) {
