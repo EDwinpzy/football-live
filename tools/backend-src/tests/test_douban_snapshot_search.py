@@ -185,6 +185,18 @@ class SnapshotRebuildPreservesHistoryTest(unittest.TestCase):
         self.assertEqual(details[self.stale_id]["title"], "声生不息")
         self.assertEqual(by_id[self.stale_id]["summary"], "旧快照里的简介")
 
+    def test_fresh_home_rows_are_in_the_rebuilt_search_index(self):
+        home = {"movie": {"sections": [{"items": [
+            self.stale_entry("22222222", "本次首页新条目")]}]}}
+
+        index, _details = builder.finalize_search_index(
+            self.fresh_pool, {}, home, self.previous)
+        ids = [item["douban_id"] for item in index]
+
+        self.assertEqual(ids[:3], ["11111111", self.stale_id, "30000000"])
+        self.assertIn("22222222", ids)
+        self.assertEqual(len(ids), len(set(ids)))
+
     def test_history_never_overrides_freshly_fetched_data(self):
         fresh = self.stale_entry(self.stale_id, "声生不息", summary="本次抓到的简介")
         fresh["rating"] = 8.1

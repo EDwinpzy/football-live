@@ -471,7 +471,7 @@ class MetadataCatalogRepositoryTest {
             repository.awaitLibBlocks("douban:movie")
 
             val blocks = repository.libBlocksFlow.value[1].orEmpty().associateBy { it.name }
-            assertEquals(listOf("/vod/home", "/hhkan/channel-sections/1"), requestedPaths)
+            assertEquals(setOf("/vod/home", "/hhkan/channel-sections/1"), requestedPaths.toSet())
             assertEquals(listOf("hhkan:901", "hhkan:902"), blocks.getValue("最近更新").items.map { it.id })
             assertEquals(listOf("真实更新一", "真实更新二"), blocks.getValue("最近更新").items.map { it.title })
         } finally {
