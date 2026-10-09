@@ -46,6 +46,26 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(categories, ["tv", "anime"])
     }
 
+    func testSearchPreservesPaginationMetadataAndRequestsTheRequestedPage() async throws {
+        let requests = RequestRecorder()
+        StubURLProtocol.install { request in
+            requests.append(request)
+            let body = #"{"query":"海边的曼彻斯特","page":2,"limit":30,"has_more":true,"items":[{"id":"douban:1292052","title":"海边的曼彻斯特"}]}"#
+            return (200, Data(body.utf8))
+        }
+        let client = makeClient()
+
+        let page = try await client.search(query: "海边的曼彻斯特", page: 2)
+
+        XCTAssertEqual(page.page, 2)
+        XCTAssertTrue(page.hasMore)
+        XCTAssertEqual(page.items.map(\.id), ["douban:1292052"])
+        let requestURL = try XCTUnwrap(requests.all.first?.url)
+        let query = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(query?.first(where: { $0.name == "page" })?.value, "2")
+        XCTAssertEqual(query?.first(where: { $0.name == "q" })?.value, "海边的曼彻斯特")
+    }
+
     func testHomeSectionPagerCreatesTwoRowPagesAndPadsTheLastPage() {
         let items = (1...7).map { index in
             MediaItem(id: "douban:\(index)", title: "作品\(index)")
@@ -168,6 +188,22 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(components.queryItems?.first(where: { $0.name == "u" })?.value, "https://cdn.example.test/vod/playlist.m3u8?token=a+b&part=one")
         XCTAssertEqual(components.queryItems?.first(where: { $0.name == "ref" })?.value, "none")
         XCTAssertTrue(components.percentEncodedQuery?.contains("token%3Da%2Bb%26part%3Done") == true)
+    }
+
+    func testHHKanPlayUsesNumericContentIDAndSelectedSourceEpisodeKeys() async throws {
+        let requests = RequestRecorder()
+        StubURLProtocol.install { request in
+            requests.append(request)
+            let body = #"{"sources":[{"name":"线路一·清晰1","url":"https://cdn.example.test/episode.m3u8"}]}"#
+            return (200, Data(body.utf8))
+        }
+        let client = makeClient()
+        let source = MediaSource(id: "41", name: "线路一", episodes: [])
+        let episode = Episode(id: "4422228", name: "第1集")
+
+        _ = try await client.play(detailRef: "hhkan:4422228", source: source, episode: episode)
+
+        XCTAssertEqual(requests.all.first?.url?.path, "/web/hhkan/play/4422228/41/4422228")
     }
 
     func testLicenseTicketSignatureSupportsDERAndRawP1363() throws {

@@ -1766,7 +1766,7 @@ def relay_url(u, ref=None):
                                lambda mo: 'URI="' + rw(mo.group(1)) + '"', s)
                 out.append(s)
             else:
-                raw_segs.append(urljoin(u, s))  # 原始上游分片 URL（预取定位用）
+                raw_segs.append(urljoin(base, s))  # 原始上游分片 URL（预取定位用）
                 out.append(rw(s))
         data = "\n".join(out).encode("utf-8")
         ctype = "application/vnd.apple.mpegurl"
@@ -5840,6 +5840,12 @@ def enrich_detail_sources(d, vodid):
                                     for vi, e in enumerate(g["eps"])]}
                 (hi if g.get("probe_h", 0) >= 720 else lo).append(src)
     _nt.join(timeout=max(0.0, 10.0 - (time.time() - t0)))
+    # Keep the groups just resolved from the cross-site pool. They are assigned
+    # pid>=100 above so /hhkan/play can route them through mcms_enriched_play;
+    # previously hi/lo were populated but never merged, leaving visible HHKan
+    # lines as the only choices and making every fallback play return empty.
+    merged_srcs.extend(hi)
+    merged_srcs.extend(lo)
     merged_srcs.sort(key=_unified_line_key)
     d["sources"] = merged_srcs
     _detail_ranked_put(d)

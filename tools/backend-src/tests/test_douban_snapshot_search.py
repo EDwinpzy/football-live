@@ -100,6 +100,28 @@ class SnapshotSearchCoverageTest(unittest.TestCase):
             finally:
                 index.close()
 
+    def test_offline_search_covers_several_real_titles_in_the_bundled_snapshot(self):
+        """经典题名与连续剧搜索必须能由本地快照覆盖，不依赖豆瓣在线响应。"""
+        expected = {
+            "红楼梦": {"1864810"},
+            "西游记": {"2156663"},
+            "三国演义": {"1830528"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            index = media_index.MediaIndex(pathlib.Path(tmp) / "mytv.db")
+            try:
+                catalog = douban_catalog.DoubanCatalog(
+                    fetch=offline_fetch, snapshot=self.snapshot, media_index=index)
+                catalog.warm_index()
+                for query, ids in expected.items():
+                    with self.subTest(query=query):
+                        result = catalog.search(query, limit=100)
+                        found = {item["douban_id"] for item in result["items"]}
+                        self.assertTrue(ids <= found, "离线搜索「%s」漏了 %s" %
+                                        (query, sorted(ids - found)))
+            finally:
+                index.close()
+
     def test_warm_index_writes_every_snapshot_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             index = media_index.MediaIndex(pathlib.Path(tmp) / "mytv.db")
@@ -204,6 +226,49 @@ class SnapshotRebuildPreservesHistoryTest(unittest.TestCase):
             self.fresh_pool, {},
             {"index": [{"title": "没有豆瓣 ID"}, "junk", None], "details": {}})
         self.assertEqual([item["douban_id"] for item in index], ["11111111"])
+
+
+class SnapshotSourceMergeTest(unittest.TestCase):
+    def test_home_and_search_pool_merge_by_id_without_losing_search_fields(self):
+        """首页卡片的同 ID 简略副本不能遮住搜索池的别名和分类。"""
+        home_item = {
+            "id": "douban:1864810", "douban_id": "1864810", "title": "红楼梦",
+            "category": "movie", "aliases": [], "genres": [], "year": "1987",
+            "rating": 0, "poster_url": "https://img.example/red-dream.jpg",
+        }
+        index_item = {
+            "id": "douban:1864810", "douban_id": "1864810", "title": "红楼梦",
+            "category": "tv", "aliases": ["87版红楼梦", "Dream of the Red Chamber"],
+            "genres": ["剧情"], "year": "1987", "rating": 9.6,
+        }
+        snapshot = {
+            "home": {"tv": {"sections": [{"title": "最近热门", "items": [home_item]}]}},
+            "index": [index_item, {"id": "douban:2156663", "douban_id": "2156663",
+                                   "title": "西游记", "category": "tv"}],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            index = media_index.MediaIndex(pathlib.Path(tmp) / "mytv.db")
+            try:
+                catalog = douban_catalog.DoubanCatalog(
+                    fetch=offline_fetch, snapshot=snapshot, media_index=index)
+                subjects = catalog.snapshot_subjects()
+                red_dream = next(item for item in subjects if item["douban_id"] == "1864810")
+                self.assertEqual(len([item for item in subjects
+                                      if item["douban_id"] == "1864810"]), 1)
+                self.assertEqual(red_dream["category"], "tv")
+                self.assertEqual(red_dream["aliases"],
+                                 ["87版红楼梦", "Dream of the Red Chamber"])
+                self.assertEqual(red_dream["genres"], ["剧情"])
+                self.assertEqual(red_dream["poster_url"], home_item["poster_url"])
+                self.assertEqual(red_dream["rating"], 9.6)
+
+                self.assertEqual(catalog.warm_index(), 2)
+                result = catalog.search("87版红楼梦")
+                self.assertEqual([item["douban_id"] for item in result["items"]], ["1864810"])
+                self.assertEqual(result["items"][0]["category"], "tv")
+            finally:
+                index.close()
 
 
 if __name__ == "__main__":

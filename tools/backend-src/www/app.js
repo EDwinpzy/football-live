@@ -1425,24 +1425,38 @@ const briefCache = {};
 /* 同一 id 的详情并发去重：hero 轮播/重绘会在首个请求回来前重复调用，
    实测同一部片会同时打 5 次 /vod/detail（briefCache 只在成功后才写入）。 */
 const briefInflight = {};
+function vodIdentity(vid) {
+  const value = String(vid || "");
+  const hhkan = /^hhkan:(\d+)$/.exec(value);
+  return hhkan ? { kind: "hhkan", id: hhkan[1] }
+    : { kind: "douban", id: value.replace(/^douban:/, "") };
+}
+function vodDetailPath(vid) {
+  const ref = vodIdentity(vid);
+  return ref.kind === "hhkan" ? `/hhkan/detail/${ref.id}` : `/vod/detail/${ref.id}`;
+}
+function vodPlayPath(vid, pid, evid) {
+  const ref = vodIdentity(vid);
+  return ref.kind === "hhkan"
+    ? `/hhkan/play/${ref.id}/${encodeURIComponent(pid)}/${evid}`
+    : `/vod/play/${ref.id}/${encodeURIComponent(pid)}/${evid}`;
+}
 async function vodBrief(id) {
   if (briefCache[id] !== undefined) return briefCache[id];
   if (briefInflight[id]) return briefInflight[id];
   const request = (async () => {
     try {
-      /* hero id 在三端统一为 hhkan:{vid}，后端 detail 路由只接受数字 vid。
-         旧网页直接拼接前缀会请求失败，因此只剩「正片 / My TV 精选内容」占位文案。 */
-      const ref = String(id || "").replace(/^douban:/, "");
-      const d = await fetchJSON(BASE + "/vod/detail/" + ref + "?defer_sources=1", { timeout: 60000 });
+      const ref = vodIdentity(id);
+      const d = await fetchJSON(BASE + vodDetailPath(id) + "?defer_sources=1", { timeout: 60000 });
       if (!d.title) { briefCache[id] = null; return null; }
       /* 2026-09-18：详情接口已是豆瓣 subject 形态（summary/rating/year/regions/genres）。
          旧代码读好好看口径的 meta/desc/score——三个字段都取不到，简介恒为空、评分恒 0，
          hero 只剩「XXX · My TV 精选内容，一键播放。」占位。meta 拼法与 App 端保持一致。 */
       const v = {
-        meta: [d.year, (d.regions || []).join(" / "), (d.genres || []).join(" / ")]
-          .filter(Boolean).join(" / "),
-        desc: d.summary || "",
-        rating: +d.rating || 0,
+        meta: ref.kind === "hhkan" ? (d.meta || [d.year, d.area, ...(d.tags || [])].filter(Boolean).join(" / "))
+          : [d.year, (d.regions || []).join(" / "), (d.genres || []).join(" / ")].filter(Boolean).join(" / "),
+        desc: d.summary || d.desc || "",
+        rating: +d.rating || +d.score || 0,
       };
       briefCache[id] = v;
       return v;
@@ -1905,9 +1919,12 @@ function renderVodHero() {
 /* 历史卡直进播放（App 路由 player/{vodId}/{epIndex}：默认线路 0 + 该集续播） */
 async function playFromHistory(h) {
   try {
-    const d = await fetchJSON(BASE + "/hhkan/detail/" + h.id, { timeout: 60000 });
+    const d = await fetchJSON(BASE + vodDetailPath(h.id), { timeout: 60000 });
     if (!d.title) throw new Error(d.error || "未找到该影片");
-    const src = (d.sources || [])[0];
+    const src = (d.sources || []).map(line => ({ ...line, episodes: (line.episodes || []).map((ep, index) => ({
+      ...ep, ep: ep.ep || ep.name || `第${index + 1}集`, pid: ep.pid != null ? ep.pid : line.id,
+      vid: ep.vid != null ? ep.vid : index,
+    })) }))[0];
     const eps = src ? src.episodes : [];
     if (!eps.length) { hint("该影片暂无可播放线路"); return; }
     let epIdx = h.epIndex || 0;
@@ -2388,21 +2405,24 @@ async function openDetail(vid, cardHint, autoplay) {
      ① `defer_sources=1` 只取豆瓣元数据（多数已随首页补详情落在服务端 7 天缓存里）
         → 海报/标题/meta/评分/演员/简介立刻上屏，主按钮显示「正在查找片源」；
      ② 再取完整详情（含 sources）→ 只补选集区与主按钮，不动已经上屏的信息。 */
-  const ref = String(vid).replace(/^douban:/, "");
-  const normalizeDetail = raw => ({ ...raw, cover: raw.poster_url || "", score: +raw.rating || 0,
-    area: (raw.regions || []).join(" / "), tags: raw.genres || [], desc: raw.summary || "",
-    meta: [raw.year, ...(raw.regions || []), ...(raw.genres || [])].filter(Boolean).join(" / "),
-    actors: (raw.actors || []).join(" / "),
-    sources: (raw.sources || []).map(line => ({ ...line, episodes: (line.episodes || []).map((ep, index) => ({ ep: ep.name || `第${index + 1}集`, pid: line.id, vid: index })) })) });
+  const ref = vodIdentity(vid);
+  const normalizeDetail = raw => ({ ...raw, cover: raw.poster_url || raw.cover || "", score: +raw.rating || +raw.score || 0,
+    area: (raw.area || (raw.regions || []).join(" / ")), tags: raw.tags || raw.genres || [],
+    desc: raw.desc || raw.summary || "",
+    meta: raw.meta || [raw.year, raw.area || (raw.regions || []).join(" / "), ...(raw.tags || raw.genres || [])].filter(Boolean).join(" / "),
+    actors: Array.isArray(raw.actors) ? raw.actors.join(" / ") : (raw.actors || ""),
+    sources: (raw.sources || []).map(line => ({ ...line, episodes: (line.episodes || []).map((ep, index) => ({
+      ep: ep.name || ep.ep || `第${index + 1}集`, pid: ep.pid != null ? ep.pid : line.id, vid: ep.vid != null ? ep.vid : index,
+    })) })) });
   let painted = false;
   try {
-    const fast = await fetchJSON(BASE + "/vod/detail/" + ref + "?defer_sources=1", { timeout: 60000, signal: controller.signal });
+    const fast = await fetchJSON(BASE + vodDetailPath(vid) + "?defer_sources=1", { timeout: 60000, signal: controller.signal });
     if (!current()) return;
     if (!fast.title) throw new Error(fast.error || "未找到该影片");
     applyDetail(normalizeDetail(fast), true);
     painted = true;
     const rawDetail = await fetchJSON(
-      BASE + "/vod/detail/" + ref + "?refresh=1",
+      BASE + (ref.kind === "hhkan" ? vodDetailPath(vid) : vodDetailPath(vid) + "?refresh=1"),
       { timeout: 90000, signal: controller.signal });
     if (!current()) return;
     const d = normalizeDetail(rawDetail);
@@ -2563,10 +2583,14 @@ function classifyVod(meta, epCount) {
   if (epCount > 1) return "电视剧";
   return "电影";
 }
-const search = { q: "", remote: [], local: [], loading: false, lastSearched: "", seq: 0, explicit: 0, catMap: {}, timer: 0 };
+const search = { q: "", remote: [], local: [], loading: false, loadingMore: false,
+  lastSearched: "", seq: 0, explicit: 0, catMap: {}, timer: 0, page: 0, hasMore: false, moreError: "" };
 
 function searchReset() {
+  clearTimeout(search.timer); search.timer = 0; search.seq++;
   search.q = ""; search.remote = []; search.local = []; search.catMap = {};
+  search.loading = false; search.loadingMore = false; search.lastSearched = "";
+  search.page = 0; search.hasMore = false; search.moreError = ""; search.cat = "全部";
   $("#searchInput").value = ""; $("#searchClear").hidden = true;
   $("#searchGrid").innerHTML = ""; $("#searchTabs").innerHTML = "";
   $("#searchHint").hidden = true;
@@ -2593,18 +2617,33 @@ function renderSearch() {
     $$("#searchTabs .stab").forEach(b => b.addEventListener("click", () => { search.cat = b.dataset.c; renderSearch(); }));
   } else $("#searchTabs").innerHTML = "";
   const shown = searchShown();
-  $("#searchHint").hidden = shown.length > 0;
   if (!shown.length) {
     $("#searchGrid").innerHTML = "";
-    if (search.q) $("#searchHint").textContent =
-      rs.length === 0 && search.loading ? "搜索中…" : rs.length === 0 ? "没有匹配的影片" : "该分类暂无结果";
-    return;
+  } else {
+    $("#searchGrid").innerHTML = shown.map(it => posterCard(it, 24)).join("");
+    bindCards("#searchGrid"); registerGrid("#searchGrid", state.portrait ? 205 : 232, 20, state.portrait ? 40 : 70);
   }
-  $("#searchGrid").innerHTML = shown.map(it => posterCard(it, 24)).join("");
-  bindCards("#searchGrid"); registerGrid("#searchGrid", state.portrait ? 205 : 232, 20, state.portrait ? 40 : 70);
+  const hint = $("#searchHint");
+  const empty = !shown.length && search.q
+    ? (rs.length === 0 && search.loading ? "搜索中…" : rs.length === 0 ? "没有匹配的影片" : "该分类暂无结果") : "";
+  if (search.loadingMore) {
+    hint.textContent = empty ? `${empty}\n正在加载更多…` : "正在加载更多…";
+    hint.hidden = false;
+  } else if (search.moreError || search.hasMore) {
+    hint.innerHTML = `${empty ? `<div>${esc(empty)}</div>` : ""}<button type="button" class="search-more" style="margin-top:18px;padding:12px 24px;border-radius:24px;background:rgba(255,255,255,.14);color:#fff">${search.moreError ? "加载失败，点击重试" : "加载更多搜索结果"}</button>`;
+    hint.hidden = false;
+    $(".search-more", hint).addEventListener("click", () => {
+      search.moreError = "";
+      doSearch(search.q, search.page + 1);
+    });
+  } else if (empty) {
+    hint.textContent = empty;
+    hint.hidden = false;
+  } else hint.hidden = true;
 }
 /* 已知目录分类直接采用；目录外前 24 条拉详情归类（并发 6） */
-async function classifyResults(items) {
+async function classifyResults(items, seq = search.seq) {
+  if (seq !== search.seq) return;
   const categories = { movie: "电影", tv: "电视剧", anime: "国漫", variety: "综艺", short: "短剧" };
   for (const it of items) {
     const m = /^douban:(movie|tv|anime|variety|short)$/.exec(it.categoryId || "");
@@ -2614,30 +2653,39 @@ async function classifyResults(items) {
   let i = 0;
   const worker = async () => {
     while (i < targets.length) {
+      if (seq !== search.seq) return;
       const it = targets[i++];
       let cat = null;
-      const m = /^hhkan:(\d)$/.exec(it.categoryId || "");
+      const m = /^hhkan:(\d+)$/.exec(it.categoryId || "");
       if (m && ["1", "2", "3", "4", "6"].includes(m[1])) {
         cat = { "1": "电影", "2": "电视剧", "3": "国漫", "4": "综艺", "6": "短剧" }[m[1]];
       } else {
         try {
-          const d = await fetchJSON(BASE + "/hhkan/detail/" + it.id, { timeout: 45000 });
+          const d = await fetchJSON(BASE + vodDetailPath(it.id), { timeout: 45000 });
           if (d.title) cat = classifyVod(d.meta, (d.sources || []).reduce((n, s) => Math.max(n, (s.episodes || []).length), 0));
         } catch (e) {}
       }
+      if (seq !== search.seq) return;
       if (cat) search.catMap[it.id] = cat;
     }
   };
   await Promise.all(Array.from({ length: 6 }, worker));
-  renderSearch();
+  if (seq === search.seq) renderSearch();
 }
-async function doSearch(k) {
+async function doSearch(k, page = 1) {
   if (!k) return;
-  const seq = ++search.seq;
-  search.loading = true;
+  const firstPage = page <= 1;
+  if (!firstPage && (search.loadingMore || !search.hasMore)) return;
+  const seq = firstPage ? ++search.seq : search.seq;
+  if (firstPage) {
+    search.loading = true; search.loadingMore = false; search.page = 0;
+    search.hasMore = false; search.moreError = "";
+  } else {
+    search.loadingMore = true; search.moreError = "";
+  }
   renderSearch();
   try {
-    const d = await fetchJSON(BASE + "/api/search?q=" + encodeURIComponent(k) + "&limit=60", { timeout: 15000 });
+    const d = await fetchJSON(BASE + "/api/search?q=" + encodeURIComponent(k) + "&page=" + page + "&limit=60", { timeout: 15000 });
     const items = (d.items || []).map(it => ({
       ...it,
       id: it.id || ("douban:" + it.douban_id),
@@ -2645,34 +2693,56 @@ async function doSearch(k) {
       categoryId: "douban:" + (it.category || "movie"),
     }));
     if (seq !== search.seq) return;
-    search.remote = items;
-    search.loading = false;
+    search.remote = firstPage ? items : search.remote.concat(items)
+      .filter((item, index, all) => all.findIndex(x => x.id === item.id) === index);
+    search.loading = false; search.loadingMore = false; search.page = page;
+    search.hasMore = !!d.has_more; search.moreError = "";
     renderSearch();
-    classifyResults(search.remote);
+    classifyResults(firstPage ? items.concat(search.local) : items, seq);
   } catch (e) {
-    if (seq === search.seq) { search.loading = false; renderSearch(); }
+    if (seq === search.seq) {
+      search.loading = false; search.loadingMore = false;
+      if (!firstPage) search.moreError = "more";
+      renderSearch();
+    }
   }
 }
 function searchInputChanged(explicit) {
   const k = $("#searchInput").value.trim();
+  const changed = k !== search.q;
   search.q = k;
-  clearTimeout(search.timer);
-  if (!k) { search.remote = []; search.local = []; search.catMap = {}; search.loading = false; renderSearch(); return; }
+  clearTimeout(search.timer); search.timer = 0;
+  if (!k) {
+    search.seq++; search.remote = []; search.local = []; search.catMap = {};
+    search.loading = false; search.loadingMore = false; search.lastSearched = "";
+    search.page = 0; search.hasMore = false; search.moreError = "";
+    renderSearch(); return;
+  }
+  if (changed) {
+    search.seq++; search.remote = []; search.catMap = {}; search.lastSearched = "";
+    search.loading = false; search.loadingMore = false; search.page = 0;
+    search.hasMore = false; search.moreError = ""; search.cat = "全部";
+  }
   /* 本地目录即时过滤 */
   search.local = vod.cat ? vod.cat.dedupedItems.filter(it => {
     const t = it.title || "";
     return t.includes(k) || k.toLowerCase().split("").every(ch => t.toLowerCase().includes(ch));
   }) : [];
-  if (!explicit && k === search.lastSearched) { renderSearch(); return; }
   renderSearch();
-  search.timer = setTimeout(() => { search.lastSearched = k; doSearch(k); }, 450);
+  classifyResults(search.local, search.seq);
+  if (!explicit && k === search.lastSearched) return;
+  if (explicit) { search.lastSearched = k; doSearch(k); return; }
+  search.timer = setTimeout(() => {
+    if (search.q !== k) return;
+    search.lastSearched = k; doSearch(k);
+  }, 450);
 }
 $("#searchInput").addEventListener("input", () => {
   $("#searchClear").hidden = !$("#searchInput").value;
   searchInputChanged(false);
 });
 $("#searchInput").addEventListener("keydown", e => {
-  if (e.key === "Enter") { e.target.blur(); searchInputChanged(true); doSearch($("#searchInput").value.trim()); }
+  if (e.key === "Enter") { e.target.blur(); searchInputChanged(true); }
 });
 $("#searchClear").addEventListener("click", searchReset);
 search.cat = "全部";
@@ -3203,9 +3273,7 @@ function resolvePlayCached(vid, pid, evid) {
     if (Date.now() - hit.t < playResolve.TTL) return Promise.resolve(hit.d);
     playResolve.map.delete(key);
   }
-  const playPath = String(vid).startsWith("douban:")
-    ? `/vod/play/${String(vid).replace(/^douban:/, "")}/${encodeURIComponent(pid)}/${evid}`
-    : `/hhkan/play/${vid}/${pid}/${evid}`;
+  const playPath = vodPlayPath(vid, pid, evid);
   const p = fetchJSON(BASE + playPath, { timeout: 60000 })
     .then(d => {
       if (d && d.url && !d.sources) d.sources = [{ name: d.name || "自动优选", url: d.url }];
@@ -3484,8 +3552,15 @@ function chooseNextVodLine(ctx, lines) {
   const tried = new Set([String(ctx.playRef.pid), ...(ctx.failedLineIds || []).map(String)]);
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
-    if (!line || tried.has(String(line.id))) continue;
+    if (!line) continue;
     const episodes = line.episodes || [];
+    /* 好好看线路没有 line.id：detail/play 约定用同组 episodes[].pid 代表线路。
+       仅比较 line.id 会反复命中第一条无 id 线路，自动切源永远切不出去。 */
+    const firstPid = episodes.find(ep => ep && ep.pid != null);
+    const lineId = line.id != null ? String(line.id)
+      : line.source_id != null ? String(line.source_id)
+        : firstPid ? String(firstPid.pid) : `line:${index}`;
+    if (tried.has(lineId)) continue;
     const ep = episodes[ctx.epIdx] || episodes[0];
     if (ep && ep.pid != null && ep.vid != null)
       return { index, playRef: { pid: ep.pid, vid: ep.vid } };

@@ -587,6 +587,69 @@ def _section_items(value, title):
     return []
 
 
+_SUBJECT_LIST_FIELDS = (
+    "aliases", "genres", "regions", "tags", "durations", "directors", "actors",
+)
+
+
+def _subject_id(item):
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("douban_id") or item.get("id") or "").removeprefix("douban:")
+
+
+def _merge_subject_metadata(existing, incoming, preferred_fields=(), incoming_lists_first=False):
+    """合并同一豆瓣条目的多来源字段，保留已有详情并补上另一来源的信息。"""
+    merged = copy.deepcopy(existing) if isinstance(existing, dict) else {}
+    incoming = incoming if isinstance(incoming, dict) else {}
+    preferred_fields = set(preferred_fields)
+    for field, value in incoming.items():
+        if field in _SUBJECT_LIST_FIELDS:
+            old_values = merged.get(field)
+            new_values = value
+            old_values = list(old_values) if isinstance(old_values, (list, tuple)) else (
+                [] if old_values in (None, "") else [old_values])
+            new_values = list(new_values) if isinstance(new_values, (list, tuple)) else (
+                [] if new_values in (None, "") else [new_values])
+            ordered = new_values + old_values if incoming_lists_first else old_values + new_values
+            values, seen = [], set()
+            for candidate in ordered:
+                marker = str(candidate or "").strip().casefold()
+                if not marker or marker in seen:
+                    continue
+                seen.add(marker)
+                values.append(candidate)
+            if values or field in merged or field in incoming:
+                merged[field] = values
+            continue
+
+        has_incoming = value is not None and value != "" and value != [] and value != {}
+        has_existing = (merged.get(field) is not None and merged.get(field) != ""
+                        and merged.get(field) != [] and merged.get(field) != {})
+        if has_incoming and (field in preferred_fields or not has_existing):
+            merged[field] = copy.deepcopy(value)
+    return merged
+
+
+def _merge_search_sources(*sources):
+    """按来源顺序合并结果并按豆瓣 ID 去重；保留首个来源的排序与主字段。"""
+    merged = {}
+    order = []
+    for source in sources:
+        for item in source or []:
+            if not isinstance(item, dict):
+                continue
+            key = _subject_id(item)
+            if not key:
+                continue
+            if key not in merged:
+                merged[key] = copy.deepcopy(item)
+                order.append(key)
+            else:
+                merged[key] = _merge_subject_metadata(merged[key], item)
+    return [merged[key] for key in order]
+
+
 class DoubanCatalog:
     def __init__(self, fetch=None, cache=None, snapshot=None, media_index=None, matrix_path=None):
         self.fetch = fetch or self._fetch
@@ -757,22 +820,33 @@ class DoubanCatalog:
         return cached
 
     def snapshot_subjects(self):
-        """快照携带的全部条目：首页三段 + 搜索池 `index`（按豆瓣 ID 去重）。"""
-        items = []
-        for category in (self.snapshot.get("home") or {}):
-            items.extend(self._snapshot_section_items(category))
-        pool = self.snapshot.get("index")
-        items.extend(pool if isinstance(pool, list) else [])
-        unique, seen = [], set()
-        for item in items:
+        """快照携带的全部条目：首页三段 + 搜索池 `index`，同 ID 按字段合并。"""
+        items_by_id = {}
+        order = []
+
+        def add(item, prefer_incoming=False):
             if not isinstance(item, dict):
-                continue
-            key = str(item.get("douban_id") or item.get("id") or "").removeprefix("douban:")
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            unique.append(item)
-        return unique
+                return
+            key = _subject_id(item)
+            if not key:
+                return
+            if key not in items_by_id:
+                items_by_id[key] = copy.deepcopy(item)
+                order.append(key)
+                return
+            preferred_fields = item.keys() if prefer_incoming else ()
+            items_by_id[key] = _merge_subject_metadata(
+                items_by_id[key], item, preferred_fields=preferred_fields,
+                incoming_lists_first=prefer_incoming)
+
+        for category in (self.snapshot.get("home") or {}):
+            for item in self._snapshot_section_items(category):
+                add(item)
+        pool = self.snapshot.get("index")
+        for item in pool if isinstance(pool, list) else []:
+            # 搜索池是广度索引的权威来源；首页行只补齐它缺少的字段。
+            add(item, prefer_incoming=True)
+        return [items_by_id[key] for key in order]
 
     def _snapshot_facets(self, category):
         """随包快照里该分类真实出现过的类型/地区（用来保证筛选项「点了有内容」）。"""
@@ -797,18 +871,31 @@ class DoubanCatalog:
         return options
 
     def warm_index(self):
-        """补齐快照新增条目，保留设备上已抓到的更完整详情。"""
+        """补齐快照条目，合并字段但保留设备上已经抓到的详情。"""
         if not self.media_index:
             return 0
         with self._condition_lock:
             if self._index_warmed:
                 return 0
             known = self.media_index.subject_ids()
-            items = [item for item in self.snapshot_subjects()
-                     if str(item.get("douban_id") or "") not in known]
+            items = []
+            new_count = 0
+            for item in self.snapshot_subjects():
+                key = _subject_id(item)
+                if not key:
+                    continue
+                stored = self.media_index.get(key) if key in known else None
+                if not stored:
+                    items.append(item)
+                    new_count += 1
+                    continue
+                merged = _merge_subject_metadata(
+                    stored, item, preferred_fields=("category",))
+                if merged != stored:
+                    items.append(merged)
             self._ingest(items)
             self._index_warmed = True
-            return len(items)
+            return new_count
 
     @staticmethod
     def _fetch(url, timeout=12):
@@ -1444,10 +1531,16 @@ class DoubanCatalog:
         negative = self.cache.get(key + ":empty", 60) if self.cache else negative
         if negative is not None and not discovered.get("items"):
             discovered = {"items": [], "source": "douban-search", "upstream_available": True}
-        if negative is not None or discovered.get("empty") or not discovered.get("upstream_available", True):
-            backup = self._search_suggestions(query)
-            if backup.get("items") or (negative is None and not discovered.get("items") and not discovered.get("empty")):
-                discovered = backup
+        # 站内搜索和联想建议是两个独立入口。即使发现接口返回了部分条目，也要并入
+        # 建议结果；只把建议当作空结果回退会漏掉只在另一个入口出现的同名作品。
+        backup = self._search_suggestions(query)
+        discovery_items = discovered.get("items") or []
+        suggestion_items = backup.get("items") or []
+        if discovery_items:
+            discovered = dict(discovered)
+            discovered["items"] = _merge_search_sources(discovery_items, suggestion_items)
+        elif suggestion_items or (negative is None and not discovered.get("empty")):
+            discovered = backup
         found = discovered.get("items") or []
         if found and self.media_index:
             enriched = []

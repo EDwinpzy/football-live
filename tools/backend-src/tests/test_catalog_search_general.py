@@ -76,7 +76,10 @@ class GeneralCatalogSearchTest(unittest.TestCase):
         second = catalog.search("星际探索")
         self.assertEqual({item["douban_id"] for item in first["items"]}, {"100", "200"})
         self.assertEqual({item["douban_id"] for item in second["items"]}, {"100", "200"})
-        self.assertEqual(len(self.requests), 1)
+        # A complete result includes both the search-discovery endpoint and
+        # the independent suggestion endpoint; the second identical query uses
+        # both cached responses instead of reissuing either network request.
+        self.assertEqual(len(self.requests), 2)
 
     def test_discovery_does_not_replace_rich_cached_details_with_thin_search_cards(self):
         self.index.upsert_many([normalize_subject({"id": "200", "title": "复仇者联盟",

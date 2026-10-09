@@ -7,8 +7,13 @@ struct SearchView: View {
     @State private var submittedQuery = ""
     @State private var results: [MediaItem] = []
     @State private var isLoading = false
+    @State private var isLoadingMore = false
+    @State private var page = 1
+    @State private var hasMore = false
     @State private var errorMessage: String?
+    @State private var loadMoreError: String?
     @State private var retryToken = 0
+    @State private var searchGeneration = 0
 
     private let columns = [GridItem(.adaptive(minimum: 132), spacing: 14, alignment: .top)]
 
@@ -52,6 +57,25 @@ struct SearchView: View {
                     }
                     .padding(.horizontal, 18)
                     .padding(.vertical, 20)
+                    if isLoadingMore {
+                        ProgressView().tint(MyTVStyle.accent).padding(.vertical, 20)
+                            .accessibilityIdentifier("search-loading-more")
+                    } else if hasMore || loadMoreError != nil {
+                        Button(loadMoreError == nil ? "加载更多" : "加载失败，点击重试") {
+                            Task { await loadMore() }
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(MyTVStyle.accent)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .accessibilityIdentifier("search-load-more")
+                        if let loadMoreError {
+                            Text(loadMoreError)
+                                .font(.caption)
+                                .foregroundStyle(MyTVStyle.secondaryText)
+                                .padding(.bottom, 16)
+                        }
+                    }
                 }
                 .accessibilityIdentifier("search-results")
             }
@@ -80,6 +104,11 @@ struct SearchView: View {
                     query = ""
                     submittedQuery = ""
                     results = []
+                    searchGeneration += 1
+                    page = 1
+                    hasMore = false
+                    isLoadingMore = false
+                    loadMoreError = nil
                     errorMessage = nil
                 } label: {
                     Image(systemName: "xmark.circle.fill")
@@ -106,19 +135,52 @@ struct SearchView: View {
     @MainActor
     private func search() async {
         guard let client = settings.client else { return }
+        searchGeneration += 1
+        let generation = searchGeneration
         isLoading = true
+        isLoadingMore = false
+        page = 1
+        hasMore = false
+        loadMoreError = nil
         errorMessage = nil
         do {
             let found = try await client.search(query: submittedQuery, page: 1)
             try Task.checkCancellation()
-            results = found
+            guard generation == searchGeneration else { return }
+            results = found.items
+            page = found.page
+            hasMore = found.hasMore
             isLoading = false
         } catch is CancellationError {
             return
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, generation == searchGeneration else { return }
             errorMessage = userFacingNetworkMessage(error)
             isLoading = false
+        }
+    }
+
+    @MainActor
+    private func loadMore() async {
+        guard let client = settings.client, hasMore, !isLoadingMore else { return }
+        let generation = searchGeneration
+        isLoadingMore = true
+        loadMoreError = nil
+        do {
+            let next = try await client.search(query: submittedQuery, page: page + 1)
+            try Task.checkCancellation()
+            guard generation == searchGeneration else { return }
+            var knownIDs = Set(results.map(\.id))
+            results.append(contentsOf: next.items.filter { knownIDs.insert($0.id).inserted })
+            page = next.page
+            hasMore = next.hasMore
+            isLoadingMore = false
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled, generation == searchGeneration else { return }
+            loadMoreError = userFacingNetworkMessage(error)
+            isLoadingMore = false
         }
     }
 }

@@ -184,15 +184,24 @@ def probe_source(source, *, timeout=None):
         with urllib.request.urlopen(request, timeout=timeout or PROBE_TIMEOUT) as response:
             body = _read_response_body(response, PROBE_BODY_LIMIT)
             result["status"] = int(getattr(response, "status", 0) or 0)
-        text = body[:4096].decode("utf-8", "replace")
+        text = body.decode("utf-8", "replace")
         head = text.lstrip()[:200].lower()
         if head.startswith("<!doctype html") or "<title>just a moment" in head:
             # Cloudflare 挑战页：源站可能活着，但当前网络过不去。
             result["error"] = "challenge page (cloudflare)"
-        elif '"list"' in text or '"total"' in text or '"code"' in text:
-            result["ok"] = True
         else:
-            result["error"] = "unexpected payload"
+            try:
+                payload = json.loads(text)
+            except (TypeError, ValueError):
+                payload = None
+            has_list = isinstance(payload, dict) and isinstance(payload.get("list"), list)
+            total = payload.get("total") if isinstance(payload, dict) else None
+            has_total = (isinstance(total, (int, float)) or
+                         isinstance(total, str) and total.strip().isdigit())
+            if 200 <= result["status"] < 300 and (has_list or has_total):
+                result["ok"] = True
+            else:
+                result["error"] = "unexpected payload"
     except Exception as exc:  # noqa: BLE001
         result["error"] = _probe_error_text(exc)
     result["latencyMs"] = int((time.time() - started) * 1000)
@@ -1217,21 +1226,52 @@ def _probe_fetch(url):
     with _SOURCE_URL_OPENER.open(request, timeout=PROBE_TIMEOUT_SECONDS) as response:
         _validate_public_url(response.geturl(), resolve_dns=True)
         body = response.read(256 * 1024).decode("utf-8", "replace")
-    return {"elapsed_ms": int((time.monotonic() - started) * 1000), "body": body}
+        status = int(getattr(response, "status", 200) or 200)
+        response_headers = getattr(response, "headers", None)
+        get_content_type = getattr(response_headers, "get_content_type", None)
+        content_type = get_content_type() if callable(get_content_type) else ""
+        final_url = response.geturl()
+    return {"elapsed_ms": int((time.monotonic() - started) * 1000), "body": body,
+            "status": status, "content_type": content_type, "final_url": final_url}
 
 
 def probe_stream(url, fetch=None):
-    """Probe the first playlist response and derive the best advertised resolution."""
+    """Probe a playlist or direct-media response and derive advertised resolution."""
     if not str(url or "").startswith(("http://", "https://")):
         return {"alive": False, "latency_ms": None, "height": 0}
     try:
         result = (fetch or _probe_fetch)(url)
-        body = str(result.get("body") or "")
-        if "#EXTM3U" not in body.upper() and "#EXT-X-" not in body.upper():
+        status = result.get("status", 200)
+        status = 200 if status is None else int(status)
+        if not 200 <= status < 300:
             return {"alive": False, "latency_ms": None, "height": 0}
-        heights = [int(value) for value in re.findall(r"RESOLUTION=\d+x(\d+)", body, re.I)]
-        return {"alive": True, "latency_ms": int(result.get("elapsed_ms") or 0),
-                "height": max(heights, default=0)}
+        raw_body = result.get("body") or b""
+        body = (raw_body.decode("utf-8", "replace") if isinstance(raw_body, bytes)
+                else str(raw_body))
+        if not body:
+            return {"alive": False, "latency_ms": None, "height": 0}
+        body_head = body.lstrip()[:256].lower()
+        if body_head.startswith(("<!doctype html", "<html", "<head", "<body")):
+            return {"alive": False, "latency_ms": None, "height": 0}
+        upper_body = body.upper()
+        if "#EXTM3U" in upper_body or "#EXT-X-" in upper_body:
+            heights = [int(value) for value in re.findall(r"RESOLUTION=\d+x(\d+)", body, re.I)]
+            return {"alive": True, "latency_ms": int(result.get("elapsed_ms") or 0),
+                    "height": max(heights, default=0)}
+
+        content_type = str(result.get("content_type") or "").split(";", 1)[0].strip().lower()
+        final_url = str(result.get("final_url") or url)
+        path = urllib.parse.urlsplit(final_url).path.lower()
+        media_path = bool(re.search(
+            r"\.(?:mp4|m4v|mov|flv|ts|mpd|webm|mkv|mp3|m4a|aac|ogg|wav)$", path))
+        direct_media_type = (content_type.startswith(("video/", "audio/")) or
+                             content_type == "application/mp4" or
+                             (media_path and content_type in {
+                                 "", "application/octet-stream", "binary/octet-stream"}))
+        if direct_media_type:
+            return {"alive": True, "latency_ms": int(result.get("elapsed_ms") or 0),
+                    "height": 0}
+        return {"alive": False, "latency_ms": None, "height": 0}
     except source_dns.DNSCapacityError:
         # Our own lookup pool was full. The source was never actually asked, so
         # this line stays unprobed (sorted last) rather than being written off

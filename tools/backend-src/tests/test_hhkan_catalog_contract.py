@@ -264,8 +264,10 @@ class HhkanCatalogContractTest(unittest.TestCase):
         web = (BACKEND / "www/app.js").read_text(encoding="utf-8")
         brief = web[web.index("async function vodBrief(id)"):
                     web.index("async function initVod()")]
-        self.assertIn('replace(/^douban:/, "")', brief)
-        self.assertIn('"/vod/detail/" + ref', brief)
+        identity = web[web.index("function vodIdentity(vid)"):
+                       web.index("async function vodBrief(id)")]
+        self.assertIn('value.replace(/^douban:/, "")', identity)
+        self.assertIn("BASE + vodDetailPath(id)", brief)
 
     def test_web_hhkan_https_images_bypass_cloud_proxy(self):
         web = (BACKEND / "www/app.js").read_text(encoding="utf-8")

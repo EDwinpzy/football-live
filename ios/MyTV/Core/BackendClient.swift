@@ -111,19 +111,24 @@ public struct BackendClient {
         }
     }
 
-    public func search(query: String, page: Int = 1) async throws -> [MediaItem] {
+    public func search(query: String, page: Int = 1) async throws -> MediaSearchPage {
+        let requestedPage = max(1, page)
         let data = try await get(
             segments: ["vod", "search"],
             query: [
                 URLQueryItem(name: "q", value: query),
-                URLQueryItem(name: "page", value: String(max(1, page)))
+                URLQueryItem(name: "page", value: String(requestedPage))
             ]
         )
         let object = try jsonObject(data)
         guard let items = object["items"] as? [[String: Any]] else {
             throw BackendError.malformedPayload("搜索结果格式不正确。")
         }
-        return items.compactMap { parseMediaItem($0, kind: .douban) }
+        return MediaSearchPage(
+            items: items.compactMap { parseMediaItem($0, kind: .douban) },
+            page: Self.integer(object["page"]) ?? requestedPage,
+            hasMore: object["has_more"] as? Bool ?? false
+        )
     }
 
     public func detail(item: MediaItem) async throws -> MediaDetail {
