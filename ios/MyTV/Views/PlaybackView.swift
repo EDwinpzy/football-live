@@ -219,15 +219,18 @@ struct PlaybackView: View {
                         let freshDetail = try await client.detail(item: item, refresh: true)
                         try Task.checkCancellation()
                         guard generation == requestGeneration else { return }
-                        let refreshedSources = freshDetail.sources.isEmpty ? previousSources : freshDetail.sources
+                        let refreshedSources = freshDetail.sources
+                        guard !refreshedSources.isEmpty else {
+                            availableSources = previousSources
+                            throw PlaybackError.noAvailableSources
+                        }
                         availableSources = refreshedSources
                         guard let refreshedSource = PlaybackSourceSelection.refreshedSource(
                             matching: requestedSource,
                             in: refreshedSources
-                        ), let refreshedEpisode = PlaybackSourceSelection.episode(
+                        ), let refreshedEpisode = PlaybackSourceSelection.refreshedEpisode(
                             in: refreshedSource,
-                            matching: requestedEpisode,
-                            from: requestedSource
+                            matching: requestedEpisode
                         ) else {
                             throw PlaybackError.selectedLineUnavailable
                         }
@@ -519,12 +522,15 @@ struct PlaybackView: View {
 
 private enum PlaybackError: LocalizedError {
     case missingRoute
+    case noAvailableSources
     case selectedLineUnavailable
 
     var errorDescription: String? {
         switch self {
         case .missingRoute:
             return "播放请求不完整，请返回详情页重新选择线路和集数。"
+        case .noAvailableSources:
+            return "刷新后的详情没有可用线路，仍可打开当前线路面板重试或返回详情页。"
         case .selectedLineUnavailable:
             return "刷新后的线路列表中找不到当前选择，请打开线路面板选择一条可用线路重试。"
         }

@@ -91,6 +91,9 @@ private final class UITestPlaybackURLProtocol: URLProtocol {
     override func stopLoading() {}
 
     private static func detailResponse(for url: URL) -> Data {
+        if url.path.contains("movie-3") {
+            return Data(#"{"id":"movie-3","title":"无刷新线路","summary":"本地空线路刷新 fixture","sources":[]}"#.utf8)
+        }
         let alternateSource = url.path.contains("coast-north")
             ? #",{"id":"fixture-source-2","name":"备用线路","episodes":[{"name":"第 1 集"},{"name":"第 2 集"},{"name":"第 3 集"}]}"#
             : ""
@@ -107,7 +110,9 @@ private final class UITestPlaybackRequestCounter: @unchecked Sendable {
     func nextFailureStatus(for url: URL) -> Int {
         lock.lock()
         defer { lock.unlock() }
-        let contentID = url.path.contains("midnight-letter") ? "midnight-letter" : "coast-north"
+        let contentID = url.path.contains("midnight-letter")
+            ? "midnight-letter"
+            : url.path.contains("movie-3") ? "movie-3" : "coast-north"
         let count = (playRequestCounts[contentID] ?? 0) + 1
         playRequestCounts[contentID] = count
         return count == 1 ? 503 : 502

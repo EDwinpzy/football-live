@@ -71,15 +71,31 @@ enum PlaybackSourceSelection {
         matching selectedSource: MediaSource,
         in refreshedSources: [MediaSource]
     ) -> MediaSource? {
-        if let exact = refreshedSources.first(where: { $0.id == selectedSource.id }) {
-            return exact
+        let idMatches = refreshedSources.filter { $0.id == selectedSource.id }
+        if !idMatches.isEmpty {
+            return idMatches.count == 1 ? idMatches[0] : nil
         }
         let selectedName = normalized(selectedSource.name)
-        if !selectedName.isEmpty,
-           let named = refreshedSources.first(where: { normalized($0.name) == selectedName }) {
-            return named
+        guard !selectedName.isEmpty else { return nil }
+        let nameMatches = refreshedSources.filter { normalized($0.name) == selectedName }
+        return nameMatches.count == 1 ? nameMatches[0] : nil
+    }
+
+    static func refreshedEpisode(
+        in source: MediaSource,
+        matching selectedEpisode: Episode
+    ) -> Episode? {
+        let selectedName = normalized(selectedEpisode.name)
+        if !selectedName.isEmpty {
+            let nameMatches = source.episodes.filter { normalized($0.name) == selectedName }
+            if nameMatches.count == 1 { return nameMatches[0] }
+            if nameMatches.count > 1 { return nil }
         }
-        return nil
+
+        let hasCredibleNames = source.episodes.contains { !normalized($0.name).isEmpty }
+        guard selectedName.isEmpty || !hasCredibleNames else { return nil }
+        let idMatches = source.episodes.filter { $0.id == selectedEpisode.id }
+        return idMatches.count == 1 ? idMatches[0] : nil
     }
 
     static func episode(
@@ -89,19 +105,23 @@ enum PlaybackSourceSelection {
     ) -> Episode? {
         guard !source.episodes.isEmpty else { return nil }
         guard let currentEpisode else { return source.episodes.first }
-        if let exact = source.episodes.first(where: { $0.id == currentEpisode.id }) {
-            return exact
-        }
         let episodeName = normalized(currentEpisode.name)
-        if !episodeName.isEmpty,
-           let named = source.episodes.first(where: { normalized($0.name) == episodeName }) {
-            return named
-        }
-        if let currentSource,
-           let oldIndex = currentSource.episodes.firstIndex(of: currentEpisode) {
+        if let currentSource, currentSource.id != source.id {
+            if !episodeName.isEmpty {
+                let nameMatches = source.episodes.filter { normalized($0.name) == episodeName }
+                if nameMatches.count == 1 { return nameMatches[0] }
+            }
+            guard let oldIndex = currentSource.episodes.firstIndex(of: currentEpisode) else { return nil }
             return source.episodes[min(oldIndex, source.episodes.count - 1)]
         }
-        return source.episodes.first
+
+        let idMatches = source.episodes.filter { $0.id == currentEpisode.id }
+        if idMatches.count == 1 { return idMatches[0] }
+        if !episodeName.isEmpty {
+            let nameMatches = source.episodes.filter { normalized($0.name) == episodeName }
+            if nameMatches.count == 1 { return nameMatches[0] }
+        }
+        return nil
     }
 
     private static func normalized(_ value: String) -> String {

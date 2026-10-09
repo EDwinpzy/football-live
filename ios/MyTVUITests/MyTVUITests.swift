@@ -144,7 +144,9 @@ final class MyTVUITests: XCTestCase {
         XCTAssertTrue(app.buttons["选择线路重试"].isHittable, "The picker must remain reachable after a same-source retry fails.")
         app.buttons["选择线路重试"].tap()
         XCTAssertTrue(app.buttons["player-source-fixture-source"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["player-episode-fixture-source-fixture-episode-1"].exists)
+        let refreshedEpisode = fixtureEpisodeButton(app, sourceID: "fixture-source", name: "第 1 集")
+        XCTAssertTrue(refreshedEpisode.waitForExistence(timeout: 10))
+        XCTAssertTrue(refreshedEpisode.label.contains("第 1 集"))
         attachScreenshot(of: app, named: "fixture-player-single-source-after-retry")
     }
 
@@ -185,8 +187,41 @@ final class MyTVUITests: XCTestCase {
         app.buttons["选择线路重试"].tap()
         XCTAssertTrue(app.buttons["player-source-fixture-source"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["player-source-fixture-source-2"].exists)
-        XCTAssertTrue(app.buttons["player-episode-fixture-source-2-fixture-episode-1"].exists)
+        let refreshedEpisode = fixtureEpisodeButton(app, sourceID: "fixture-source-2", name: "第 1 集")
+        XCTAssertTrue(refreshedEpisode.waitForExistence(timeout: 10))
+        XCTAssertTrue(refreshedEpisode.label.contains("第 1 集"))
         attachScreenshot(of: app, named: "fixture-player-picker-after-switch-failure")
+    }
+
+    func testFixtureEmptyRefreshShowsErrorAndKeepsPreviousSourcePickerReachable() {
+        let app = fixturePlaybackApp()
+        app.launch()
+
+        let card = app.buttons["media-card-fixture-movie-3"]
+        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        card.tap()
+        XCTAssertTrue(app.staticTexts["detail-summary"].waitForExistence(timeout: 10))
+        let episode = app.buttons["episode-fixture-source-fixture-episode-1"]
+        XCTAssertTrue(episode.waitForExistence(timeout: 10))
+        episode.tap()
+
+        assertFixturePlaybackError(app, status: 503)
+        app.buttons["选择线路重试"].tap()
+        XCTAssertTrue(app.buttons["player-source-fixture-source"].waitForExistence(timeout: 10))
+        app.buttons["player-episode-fixture-source-fixture-episode-1"].tap()
+
+        let emptyRefreshError = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "刷新后的详情没有可用线路")
+        ).firstMatch
+        XCTAssertTrue(emptyRefreshError.waitForExistence(timeout: 10), "An empty refresh must stop resolution instead of reusing stale sources.")
+        XCTAssertTrue(app.buttons["选择线路重试"].isHittable, "The previous source list should keep the picker reachable while showing the empty-refresh error.")
+        XCTAssertFalse(app.descendants(matching: .any)["native-video-player"].exists)
+        attachScreenshot(of: app, named: "fixture-player-empty-refresh-error")
+
+        app.buttons["选择线路重试"].tap()
+        XCTAssertTrue(app.buttons["player-source-fixture-source"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["player-episode-fixture-source-fixture-episode-1"].exists)
+        attachScreenshot(of: app, named: "fixture-player-empty-refresh-picker-preserved")
     }
 
     private func fixtureApp() -> XCUIApplication {
@@ -217,6 +252,19 @@ final class MyTVUITests: XCTestCase {
             file: file,
             line: line
         )
+    }
+
+    private func fixtureEpisodeButton(
+        _ app: XCUIApplication,
+        sourceID: String,
+        name: String
+    ) -> XCUIElement {
+        let predicate = NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
+            "player-episode-\(sourceID)-",
+            name
+        )
+        return app.buttons.matching(predicate).firstMatch
     }
 
     private func attachScreenshot(of app: XCUIApplication, named name: String) {

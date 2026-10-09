@@ -182,10 +182,9 @@ final class CoreTests: XCTestCase {
             matching: original,
             in: [secondLine, reorderedRefresh]
         ))
-        let refreshedEpisode = PlaybackSourceSelection.episode(
+        let refreshedEpisode = PlaybackSourceSelection.refreshedEpisode(
             in: selected,
-            matching: original.episodes[1],
-            from: original
+            matching: original.episodes[1]
         )
         let otherLineEpisode = PlaybackSourceSelection.episode(
             in: secondLine,
@@ -213,6 +212,73 @@ final class CoreTests: XCTestCase {
             PlaybackSourceSelection.episode(in: original, matching: original.episodes[1], from: original)?.id,
             "a2",
             "Reselecting the current source keeps the same episode so the tap can retry playback."
+        )
+    }
+
+    func testFreshEpisodeSelectionUsesUniqueNameWhenBackendReusesReorderedIDs() {
+        let selectedEpisode = Episode(id: "1", name: "第 2 集")
+        let refreshed = MediaSource(
+            id: "line-a",
+            name: "高清线路",
+            episodes: [
+                Episode(id: "0", name: "第 2 集"),
+                Episode(id: "1", name: "第 1 集")
+            ]
+        )
+
+        let result = PlaybackSourceSelection.refreshedEpisode(in: refreshed, matching: selectedEpisode)
+
+        XCTAssertEqual(result?.id, "0", "A reused positional ID must not override the unique matching episode name.")
+        XCTAssertEqual(result?.name, "第 2 集")
+    }
+
+    func testFreshEpisodeSelectionRejectsRemovedAndDuplicateEpisodeNames() {
+        let removedEpisode = Episode(id: "1", name: "第 2 集")
+        let refreshedWithoutSelection = MediaSource(
+            id: "line-a",
+            name: "高清线路",
+            episodes: [Episode(id: "1", name: "第 1 集")]
+        )
+        XCTAssertNil(
+            PlaybackSourceSelection.refreshedEpisode(in: refreshedWithoutSelection, matching: removedEpisode),
+            "A reused ID cannot make a removed episode look present."
+        )
+
+        let duplicateNameSource = MediaSource(
+            id: "line-a",
+            name: "高清线路",
+            episodes: [
+                Episode(id: "1", name: "第 2 集"),
+                Episode(id: "b", name: "第 2 集")
+            ]
+        )
+        XCTAssertNil(
+            PlaybackSourceSelection.refreshedEpisode(in: duplicateNameSource, matching: removedEpisode),
+            "Duplicate episode names are ambiguous even if a backend ID happens to match."
+        )
+
+        let unnamedRefresh = MediaSource(
+            id: "line-a",
+            name: "高清线路",
+            episodes: [Episode(id: "1", name: "")]
+        )
+        XCTAssertEqual(
+            PlaybackSourceSelection.refreshedEpisode(in: unnamedRefresh, matching: removedEpisode)?.id,
+            "1",
+            "A unique ID may be used only when the refreshed source has no credible episode names."
+        )
+    }
+
+    func testFreshSourceSelectionRejectsDuplicateNameFallbacks() {
+        let selected = MediaSource(id: "removed-id", name: "高清线路", episodes: [])
+        let refreshedSources = [
+            MediaSource(id: "new-a", name: "高清线路", episodes: []),
+            MediaSource(id: "new-b", name: " 高清线路 ", episodes: [])
+        ]
+
+        XCTAssertNil(
+            PlaybackSourceSelection.refreshedSource(matching: selected, in: refreshedSources),
+            "The app must not silently choose one of multiple sources with the same display name."
         )
     }
 
