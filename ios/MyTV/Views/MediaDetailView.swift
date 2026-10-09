@@ -124,7 +124,7 @@ struct MediaDetailView: View {
                             .accessibilityIdentifier("detail-no-sources")
                     } else {
                         ForEach(detail.sources) { source in
-                            sourceCard(source, item: detail.item)
+                            sourceCard(source, item: detail.item, availableSources: detail.sources)
                         }
                     }
                 }
@@ -136,7 +136,7 @@ struct MediaDetailView: View {
         .accessibilityIdentifier("detail-loaded-content")
     }
 
-    private func sourceCard(_ source: MediaSource, item: MediaItem) -> some View {
+    private func sourceCard(_ source: MediaSource, item: MediaItem, availableSources: [MediaSource]) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label(source.name, systemImage: "dot.radiowaves.left.and.right")
@@ -159,7 +159,8 @@ struct MediaDetailView: View {
                             item: item,
                             detailRef: item.detailRef,
                             source: source,
-                            episode: episode
+                            episode: episode,
+                            availableSources: availableSources
                         )) {
                             Text(episode.name)
                                 .font(.caption.weight(.semibold))
@@ -221,17 +222,25 @@ struct PlaybackRoute: Hashable, Identifiable {
     let detailRef: String?
     let source: MediaSource?
     let episode: Episode?
+    let availableSources: [MediaSource]
     let channelURL: String?
     let footballMatch: FootballMatch?
     let footballSourceIndex: Int?
 
-    init(item: MediaItem, detailRef: String, source: MediaSource, episode: Episode) {
+    init(
+        item: MediaItem,
+        detailRef: String,
+        source: MediaSource,
+        episode: Episode,
+        availableSources: [MediaSource] = []
+    ) {
         self.id = "vod-\(item.id)-\(source.id)-\(episode.id)"
         self.title = "\(item.title) · \(episode.name)"
         self.item = item
         self.detailRef = detailRef
         self.source = source
         self.episode = episode
+        self.availableSources = availableSources.isEmpty ? [source] : availableSources
         self.channelURL = nil
         self.footballMatch = nil
         self.footballSourceIndex = nil
@@ -244,6 +253,7 @@ struct PlaybackRoute: Hashable, Identifiable {
         self.detailRef = nil
         self.source = nil
         self.episode = nil
+        self.availableSources = []
         self.channelURL = streamURL
         self.footballMatch = nil
         self.footballSourceIndex = nil
@@ -256,6 +266,7 @@ struct PlaybackRoute: Hashable, Identifiable {
         self.detailRef = nil
         self.source = nil
         self.episode = nil
+        self.availableSources = []
         self.channelURL = nil
         self.footballMatch = footballMatch
         self.footballSourceIndex = sourceIndex

@@ -150,6 +150,99 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(detail.sources.first?.episodes.first?.id, "4422228")
     }
 
+    func testPlaybackSourceSelectionPreservesSourceAndEpisodeAcrossRefresh() throws {
+        let original = MediaSource(
+            id: "line-a",
+            name: "高清线路",
+            episodes: [
+                Episode(id: "a1", name: "第 1 集"),
+                Episode(id: "a2", name: "第 2 集"),
+                Episode(id: "a3", name: "第 3 集")
+            ]
+        )
+        let reorderedRefresh = MediaSource(
+            id: "line-a",
+            name: "高清线路",
+            episodes: [
+                Episode(id: "fresh1", name: "第 1 集"),
+                Episode(id: "fresh2", name: "第 2 集"),
+                Episode(id: "fresh3", name: "第 3 集")
+            ]
+        )
+        let secondLine = MediaSource(
+            id: "line-b",
+            name: "备用线路",
+            episodes: [
+                Episode(id: "b1", name: "第 1 集"),
+                Episode(id: "b2", name: "第 2 集")
+            ]
+        )
+
+        let selected = try XCTUnwrap(PlaybackSourceSelection.refreshedSource(
+            matching: original,
+            in: [secondLine, reorderedRefresh]
+        ))
+        let refreshedEpisode = PlaybackSourceSelection.episode(
+            in: selected,
+            matching: original.episodes[1],
+            from: original
+        )
+        let otherLineEpisode = PlaybackSourceSelection.episode(
+            in: secondLine,
+            matching: original.episodes[2],
+            from: original
+        )
+
+        XCTAssertEqual(selected.id, "line-a")
+        let renamedID = MediaSource(id: "line-a-refreshed", name: " 高清线路 ", episodes: reorderedRefresh.episodes)
+        XCTAssertEqual(
+            PlaybackSourceSelection.refreshedSource(matching: original, in: [renamedID])?.id,
+            "line-a-refreshed",
+            "Line names preserve a selected source when a fresh detail response changes its identifier."
+        )
+        XCTAssertNil(
+            PlaybackSourceSelection.refreshedSource(
+                matching: MediaSource(id: "old-id", name: "Removed line", episodes: []),
+                in: [secondLine, reorderedRefresh]
+            ),
+            "A refresh must not silently redirect a hand-selected source to a different line."
+        )
+        XCTAssertEqual(refreshedEpisode?.id, "fresh2")
+        XCTAssertEqual(otherLineEpisode?.id, "b2", "When a line has fewer episodes, keep the nearest available episode position.")
+        XCTAssertEqual(
+            PlaybackSourceSelection.episode(in: original, matching: original.episodes[1], from: original)?.id,
+            "a2",
+            "Reselecting the current source keeps the same episode so the tap can retry playback."
+        )
+    }
+
+    func testPlaybackRouteCarriesAllSourcesAndKeepsTheSingleSourceForRetry() {
+        let item = MediaItem(id: "douban:1292052", title: "示例影片", detailRef: "1292052")
+        let source = MediaSource(
+            id: "line-only",
+            name: "唯一线路",
+            episodes: [Episode(id: "episode-1", name: "正片")]
+        )
+        let backupSource = MediaSource(
+            id: "line-backup",
+            name: "备用线路",
+            episodes: [Episode(id: "backup-episode-1", name: "正片")]
+        )
+        let episode = source.episodes[0]
+
+        let multiSourceRoute = PlaybackRoute(
+            item: item,
+            detailRef: item.detailRef,
+            source: source,
+            episode: episode,
+            availableSources: [source, backupSource]
+        )
+        let singleSourceRoute = PlaybackRoute(item: item, detailRef: item.detailRef, source: source, episode: episode)
+
+        XCTAssertEqual(multiSourceRoute.availableSources, [source, backupSource])
+        XCTAssertEqual(singleSourceRoute.availableSources, [source])
+    }
+
     func testLegacyNumericDetailRefsKeepDoubanAndHHKanRoutesDistinct() {
         let oldDouban = BackendClient.detailRoute(detailRef: "1292052", itemID: "douban:1292052")
         let oldHHKan = BackendClient.detailRoute(detailRef: "4422228", itemID: "hhkan:4422228")
@@ -241,6 +334,57 @@ final class CoreTests: XCTestCase {
         _ = try await client.play(detailRef: "hhkan:4422228", source: source, episode: episode)
 
         XCTAssertEqual(requests.all.first?.url?.path, "/web/hhkan/play/4422228/41/4422228")
+    }
+
+    func testHHKanPlayCanBypassResolutionCacheForManualRetry() async throws {
+        let requests = RequestRecorder()
+        StubURLProtocol.install { request in
+            requests.append(request)
+            return (200, Data(#"{"url":"https://cdn.example.test/episode.m3u8"}"#.utf8))
+        }
+        let client = makeClient()
+        let source = MediaSource(id: "41", name: "线路一", episodes: [])
+        let episode = Episode(id: "4422228", name: "第1集")
+
+        _ = try await client.play(detailRef: "hhkan:4422228", source: source, episode: episode, fresh: true)
+
+        let request = try XCTUnwrap(requests.all.first)
+        XCTAssertEqual(request.url?.path, "/web/hhkan/play/4422228/41/4422228")
+        let queryItems = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(queryItems?.first(where: { $0.name == "fresh" })?.value, "1")
+    }
+
+    func testDoubanDetailRefreshRequestsFreshSourceMetadata() async throws {
+        let requests = RequestRecorder()
+        StubURLProtocol.install { request in
+            requests.append(request)
+            return (200, Data(#"{"id":1292052,"title":"示例影片","sources":[{"name":"线路一","episodes":[{"ep":"第1集","id":"e1"}]}]}"#.utf8))
+        }
+        let client = makeClient()
+        let item = MediaItem(id: "douban:1292052", title: "示例影片", detailRef: "1292052")
+
+        _ = try await client.detail(item: item, refresh: true)
+
+        let requestURL = try XCTUnwrap(requests.all.first?.url)
+        XCTAssertEqual(requestURL.path, "/web/vod/detail/1292052")
+        XCTAssertEqual(URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "refresh" })?.value, "1")
+    }
+
+    func testDoubanManualRetryDoesNotUseUnsupportedPlayFreshParameter() async throws {
+        let requests = RequestRecorder()
+        StubURLProtocol.install { request in
+            requests.append(request)
+            return (200, Data(#"{"url":"https://cdn.example.test/vod.m3u8"}"#.utf8))
+        }
+        let client = makeClient()
+        let source = MediaSource(id: "12", name: "线路", episodes: [])
+        let episode = Episode(id: "0", name: "正片")
+
+        _ = try await client.play(detailRef: "1292052", source: source, episode: episode, fresh: true)
+
+        let requestURL = try XCTUnwrap(requests.all.first?.url)
+        XCTAssertEqual(requestURL.path, "/web/vod/play/1292052/12/0")
+        XCTAssertNil(URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "fresh" }))
     }
 
     func testLicenseTicketSignatureSupportsDERAndRawP1363() throws {

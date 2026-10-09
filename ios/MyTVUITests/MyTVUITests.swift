@@ -1,6 +1,8 @@
 import XCTest
 
 // Fixture captures validate layout and state rendering only; the real-service test is separate.
+// Playback fixtures intentionally fail at the local resolver before AVPlayer creation, so they cover
+// source selection and retry UI only, not upstream streaming or media decoding.
 final class MyTVUITests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
@@ -110,10 +112,111 @@ final class MyTVUITests: XCTestCase {
         attachScreenshot(of: app, named: "fixture-player-license-gate")
     }
 
+    func testFixtureSingleSourceRetryOpensPickerAndRetriesSameEpisode() {
+        let app = fixturePlaybackApp()
+        app.launch()
+
+        let secondCard = app.buttons["media-card-fixture-movie-2"]
+        XCTAssertTrue(secondCard.waitForExistence(timeout: 10))
+        secondCard.tap()
+        XCTAssertTrue(app.staticTexts["detail-summary"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["episode-fixture-source-fixture-episode-1"].waitForExistence(timeout: 10))
+        app.buttons["episode-fixture-source-fixture-episode-1"].tap()
+
+        assertFixturePlaybackError(app, status: 503)
+        XCTAssertTrue(app.staticTexts["午夜来信 · 第 1 集"].isHittable)
+        XCTAssertTrue(app.staticTexts["高清线路"].isHittable)
+        XCTAssertTrue(app.buttons["选择线路重试"].isHittable)
+        XCTAssertFalse(app.descendants(matching: .any)["native-video-player"].exists)
+        attachScreenshot(of: app, named: "fixture-player-single-source-error-retry")
+
+        app.buttons["选择线路重试"].tap()
+        let source = app.buttons["player-source-fixture-source"]
+        let episode = app.buttons["player-episode-fixture-source-fixture-episode-1"]
+        XCTAssertTrue(source.waitForExistence(timeout: 10), "The one available source must remain visible in the retry sheet.")
+        XCTAssertTrue(source.label.contains("高清线路"))
+        XCTAssertTrue(episode.exists, "The currently selected episode must be available for same-source retry.")
+        attachScreenshot(of: app, named: "fixture-player-single-source-picker")
+
+        episode.tap()
+        assertFixturePlaybackError(app, status: 502)
+        XCTAssertTrue(app.staticTexts["高清线路"].isHittable)
+        XCTAssertTrue(app.buttons["选择线路重试"].isHittable, "The picker must remain reachable after a same-source retry fails.")
+        app.buttons["选择线路重试"].tap()
+        XCTAssertTrue(app.buttons["player-source-fixture-source"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["player-episode-fixture-source-fixture-episode-1"].exists)
+        attachScreenshot(of: app, named: "fixture-player-single-source-after-retry")
+    }
+
+    func testFixtureMultipleSourcesCanSwitchAndReopenPickerAfterFailure() {
+        let app = fixturePlaybackApp()
+        app.launch()
+
+        let firstCard = app.buttons["media-card-fixture-movie-1"]
+        XCTAssertTrue(firstCard.waitForExistence(timeout: 10))
+        firstCard.tap()
+        XCTAssertTrue(app.staticTexts["detail-summary"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["episode-fixture-source-fixture-episode-1"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["episode-fixture-source-2-fixture-episode-1"].exists)
+        app.buttons["episode-fixture-source-fixture-episode-1"].tap()
+
+        assertFixturePlaybackError(app, status: 503)
+        XCTAssertTrue(app.staticTexts["高清线路"].isHittable)
+        XCTAssertTrue(app.buttons["选择线路重试"].isHittable)
+        attachScreenshot(of: app, named: "fixture-player-multiple-source-error-retry")
+
+        app.buttons["选择线路重试"].tap()
+        XCTAssertTrue(app.buttons["player-source-fixture-source"].waitForExistence(timeout: 10))
+        let alternate = app.buttons["player-source-fixture-source-2"]
+        let alternateEpisode = app.buttons["player-episode-fixture-source-2-fixture-episode-1"]
+        XCTAssertTrue(alternate.exists)
+        XCTAssertTrue(alternate.label.contains("备用线路"))
+        XCTAssertTrue(alternateEpisode.exists)
+        attachScreenshot(of: app, named: "fixture-player-multiple-source-picker")
+
+        alternateEpisode.tap()
+        assertFixturePlaybackError(app, status: 502)
+        XCTAssertTrue(app.staticTexts["备用线路"].isHittable, "The selected source should update before the simulated resolver failure.")
+        XCTAssertTrue(app.staticTexts["海岸线以北 · 第 1 集"].isHittable)
+        XCTAssertFalse(app.descendants(matching: .any)["native-video-player"].exists)
+        XCTAssertTrue(app.buttons["选择线路重试"].isHittable, "The source picker must remain reachable after switching fails.")
+        attachScreenshot(of: app, named: "fixture-player-switched-source-error-retry")
+
+        app.buttons["选择线路重试"].tap()
+        XCTAssertTrue(app.buttons["player-source-fixture-source"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["player-source-fixture-source-2"].exists)
+        XCTAssertTrue(app.buttons["player-episode-fixture-source-2-fixture-episode-1"].exists)
+        attachScreenshot(of: app, named: "fixture-player-picker-after-switch-failure")
+    }
+
     private func fixtureApp() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments.append("--ui-test-fixtures")
         return app
+    }
+
+    private func fixturePlaybackApp() -> XCUIApplication {
+        let app = fixtureApp()
+        app.launchArguments.append("--ui-test-playback-access")
+        return app
+    }
+
+    private func assertFixturePlaybackError(
+        _ app: XCUIApplication,
+        status: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertTrue(app.staticTexts["播放失败"].waitForExistence(timeout: 10), file: file, line: line)
+        let statusMessage = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "HTTP \(status)")
+        ).firstMatch
+        XCTAssertTrue(
+            statusMessage.waitForExistence(timeout: 10),
+            "The fixture transport should surface its intentional HTTP \(status) resolver failure.\n\(app.debugDescription)",
+            file: file,
+            line: line
+        )
     }
 
     private func attachScreenshot(of app: XCUIApplication, named name: String) {

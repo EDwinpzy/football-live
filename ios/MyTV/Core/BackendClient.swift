@@ -131,9 +131,10 @@ public struct BackendClient {
         )
     }
 
-    public func detail(item: MediaItem) async throws -> MediaDetail {
+    public func detail(item: MediaItem, refresh: Bool = false) async throws -> MediaDetail {
         let route = Self.detailRoute(detailRef: item.detailRef, itemID: item.id)
-        let data = try await get(segments: route.segments, query: [])
+        let query = refresh ? [URLQueryItem(name: "refresh", value: "1")] : []
+        let data = try await get(segments: route.segments, query: query)
         let object = try jsonObject(data)
         let kind: MediaKind = route.isHHKan ? .hhkan : .douban
         var detailItem = parseMediaItem(object, kind: kind) ?? item
@@ -149,12 +150,18 @@ public struct BackendClient {
         return MediaDetail(item: detailItem, summary: summary, sources: sources)
     }
 
-    public func play(detailRef: String, source: MediaSource, episode: Episode) async throws -> PlayableStream {
+    public func play(
+        detailRef: String,
+        source: MediaSource,
+        episode: Episode,
+        fresh: Bool = false
+    ) async throws -> PlayableStream {
         let route = Self.contentRoute(detailRef: detailRef)
         let segments = route.isHHKan
             ? ["hhkan", "play", route.contentID, source.id, episode.id]
             : ["vod", "play", route.contentID, source.id, episode.id]
-        let data = try await get(segments: segments, query: [])
+        let query = route.isHHKan && fresh ? [URLQueryItem(name: "fresh", value: "1")] : []
+        let data = try await get(segments: segments, query: query)
         let object = try jsonObject(data)
         let firstSource = (object["sources"] as? [[String: Any]])?.compactMap {
             Self.string($0["url"]).nilIfBlank

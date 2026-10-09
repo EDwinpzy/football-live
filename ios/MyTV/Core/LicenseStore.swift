@@ -122,6 +122,18 @@ public final class LicenseStore: ObservableObject {
         busy = false
     }
 
+    #if DEBUG
+    /// Enables playback UI coverage for the isolated UI fixture process only.
+    /// This is deliberately in-memory: it never creates or writes a license ticket.
+    func enableUITestPlaybackAccessIfRequested() {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard arguments.contains("--ui-test-fixtures"),
+              arguments.contains("--ui-test-playback-access") else { return }
+        isActive = true
+        statusText = "UI 测试播放许可（仅本次进程）"
+    }
+    #endif
+
     public func activate(code rawCode: String, client: BackendClient) async {
         let code = rawCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard Self.validCode(code) else {

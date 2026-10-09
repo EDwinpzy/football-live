@@ -10,6 +10,10 @@ private enum UITestPosterProtocolRegistration {
     static let isRegistered = URLProtocol.registerClass(UITestPosterURLProtocol.self)
 }
 
+private enum UITestPlaybackProtocolRegistration {
+    static let isRegistered = URLProtocol.registerClass(UITestPlaybackURLProtocol.self)
+}
+
 private final class UITestPosterURLProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool {
         guard let url = request.url else { return false }
@@ -38,6 +42,76 @@ private final class UITestPosterURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+}
+
+private final class UITestPlaybackURLProtocol: URLProtocol {
+    private static let requestCounter = UITestPlaybackRequestCounter()
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        guard let url = request.url else { return false }
+        return url.scheme?.lowercased() == "https"
+            && url.host?.lowercased() == "playback.fixture.invalid"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+
+        let statusCode: Int
+        let body: Data
+        if url.path.contains("/web/vod/detail/") {
+            statusCode = 200
+            body = Self.detailResponse(for: url)
+        } else if url.path.contains("/web/vod/play/") {
+            statusCode = Self.requestCounter.nextFailureStatus(for: url)
+            body = Data(#"{"error":"UI fixture intentionally simulates a playback resolution failure."}"#.utf8)
+        } else {
+            statusCode = 404
+            body = Data(#"{"error":"No UI fixture route is registered."}"#.utf8)
+        }
+
+        guard let response = HTTPURLResponse(
+            url: url,
+            statusCode: statusCode,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json", "Cache-Control": "no-store"]
+        ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private static func detailResponse(for url: URL) -> Data {
+        let alternateSource = url.path.contains("coast-north")
+            ? #",{"id":"fixture-source-2","name":"备用线路","episodes":[{"name":"第 1 集"},{"name":"第 2 集"},{"name":"第 3 集"}]}"#
+            : ""
+        let contentID = url.path.contains("midnight-letter") ? "midnight-letter" : "coast-north"
+        let json = #"{"id":"\#(contentID)","title":"Fixture","summary":"本地 UI 测试详情","sources":[{"id":"fixture-source","name":"高清线路","episodes":[{"name":"第 1 集"},{"name":"第 2 集"},{"name":"第 3 集"}]}\#(alternateSource)]}"#
+        return Data(json.utf8)
+    }
+}
+
+private final class UITestPlaybackRequestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var playRequestCounts: [String: Int] = [:]
+
+    func nextFailureStatus(for url: URL) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let contentID = url.path.contains("midnight-letter") ? "midnight-letter" : "coast-north"
+        let count = (playRequestCounts[contentID] ?? 0) + 1
+        playRequestCounts[contentID] = count
+        return count == 1 ? 503 : 502
+    }
 }
 
 private enum UITestPosterPNG {
@@ -157,32 +231,53 @@ enum UITestFixtures {
     }
 
     static func detail(for item: MediaItem) -> MediaDetail {
+        let episodes = [
+            Episode(id: "fixture-episode-1", name: "第 1 集"),
+            Episode(id: "fixture-episode-2", name: "第 2 集"),
+            Episode(id: "fixture-episode-3", name: "第 3 集")
+        ]
         let source = MediaSource(
             id: "fixture-source",
             name: "高清线路",
-            episodes: [
-                Episode(id: "fixture-episode-1", name: "第 1 集"),
-                Episode(id: "fixture-episode-2", name: "第 2 集"),
-                Episode(id: "fixture-episode-3", name: "第 3 集")
-            ]
+            episodes: episodes
         )
+        let sources = item.id == featuredMovie.id
+            ? [source, MediaSource(id: "fixture-source-2", name: "备用线路", episodes: episodes)]
+            : [source]
         return MediaDetail(
             item: item,
             summary: "沿着海岸线向北，一群久别重逢的朋友重新面对旧日选择，也在日常的旅程中找回彼此。",
-            sources: [source]
+            sources: sources
         )
     }
 }
 
+@MainActor
 struct UITestFixtureRootView: View {
+    @EnvironmentObject private var license: LicenseStore
+    @StateObject private var fixtureSettings: AppSettings
+
     init() {
+        precondition(ProcessInfo.processInfo.arguments.contains("--ui-test-fixtures"), "Fixture mode requires the existing UI test launch flag.")
         precondition(UITestPosterProtocolRegistration.isRegistered, "The fixture poster URL protocol must be registered.")
+        precondition(UITestPlaybackProtocolRegistration.isRegistered, "The fixture playback URL protocol must be registered.")
+
+        let defaults = UserDefaults(suiteName: "com.qiubo.mytv.ios.ui-test-fixtures")!
+        let settings = AppSettings(defaults: defaults)
+        try! settings.saveOrigin("https://playback.fixture.invalid")
+        _fixtureSettings = StateObject(wrappedValue: settings)
     }
 
     var body: some View {
         NavigationStack {
             HomeView(fixtureSections: UITestFixtures.homeSections)
                 .installMyTVDestinations(fixtureDetail: UITestFixtures.detail(for:))
+        }
+        .environmentObject(fixtureSettings)
+        .task {
+            await MainActor.run {
+                license.enableUITestPlaybackAccessIfRequested()
+            }
         }
         .myTVScreen()
     }

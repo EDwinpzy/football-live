@@ -66,6 +66,49 @@ public struct MediaSource: Identifiable, Codable, Hashable {
     }
 }
 
+enum PlaybackSourceSelection {
+    static func refreshedSource(
+        matching selectedSource: MediaSource,
+        in refreshedSources: [MediaSource]
+    ) -> MediaSource? {
+        if let exact = refreshedSources.first(where: { $0.id == selectedSource.id }) {
+            return exact
+        }
+        let selectedName = normalized(selectedSource.name)
+        if !selectedName.isEmpty,
+           let named = refreshedSources.first(where: { normalized($0.name) == selectedName }) {
+            return named
+        }
+        return nil
+    }
+
+    static func episode(
+        in source: MediaSource,
+        matching currentEpisode: Episode?,
+        from currentSource: MediaSource?
+    ) -> Episode? {
+        guard !source.episodes.isEmpty else { return nil }
+        guard let currentEpisode else { return source.episodes.first }
+        if let exact = source.episodes.first(where: { $0.id == currentEpisode.id }) {
+            return exact
+        }
+        let episodeName = normalized(currentEpisode.name)
+        if !episodeName.isEmpty,
+           let named = source.episodes.first(where: { normalized($0.name) == episodeName }) {
+            return named
+        }
+        if let currentSource,
+           let oldIndex = currentSource.episodes.firstIndex(of: currentEpisode) {
+            return source.episodes[min(oldIndex, source.episodes.count - 1)]
+        }
+        return source.episodes.first
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+}
+
 public struct Episode: Identifiable, Codable, Hashable {
     public var id: String
     public var name: String
