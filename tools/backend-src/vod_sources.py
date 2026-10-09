@@ -24,7 +24,7 @@ RUNTIME_PATH = Path(__file__).with_name("vod_sources.runtime.json")
 AUTO_MATCH_THRESHOLD = 80
 TITLE_SEPARATORS = re.compile(r"[^\w\u4e00-\u9fff]+", re.UNICODE)
 TITLE_VARIANT_SUFFIX = re.compile(
-    r"(?:第\s*\d+\s*季|第\s*\d+\s*部|season\s*\d+|s\s*\d+|年番\s*\d*)\s*$",
+    r"(?:第\s*[\d一二三四五六七八九十百两]+\s*[季部]|season\s*\d+|s\s*\d+|年番\s*\d*)\s*$",
     re.IGNORECASE,
 )
 MAX_SEARCH_TERMS = 4
@@ -538,6 +538,14 @@ class SourceRegistry:
             if not best or confidence < AUTO_MATCH_THRESHOLD:
                 return source, [], None, _elapsed_ms(started)
             lines = adapter.detail(best)
+            episode_range = _continuous_anime_range(subject, best)
+            if episode_range:
+                start, end = episode_range
+                for line in lines:
+                    selected = [episode for episode in line.get("episodes", [])
+                                if start <= (_episode_number(episode.get("name")) or 0) <= end]
+                    line["episodes"] = [dict(episode, index=index) for index, episode in enumerate(selected)]
+                lines = [line for line in lines if line.get("episodes")]
             if deadline is not None:
                 _remaining_source_timeout(deadline)
             for line in lines:
@@ -784,9 +792,20 @@ def _base_search_title(value):
 
 def _search_terms(subject):
     """Return bounded, high-value source queries without multiplying source traffic."""
+    title = str(subject.get("title") or "").strip()
+    base = normalize_title(_base_search_title(title) or title)
+
+    def alias_priority(value):
+        key = normalize_title(value)
+        # Source catalogs often use the arc subtitle, while Douban uses 年番/季.
+        # Prefer an explicit same-series subtitle over short or English aliases.
+        same_series_subtitle = key.startswith(base) and key != base and not TITLE_VARIANT_SUFFIX.search(value)
+        return (not same_series_subtitle, bool(re.search(r"\d", value)), len(key))
+
     aliases = sorted(
-        (str(value or "").strip() for value in (subject.get("aliases") or [])),
-        key=lambda value: (bool(re.search(r"\d", value)), len(normalize_title(value))),
+        (str(value or "").strip() for value in (subject.get("aliases") or [])
+         if not re.search(r"第\s*\d+\s*[-－~～至]\s*\d+\s*集", str(value))),
+        key=alias_priority,
     )
     values = [subject.get("title") or "", _base_search_title(subject.get("title"))]
     values.extend(aliases)
@@ -834,7 +853,42 @@ def _candidate_base_title_for_matching_year(candidate, expected_year):
     return title[:suffix.start()].rstrip(" \t._-–—:：/·")
 
 
+def _episode_number(name):
+    match = re.fullmatch(r"(?:第\s*)?(\d+)\s*[集话](?:\s*【.*】)?", str(name or "").strip())
+    return int(match.group(1)) if match else None
+
+
+def _continuous_anime_range(subject, candidate):
+    """Require explicit total-episode evidence before using a merged annual series."""
+    # Old enriched snapshots sometimes retained "movie" for a TV animation.
+    # Explicit animation metadata plus an annual episode range still identifies it.
+    subject_is_anime = subject.get("category") == "anime" or "动画" in (subject.get("genres") or [])
+    if not subject_is_anime or candidate.get("category") != "anime":
+        return None
+    base = _base_search_title(subject.get("title"))
+    if not base or normalize_title(candidate.get("title")) != normalize_title(base):
+        return None
+    subject_year, candidate_year = _year(subject.get("year")), _year(candidate.get("year"))
+    if not subject_year or not candidate_year or candidate_year > subject_year:
+        return None
+    for alias in subject.get("aliases") or []:
+        match = re.fullmatch(r"(.+?)\s*第\s*(\d+)\s*[-－~～至]\s*(\d+)\s*集", str(alias).strip())
+        if not match or normalize_title(match.group(1)) != normalize_title(base):
+            continue
+        start, end = int(match.group(2)), int(match.group(3))
+        if not 1 < start <= end:
+            continue
+        groups = str((candidate.get("raw") or {}).get("vod_play_url") or "").split("$$$")
+        for group in groups:
+            numbers = {_episode_number(value.rsplit("$", 1)[0]) for value in group.split("#") if "$" in value}
+            if start in numbers and start + 1 in numbers:
+                return start, end
+    return None
+
+
 def match_score(subject, candidate):
+    if _continuous_anime_range(subject, candidate):
+        return 90
     subject_titles = _titles(subject)
     candidate_titles = _titles(candidate)
     subject_year, candidate_year = _year(subject.get("year")), _year(candidate.get("year"))
@@ -1134,7 +1188,9 @@ class _PublicSourceHTTPSHandler(source_dns.BoundedHTTPSHandler):
 
 
 _SOURCE_URL_OPENER = urllib.request.build_opener(
-    _PublicSourceHTTPHandler, _PublicSourceHTTPSHandler)
+    # Public-source connections are validated against their destination DNS.
+    # An inherited localhost system proxy would be rejected as a private host.
+    urllib.request.ProxyHandler({}), _PublicSourceHTTPHandler, _PublicSourceHTTPSHandler)
 
 
 def _default_fetch(url):

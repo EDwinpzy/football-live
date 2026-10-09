@@ -7,7 +7,7 @@ private struct HomeCategory: Identifiable {
     static let all = [
         HomeCategory(id: "movie", title: "电影"),
         HomeCategory(id: "tv", title: "电视剧"),
-        HomeCategory(id: "anime", title: "3D国漫"),
+        HomeCategory(id: "anime", title: "国漫"),
         HomeCategory(id: "variety", title: "综艺")
     ]
 }

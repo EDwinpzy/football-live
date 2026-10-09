@@ -68,8 +68,13 @@ class BoundedDNSResolverTest(unittest.TestCase):
         started = threading.Event()
         calls = [0]
         calls_lock = threading.Lock()
+        real_getaddrinfo = socket.getaddrinfo
 
         def stalled_getaddrinfo(host, port, *args, **kwargs):
+            # Background resolver work from other tests must not consume this
+            # test's two controlled slots or wait on its release event.
+            if host != "source.test":
+                return real_getaddrinfo(host, port, *args, **kwargs)
             with calls_lock:
                 calls[0] += 1
                 if calls[0] == resolver.max_workers:

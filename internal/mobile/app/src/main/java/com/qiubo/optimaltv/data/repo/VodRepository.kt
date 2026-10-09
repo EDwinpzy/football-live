@@ -27,6 +27,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -466,16 +467,21 @@ class VodRepository(
         .map { it.categoryId.removePrefix("douban:") }
         .let(::metadataCategoriesForKeys)
 
-    private fun metadataCategoriesForKeys(keys: List<String>): List<Category> = keys.distinct().map { key ->
+    private fun metadataCategoriesForKeys(keys: List<String>): List<Category> {
+        val uniqueKeys = keys.distinct()
+        val preferredOrder = listOf("movie", "tv", "anime", "variety", "short")
+        val orderedKeys = preferredOrder.filter { it in uniqueKeys } + uniqueKeys.filterNot { it in preferredOrder }
+        return orderedKeys.map { key ->
             Category("douban:$key", when (key) {
                 "movie" -> "电影"
                 "tv" -> "电视剧"
-                "anime" -> "3D国漫"
+                "anime" -> "国漫"
                 "variety" -> "综艺"
                 "short" -> "短剧"
                 else -> key
             })
         }
+    }
 
     private fun categoryForMediaType(mediaType: String): String = when (mediaType.trim().lowercase()) {
         "tv", "series", "tv_series", "show" -> "tv"
@@ -488,15 +494,22 @@ class VodRepository(
     private val _sections = MutableStateFlow<Map<Int, List<HSec>>>(emptyMap())
     val sectionsFlow: StateFlow<Map<Int, List<HSec>>> = _sections.asStateFlow()
 
+    private val sectionFetchedAt = java.util.concurrent.ConcurrentHashMap<Int, Long>()
+
     suspend fun channelSections(categoryId: String, force: Boolean = false) {
         val key = categoryId.removePrefix("douban:")
         val cid = categoryNumber(key) ?: return
-        if (!force && _sections.value.containsKey(cid)) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!force && now - (sectionFetchedAt[cid] ?: -60_000L) < 60_000L &&
+            _sections.value[cid].orEmpty().any { it.items.isNotEmpty() }) return
         val base = settings.current().hhkanBaseUrl
         val secs = withContext(Dispatchers.IO) {
             runCatching { VodApiSource.fetchHome(base, okHttp, key, refresh = force).sections }.getOrDefault(emptyList())
         }
-        if (secs.any { it.items.isNotEmpty() }) _sections.value = _sections.value + (cid to secs)
+        if (secs.any { it.items.isNotEmpty() }) {
+            _sections.update { current -> current + (cid to secs) }
+            sectionFetchedAt[cid] = android.os.SystemClock.elapsedRealtime()
+        }
     }
 
     /** 源站首页（原版 view-vod refreshVod：/hhkan/home sections + carousel） */
@@ -798,44 +811,58 @@ class VodRepository(
             }
             if (hasLocalSections) markHotSettled(cid)
 
-            val doubanHome = if (base.isBlank()) null else fetchHomeWithRevalidation(
-                base = base,
-                category = category,
-                force = force,
-                label = "分类 $cid 豆瓣首页",
-            ) { data ->
-                val current = _libBlocks.value[cid].orEmpty()
-                val merged = mergeDoubanHomeIntoLibraryBlocks(
-                    current = current,
-                    upstream = data.sections,
-                    hotAliases = LIB_HOT_SECS[cid].orEmpty(),
-                )
-                _libBlocks.value = _libBlocks.value + (cid to completeBlocks(merged))
+            fun applyDouban(data: HhkanSource.HomeData) {
+                _libBlocks.update { current ->
+                    val merged = mergeDoubanHomeIntoLibraryBlocks(
+                        current = current[cid].orEmpty(),
+                        upstream = data.sections,
+                        hotAliases = LIB_HOT_SECS[cid].orEmpty(),
+                    )
+                    current + (cid to completeBlocks(merged))
+                }
                 if (data.sections.any { it.items.isNotEmpty() }) markHotSettled(cid)
             }
-            val hasFreshDouban = doubanHome?.let { data ->
+            val (douban, onlineUpdated) = coroutineScope {
+                val homeRequest = async {
+                    if (base.isBlank()) null else runCatching {
+                        VodApiSource.fetchHome(base, okHttp, category, refresh = force)
+                    }.onFailure { android.util.Log.w("OTV", "分类 $cid 豆瓣目录拉取失败: ${it.message}") }.getOrNull()
+                }
+                val updatesRequest = async {
+                    if (base.isBlank()) emptyList() else runCatching {
+                        HhkanSource.fetchChannelSections(base, okHttp, cid)
+                            .firstOrNull { it.name == "最近更新" }
+                            ?.items
+                            .orEmpty()
+                            .take(24)
+                    }.onFailure { android.util.Log.w("OTV", "分类 $cid 最近更新拉取失败: ${it.message}") }
+                        .getOrDefault(emptyList()).also { updates ->
+                            if (updates.isNotEmpty()) {
+                                _libBlocks.update { current ->
+                                    val sections = current[cid].orEmpty().filterNot { it.name == "最近更新" } + HSec("最近更新", updates)
+                                    current + (cid to completeBlocks(sections))
+                                }
+                                markHotSettled(cid)
+                            }
+                        }
+                }
+                var home = homeRequest.await()
+                home?.let(::applyDouban)
+                if (home?.stale == true && !force) {
+                    val refreshed = runCatching { VodApiSource.fetchHome(base, okHttp, category, refresh = true) }
+                        .getOrNull()
+                    if (refreshed != null) {
+                        home = refreshed
+                        applyDouban(refreshed)
+                    }
+                }
+                val updates = updatesRequest.await()
+                home to updates
+            }
+            val hasFreshDouban = douban?.let { data ->
                 !data.stale && data.sections.any { it.name == "最近热门" && it.items.isNotEmpty() }
             } == true
-
-            val onlineUpdated = if (base.isBlank()) {
-                emptyList()
-            } else {
-                runCatching { HhkanSource.fetchChannelSections(base, okHttp, cid) }
-                    .onFailure { android.util.Log.w("OTV", "分类 $cid 最近更新拉取失败: ${it.message}") }
-                    .getOrNull()
-                    ?.firstOrNull { it.name == "最近更新" }
-                    ?.items
-                    .orEmpty()
-                    .take(24)
-            }
             val hasOnlineUpdates = onlineUpdated.isNotEmpty()
-            if (hasOnlineUpdates) {
-                // 最近更新仍取 HHKan，但以当前三栏为基底，保留已落入的豆瓣热门与最新上映。
-                val current = _libBlocks.value[cid].orEmpty()
-                val sections = replaceLibrarySection(current, HSec("最近更新", onlineUpdated))
-                _libBlocks.value = _libBlocks.value + (cid to completeBlocks(sections))
-                markHotSettled(cid)
-            }
 
             if (hasFreshDouban || (base.isBlank() && hasLocalSections && installedMetadata)) {
                 libDone += cid

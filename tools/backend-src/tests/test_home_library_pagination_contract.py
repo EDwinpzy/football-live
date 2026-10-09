@@ -2,7 +2,7 @@
 
 分页的产品口径是固定两行：TV 每页 14 张（7×2），移动端每页按列数×2，
 网页版横屏 7×2、竖屏 3×2。每个分类返回的三栏都应独立走分页组件；切分类和
-重新进入页面时仍要强制刷新，不得恢复旧的 TV libBlocks UI 数据通路。
+重新进入页面时复用短缓存，过期后仍要刷新，不得恢复旧的 TV libBlocks UI 数据通路。
 """
 
 import pathlib
@@ -57,13 +57,14 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
             "private fun PagedLibSection(",
             "/** 片库竖卡",
         )
-        self.assertIn("items.chunked(14)", pager, "TV 每页必须严格按 14 张分段")
+        self.assertIn("items.chunked(HomeLibraryUiPolicy.PAGE_SIZE)", pager, "TV 每页必须严格按 14 张分段")
         self.assertIn("repeat(2) { row ->", pager, "TV 分页必须始终绘制两行")
-        self.assertIn("repeat(7) { col ->", pager, "TV 每行必须有 7 个固定槽位")
-        self.assertIn("row * 7 + col", pager)
-        self.assertIn('Text("${page + 1} / ${pages.size}"', pager, "TV 页面计数器缺失")
-        self.assertIn('Text("上一页"', pager)
-        self.assertIn('Text("下一页"', pager)
+        self.assertIn("repeat(HomeLibraryUiPolicy.ROW_SIZE) { col ->", pager, "TV 每行必须有 7 个固定槽位")
+        self.assertIn("row * HomeLibraryUiPolicy.ROW_SIZE + col", pager)
+        self.assertNotIn('Text("上一页"', pager)
+        self.assertNotIn('Text("下一页"', pager)
+        self.assertIn("detectHorizontalDragGestures(", pager)
+        self.assertIn("targetPageForDpad", pager)
 
     def test_mobile_page_is_two_rows_of_current_column_count(self):
         pager = _source_block(
@@ -179,10 +180,13 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
         self.assertLess(anime_guard, hhkan_fetch,
                         "动漫必须在调用任意 HHKan 栏目接口前提前返回")
 
-    def test_every_client_keeps_forced_refresh_on_the_library_path(self):
+    def test_android_category_switch_uses_short_cache_and_web_keeps_explicit_refresh(self):
         for label, home in (("TV", self.tv_home), ("mobile", self.mobile_home)):
             with self.subTest(client=label):
-                self.assertRegex(home, r"Graph\.repo\.channelSections\(selCatId,\s*force\s*=\s*true\)")
+                self.assertIn("Graph.repo.channelSections(selCatId)", home)
+                repo = self.tv_repo if label == "TV" else self.mobile_repo
+                self.assertIn("sectionFetchedAt", repo)
+                self.assertIn("< 60_000L", repo)
 
         self.assertIn("fetchLibBlocksSWR(cid, vod.homeSections, paint, refresh)", self.web_app)
         fetch = _source_block(
@@ -211,7 +215,7 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
         self.assertIn('rows.any { "lib:$sectionName:${it.id}" == returnKey }', pager,
                       "从详情返回时应恢复到正确板块的页")
         self.assertIn('val target = "lib:$sectionName:${pages[next][slot.coerceIn(0, pages[next].lastIndex)].id}"', pager)
-        self.assertIn('LibCard(nav, item, s, cardReg, "lib:$sectionName:${item.id}")', pager,
+        self.assertIn('nav, item, s, cardReg, "lib:$sectionName:${item.id}"', pager,
                       "卡片焦点注册 key 需要带板块名，避免跨栏同 ID 冲突")
 
         turn = _source_block(pager, "fun turn(next: Int, slot: Int) {", "    Column(")

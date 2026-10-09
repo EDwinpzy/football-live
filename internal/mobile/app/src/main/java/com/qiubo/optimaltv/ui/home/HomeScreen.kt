@@ -155,7 +155,7 @@ fun VodScreen(nav: NavController) {
                 )
                 val libGap = if (portrait) 12f else 20f
                 // 片库状态提升到组合作用域（LazyColumn builder 非组合上下文）
-                val categories = remember(cat) { cat.categories.map { it.id to if (it.id.removePrefix("douban:") == "anime") "3D国漫" else it.name } + ("" to "全部 ›") }
+                val categories = remember(cat) { cat.categories.map { it.id to if (it.id.removePrefix("douban:") == "anime") "国漫" else it.name }.sortedBy { listOf("movie", "tv", "anime", "variety", "short").indexOf(it.first.removePrefix("douban:")).let { rank -> if (rank < 0) Int.MAX_VALUE else rank } } + ("" to "全部 ›") }
                 // v1.17 需求：进页恢复上次选中的分类 chip（按分类 ID 持久化），不回「电影」
                 var catSel by remember(cat) { mutableStateOf(0) }
                 LaunchedEffect(cat) {
@@ -169,7 +169,7 @@ fun VodScreen(nav: NavController) {
                 val selCatId = categories.getOrNull(catSel)?.first.orEmpty()
                 var sectionLoading by remember(selCatId) { mutableStateOf(true) }
                 LaunchedEffect(selCatId) {
-                    try { Graph.repo.channelSections(selCatId, force = true) } finally { sectionLoading = false }
+                    try { Graph.repo.channelSections(selCatId) } finally { sectionLoading = false }
                 }
                 /* 分类 id 现为 `douban:movie` 形态；用与 libBlocks 同一套解析，
                    否则恒为 null → 三栏恒空（影视 tab 一直「暂无内容」）。 */

@@ -1,4 +1,5 @@
 import pathlib
+import json
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,45 @@ import vod_sources  # noqa: E402
 
 
 class VodSourcesTest(unittest.TestCase):
+    def test_real_annual_animation_alias_is_not_displaced_by_short_aliases(self):
+        subject = {
+            "title": "凡人修仙传 年番4", "year": "2026", "category": "anime",
+            "aliases": ["凡人修仙传 第177-228集", "凡人修仙传 年番4之慕兰之战",
+                        "凡人修仙传：慕兰之战", "凡人修仙传 第五季",
+                        "凡人修仙传 第五季之慕兰之战", "凡人慕兰之战",
+                        "A Mortal's Journey 5", "A Mortal's Journey: Fighting in Mulan Grassland"],
+        }
+        terms = vod_sources._search_terms(subject)
+        self.assertEqual(terms[:3], ["凡人修仙传 年番4", "凡人修仙传", "凡人修仙传：慕兰之战"])
+        self.assertLessEqual(len(terms), 4)
+
+    def test_chinese_numbered_season_search_falls_back_to_series_title(self):
+        self.assertEqual(vod_sources._search_terms({"title": "剑来 第二季"})[:2], ["剑来 第二季", "剑来"])
+
+    def test_annual_animation_merged_source_requires_episode_range_and_slices_lines(self):
+        subject = {"title": "仙逆 年番3", "year": "2026", "category": "anime",
+                   "aliases": ["仙逆 第129-180集", "仙逆 第四季"]}
+        raw = {"vod_id": 7, "vod_name": "仙逆", "vod_year": "2023", "type_name": "国产动漫",
+               "vod_play_from": "test", "vod_play_url": "#".join(
+                   "第%02d集$https://example.test/%s.m3u8" % (i, i) for i in range(1, 162))}
+        source = vod_sources.VodSource("test", "test", "https://example.test", "https://example.test/api", "macms_json")
+        registry = vod_sources.SourceRegistry([source])
+        self.addCleanup(registry.close)
+        from unittest.mock import patch
+        with patch.object(vod_sources, "_default_fetch", return_value={"body": json.dumps({"list": [raw]})}):
+            _, lines, error, _ = registry._search_one(source, subject)
+        self.assertIsNone(error)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual([e["name"] for e in lines[0]["episodes"]], ["第%02d集" % i for i in range(129, 162)])
+        self.assertEqual(lines[0]["episodes"][0]["index"], 0)
+        self.assertEqual(vod_sources.MacCmsAdapter(source).resolve(lines[0], 0)["url"], "https://example.test/129.m3u8")
+        candidate = {"title": "仙逆", "year": "2023", "category": "anime", "raw": raw}
+        self.assertEqual(vod_sources.match_score(subject, candidate), 90)
+        self.assertLess(vod_sources.match_score(dict(subject, aliases=[]), candidate), 80)
+        self.assertLess(vod_sources.match_score(subject, dict(candidate, category="movie")), 80)
+        self.assertLess(vod_sources.match_score(subject, dict(candidate, raw={})), 80)
+        self.assertLess(vod_sources.match_score(subject, dict(candidate, title="仙逆剧场版")), 80)
+
     def test_default_registry_contains_reachable_fallback_candidates(self):
         registry = vod_sources.SourceRegistry.load_default()
         self.addCleanup(registry.close)

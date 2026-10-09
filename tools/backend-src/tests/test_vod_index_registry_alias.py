@@ -70,6 +70,8 @@ class StaticIndexAliasTest(unittest.TestCase):
         }}
         index = vod_resolver.StaticLineIndex(lambda: payload, clock=clock)
         registry = vod_sources.SourceRegistry(sources, version=3)
+        # These tests exercise static joins, never the availability of a real site.
+        registry.submit_fast_searches = lambda subject, max_sources: ()
         self.addCleanup(registry.close)
         return vod_resolver.VodResolver(_Metadata(_detail()), index, registry)
 
@@ -245,6 +247,8 @@ class StaleIndexServingTest(unittest.TestCase):
             lambda: payload, clock=lambda: NOW,
             max_age_seconds=max_age_days * DAY)
         registry = vod_sources.SourceRegistry(sources, version=3)
+        # These tests exercise static joins, never the availability of a real site.
+        registry.submit_fast_searches = lambda subject, max_sources: ()
         self.addCleanup(registry.close)
         return vod_resolver.VodResolver(
             _Metadata(_detail(episodes=3)), index, registry)

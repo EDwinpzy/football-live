@@ -897,8 +897,13 @@ class DoubanCatalog:
             # 目录类（home/show）内置快照足以撑起首屏，先秒回快照 + 后台预热。旧实现要等
             # 「5 个分类 × 3 栏 × 最多 3 页 + 每条补详情」整轮跑完，手机上极易超过客户端
             # 45s 读超时 → 5 路全失败 → 影视页整页空掉（用户报障「影视界面崩了」）。
-            # detail 不走这条：快照详情可能没有线路，秒回会让详情页显示「暂无片源」。
-            if (allow_snapshot_first and kind in ("home", "show")
+            # Metadata detail has no playback lines: VodService resolves those
+            # separately. A complete packaged subject can start that search now.
+            snapshot_ready = kind in ("home", "show") or (
+                kind == "detail" and isinstance(snapshot_value, dict)
+                and snapshot_value.get("title") and snapshot_value.get("year")
+                and snapshot_value.get("detail_meta"))
+            if (allow_snapshot_first and snapshot_ready
                     and isinstance(snapshot_value, dict) and snapshot_value):
                 self._refresh_async(key, producer)
                 fallback = copy.deepcopy(snapshot_value)

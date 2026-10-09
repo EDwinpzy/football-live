@@ -27,7 +27,7 @@ class HhkanCatalogWiringTest(unittest.TestCase):
 
     def test_categories_stay_five_plus_all(self):
         self.assertIn(
-            '[["movie", "电影"], ["tv", "电视剧"], ["anime", "动漫"], '
+            '[["movie", "电影"], ["tv", "电视剧"], ["anime", "国漫"], '
             '["variety", "综艺"], ["short", "短剧"]]',
             self.js,
             "分类定义被改动：好好看不应作为第六个分类混进 VOD_CATEGORIES",

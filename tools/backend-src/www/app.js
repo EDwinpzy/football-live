@@ -11,7 +11,7 @@
  */
 "use strict";
 
-const VOD_CATEGORIES = [["movie", "电影"], ["tv", "电视剧"], ["anime", "动漫"], ["variety", "综艺"], ["short", "短剧"]];
+const VOD_CATEGORIES = [["movie", "电影"], ["tv", "电视剧"], ["anime", "国漫"], ["variety", "综艺"], ["short", "短剧"]];
 const VOD_SORTS = [["hot", "热门"], ["new", "最新上映"], ["rating", "豆瓣高分"]];
 
 /* 好好看的频道号（hhkan_snapshot.json 的 channels 键，与上面五个分类一一对应：
@@ -1257,7 +1257,7 @@ function displayLibSectionName(name) {
 }
 
 function displayVodCategoryName(id, name) {
-  return /(?:^|:)anime$/.test(String(id || "")) ? "3D国漫" : name;
+  return /(?:^|:)anime$/.test(String(id || "")) ? "国漫" : name;
 }
 
 function canonicalLibBlockName(raw) {
@@ -1609,7 +1609,10 @@ async function initVod() {
 
 /* App VodScreen chips：目录 categories + 末尾「全部 ›」；记住上次分类；点分类切三块，点「全部›」开全部页 */
 function vodCategories() {
-  return vod.cat ? vod.cat.cats.map(c => ({ id: c.id, name: displayVodCategoryName(c.id, c.name) })).concat([{ id: "", name: "全部 ›" }])
+  const order = new Map(VOD_CATEGORIES.map(([id], index) => [id, index]));
+  return vod.cat ? vod.cat.cats.map(c => ({ id: c.id, name: displayVodCategoryName(c.id, c.name) }))
+    .sort((a, b) => (order.get(a.id.replace("douban:", "")) ?? 99) - (order.get(b.id.replace("douban:", "")) ?? 99))
+    .concat([{ id: "", name: "全部 ›" }])
     : [{ id: "", name: "全部 ›" }];
 }
 function renderCatChips() {
@@ -1931,7 +1934,7 @@ const all = {
   /* 筛选面板收起态（2026-09-18 需求）：记忆上次选择，默认展开 */
   filterOpen: store.get("otvw:filterOpen", true) !== false,
 };
-const ALL_CATS = [["movie", "电影"], ["tv", "电视剧"], ["anime", "3D国漫"], ["variety", "综艺"], ["short", "短剧"]];
+const ALL_CATS = [["movie", "电影"], ["tv", "电视剧"], ["anime", "国漫"], ["variety", "综艺"], ["short", "短剧"]];
 
 async function openAll(cid) {
   /* App：无路由参数——进页恢复上次类别（allLastCat，默认「全部」） */
@@ -2548,13 +2551,13 @@ function startPlayAt(idx, resumePos) {
 /* ================================================================
  * 搜索（SearchScreen 复刻：本地目录 + 全站搜索，中文自动搜/字母显式搜）
  * ================================================================ */
-const RESULT_CATS = ["全部", "电影", "电视剧", "3D国漫", "综艺", "短剧"];
+const RESULT_CATS = ["全部", "电影", "电视剧", "国漫", "综艺", "短剧"];
 const TV_TAG_RE = /欧美剧|国产剧|香港剧|台湾剧|韩国剧|日本剧|海外剧|泰剧|美剧|英剧|连续剧|电视剧|网剧/;
 /* App classifyVod：meta 正则 + 集数 */
 function classifyVod(meta, epCount) {
   meta = meta || "";
   if (meta.includes("短剧")) return "短剧";
-  if (meta.includes("动漫")) return "3D国漫";
+  if (meta.includes("动漫")) return "国漫";
   if (meta.includes("综艺")) return "综艺";
   if (TV_TAG_RE.test(meta)) return "电视剧";
   if (epCount > 1) return "电视剧";
@@ -2602,7 +2605,7 @@ function renderSearch() {
 }
 /* 已知目录分类直接采用；目录外前 24 条拉详情归类（并发 6） */
 async function classifyResults(items) {
-  const categories = { movie: "电影", tv: "电视剧", anime: "3D国漫", variety: "综艺", short: "短剧" };
+  const categories = { movie: "电影", tv: "电视剧", anime: "国漫", variety: "综艺", short: "短剧" };
   for (const it of items) {
     const m = /^douban:(movie|tv|anime|variety|short)$/.exec(it.categoryId || "");
     if (m) search.catMap[it.id] = categories[m[1]];
@@ -2615,7 +2618,7 @@ async function classifyResults(items) {
       let cat = null;
       const m = /^hhkan:(\d)$/.exec(it.categoryId || "");
       if (m && ["1", "2", "3", "4", "6"].includes(m[1])) {
-        cat = { "1": "电影", "2": "电视剧", "3": "3D国漫", "4": "综艺", "6": "短剧" }[m[1]];
+        cat = { "1": "电影", "2": "电视剧", "3": "国漫", "4": "综艺", "6": "短剧" }[m[1]];
       } else {
         try {
           const d = await fetchJSON(BASE + "/hhkan/detail/" + it.id, { timeout: 45000 });

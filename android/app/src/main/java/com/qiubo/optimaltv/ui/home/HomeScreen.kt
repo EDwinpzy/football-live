@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -42,6 +43,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -76,6 +78,7 @@ import androidx.compose.foundation.layout.size
 import com.qiubo.optimaltv.ui.theme.sx
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import java.net.URLEncoder
 
 /**
@@ -102,6 +105,41 @@ private const val VOD_HERO_TEXT_MAX = 222f
 
 /** hero 播放钮距海报带底部（设计钮框 y 576..640，带高 700 → 底部留 60） */
 private const val VOD_HERO_BTN_BOTTOM = 60f
+
+/** 影视首页的 TV 分类与两行片库分页规则。 */
+internal object HomeLibraryUiPolicy {
+    const val PAGE_SIZE = 14
+    const val ROW_SIZE = 7
+
+    fun orderedCategories(source: List<Pair<String, String>>): List<Pair<String, String>> {
+        val result = source.map { (id, name) ->
+            id to if (id.removePrefix("douban:") == "anime") "国漫" else name
+        }.toMutableList()
+        val animeIndex = result.indexOfFirst { it.first.removePrefix("douban:") == "anime" }
+        if (animeIndex < 0) return result
+        val anime = result.removeAt(animeIndex)
+        val tvIndex = result.indexOfFirst { it.first.removePrefix("douban:") == "tv" }
+        val insertAt = if (tvIndex >= 0) tvIndex + 1 else minOf(2, result.size)
+        result.add(insertAt, anime)
+        return result
+    }
+
+    fun targetPageForDpad(page: Int, pageCount: Int, direction: Int): Int? {
+        val delta = when (direction) {
+            NAV_RIGHT -> 1
+            NAV_LEFT -> -1
+            else -> return null
+        }
+        return (page + delta).takeIf { pageCount > 0 && page in 0 until pageCount && it in 0 until pageCount }
+    }
+
+    /** A leftward swipe advances; a rightward swipe returns to the previous page. */
+    fun targetPageForSwipe(page: Int, pageCount: Int, dragPx: Float, thresholdPx: Float): Int? {
+        if (abs(dragPx) < thresholdPx.coerceAtLeast(0f)) return null
+        val direction = if (dragPx < 0f) NAV_RIGHT else NAV_LEFT
+        return targetPageForDpad(page, pageCount, direction)
+    }
+}
 
 @Composable
 fun VodScreen(nav: NavController) {
@@ -141,6 +179,7 @@ fun VodScreen(nav: NavController) {
     }
     val cat0 = catalogState.catalog
     val heroesTop = remember(cat0, home) { buildHeroes(cat0, home) }
+    val watchedIds = remember(history) { history.map { it.vodId }.toSet() }
     var heroIdxTop by remember(heroesTop) { mutableIntStateOf(0) }
     // 需求 #15：海报不自动轮播，仅焦点在播放钮上左右键手动切换
 
@@ -202,7 +241,9 @@ fun VodScreen(nav: NavController) {
             }
             else -> {
                 // 片库状态提升到组合作用域（LazyColumn builder 非组合上下文，remember/LaunchedEffect 不可写在其内）
-                val categories = remember(cat) { cat.categories.map { it.id to if (it.id.removePrefix("douban:") == "anime") "3D国漫" else it.name } + ("" to "全部 ›") }
+                val categories = remember(cat) {
+                    HomeLibraryUiPolicy.orderedCategories(cat.categories.map { it.id to it.name }) + ("" to "全部 ›")
+                }
                 // v1.17 需求：进页恢复上次选中的分类 chip（按分类 ID 持久化），不回「电影」
                 var catSel by remember(cat) { mutableIntStateOf(0) }
                 val selectedCatChipFocus = remember { FocusRequester() }
@@ -216,7 +257,7 @@ fun VodScreen(nav: NavController) {
                 val selCatId = categories.getOrNull(catSel)?.first.orEmpty()
                 var sectionLoading by remember(selCatId) { mutableStateOf(true) }
                 LaunchedEffect(selCatId) {
-                    try { Graph.repo.channelSections(selCatId, force = true) } finally { sectionLoading = false }
+                    try { Graph.repo.channelSections(selCatId) } finally { sectionLoading = false }
                 }
                 /* 分类 id 现为 `douban:movie` 形态；用与 libBlocks 同一套解析，
                    否则恒为 null → 三栏恒空（影视 tab 一直「暂无内容」）。 */
@@ -289,7 +330,7 @@ fun VodScreen(nav: NavController) {
                             selectedCatChipFocus = selectedCatChipFocus,
                             firstHistoryFocus = firstHistoryFocus,
                             hasHistory = history.isNotEmpty(),
-                            watchedIds = history.map { it.vodId }.toSet(),
+                            watchedIds = watchedIds,
                             listState = vodListState,
                             onPrev = { heroIdxTop = (heroIdxTop - 1 + heroesTop.size.coerceAtLeast(1)) % heroesTop.size.coerceAtLeast(1) },
                             onNext = { heroIdxTop = (heroIdxTop + 1) % heroesTop.size.coerceAtLeast(1) },
@@ -763,8 +804,10 @@ private fun VodHeroBand(
 
 @Composable
 private fun PagedLibSection(nav: NavController, items: List<VodItem>, s: Float, cardReg: FocusRegistry, returnKey: String?, sectionName: String) {
-    val pages = remember(items) { items.chunked(14) }
+    val pages = remember(items) { items.chunked(HomeLibraryUiPolicy.PAGE_SIZE) }
     var page by remember(items) { mutableIntStateOf(pages.indexOfFirst { rows -> rows.any { "lib:$sectionName:${it.id}" == returnKey } }.coerceAtLeast(0)) }
+    // Focus slot is intentionally non-observable: moving focus must not recompose all 14 cards.
+    val focusedSlot = remember(items) { intArrayOf(0) }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     if (pages.isEmpty()) return
     val current = pages[page]
@@ -779,32 +822,64 @@ private fun PagedLibSection(nav: NavController, items: List<VodItem>, s: Float, 
             }
         }
     }
-    Column(Modifier.fillMaxWidth().padding(horizontal = 80f.sx(s)), verticalArrangement = Arrangement.spacedBy(24f.sx(s))) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 80f.sx(s))
+            .pointerInput(page, pages.size) {
+                var horizontalDrag = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { horizontalDrag = 0f },
+                    onHorizontalDrag = { _, amount -> horizontalDrag += amount },
+                    onDragEnd = {
+                        HomeLibraryUiPolicy.targetPageForSwipe(
+                            page = page,
+                            pageCount = pages.size,
+                            dragPx = horizontalDrag,
+                            thresholdPx = viewConfiguration.touchSlop * 2f,
+                        )?.let { turn(it, focusedSlot[0]) }
+                    },
+                    onDragCancel = { horizontalDrag = 0f },
+                )
+            },
+        verticalArrangement = Arrangement.spacedBy(24f.sx(s)),
+    ) {
         repeat(2) { row ->
             Row(Modifier.fillMaxWidth().height(402f.sx(s)), horizontalArrangement = Arrangement.spacedBy(20f.sx(s))) {
-                repeat(7) { col ->
-                    val slot = row * 7 + col
+                repeat(HomeLibraryUiPolicy.ROW_SIZE) { col ->
+                    val slot = row * HomeLibraryUiPolicy.ROW_SIZE + col
                     val item = current.getOrNull(slot)
-                    if (item == null) Spacer(Modifier.width(232f.sx(s))) else LibCard(nav, item, s, cardReg, "lib:$sectionName:${item.id}") { dir ->
+                    if (item == null) Spacer(Modifier.width(232f.sx(s))) else LibCard(
+                        nav, item, s, cardReg, "lib:$sectionName:${item.id}",
+                        onCardFocused = { focusedSlot[0] = slot },
+                    ) { dir ->
                         when {
-                            dir == NAV_RIGHT && (col == 6 || slot == current.lastIndex) -> { turn(page + 1, row * 7); true }
-                            dir == NAV_LEFT && col == 0 -> { turn(page - 1, row * 7 + 6); true }
-                            dir == NAV_DOWN && row == 0 && current.size > 7 -> {
-                                runCatching { cardReg.fr("lib:$sectionName:${current[(slot + 7).coerceAtMost(current.lastIndex)].id}").requestFocus() }; true
+                            dir == NAV_RIGHT && (col == HomeLibraryUiPolicy.ROW_SIZE - 1 || slot == current.lastIndex) -> {
+                                HomeLibraryUiPolicy.targetPageForDpad(page, pages.size, dir)?.let {
+                                    turn(it, row * HomeLibraryUiPolicy.ROW_SIZE)
+                                }
+                                true
                             }
-                            dir == NAV_UP && row == 1 -> { runCatching { cardReg.fr("lib:$sectionName:${current[col].id}").requestFocus() }; true }
+                            dir == NAV_LEFT && col == 0 -> {
+                                HomeLibraryUiPolicy.targetPageForDpad(page, pages.size, dir)?.let {
+                                    turn(it, row * HomeLibraryUiPolicy.ROW_SIZE + HomeLibraryUiPolicy.ROW_SIZE - 1)
+                                }
+                                true
+                            }
+                            dir == NAV_DOWN && row == 0 && current.size > HomeLibraryUiPolicy.ROW_SIZE -> {
+                                val targetSlot = (slot + HomeLibraryUiPolicy.ROW_SIZE).coerceAtMost(current.lastIndex)
+                                runCatching { cardReg.fr("lib:$sectionName:${current[targetSlot].id}").requestFocus() }
+                                true
+                            }
+                            dir == NAV_UP && row == 1 -> {
+                                runCatching { cardReg.fr("lib:$sectionName:${current[col].id}").requestFocus() }
+                                true
+                            }
                             else -> false
                         }
                     }
                 }
             }
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-            Text("上一页", color = if (page > 0) OtvColors.White else OtvColors.White30, fontSize = 24f.sxs(s),
-                modifier = Modifier.dpadFocusable { turn(page - 1, 0) }.padding(16f.sx(s)))
-            Text("${page + 1} / ${pages.size}", color = OtvColors.White, fontSize = 24f.sxs(s))
-            Text("下一页", color = if (page < pages.lastIndex) OtvColors.White else OtvColors.White30, fontSize = 24f.sxs(s),
-                modifier = Modifier.dpadFocusable { turn(page + 1, 0) }.padding(16f.sx(s)))
         }
     }
 }
@@ -812,13 +887,26 @@ private fun PagedLibSection(nav: NavController, items: List<VodItem>, s: Float, 
 /** 片库竖卡（poster 232×352 r12 + remark 右下 + vname 24 白；副行已按用户要求去掉）
  *  需求 影视#3：选中环紧贴卡片边缘。需求 影视#11：remark 徽章高度降为 2/3。 */
 @Composable
-private fun LibCard(nav: NavController, item: VodItem, s: Float, cardReg: FocusRegistry? = null, focusKey: String = item.id, navOverride: ((Int) -> Boolean)? = null) {
+private fun LibCard(
+    nav: NavController,
+    item: VodItem,
+    s: Float,
+    cardReg: FocusRegistry? = null,
+    focusKey: String = item.id,
+    onCardFocused: (() -> Unit)? = null,
+    navOverride: ((Int) -> Boolean)? = null,
+) {
     Column(Modifier.width(232f.sx(s))) {
         Box(
             Modifier
                 .dpadFocusable(
                     scaleFocused = 1.05f,
-                    onFocusedChange = { if (it) ReturnFocus.mark("vod", focusKey) },
+                    onFocusedChange = {
+                        if (it) {
+                            ReturnFocus.mark("vod", focusKey)
+                            onCardFocused?.invoke()
+                        }
+                    },
                     externalFocusRequester = cardReg?.fr(focusKey),
                     navOverride = navOverride,
                 ) {

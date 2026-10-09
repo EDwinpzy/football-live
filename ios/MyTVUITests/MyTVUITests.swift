@@ -39,7 +39,7 @@ final class MyTVUITests: XCTestCase {
         assertFrame(of: app, landscape: false)
         XCTAssertTrue(app.staticTexts["home-title"].exists)
         XCTAssertEqual(app.buttons["category-tv"].label, "电视剧")
-        XCTAssertEqual(app.buttons["category-anime"].label, "3D国漫")
+        XCTAssertEqual(app.buttons["category-anime"].label, "国漫")
         attachScreenshot(of: app, named: "fixture-home-portrait")
 
         firstCard.tap()

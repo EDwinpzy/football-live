@@ -24,7 +24,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusEvent
@@ -258,7 +258,7 @@ fun Modifier.dpadFocusable(
     val interaction = remember { MutableInteractionSource() }
     var focused by remember { mutableStateOf(false) }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    val scaleAnim by animateFloatAsState(
+    val scaleAnim = animateFloatAsState(
         targetValue = if (focused) scaleFocused else 1f,
         animationSpec = TvInteractionMotion.focusScaleSpec,
         label = "focusScale",
@@ -375,7 +375,12 @@ fun Modifier.dpadFocusable(
         .focusRequester(bandNode.requester)
         .focusable(enabled = enabled, interactionSource = interaction)
         .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-        .scale(scaleAnim)
+        // Read each animation frame in the layer phase, avoiding recomposition and
+        // navigation registration on every tick across all TV screens.
+        .graphicsLayer {
+            scaleX = scaleAnim.value
+            scaleY = scaleAnim.value
+        }
         .drawWithContent {
             // focusedBg 是「背景」：必须画在内容下层，否则盖住文字
             if (focused) {

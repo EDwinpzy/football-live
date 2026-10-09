@@ -16,6 +16,34 @@ import douban_catalog  # noqa: E402
 import media_index  # noqa: E402
 
 
+class CompleteDetailSnapshotSpeedTest(unittest.TestCase):
+    def test_complete_metadata_starts_source_search_without_waiting_for_douban(self):
+        started, release = threading.Event(), threading.Event()
+
+        def fetch(_url):
+            started.set()
+            release.wait(2)
+            return {"id": "1", "title": "新资料", "year": "2026"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog = douban_catalog.DoubanCatalog(
+                fetch=fetch, cache=douban_catalog.JsonDiskCache(tmp),
+                snapshot={"details": {"1": {"douban_id": "1", "title": "现有资料",
+                                           "year": "2026", "detail_meta": True}}})
+            try:
+                result = catalog.detail("1")
+                self.assertEqual(result["title"], "现有资料")
+                self.assertTrue(result["stale"])
+                self.assertTrue(started.wait(1))
+            finally:
+                release.set()
+                # Await completion so the cache directory is not removed during a write.
+                for _ in range(100):
+                    if catalog.cache.get_stale("detail:1"):
+                        break
+                    time.sleep(0.01)
+
+
 def fixture_json(name):
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
