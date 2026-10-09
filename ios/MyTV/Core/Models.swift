@@ -30,6 +30,18 @@ public struct MediaSection: Identifiable, Codable, Hashable {
     }
 }
 
+public struct MediaSearchPage: Hashable {
+    public var items: [MediaItem]
+    public var page: Int
+    public var hasMore: Bool
+
+    public init(items: [MediaItem], page: Int, hasMore: Bool) {
+        self.items = items
+        self.page = page
+        self.hasMore = hasMore
+    }
+}
+
 public struct MediaDetail: Codable, Hashable {
     public var item: MediaItem
     public var summary: String

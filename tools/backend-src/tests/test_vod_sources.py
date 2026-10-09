@@ -346,6 +346,116 @@ class VodSourcesTest(unittest.TestCase):
         })
         self.assertFalse(result["alive"])
 
+    def test_probe_accepts_direct_mp4_and_flv_media(self):
+        for url, content_type in (
+                ("https://cdn.example/movie.mp4?token=x", "video/mp4"),
+                ("https://cdn.example/live.flv", "application/octet-stream")):
+            with self.subTest(url=url):
+                result = vod_sources.probe_stream(url, fetch=lambda _url: {
+                    "status": 206, "content_type": content_type,
+                    "elapsed_ms": 90, "body": b"media bytes",
+                })
+                self.assertTrue(result["alive"])
+                self.assertEqual(result["latency_ms"], 90)
+                self.assertEqual(result["height"], 0)
+
+    def test_probe_rejects_error_status_even_if_body_looks_like_a_playlist(self):
+        result = vod_sources.probe_stream("https://cdn.example/master.m3u8", fetch=lambda _url: {
+            "status": 503, "content_type": "application/vnd.apple.mpegurl",
+            "elapsed_ms": 40, "body": "#EXTM3U\n#EXTINF:6,\nsegment.ts",
+        })
+        self.assertFalse(result["alive"])
+
+    def test_probe_rejects_json_error_payload_as_healthy_source(self):
+        from unittest.mock import patch
+
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, body):
+                self.body = body.encode("utf-8")
+
+            def read(self, size=-1):
+                if size < 0:
+                    size = len(self.body)
+                body, self.body = self.body[:size], self.body[size:]
+                return body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        source = vod_sources.VodSource(
+            "broken", "坏源", "https://broken.example",
+            "https://broken.example/api.php/provide/vod/", "macms_json")
+        with patch("vod_sources.urllib.request.urlopen",
+                   return_value=FakeResponse('{"code":0,"msg":"upstream unavailable"}')):
+            result = vod_sources.probe_source(source)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "unexpected payload")
+
+    def test_probe_accepts_structured_empty_source_catalog(self):
+        from unittest.mock import patch
+
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, body):
+                self.body = body.encode("utf-8")
+
+            def read(self, size=-1):
+                if size < 0:
+                    size = len(self.body)
+                body, self.body = self.body[:size], self.body[size:]
+                return body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        source = vod_sources.VodSource(
+            "empty", "空目录", "https://empty.example",
+            "https://empty.example/api.php/provide/vod/", "macms_json")
+        with patch("vod_sources.urllib.request.urlopen",
+                   return_value=FakeResponse('{"code":1,"total":0,"list":[]}')):
+            result = vod_sources.probe_source(source)
+        self.assertTrue(result["ok"])
+
+    def test_probe_parses_large_valid_catalog_without_truncating_json(self):
+        from unittest.mock import patch
+
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, body):
+                self.body = body.encode("utf-8")
+
+            def read(self, size=-1):
+                if size < 0:
+                    size = len(self.body)
+                body, self.body = self.body[:size], self.body[size:]
+                return body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        source = vod_sources.VodSource(
+            "large", "大目录", "https://large.example",
+            "https://large.example/api.php/provide/vod/", "macms_json")
+        payload = '{"code":1,"total":1,"list":[],"padding":"%s"}' % ("x" * 6000)
+        self.assertGreater(len(payload), 4096)
+        with patch("vod_sources.urllib.request.urlopen",
+                   return_value=FakeResponse(payload)):
+            result = vod_sources.probe_source(source)
+        self.assertTrue(result["ok"])
+
     def test_detail_can_wait_for_all_matching_sources(self):
         class FakeAdapter:
             def __init__(self, source): self.source = source

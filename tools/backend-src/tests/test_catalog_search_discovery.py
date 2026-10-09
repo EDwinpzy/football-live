@@ -24,6 +24,8 @@ class CatalogSearchDiscoveryTest(unittest.TestCase):
 
     def fetch(self, url):
         self.calls.append(url)
+        if "subject_suggest" in url:
+            return []
         self.assertIn(urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["q"][0],
                       ("声生", "声生不息", "shengsheng"))
         return {"subjects": {"items": [
@@ -49,7 +51,41 @@ class CatalogSearchDiscoveryTest(unittest.TestCase):
         self.assertTrue(result["items"][0]["poster_url"])
         self.assertEqual(catalog.search("声生不息")["items"][0]["douban_id"], "35634451")
         self.assertEqual(catalog.search("shengsheng")["items"][0]["douban_id"], "35634451")
-        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(len(self.calls), 6)
+
+    def test_partial_discovery_merges_suggestions_and_local_metadata(self):
+        self.index.upsert_many([normalize_subject({
+            "id": "1864810", "title": "红楼梦", "year": "1987", "category": "tv",
+            "aliases": ["87版红楼梦"], "genres": ["剧情"], "summary": "央视版红楼梦",
+        }, "tv"), normalize_subject({
+            "id": "39000003", "title": "红楼梦", "year": "2010", "category": "tv",
+            "aliases": ["新红楼梦"], "genres": ["剧情"],
+        }, "tv")])
+
+        def fetch(url):
+            self.calls.append(url)
+            if "subject_suggest" in url:
+                return [{"id": "1864810", "title": "红楼梦"},
+                        {"id": "39000002", "title": "红楼梦"}]
+            if "/subject/39000002" in url:
+                return {"id": "39000002", "title": "红楼梦", "year": "1996",
+                        "type": "tv", "genres": ["剧情"], "episodes_count": 50}
+            return {"subjects": {"items": [{
+                "layout": "subject", "target_type": "tv", "target": {
+                    "id": "1864810", "title": "红楼梦", "year": "1987",
+                    "card_subtitle": "剧情 / 王扶林",
+                }}]}}
+
+        result = self.catalog(fetch=fetch).search("红楼梦", limit=10)
+
+        self.assertEqual(result["total"], 3)
+        self.assertEqual([item["douban_id"] for item in result["items"]],
+                         ["1864810", "39000002", "39000003"])
+        self.assertEqual({item["title"] for item in result["items"]}, {"红楼梦"})
+        self.assertEqual({item["year"] for item in result["items"]}, {"1987", "1996", "2010"})
+        self.assertEqual(result["items"][0]["aliases"], ["87版红楼梦"])
+        self.assertEqual(result["items"][0]["summary"], "央视版红楼梦")
+        self.assertTrue(any("subject_suggest" in url for url in self.calls))
 
     def test_remote_failure_preserves_local_typo_matches_and_retries_after_cooldown(self):
         self.index.upsert_many([normalize_subject({"id": "35634451", "title": "声生不息"}, "tv")])
@@ -71,7 +107,7 @@ class CatalogSearchDiscoveryTest(unittest.TestCase):
         self.assertEqual(catalog.warm_index(), 1)
         self.assertEqual(catalog.warm_index(), 0)
         self.assertEqual(catalog.search("声生")["items"][0]["douban_id"], "35634451")
-        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(self.calls), 2)
 
     def test_empty_search_never_contacts_upstream(self):
         self.assertEqual(self.catalog().search("  ")["items"], [])

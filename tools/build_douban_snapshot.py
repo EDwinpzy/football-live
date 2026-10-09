@@ -307,6 +307,12 @@ def preserve_history(index, details, previous):
     return merged, merged_details
 
 
+def finalize_search_index(index, details, home, previous):
+    """保留搜索历史，并保证本次首页条目也进入离线搜索索引。"""
+    index, details = preserve_history(index, details, previous)
+    return append_home_to_index(index, home, details), details
+
+
 def load_previous():
     try:
         return json.loads(OUT.read_text(encoding="utf-8"))
@@ -443,7 +449,7 @@ def main():
     if previous and len(index) < previous * 0.3 and not args.force:
         raise SystemExit("本次只抓到 %d 条（上次 %d 条），疑似被限流；确认无误可加 --force"
                          % (len(index), previous))
-    index, details = preserve_history(index, details, previous_snapshot)
+    index, details = finalize_search_index(index, details, home, previous_snapshot)
 
     payload = {
         "schema": 1,

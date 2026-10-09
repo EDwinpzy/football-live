@@ -209,6 +209,54 @@ class MetadataCatalogRepositoryTest {
     }
 
     @Test
+    fun `搜索保留同名不同年份的独立作品`() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val settings = SettingsStore(context)
+        settings.setHhkanBase("")
+        val store = MetadataCatalogStore(context, OkHttpClient(), BuildConfig.API_BASE_URL)
+        val database = store.currentDatabaseFile
+        database.parentFile?.deleteRecursively()
+        database.parentFile?.mkdirs()
+        writeSearchCatalog(
+            database,
+            listOf(
+                SearchFixtureMedia(10000013L, "红楼梦", 1987, 8.8, "1291546"),
+                SearchFixtureMedia(10000014L, "红楼梦", 1996, 8.5, "1291547"),
+                SearchFixtureMedia(10000015L, "红楼梦", 2010, 7.9, "1291548"),
+            ),
+        )
+
+        try {
+            val matches = VodRepository(settings, OkHttpClient(), context).search("红楼梦")
+
+            assertEquals("同名不同条目不能因标题相同而被折叠", 3, matches.size)
+            assertEquals(setOf("10000013", "10000014", "10000015"), matches.map { it.mytvId }.toSet())
+            assertEquals(setOf("1987", "1996", "2010"), matches.map { it.year }.toSet())
+        } finally {
+            database.parentFile?.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `无SQLite时旧目录搜索也保留同名不同年份`() {
+        val works = listOf(
+            com.qiubo.optimaltv.data.model.VodItem("douban:1864810", "douban", "红楼梦", "douban:tv", "1987"),
+            com.qiubo.optimaltv.data.model.VodItem("douban:1987", "douban", "红楼梦", "douban:tv", "1996"),
+            com.qiubo.optimaltv.data.model.VodItem("douban:2010", "douban", "红楼梦", "douban:tv", "2010"),
+        )
+        val catalog = Aggregated(
+            categories = emptyList(),
+            dedupedItems = listOf(works.first()),
+            groups = mapOf("红楼梦" to works),
+        )
+
+        val matches = searchLegacyCatalog(catalog, "红楼梦")
+
+        assertEquals(3, matches.size)
+        assertEquals(setOf("1987", "1996", "2010"), matches.map { it.year }.toSet())
+    }
+
+    @Test
     fun `搜索精确标题优先于高热度标题前缀`() = runBlocking {
         val context: Context = RuntimeEnvironment.getApplication()
         val settings = SettingsStore(context)
@@ -489,17 +537,37 @@ class MetadataCatalogRepositoryTest {
         }
     }
 
-    private fun writeSearchCatalog(file: File) {
+    private data class SearchFixtureMedia(
+        val id: Long,
+        val title: String,
+        val year: Int,
+        val popularity: Double,
+        val externalId: String,
+        val initials: String = "bwbj",
+    )
+
+    private fun writeSearchCatalog(
+        file: File,
+        rows: List<SearchFixtureMedia> = listOf(
+            SearchFixtureMedia(10000013L, "片甲", 1993, 5.0, "1291546"),
+            SearchFixtureMedia(10000014L, "片乙", 1994, 9.0, "1291547"),
+        ),
+    ) {
         val db = SQLiteDatabase.openOrCreateDatabase(file, null)
         db.execSQL("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         db.execSQL("INSERT INTO meta VALUES ('schema_version', '3')")
         db.execSQL("INSERT INTO meta VALUES ('data_version', '2026092401')")
         db.execSQL("CREATE TABLE media (id INTEGER PRIMARY KEY, media_type TEXT, title TEXT, original_title TEXT, year INTEGER, overview TEXT, popularity REAL, updated_at INTEGER)")
-        db.execSQL("INSERT INTO media VALUES (10000013, 'movie', '片甲', '', 1993, '', 5.0, 0)")
-        db.execSQL("INSERT INTO media VALUES (10000014, 'movie', '片乙', '', 1994, '', 9.0, 0)")
+        rows.forEach { row ->
+            db.execSQL(
+                "INSERT INTO media VALUES (?, 'movie', ?, '', ?, '', ?, 0)",
+                arrayOf(row.id, row.title, row.year, row.popularity),
+            )
+        }
         db.execSQL("CREATE TABLE external_id (media_id INTEGER, provider TEXT, external_id TEXT)")
-        db.execSQL("INSERT INTO external_id VALUES (10000013, 'douban', '1291546')")
-        db.execSQL("INSERT INTO external_id VALUES (10000014, 'douban', '1291547')")
+        rows.forEach { row ->
+            db.execSQL("INSERT INTO external_id VALUES (?, 'douban', ?)", arrayOf(row.id, row.externalId))
+        }
         db.execSQL("CREATE TABLE person (id INTEGER PRIMARY KEY, name TEXT)")
         db.execSQL("CREATE TABLE credit (media_id INTEGER, person_id INTEGER, department TEXT, credit_order INTEGER)")
         db.execSQL("CREATE TABLE genre (id INTEGER PRIMARY KEY, name TEXT)")
@@ -507,13 +575,16 @@ class MetadataCatalogRepositoryTest {
         db.execSQL("CREATE TABLE region (id INTEGER PRIMARY KEY, name TEXT)")
         db.execSQL("INSERT INTO region VALUES (1, '中国大陆')")
         db.execSQL("CREATE TABLE media_region (media_id INTEGER, region_id INTEGER)")
-        db.execSQL("INSERT INTO media_region VALUES (10000013, 1)")
-        db.execSQL("INSERT INTO media_region VALUES (10000014, 1)")
+        rows.forEach { row -> db.execSQL("INSERT INTO media_region VALUES (?, 1)", arrayOf(row.id)) }
         db.execSQL("CREATE TABLE rating (media_id INTEGER, provider TEXT, score REAL)")
         db.execSQL("CREATE TABLE image (media_id INTEGER, image_type TEXT, original_url TEXT)")
         db.execSQL("CREATE TABLE search_doc (media_id INTEGER, title_norm TEXT, aliases_norm TEXT, pinyin TEXT, pinyin_alts TEXT, initials TEXT, initials_alts TEXT, people_norm TEXT, people_pinyin TEXT, genres_norm TEXT, popularity REAL)")
-        db.execSQL("INSERT INTO search_doc VALUES (10000013, '片甲', '', '', '', 'bwbj', '', '', '', '', 5.0)")
-        db.execSQL("INSERT INTO search_doc VALUES (10000014, '片乙', '', '', '', 'bwbj', '', '', '', '', 9.0)")
+        rows.forEach { row ->
+            db.execSQL(
+                "INSERT INTO search_doc VALUES (?, ?, '', '', '', ?, '', '', '', '', ?)",
+                arrayOf(row.id, row.title, row.initials, row.popularity),
+            )
+        }
         db.close()
     }
 

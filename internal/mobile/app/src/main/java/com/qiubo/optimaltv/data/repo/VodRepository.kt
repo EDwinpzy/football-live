@@ -48,6 +48,17 @@ data class CatalogState(
     val sourceStates: List<SourceState> = emptyList(),
 )
 
+/** Legacy JSON/API catalog search must use every distinct row, not the title-collapsed browse list. */
+internal fun searchLegacyCatalog(catalog: Aggregated?, query: String): List<VodItem> {
+    val q = query.trim()
+    if (q.isEmpty()) return emptyList()
+    return catalog?.groups?.values?.flatten()?.distinctBy(VodItem::id)?.filter { item ->
+        item.title.contains(q, true) || item.tags.any { it.contains(q, true) }
+                || item.year == q || item.area.contains(q, true)
+                || item.searchTerms.any { it.contains(q, true) }
+    } ?: emptyList()
+}
+
 /** 豆瓣有数据时按豆瓣板块顺序显示；豆瓣某个板块为空时才回退到同名本地板块。 */
 internal fun preferUpstreamHomeSections(local: List<HSec>, upstream: List<HSec>): List<HSec> {
     val result = local.toMutableList()
@@ -451,14 +462,13 @@ class VodRepository(
         if (metadataCatalog.hasInstalledDatabase()) {
             return metadataCatalog.search(q)
                 .map { VodApiSource.fromCatalogMedia(it, settings.current().hhkanBaseUrl) }
-                .distinctBy(VodItem::normTitle)
+                // Search is about individual works: different releases/adaptations can share a
+                // title (for example 红楼梦) and must remain separate results. Only collapse the
+                // same catalogue row when it was duplicated by its stable ID.
+                .distinctBy(VodItem::id)
         }
         return withContext(Dispatchers.Default) {
-            _state.value.catalog?.dedupedItems?.filter { item ->
-                item.title.contains(q, true) || item.tags.any { it.contains(q, true) }
-                        || item.year == q || item.area.contains(q, true)
-                        || item.searchTerms.any { it.contains(q, true) }
-            } ?: emptyList()
+            searchLegacyCatalog(_state.value.catalog, q)
         }
     }
 

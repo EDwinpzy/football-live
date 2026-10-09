@@ -43,7 +43,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -56,7 +55,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import coil.compose.AsyncImage
@@ -87,7 +88,6 @@ import androidx.compose.foundation.layout.size
 import com.qiubo.optimaltv.ui.theme.sx
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlin.math.abs
 import java.net.URLEncoder
 
 /**
@@ -322,7 +322,10 @@ fun VodScreen(nav: NavController) {
                     val item = targetItems[targetColumn]
                     val key = "lib:${section.name}:${item.id}"
                     pageScope.launch {
-                        sectionRowStates[page][targetRow].animateScrollToItem(targetColumn)
+                        val rowState = sectionRowStates[page][targetRow]
+                        if (rowState.layoutInfo.visibleItemsInfo.none { it.index == targetColumn }) {
+                            rowState.animateScrollToItem(targetColumn)
+                        }
                         repeat(24) {
                             delay(40)
                             if (runCatching { cardReg.fr(key).requestFocus() }.isSuccess) return@launch
@@ -333,12 +336,20 @@ fun VodScreen(nav: NavController) {
                     if (page !in sectionPages.indices) return
                     lastLibraryRow = row
                     lastLibraryColumn = column
-                    pageScope.launch { sectionPagerState.animateScrollToPage(page) }
+                    libraryCardHasFocus = true
+                    pageScope.launch {
+                        sectionPagerState.animateScrollToPage(
+                            page = page,
+                            animationSpec = tween(
+                                durationMillis = 280,
+                                easing = FastOutSlowInEasing,
+                            ),
+                        )
+                    }
                 }
-                LaunchedEffect(sectionPagerState.currentPage) {
+                LaunchedEffect(sectionPagerState.settledPage) {
                     if (libraryCardHasFocus) {
-                        delay(70)
-                        requestLibraryFocus(sectionPagerState.currentPage, lastLibraryRow, lastLibraryColumn)
+                        requestLibraryFocus(sectionPagerState.settledPage, lastLibraryRow, lastLibraryColumn)
                     }
                 }
                 BackHandler {
@@ -594,6 +605,7 @@ fun VodScreen(nav: NavController) {
                     item(key = "lib-vertical-three-pages") {
                         VerticalPager(
                             state = sectionPagerState,
+                            beyondBoundsPageCount = 1,
                             modifier = Modifier.fillParentMaxHeight().fillMaxWidth(),
                             key = { page -> "vod-library-page-${HomeLibraryUiPolicy.PAGE_TITLES[page]}" },
                             flingBehavior = PagerDefaults.flingBehavior(
@@ -625,17 +637,7 @@ fun VodScreen(nav: NavController) {
                                         lastLibraryColumn = column
                                     }
                                 },
-                                modifier = Modifier.graphicsLayer {
-                                    // Keep the subtle fade/scale in the draw layer so the slide does not
-                                    // trigger a whole-page recomposition on each animation frame.
-                                    val distance = abs(
-                                        sectionPagerState.currentPage - page - sectionPagerState.currentPageOffsetFraction,
-                                    ).coerceIn(0f, 1f)
-                                    alpha = 1f - distance * 0.16f
-                                    val scale = 1f - distance * 0.012f
-                                    scaleX = scale
-                                    scaleY = scale
-                                },
+                                modifier = Modifier,
                             )
                         }
                     }
