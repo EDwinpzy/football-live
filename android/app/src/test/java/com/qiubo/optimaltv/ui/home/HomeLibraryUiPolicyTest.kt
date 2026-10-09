@@ -1,7 +1,5 @@
 package com.qiubo.optimaltv.ui.home
 
-import com.qiubo.optimaltv.ui.components.NAV_LEFT
-import com.qiubo.optimaltv.ui.components.NAV_RIGHT
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -33,20 +31,19 @@ class HomeLibraryUiPolicyTest {
     }
 
     @Test
-    fun `遥控左右键只在可用范围内切换分页`() {
-        assertEquals(2, HomeLibraryUiPolicy.targetPageForDpad(1, 3, NAV_RIGHT))
-        assertEquals(0, HomeLibraryUiPolicy.targetPageForDpad(1, 3, NAV_LEFT))
-        assertNull(HomeLibraryUiPolicy.targetPageForDpad(2, 3, NAV_RIGHT))
-        assertNull(HomeLibraryUiPolicy.targetPageForDpad(0, 3, NAV_LEFT))
-        assertNull(HomeLibraryUiPolicy.targetPageForDpad(1, 3, -1))
+    fun `影视片库固定为热门更新豆瓣高分三页`() {
+        assertEquals(listOf("最近热门", "最近更新", "豆瓣高分"), HomeLibraryUiPolicy.PAGE_TITLES)
     }
 
     @Test
-    fun `触屏横滑方向与遥控翻页一致并忽略短拖动`() {
-        assertEquals(2, HomeLibraryUiPolicy.targetPageForSwipe(1, 3, -60f, 40f))
-        assertEquals(0, HomeLibraryUiPolicy.targetPageForSwipe(1, 3, 60f, 40f))
-        assertNull(HomeLibraryUiPolicy.targetPageForSwipe(1, 3, -30f, 40f))
-        assertNull(HomeLibraryUiPolicy.targetPageForSwipe(2, 3, -60f, 40f))
-        assertNull(HomeLibraryUiPolicy.targetPageForSwipe(0, 3, 60f, 40f))
+    fun `固定页面兼容后端栏目别名并容忍缺栏`() {
+        assertEquals("最近热门", HomeLibraryUiPolicy.sourceSectionName(0, listOf("最近热门", "豆瓣高分")))
+        assertEquals("近期热门", HomeLibraryUiPolicy.sourceSectionName(0, listOf("近期热门")))
+        assertEquals("最近更新", HomeLibraryUiPolicy.sourceSectionName(1, listOf("最近更新")))
+        assertEquals("最新上映", HomeLibraryUiPolicy.sourceSectionName(1, listOf("最新上映")))
+        assertEquals("最新上线", HomeLibraryUiPolicy.sourceSectionName(1, listOf("最新上线")))
+        assertEquals("豆瓣高分", HomeLibraryUiPolicy.sourceSectionName(2, listOf("豆瓣高分")))
+        assertNull(HomeLibraryUiPolicy.sourceSectionName(1, listOf("最近热门", "豆瓣高分")))
+        assertNull(HomeLibraryUiPolicy.sourceSectionName(3, listOf("最近热门")))
     }
 }
