@@ -472,6 +472,11 @@ class SourceRegistry:
         pending_probes = self._race_probe(picked, deadline)
 
         if pending_searches or pending_probes:
+            # Reopening detail must reuse the useful result already returned,
+            # rather than repeat the whole race while slower sources finish.
+            # The background completion replaces this with the expanded result.
+            if lines:
+                self._cache_put(cache_key, lines)
             # 早返回：剩余搜索/探测后台补完（自带着各自的网络超时兜底），
             # 合并全量进缓存；响应先行，不等。
             threading.Thread(

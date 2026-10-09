@@ -13,6 +13,25 @@ import vod_sources  # noqa: E402
 
 
 class VodSourcesTest(unittest.TestCase):
+    def test_returned_sources_are_cached_while_slow_sources_finish(self):
+        import concurrent.futures
+        from unittest.mock import Mock
+        source = vod_sources.VodSource("test", "test", "https://example.test", "https://example.test/api", "macms_json")
+        registry = vod_sources.SourceRegistry([source])
+        self.addCleanup(registry.close)
+        pending = concurrent.futures.Future()
+        line = {"id": "test:1:0", "source_id": "test", "episodes": [{"name": "第1集", "url": "https://example.test/1.m3u8"}]}
+        registry._race_search = Mock(return_value=([line], [], [pending]))
+        registry._race_probe = Mock(return_value=[])
+        subject = {"title": "测试剧", "year": "2026", "category": "tv"}
+        try:
+            first = registry.resolve_subject(subject)
+            second = registry.resolve_subject(subject)
+            self.assertEqual(first, second)
+            self.assertEqual(registry._race_search.call_count, 1)
+        finally:
+            pending.set_result((source, [], None, 0))
+
     def test_real_annual_animation_alias_is_not_displaced_by_short_aliases(self):
         subject = {
             "title": "凡人修仙传 年番4", "year": "2026", "category": "anime",
