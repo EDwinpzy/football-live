@@ -2,7 +2,7 @@ name: iOS native build
 on:
   workflow_dispatch:
   push:
-    branches: [codex/ios-native-free]
+    branches: [main, codex/ios-native-free]
     paths: ["ios/**", ".github/workflows/ios.yml"]
 permissions:
   contents: read

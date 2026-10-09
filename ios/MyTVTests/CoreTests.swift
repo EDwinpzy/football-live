@@ -25,6 +25,55 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?.queryItems?.first?.value, "movie")
     }
 
+    func testHomeRequestsTheBackendCategoryForTVAnd3DChineseAnimation() async throws {
+        let requests = RequestRecorder()
+        StubURLProtocol.install { request in
+            requests.append(request)
+            return (200, Data(#"{"sections":[]}"#.utf8))
+        }
+        let client = makeClient()
+
+        for category in ["tv", "anime"] {
+            _ = try await client.home(category: category)
+        }
+
+        let categories = requests.all.compactMap { request -> String? in
+            guard let url = request.url,
+                  url.path == "/web/vod/home" else { return nil }
+            return URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "category" })?.value
+        }
+        XCTAssertEqual(categories, ["tv", "anime"])
+    }
+
+    func testHomeSectionPagerCreatesTwoRowPagesAndPadsTheLastPage() {
+        let items = (1...7).map { index in
+            MediaItem(id: "douban:\(index)", title: "作品\(index)")
+        }
+
+        let pages = HomeSectionPagerLayout.pages(for: items, columns: 3)
+
+        XCTAssertEqual(pages.count, 2)
+        XCTAssertEqual(pages[0].count, 6)
+        XCTAssertEqual(pages[0].compactMap { $0?.id }, items.prefix(6).map(\.id))
+        XCTAssertEqual(pages[1].count, 6)
+        XCTAssertEqual(pages[1].compactMap { $0?.id }, ["douban:7"])
+        XCTAssertEqual(pages[1].filter { $0 == nil }.count, 5)
+    }
+
+    func testHomeSectionPagerAdaptsColumnsToAvailableWidth() {
+        XCTAssertEqual(HomeSectionPagerLayout.columnCount(for: 350), 3)
+        XCTAssertEqual(HomeSectionPagerLayout.columnCount(for: 510), 4)
+        XCTAssertEqual(HomeSectionPagerLayout.columnCount(for: 900), HomeSectionPagerLayout.maximumColumnCount)
+        XCTAssertEqual(HomeSectionPagerLayout.columnCount(for: 1), 1)
+    }
+
+    func testHomeSectionPagerNormalizesLatestReleaseHeading() {
+        XCTAssertEqual(HomeSectionPagerLayout.displayTitle(for: "最新上映"), "最近更新")
+        XCTAssertEqual(HomeSectionPagerLayout.displayTitle(for: "最近热门"), "最近热门")
+        XCTAssertEqual(HomeSectionPagerLayout.displayTitle(for: "豆瓣高分"), "豆瓣高分")
+    }
+
     func testHHKanDetailUsesPrefixedIdentityAndParsesPIDVIDPlaybackKeys() async throws {
         let requests = RequestRecorder()
         StubURLProtocol.install { request in

@@ -47,8 +47,20 @@ enum UITestFixtures {
         year: "2025"
     )
 
+    static let homeMovies = (1...16).map { index in
+        if index == 1 { return featuredMovie }
+        if index == 2 { return secondMovie }
+        return MediaItem(
+            id: "fixture-movie-\(index)",
+            title: "第\(index)部样例影片",
+            detailRef: "fixture:movie-\(index)",
+            rating: String(format: "%.1f", 7.0 + Double(index % 20) / 10),
+            year: "202\(index % 6)"
+        )
+    }
+
     static let homeSections = [
-        MediaSection(id: "fixture-featured", title: "为你推荐", items: [featuredMovie, secondMovie]),
+        MediaSection(id: "fixture-featured", title: "最近热门", items: homeMovies),
         MediaSection(id: "fixture-series", title: "热播剧集", items: [series]),
         MediaSection(id: "fixture-anime", title: "人气动漫", items: [anime]),
         MediaSection(id: "fixture-variety", title: "精选综艺", items: [variety])

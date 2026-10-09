@@ -6,8 +6,8 @@ private struct HomeCategory: Identifiable {
 
     static let all = [
         HomeCategory(id: "movie", title: "电影"),
-        HomeCategory(id: "tv", title: "剧集"),
-        HomeCategory(id: "anime", title: "动漫"),
+        HomeCategory(id: "tv", title: "电视剧"),
+        HomeCategory(id: "anime", title: "3D国漫"),
         HomeCategory(id: "variety", title: "综艺")
     ]
 }
@@ -31,41 +31,43 @@ struct HomeView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 26) {
-                header
-                categoryPicker
+        GeometryReader { viewport in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 26) {
+                    header
+                    categoryPicker
 
-                if let fixtureSections {
-                    sectionList(fixtureSections)
-                } else if isLoading {
-                    loadingState
-                } else if let errorMessage {
-                    ScreenStateView(
-                        symbol: "wifi.exclamationmark",
-                        title: "片库加载失败",
-                        message: errorMessage,
-                        actionTitle: "重试",
-                        action: { retryToken += 1 }
-                    )
-                    .frame(minHeight: 280)
-                    .accessibilityIdentifier("home-error-state")
-                } else if visibleSections.allSatisfy({ $0.items.isEmpty }) {
-                    ScreenStateView(
-                        symbol: "film",
-                        title: "这里暂时没有内容",
-                        message: "稍后再试，或切换到其他分类。"
-                    )
-                    .frame(minHeight: 280)
-                    .accessibilityIdentifier("home-empty-state")
-                } else {
-                    sectionList(visibleSections)
+                    if let fixtureSections {
+                        sectionList(fixtureSections, viewportWidth: viewport.size.width)
+                    } else if isLoading {
+                        loadingState
+                    } else if let errorMessage {
+                        ScreenStateView(
+                            symbol: "wifi.exclamationmark",
+                            title: "片库加载失败",
+                            message: errorMessage,
+                            actionTitle: "重试",
+                            action: { retryToken += 1 }
+                        )
+                        .frame(minHeight: 280)
+                        .accessibilityIdentifier("home-error-state")
+                    } else if visibleSections.allSatisfy({ $0.items.isEmpty }) {
+                        ScreenStateView(
+                            symbol: "film",
+                            title: "这里暂时没有内容",
+                            message: "稍后再试，或切换到其他分类。"
+                        )
+                        .frame(minHeight: 280)
+                        .accessibilityIdentifier("home-empty-state")
+                    } else {
+                        sectionList(visibleSections, viewportWidth: viewport.size.width)
+                    }
                 }
+                .padding(.top, 16)
+                .padding(.bottom, 30)
             }
-            .padding(.top, 16)
-            .padding(.bottom, 30)
+            .background(MyTVStyle.background)
         }
-        .background(MyTVStyle.background)
         .toolbar(.hidden, for: .navigationBar)
         .task(id: "\(selectedCategory)-\(retryToken)") {
             guard fixtureSections == nil else { return }
@@ -132,31 +134,11 @@ struct HomeView: View {
     }
 
     @ViewBuilder
-    private func sectionList(_ list: [MediaSection]) -> some View {
+    private func sectionList(_ list: [MediaSection], viewportWidth: CGFloat) -> some View {
         LazyVStack(alignment: .leading, spacing: 26) {
             ForEach(list) { section in
                 if !section.items.isEmpty {
-                    VStack(alignment: .leading, spacing: 13) {
-                        HStack {
-                            SectionHeading(title: section.title)
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(MyTVStyle.mutedText)
-                                .accessibilityHidden(true)
-                        }
-                        .padding(.horizontal, 20)
-
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            LazyHStack(alignment: .top, spacing: 14) {
-                                ForEach(section.items) { item in
-                                    MediaPosterCard(item: item)
-                                }
-                            }
-                            .padding(.horizontal, 20)
-                            .padding(.bottom, 2)
-                        }
-                    }
+                    HomeSectionPager(section: section, viewportWidth: viewportWidth)
                 }
             }
         }

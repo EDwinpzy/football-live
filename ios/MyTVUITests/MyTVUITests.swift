@@ -38,6 +38,8 @@ final class MyTVUITests: XCTestCase {
         XCTAssertTrue(firstCard.waitForExistence(timeout: 10))
         assertFrame(of: app, landscape: false)
         XCTAssertTrue(app.staticTexts["home-title"].exists)
+        XCTAssertEqual(app.buttons["category-tv"].label, "电视剧")
+        XCTAssertEqual(app.buttons["category-anime"].label, "3D国漫")
         attachScreenshot(of: app, named: "fixture-home-portrait")
 
         firstCard.tap()
@@ -45,6 +47,26 @@ final class MyTVUITests: XCTestCase {
         XCTAssertTrue(summary.waitForExistence(timeout: 10), "Fixture detail content should be visible before capture.")
         XCTAssertTrue(app.buttons["episode-fixture-source-fixture-episode-1"].exists)
         attachScreenshot(of: app, named: "fixture-detail-portrait")
+    }
+
+    func testFixtureHomeShowsTwoRowsAndCanTurnToTheNextPage() {
+        let app = fixtureApp()
+        app.launch()
+
+        let firstCard = app.buttons["media-card-fixture-movie-1"]
+        let nextRowCard = app.buttons["media-card-fixture-movie-4"]
+        XCTAssertTrue(firstCard.waitForExistence(timeout: 10))
+        XCTAssertTrue(nextRowCard.exists)
+        XCTAssertGreaterThan(nextRowCard.frame.minY, firstCard.frame.minY)
+        XCTAssertTrue(nextRowCard.isHittable)
+
+        let secondPage = app.buttons["home-page-fixture-featured-2"]
+        XCTAssertTrue(secondPage.waitForExistence(timeout: 10))
+        secondPage.tap()
+        let laterCard = app.buttons["media-card-fixture-movie-7"]
+        XCTAssertTrue(laterCard.waitForExistence(timeout: 10))
+        XCTAssertTrue(laterCard.isHittable)
+        attachScreenshot(of: app, named: "fixture-home-second-page-portrait")
     }
 
     func testFixtureDetailCapturesLandscape() {

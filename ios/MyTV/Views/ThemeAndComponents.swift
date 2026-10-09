@@ -136,12 +136,15 @@ struct PosterArtwork: View {
 
 struct MediaPosterCard: View {
     let item: MediaItem
+    var width: CGFloat = 132
+    var posterHeight: CGFloat = 190
+    var reserveYearLine = false
     @State private var posterLoaded = false
 
     var body: some View {
         NavigationLink(value: item) {
             VStack(alignment: .leading, spacing: 8) {
-                PosterArtwork(item: item, onImageLoaded: { posterLoaded = true })
+                PosterArtwork(item: item, width: width, height: posterHeight, onImageLoaded: { posterLoaded = true })
                     .overlay(alignment: .bottomLeading) {
                         if !item.rating.isEmpty {
                             Label(item.rating, systemImage: "star.fill")
@@ -161,9 +164,13 @@ struct MediaPosterCard: View {
                     Text(item.year)
                         .font(.caption)
                         .foregroundStyle(MyTVStyle.secondaryText)
+                } else if reserveYearLine {
+                    Text(" ")
+                        .font(.caption)
+                        .accessibilityHidden(true)
                 }
             }
-            .frame(width: 132, alignment: .leading)
+            .frame(width: width, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
