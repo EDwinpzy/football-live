@@ -616,6 +616,7 @@ fun VodScreen(nav: NavController) {
                                 s = s,
                                 cardReg = cardReg,
                                 rowStates = sectionRowStates[page],
+                                onRowFocus = { row, column -> requestLibraryFocus(page, row, column) },
                                 onPageMove = ::moveLibraryPage,
                                 onCardFocusChanged = { row, column, gained ->
                                     libraryCardHasFocus = gained
@@ -909,6 +910,7 @@ private fun LibrarySectionPage(
     s: Float,
     cardReg: FocusRegistry,
     rowStates: List<androidx.compose.foundation.lazy.LazyListState>,
+    onRowFocus: (row: Int, column: Int) -> Unit,
     onPageMove: (page: Int, row: Int, column: Int) -> Unit,
     onCardFocusChanged: (row: Int, column: Int, gained: Boolean) -> Unit,
     modifier: Modifier = Modifier,
@@ -960,7 +962,7 @@ private fun LibrarySectionPage(
                                     when {
                                         direction == NAV_DOWN && row == 0 -> {
                                             if (rows[1].getOrNull(column) != null) {
-                                                runCatching { cardReg.fr("lib:$sectionName:${rows[1][column].id}").requestFocus() }
+                                                onRowFocus(1, column)
                                             } else if (page + 1 < pageCount) {
                                                 onPageMove(page + 1, 0, column)
                                             }
@@ -971,7 +973,7 @@ private fun LibrarySectionPage(
                                             true
                                         }
                                         direction == NAV_UP && row == 1 && rows[0].getOrNull(column) != null -> {
-                                            runCatching { cardReg.fr("lib:$sectionName:${rows[0][column].id}").requestFocus() }
+                                            onRowFocus(0, column)
                                             true
                                         }
                                         direction == NAV_UP && row == 0 && page > 0 -> {
