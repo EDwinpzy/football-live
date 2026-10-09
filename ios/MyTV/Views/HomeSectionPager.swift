@@ -53,6 +53,8 @@ struct HomeSectionPager: View {
     }
 
     var body: some View {
+        let pages = self.pages
+
         VStack(alignment: .leading, spacing: 13) {
             HStack(alignment: .firstTextBaseline) {
                 SectionHeading(title: HomeSectionPagerLayout.displayTitle(for: section.title))
@@ -79,7 +81,7 @@ struct HomeSectionPager: View {
                     .padding(.horizontal, 20)
                     .accessibilityIdentifier("home-section-pages-\(section.id)")
 
-                    pageIndicators
+                    pageIndicators(pageCount: pages.count)
                 } else {
                     pageGrid(firstPage)
                         .frame(width: contentWidth, height: gridHeight)
@@ -117,11 +119,11 @@ struct HomeSectionPager: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private var pageIndicators: some View {
+    private func pageIndicators(pageCount: Int) -> some View {
         HStack(spacing: 6) {
-            ForEach(pages.indices, id: \.self) { index in
+            ForEach(0..<pageCount, id: \.self) { index in
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
+                    withAnimation(.easeInOut(duration: 0.32)) {
                         currentPage = index
                     }
                 } label: {

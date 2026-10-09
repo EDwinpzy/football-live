@@ -1,6 +1,10 @@
 import CryptoKit
+import CoreGraphics
+import CoreFoundation
 import Foundation
+import ImageIO
 import XCTest
+import UniformTypeIdentifiers
 @testable import MyTV
 
 final class CoreTests: XCTestCase {
@@ -92,6 +96,39 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(HomeSectionPagerLayout.displayTitle(for: "最新上映"), "最近更新")
         XCTAssertEqual(HomeSectionPagerLayout.displayTitle(for: "最近热门"), "最近热门")
         XCTAssertEqual(HomeSectionPagerLayout.displayTitle(for: "豆瓣高分"), "豆瓣高分")
+    }
+
+    func testPosterDecoderDownsamplesToTheRequestedPixelBound() throws {
+        let context = try XCTUnwrap(CGContext(
+            data: nil,
+            width: 1_200,
+            height: 1_800,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(CGColor(red: 0.9, green: 0.2, blue: 0.2, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 1_200, height: 1_800))
+        let sourceImage = try XCTUnwrap(context.makeImage())
+
+        let encoded = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(
+            encoded,
+            UTType.png.identifier as CFString,
+            1,
+            nil
+        ))
+        CGImageDestinationAddImage(destination, sourceImage, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+
+        let thumbnail = try XCTUnwrap(PosterImageDecoder.downsample(
+            data: encoded as Data,
+            maximumPixelSize: 600
+        ))
+
+        XCTAssertEqual(thumbnail.width, 400)
+        XCTAssertEqual(thumbnail.height, 600)
     }
 
     func testHHKanDetailUsesPrefixedIdentityAndParsesPIDVIDPlaybackKeys() async throws {

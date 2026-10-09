@@ -1,4 +1,7 @@
+import CoreFoundation
+import ImageIO
 import SwiftUI
+import UIKit
 
 enum MyTVStyle {
     static let background = Color(red: 0.035, green: 0.043, blue: 0.067)
@@ -74,32 +77,37 @@ struct AccentButtonStyle: ButtonStyle {
 
 struct PosterArtwork: View {
     @EnvironmentObject private var settings: AppSettings
+    @Environment(\.displayScale) private var displayScale
 
     let item: MediaItem
     var width: CGFloat = 132
     var height: CGFloat = 190
     var onImageLoaded: (() -> Void)? = nil
 
+    @State private var loadedImage: UIImage?
+    @State private var loadedImageURL: URL?
+    @State private var imageFailed = false
+
+    private var imageURL: URL? { settings.client?.imageURL(for: item.poster) }
+    private var maximumPixelSize: Int {
+        max(1, Int((max(width, height) * displayScale).rounded(.up)))
+    }
+    private var requestID: String {
+        "\(imageURL?.absoluteString ?? "no-poster")|\(maximumPixelSize)"
+    }
+
     var body: some View {
-        Group {
-            if let url = settings.client?.imageURL(for: item.poster) {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                            .onAppear { onImageLoaded?() }
-                            .accessibilityIdentifier("poster-loaded-\(item.id)")
-                    case .empty:
-                        fallbackArtwork
-                            .accessibilityIdentifier("poster-placeholder-\(item.id)")
-                    case .failure:
-                        fallbackArtwork
-                            .accessibilityIdentifier("poster-error-\(item.id)")
-                    @unknown default:
-                        fallbackArtwork
-                            .accessibilityIdentifier("poster-placeholder-\(item.id)")
-                    }
-                }
+        ZStack {
+            if let loadedImage {
+                Image(uiImage: loadedImage)
+                    .resizable()
+                    .scaledToFill()
+                    .id(loadedImageURL)
+                    .transition(.opacity)
+                    .accessibilityIdentifier("poster-loaded-\(item.id)")
+            } else if imageFailed {
+                fallbackArtwork
+                    .accessibilityIdentifier("poster-error-\(item.id)")
             } else {
                 fallbackArtwork
                     .accessibilityIdentifier("poster-placeholder-\(item.id)")
@@ -118,6 +126,29 @@ struct PosterArtwork: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("海报：\(item.title)")
         .accessibilityIdentifier("poster-container-\(item.id)")
+        .animation(.easeInOut(duration: 0.24), value: loadedImageURL)
+        .task(id: requestID) {
+            imageFailed = false
+            guard let url = imageURL else {
+                loadedImage = nil
+                loadedImageURL = nil
+                return
+            }
+
+            let image = await PosterImageCache.shared.image(for: url, maximumPixelSize: maximumPixelSize)
+            guard !Task.isCancelled else { return }
+            if let image {
+                loadedImage = image
+                loadedImageURL = url
+                onImageLoaded?()
+            } else {
+                imageFailed = true
+                if loadedImageURL != url {
+                    loadedImage = nil
+                    loadedImageURL = nil
+                }
+            }
+        }
     }
 
     private var fallbackArtwork: some View {
@@ -131,6 +162,76 @@ struct PosterArtwork: View {
                 .font(.system(size: 28, weight: .light))
                 .foregroundStyle(.white.opacity(0.35))
         }
+    }
+}
+
+enum PosterImageDecoder {
+    static func downsample(data: Data, maximumPixelSize: Int) -> CGImage? {
+        guard maximumPixelSize > 0,
+              let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return nil
+        }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    }
+}
+
+private actor PosterImageCache {
+    private struct PendingRequest {
+        let id: UUID
+        let task: Task<UIImage?, Never>
+    }
+
+    static let shared = PosterImageCache()
+
+    private let images = NSCache<NSString, UIImage>()
+    private var pending: [String: PendingRequest] = [:]
+
+    private init() {
+        images.totalCostLimit = 48 * 1024 * 1024
+    }
+
+    func image(for url: URL, maximumPixelSize: Int) async -> UIImage? {
+        guard !Task.isCancelled else { return nil }
+
+        let key = "\(maximumPixelSize)|\(url.absoluteString)"
+        if let image = images.object(forKey: key as NSString) { return image }
+
+        let request: PendingRequest
+        if let existing = pending[key] {
+            request = existing
+        } else {
+            let task = Task.detached(priority: .utility) { () -> UIImage? in
+                guard let (data, response) = try? await URLSession.shared.data(from: url),
+                      let response = response as? HTTPURLResponse,
+                      (200..<300).contains(response.statusCode),
+                      let cgImage = PosterImageDecoder.downsample(data: data, maximumPixelSize: maximumPixelSize) else {
+                    return nil
+                }
+                return UIImage(cgImage: cgImage)
+            }
+            request = PendingRequest(id: UUID(), task: task)
+            pending[key] = request
+        }
+
+        let image = await request.task.value
+        // A waiter from a finished request must not remove a newer retry for the same key.
+        if pending[key]?.id == request.id {
+            pending.removeValue(forKey: key)
+            if let image {
+                let width = Int(image.size.width.rounded(.up))
+                let height = Int(image.size.height.rounded(.up))
+                let cost = (image.cgImage?.bytesPerRow ?? width * 4)
+                    * (image.cgImage?.height ?? height)
+                images.setObject(image, forKey: key as NSString, cost: cost)
+            }
+        }
+        return image
     }
 }
 
