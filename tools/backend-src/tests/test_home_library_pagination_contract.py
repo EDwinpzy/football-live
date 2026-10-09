@@ -239,6 +239,8 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
                       "卡片焦点注册 key 需要带板块名，避免跨栏同 ID 冲突")
         self.assertIn("direction == NAV_DOWN && row == 0", pager)
         self.assertIn("direction == NAV_DOWN && row == 1", pager)
+        self.assertIn("onRowFocus(1, column)", pager)
+        self.assertIn("onRowFocus(0, column)", pager)
         self.assertIn("onPageMove(page + 1, 0, column)", pager)
         self.assertIn("onPageMove(page - 1, 1, column)", pager)
         focus_restore = _source_block(
