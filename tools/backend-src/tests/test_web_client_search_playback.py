@@ -126,11 +126,15 @@ process.stdout.write(JSON.stringify({q:search.q,seq:search.seq,loading:search.lo
         })
 
     def test_hhkan_line_failover_uses_episode_pid_when_line_has_no_id(self):
+        line_helpers = self.source[
+            self.source.index("function playerVodSourceKey("):
+            self.source.index("function normalizePlayerVodSources(")
+        ]
         function = self.source[
             self.source.index("function chooseNextVodLine("):
             self.source.index("function nextSource(")
         ]
-        result = run_node(function + """
+        result = run_node(line_helpers + function + """
 const selected = chooseNextVodLine(
   {playRef:{pid:35,vid:2},epIdx:2,failedLineIds:[]},
   [

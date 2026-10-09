@@ -4524,25 +4524,20 @@ class Handler(SimpleHTTPRequestHandler):
                 return respond(d)
             if p.startswith("/hhkan/play/"):
                 _, _, _, vodid, pid, vid = p.split("/")
+                fresh_args = {"fresh": True} if q("fresh", "0") == "1" else {}
                 if int(pid) >= 100:
                     # 需求⑮：跨站补线（pid=100+站*50+组下标）——优先于 mcms 降级判定，
                     # 防止 hhkan 恰在 detail 与 play 之间失联时 pid 被钳到错误线路
                     try:
-                        return respond(mcms_enriched_play(int(vodid), int(pid), int(vid)))
+                        return respond(mcms_enriched_play(int(vodid), int(pid), int(vid), **fresh_args))
                     except Exception as e:
                         return respond({"line": "", "sources": [], "error": str(e)[:200]})
                 try:
-                    # v1.32 性能：换集/换线重进、失败重试先吃解析缓存（5min），
-                    # 不再每次回源抓播放页（0.5-2s/次）；只缓存解析成功的结果。
-                    _pkey = (int(vodid), int(pid), int(vid))
-                    _pcached = _play_parse_get(_pkey)
-                    if _pcached is not None:
-                        return respond(_pcached)
-                    parsed2 = hhkan.parse_play_page(_hhkan_origin_call(
-                        lambda: hhkan.get_page("/play/%s-%s-%s.html" % (vodid, pid, vid))))
-                    if parsed2["sources"]:
-                        _ppayload = {"line": parsed2["line"], "sources": parsed2["sources"]}
-                        _play_parse_put(_pkey, _ppayload)
+                    # 普通换集复用短期解析缓存；手动切源/重试需重新取得直链，
+                    # 不能继续返回已卡住或过期的地址。
+                    _ppayload = _hhkan_native_play(
+                        int(vodid), int(pid), int(vid), fresh=q("fresh", "0") == "1")
+                    if _ppayload is not None:
                         return respond(_ppayload)
                 except Exception as live_error:
                     print("hhkan play %s live failed: %s" % (vodid, str(live_error)[:160]))
@@ -4555,7 +4550,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if episodes and int(episodes[0].get("pid", 0)) >= 100:
                         episode = episodes[max(0, min(int(vid), len(episodes) - 1))]
                         return respond(mcms_enriched_play(
-                            int(vodid), int(episode["pid"]), int(episode["vid"])))
+                            int(vodid), int(episode["pid"]), int(episode["vid"]), **fresh_args))
                 return respond({"line": "", "sources": [], "error": "可用播放线路暂不可达"})
             if p == "/hhkan/search":
                 k = q("k", "")
@@ -5338,26 +5333,37 @@ _MCMS_VIDEOLIST_CACHE = {}
 _MCMS_VIDEOLIST_TTL = 600.0
 _MCMS_VIDEOLIST_MAX = 120
 _mcms_videolist_lock = threading.Lock()
+_MCMS_VIDEOLIST_PENDING = {}
 
 
-def _mcms_videolist_item(si, vod_id, timeout=6.0):
+def _mcms_videolist_item(si, vod_id, timeout=6.0, fresh=False):
     key = (si, vod_id)
     now = time.time()
     with _mcms_videolist_lock:
-        hit = _MCMS_VIDEOLIST_CACHE.get(key)
-    if hit and now - hit[0] < _MCMS_VIDEOLIST_TTL:
-        return hit[1]
-    raw = _mcms_fetch_site(si, {"ac": "videolist", "ids": vod_id}, timeout=timeout)
-    lst = raw.get("list") or []
-    if not lst:
-        return None
-    item = lst[0]
-    with _mcms_videolist_lock:
-        _MCMS_VIDEOLIST_CACHE[key] = (now, item)
-        if len(_MCMS_VIDEOLIST_CACHE) > _MCMS_VIDEOLIST_MAX:
-            for k in sorted(_MCMS_VIDEOLIST_CACHE, key=lambda k: _MCMS_VIDEOLIST_CACHE[k][0])[:60]:
-                _MCMS_VIDEOLIST_CACHE.pop(k, None)
-    return item
+        if fresh:
+            _MCMS_VIDEOLIST_CACHE.pop(key, None)
+        else:
+            hit = _MCMS_VIDEOLIST_CACHE.get(key)
+            if hit and now - hit[0] < _MCMS_VIDEOLIST_TTL:
+                return hit[1]
+        ticket = object()
+        _MCMS_VIDEOLIST_PENDING[key] = ticket
+    item = None
+    try:
+        raw = _mcms_fetch_site(si, {"ac": "videolist", "ids": vod_id}, timeout=timeout)
+        lst = raw.get("list") or []
+        if lst:
+            item = lst[0]
+        return item
+    finally:
+        with _mcms_videolist_lock:
+            if _MCMS_VIDEOLIST_PENDING.get(key) is ticket:
+                _MCMS_VIDEOLIST_PENDING.pop(key, None)
+                if item is not None:
+                    _MCMS_VIDEOLIST_CACHE[key] = (time.time(), item)
+                    if len(_MCMS_VIDEOLIST_CACHE) > _MCMS_VIDEOLIST_MAX:
+                        for k in sorted(_MCMS_VIDEOLIST_CACHE, key=lambda k: _MCMS_VIDEOLIST_CACHE[k][0])[:60]:
+                            _MCMS_VIDEOLIST_CACHE.pop(k, None)
 
 
 # ---------------- 线路级清晰度探测与排序（2026-09-08 需求⑮） ----------------
@@ -5672,6 +5678,7 @@ _PLAY_PARSE_CACHE = {}
 _PLAY_PARSE_TTL = 300.0
 _PLAY_PARSE_MAX = 300
 _play_parse_lock = threading.Lock()
+_PLAY_PARSE_PENDING = {}
 
 
 def _play_parse_get(key):
@@ -5688,6 +5695,39 @@ def _play_parse_put(key, payload):
         if len(_PLAY_PARSE_CACHE) > _PLAY_PARSE_MAX:
             for k in sorted(_PLAY_PARSE_CACHE, key=lambda k: _PLAY_PARSE_CACHE[k][0])[:120]:
                 _PLAY_PARSE_CACHE.pop(k, None)
+
+
+def _hhkan_native_play(vodid, pid, vid, fresh=False):
+    """A forced retry invalidates old links and supersedes in-flight cache writes."""
+    key = (vodid, pid, vid)
+    with _play_parse_lock:
+        if fresh:
+            _PLAY_PARSE_CACHE.pop(key, None)
+        else:
+            hit = _PLAY_PARSE_CACHE.get(key)
+            if hit and time.time() - hit[0] < _PLAY_PARSE_TTL:
+                return copy.deepcopy(hit[1])
+        ticket = object()
+        _PLAY_PARSE_PENDING[key] = ticket
+    payload = None
+    try:
+        parsed = hhkan.parse_play_page(_hhkan_origin_call(
+            lambda: hhkan.get_page("/play/%s-%s-%s.html" % key)))
+        if parsed.get("sources"):
+            payload = {"line": parsed["line"], "sources": parsed["sources"]}
+        return payload
+    finally:
+        with _play_parse_lock:
+            # A slow older parse may still finish, but must not overwrite the
+            # link produced by the user's newer retry, including failed retries.
+            if _PLAY_PARSE_PENDING.get(key) is ticket:
+                _PLAY_PARSE_PENDING.pop(key, None)
+                if payload is not None:
+                    _PLAY_PARSE_CACHE[key] = (time.time(), copy.deepcopy(payload))
+                    if len(_PLAY_PARSE_CACHE) > _PLAY_PARSE_MAX:
+                        oldest = sorted(_PLAY_PARSE_CACHE, key=lambda k: _PLAY_PARSE_CACHE[k][0])[:120]
+                        for old_key in oldest:
+                            _PLAY_PARSE_CACHE.pop(old_key, None)
 
 
 def _first_pid(s):
@@ -5851,7 +5891,7 @@ def enrich_detail_sources(d, vodid):
     _detail_ranked_put(d)
 
 
-def mcms_enriched_play(vodid, pid, vid):
+def mcms_enriched_play(vodid, pid, vid, fresh=False):
     """补线播放解析：pid=100+站*50+原始组下标 → 该站同名影片该组该集直链。"""
     si, li = divmod(pid - 100, 50)
     if si < 0 or si >= len(MCMS_SITES) or not (0 <= li < 50):
@@ -5862,7 +5902,8 @@ def mcms_enriched_play(vodid, pid, vid):
     vod_id = _enrich_find_sites(title).get(si) or 0
     if not vod_id:
         raise RuntimeError("补线影片已下架")
-    it = _mcms_videolist_item(si, vod_id, timeout=6.0)
+    fresh_args = {"fresh": True} if fresh else {}
+    it = _mcms_videolist_item(si, vod_id, timeout=6.0, **fresh_args)
     if not it:
         raise RuntimeError("补线影片已下架")
     groups = _mcms_groups(it)

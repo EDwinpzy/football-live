@@ -26,7 +26,33 @@ HTML = WWW / "index.html"
 def function_body(source, name):
     """Return the source of a `function name(...) { ... }` block by brace match."""
     start = source.index("function " + name)
-    open_at = source.index("{", start)
+    params_at = source.index("(", start)
+    params_depth = 0
+    quote = None
+    escaped = False
+    close_at = None
+    for i in range(params_at, len(source)):
+        ch = source[i]
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+        elif ch == "(":
+            params_depth += 1
+        elif ch == ")":
+            params_depth -= 1
+            if params_depth == 0:
+                close_at = i
+                break
+    if close_at is None:
+        raise AssertionError("unbalanced parameters for " + name)
+    open_at = source.index("{", close_at)
     depth = 0
     for i in range(open_at, len(source)):
         ch = source[i]
@@ -104,8 +130,9 @@ class WebVodResolverFlowTest(unittest.TestCase):
     def test_default_play_does_not_pin_the_initial_line(self):
         block = function_body(self.source, "startPlayAt")
         self.assertIn("linePinned: false", block)
-        more = function_body(self.source, "renderMorePanel")
-        self.assertIn("pv.ctx.linePinned = true", more)
+        picked = function_body(self.source, "selectVodLine")
+        self.assertIn("linePinned: true", picked,
+                      "manual source selection must pin the chosen line")
 
     def test_detail_open_starts_the_resolver_alongside_the_detail_request(self):
         """The resolver must be a parallel request, not an extra serial hop."""

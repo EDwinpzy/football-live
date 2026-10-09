@@ -1,0 +1,592 @@
+/* Runtime regression harness for VOD source selection and request races.
+ * Run: node tests/web_player_sources_harness.mjs
+ */
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import vm from "node:vm";
+import { fileURLToPath } from "node:url";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const app = fs.readFileSync(path.join(here, "..", "www", "app.js"), "utf8");
+const helperStart = app.indexOf("function vodIdentity(");
+const helperEnd = app.indexOf("async function vodBrief(", helperStart);
+const playerStart = app.indexOf("const MAX_RECOVERY_ATTEMPTS =");
+const playerEnd = app.indexOf("/* 手势层", playerStart);
+const cacheStart = app.indexOf("const playResolve =");
+const cacheEnd = app.indexOf("\nfunction bustResolvedPlay", cacheStart);
+assert.ok(helperStart >= 0 && helperEnd > helperStart, "VOD route helpers are present");
+assert.ok(playerStart >= 0 && playerEnd > playerStart, "player implementation is present");
+assert.ok(cacheStart >= 0 && cacheEnd > cacheStart, "play resolution cache is present");
+
+class FakeNode {
+  constructor() {
+    this.hidden = true;
+    this.textContent = "";
+    this.innerHTML = "";
+    this.value = "";
+    this.style = { setProperty() {} };
+    this.dataset = {};
+    this.listeners = new Map();
+    this.attributes = new Map();
+    this.classes = new Set();
+    this.classList = {
+      add: name => this.classes.add(name),
+      remove: name => this.classes.delete(name),
+      toggle: (name, force) => force ? this.classes.add(name) : this.classes.delete(name),
+      contains: name => this.classes.has(name),
+    };
+    this.complete = false;
+    this.duration = 0;
+    this.currentTime = 0;
+    this.paused = true;
+    this.ended = false;
+    this.readyState = 0;
+    this.playbackRate = 1;
+    this.volume = 1;
+    this.src = "";
+    this.parentElement = { style: { setProperty() {} } };
+    this.addEventListener = (name, callback) => {
+      if (!this.listeners.has(name)) this.listeners.set(name, []);
+      this.listeners.get(name).push(callback);
+    };
+  }
+  removeEventListener() {}
+  dispatch(name, event = {}) { for (const fn of this.listeners.get(name) || []) fn(event); }
+  querySelector() { return new FakeNode(); }
+  querySelectorAll() { return []; }
+  setAttribute(name, value) { this.attributes.set(name, value); }
+  removeAttribute(name) { this.attributes.delete(name); if (name === "src") this.src = ""; }
+  getAttribute(name) { return this.attributes.get(name) || null; }
+  setPointerCapture() {}
+  load() { this.loadCount = (this.loadCount || 0) + 1; }
+  pause() { this.paused = true; this.pauseCount = (this.pauseCount || 0) + 1; }
+  play() { this.paused = false; return Promise.resolve(); }
+  focus() {}
+}
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+function lines() {
+  return [
+    { id: "line-a", source_id: "a", name: "源 A", episodes: [
+      { pid: "a", vid: 0, ep: "第1集" }, { pid: "a", vid: 1, ep: "第2集" },
+    ] },
+    { id: "line-b", source_id: "b", name: "源 B", episodes: [
+      { pid: "b", vid: 0, ep: "第1集" }, { pid: "b", vid: 1, ep: "第2集" },
+    ] },
+  ];
+}
+
+function makeRuntime(detailFactory = async () => ({
+  title: "测试片", poster_url: "", sources: lines(),
+})) {
+  const nodes = new Map();
+  const fetches = [];
+  const attached = [];
+  const requests = [];
+  const $ = selector => {
+    if (!nodes.has(selector)) nodes.set(selector, new FakeNode());
+    return nodes.get(selector);
+  };
+  const sandbox = {
+    console, Promise, Date, Math, JSON, Number, String, Object, Array, Set, Map,
+    Error, RegExp, URLSearchParams, AbortController,
+    setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
+    location: { pathname: "/web/", search: "", origin: "https://example.test" },
+    navigator: {},
+    document: {
+      body: { style: {} }, fullscreenElement: null,
+      querySelector: $, querySelectorAll: () => [], addEventListener() {},
+      exitFullscreen: () => Promise.resolve(),
+    },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    state: { portrait: false },
+    BASE: "/web",
+    addEventListener() {},
+    store: { get: (_key, fallback) => fallback, set() {}, remove() {} },
+    $,
+    $$: () => [],
+    fmtTime: value => String(Math.floor(value || 0)),
+    img: value => value || "",
+    esc: value => String(value),
+    gatePlay: () => true,
+    hint() {},
+    metricMark() {},
+    telemetryEmit() {},
+    TELEMETRY_EVENTS: { PLAYER_PREPARE: "player_prepare", FATAL: "fatal" },
+    classifyTelemetryError: () => "unknown",
+    metricBuffer() {},
+    metricMilestone() {},
+    metricDelta: () => 0,
+    metrics: { marks: {} },
+    pushHistory() {},
+    renderDetailEps() {},
+    applyAspect() {},
+    saveProgress() {},
+    getProgress: () => null,
+    resumable: () => false,
+    setPlayIcon() {},
+    detail: { vid: "douban:1", title: "测试片", meta: "电视剧", desc: "简介", sources: lines() },
+    dLineIdx: 0, dEpIdx: 0, dEpPage: 0,
+    resolverState: { preferred: null },
+    __detailFactory: detailFactory,
+    __fetches: fetches,
+    __attached: attached,
+    __requests: requests,
+    __resolveImpl: null,
+    fetchJSON: async (url, options = {}) => {
+      fetches.push({ url: String(url), signal: options.signal || null });
+      if (/\/vod\/detail\/|\/hhkan\/detail\//.test(String(url))) return sandbox.__detailFactory(url, options);
+      throw new Error("unexpected fetch " + url);
+    },
+  };
+  sandbox.window = sandbox;
+  sandbox.resolveFirstSource = (ctx, options) => {
+    const item = deferred();
+    requests.push({ pid: ctx.playRef.pid, force: !!options.force, resolve: item.resolve, reject: item.reject,
+      signal: sandbox.__pv && sandbox.__pv.playController && sandbox.__pv.playController.signal });
+    return item.promise;
+  };
+  sandbox.vodAttach = (url, resume) => attached.push({ url, resume });
+  const prelude = `
+    let detail = globalThis.detail;
+    let dLineIdx = 0, dEpIdx = 0, dEpPage = 0;
+    let resolverState = globalThis.resolverState;
+    function renderDetailEps() {}
+  `;
+  const routeHelpers = app.slice(helperStart, helperEnd);
+  const playerCode = app.slice(playerStart, playerEnd);
+  const context = vm.createContext(sandbox);
+  vm.runInContext(prelude + routeHelpers + playerCode + `
+    globalThis.__pv = pv;
+    globalThis.__setDetail = value => { detail = value; };
+    globalThis.__getDetailSelection = () => ({ line: dLineIdx, episode: dEpIdx });
+    globalThis.__getPlayer = () => ({
+      ctx: pv.ctx, sources: pv.vodSources, selected: pv.vodLineIdx,
+      status: pv.vodSourceStatus, message: pv.vodSourceMessage, panelOpen: pv.panelOpen,
+    });
+  `, context);
+  return { context, nodes, fetches, attached, requests, $ };
+}
+
+const flush = async () => {
+  await Promise.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  await Promise.resolve();
+};
+
+console.log("== landscape VOD source panel, retry and latest request wins ==");
+{
+  const runtime = makeRuntime();
+  const { context: c, $, requests, attached, fetches } = runtime;
+  c.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", cover: "", epIdx: 1,
+    epName: "第2集", epCount: 2, lineIndex: 0, sourceKey: "id:line-a",
+    playRef: { pid: "a", vid: 1 }, sources: lines(), resume: 0 });
+  await flush();
+
+  assert.equal($("#mpToggle").hidden, false, "landscape VOD exposes a source-panel entry while loading");
+  assert.equal($("#morePanel").hidden, true, "panel remains closed until selected");
+  assert.equal($("#mpLinesSec").hidden, false, "the one-or-more-source section is available");
+  assert.match($("#mpLines").innerHTML, /源 A/);
+  assert.match($("#mpLines").innerHTML, /源 B/);
+  assert.ok(fetches.some(row => row.url.endsWith("/vod/detail/1?refresh=1")));
+
+  $("#mpToggle").dispatch("click");
+  assert.equal($("#morePanel").hidden, false, "source panel opens from its visible entry");
+  assert.equal($("#mpToggle").hidden, true);
+
+  const oldSignal = c.__pv.playController.signal;
+  c.__pv.video.duration = 600;
+  c.__pv.video.currentTime = 125;
+  assert.equal(c.selectVodLine(1), true, "a second source is selectable");
+  assert.equal(oldSignal.aborted, true, "switching aborts the old playback request");
+  assert.equal(c.__getPlayer().ctx.playRef.pid, "b");
+  assert.equal(c.__getPlayer().ctx.epIdx, 1, "switch keeps the corresponding episode");
+  assert.equal(c.__getPlayer().ctx.resume, 125, "switch keeps useful playback progress");
+  await flush();
+  assert.equal(requests.at(-1).force, true, "manual selection explicitly forces a fresh resolve");
+  assert.ok(fetches.some(row => row.url.endsWith("/vod/detail/1?refresh=1")),
+    "manual Douban selection refreshes its detail before resolving playback");
+  assert.ok($("#video").loadCount >= 1, "switch unloads the old media pipeline before resolving");
+
+  const currentSignal = c.__pv.playController.signal;
+  assert.equal(c.selectVodLine(1), true, "selecting the active source retries it");
+  assert.equal(currentSignal.aborted, true, "same-source retry also stops its old request");
+  await flush();
+  assert.equal(requests.at(-1).force, true, "same-source retry bypasses the client cache");
+
+  const latest = requests.at(-1);
+  const older = requests[1];
+  latest.resolve({ sources: [{ url: "https://media.test/latest.m3u8" }] });
+  await flush();
+  older.resolve({ sources: [{ url: "https://media.test/stale.m3u8" }] });
+  await flush();
+  assert.deepEqual(attached.map(item => item.url), ["https://media.test/latest.m3u8"],
+    "late results from a superseded source never replace the latest selection");
+  assert.equal(c.__getPlayer().status, "ready", "successful resolution clears the transient retry state");
+
+  c.playerFatal("线路恢复失败");
+  assert.equal($("#pError").hidden, false, "error state remains visible");
+  $("#mpClose").dispatch("click");
+  assert.equal($("#morePanel").hidden, true);
+  assert.equal($("#mpToggle").hidden, false, "source panel can be reopened from the error state");
+  $("#mpToggle").dispatch("click");
+  assert.equal($("#morePanel").hidden, false);
+}
+
+console.log("== Douban initial playback stays fast while manual refresh remaps the selected episode ==");
+{
+  const openingDetail = deferred();
+  const manualDetail = deferred();
+  let detailCalls = 0;
+  const refreshed = [
+    { id: "line-a-v2", source_id: "a", name: "源 A", episodes: [
+      { pid: "a-v2", vid: 0, name: "第1集" }, { pid: "a-v2", vid: 1, name: "第2集" },
+    ] },
+    { id: "line-b-v2", source_id: "b", name: "源 B", episodes: [
+      { pid: "b-v2", vid: 0, name: "第1集" }, { pid: "b-v2", vid: 1, name: "第2集" },
+    ] },
+  ];
+  const runtime = makeRuntime(() => detailCalls++ === 0 ? openingDetail.promise : manualDetail.promise);
+  runtime.context.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", epIdx: 1,
+    epName: "第2集", epCount: 2, lineIndex: 1, sourceKey: "id:line-b",
+    playRef: { pid: "b", vid: 1 }, linePinned: true, sources: lines() });
+  assert.equal(runtime.requests.length, 1,
+    "ordinary player opening starts its initial resolve without waiting for refreshed details");
+  openingDetail.resolve({ title: "测试片", sources: lines() });
+  await flush();
+
+  runtime.context.selectVodLine(1);
+  const stalePlay = runtime.requests[0];
+  assert.equal(stalePlay.signal.aborted, true, "manual retry stops the previous play request");
+  const manualRequest = runtime.context.__pv.detailRequest.promise;
+  assert.equal(runtime.requests.length, 1,
+    "manual Douban playback waits for the detail refresh before resolving the source");
+  manualDetail.resolve({ title: "测试片", sources: refreshed });
+  await manualRequest;
+  await flush();
+  assert.equal(runtime.requests.length, 2);
+  assert.equal(runtime.requests[1].pid, "b-v2",
+    "manual playback resolves the refreshed playRef for the same stable source and episode");
+  assert.equal(runtime.requests[1].force, true);
+  assert.equal(runtime.context.__getPlayer().ctx.epIdx, 1);
+  assert.equal(runtime.context.__getPlayer().ctx.epName, "第2集");
+
+  runtime.requests[1].resolve({ sources: [{ url: "https://media.test/fresh-line.m3u8" }] });
+  await flush();
+  runtime.requests[0].resolve({ sources: [{ url: "https://media.test/stale-line.m3u8" }] });
+  await flush();
+  assert.deepEqual(runtime.attached.map(item => item.url), ["https://media.test/fresh-line.m3u8"],
+    "the older source resolution cannot attach after the fresh selection wins");
+}
+
+console.log("== superseded Douban manual detail refresh cannot resolve or remap stale choices ==");
+{
+  const replies = [deferred(), deferred(), deferred()];
+  let detailCalls = 0;
+  const changed = [
+    { id: "line-a-v2", source_id: "a", name: "源 A", episodes: [
+      { pid: "a-v2", vid: 0, ep: "第1集" }, { pid: "a-v2", vid: 1, ep: "第2集" },
+    ] },
+    { id: "line-b-v2", source_id: "b", name: "源 B", episodes: [
+      { pid: "b-v2", vid: 0, ep: "第1集" }, { pid: "b-v2", vid: 1, ep: "第2集" },
+    ] },
+  ];
+  const runtime = makeRuntime(() => replies[detailCalls++].promise);
+  runtime.context.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", epIdx: 1,
+    epName: "第2集", epCount: 2, lineIndex: 0, sourceKey: "id:line-a",
+    playRef: { pid: "a", vid: 1 }, linePinned: true, sources: lines() });
+  await flush();
+  replies[0].resolve({ title: "测试片", sources: lines() });
+  await flush();
+
+  runtime.context.selectVodLine(1);
+  const supersededRefresh = runtime.context.__pv.detailRequest.promise;
+  runtime.context.selectVodLine(0);
+  const winningRefresh = runtime.context.__pv.detailRequest.promise;
+  assert.equal(runtime.fetches[1].signal.aborted, true,
+    "a newer manual selection aborts the pending detail refresh from the previous selection");
+  replies[2].resolve({ title: "测试片", sources: [changed[0]] });
+  await winningRefresh;
+  await flush();
+  assert.equal(runtime.requests.length, 2, "only the winning manual refresh starts a fresh play request");
+  assert.equal(runtime.requests[1].pid, "a-v2");
+  assert.equal(runtime.context.__getPlayer().ctx.playRef.pid, "a-v2");
+
+  replies[1].resolve({ title: "测试片", sources: [changed[1]] });
+  await supersededRefresh;
+  await flush();
+  assert.equal(runtime.requests.length, 2, "a late superseded response never starts its own resolve");
+  assert.equal(runtime.context.__getPlayer().ctx.playRef.pid, "a-v2",
+    "a late response cannot overwrite the latest selected source");
+  assert.equal(runtime.context.__getPlayer().selected, 0);
+}
+
+console.log("== Douban episode-name identity wins over a reused line ID and episode index ==");
+{
+  const oldLine = { id: "same-line", source_id: "source-a", name: "源 A", episodes: [
+    { pid: "a", vid: 0, ep: "第1集" }, { pid: "a", vid: 1, ep: "第2集" },
+  ] };
+  const reorderedLine = { id: "same-line", source_id: "source-a", name: "源 A", episodes: [
+    { pid: "a", vid: 0, ep: "第2集" }, { pid: "a", vid: 1, ep: "第1集" },
+  ] };
+  let detailCalls = 0;
+  const runtime = makeRuntime(async () => ({ title: "测试片",
+    sources: detailCalls++ === 0 ? [oldLine] : [reorderedLine] }));
+  runtime.context.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", epIdx: 0,
+    epName: "第1集", epCount: 2, lineIndex: 0, sourceKey: "id:same-line",
+    playRef: { pid: "a", vid: 0 }, linePinned: true, sources: [oldLine] });
+  await flush();
+  runtime.requests[0].resolve({ sources: [{ url: "https://media.test/old-episode.m3u8" }] });
+  await flush();
+
+  assert.equal(runtime.context.selectVodLine(0), true, "same-source retry starts a fresh detail lookup");
+  await flush();
+  assert.equal(runtime.requests.length, 2);
+  assert.equal(runtime.requests[1].pid, "a");
+  assert.equal(runtime.requests[1].force, true);
+  assert.equal(runtime.context.__getPlayer().ctx.epName, "第1集");
+  assert.equal(runtime.context.__getPlayer().ctx.epIdx, 1,
+    "the selected episode follows its unique name after the line keeps its ID but reorders episodes");
+  assert.equal(runtime.context.__getPlayer().ctx.playRef.vid, 1,
+    "the reused numeric episode index is replaced with the refreshed index for the same named episode");
+}
+
+console.log("== a single real source remains visible and can be retried ==");
+{
+  const oneLine = lines()[0];
+  const runtime = makeRuntime(async () => ({ title: "测试片", sources: [oneLine] }));
+  runtime.context.__setDetail({ vid: "douban:1", title: "测试片", meta: "", desc: "", sources: [oneLine] });
+  runtime.context.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", epIdx: 0,
+    epName: "第1集", epCount: 2, playRef: { pid: "a", vid: 0 }, sources: [oneLine] });
+  await flush();
+  assert.equal(runtime.$("#mpLinesSec").hidden, false);
+  assert.equal((runtime.$("#mpLines").innerHTML.match(/class="lchip/g) || []).length, 1);
+  assert.match(runtime.$("#mpLines").innerHTML, /源 A/);
+  assert.match(runtime.$("#mpLines").innerHTML, /再次点击重试当前信号源/,
+    "the active single-source control explains its same-source retry action");
+  assert.match(runtime.$("#mpSourceState").textContent, /再次点击当前线路重试/);
+  assert.equal(runtime.context.selectVodLine(0), true, "active one-source chip provides a retry action");
+  await flush();
+  assert.equal(runtime.requests.at(-1).force, true);
+  assert.match(runtime.$("#mpSourceState").textContent, /正在解析 源 A/);
+}
+
+console.log("== source loading failure and empty result are visible ==");
+{
+  const failed = makeRuntime(async () => { throw new Error("offline"); });
+  failed.context.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", epIdx: 0,
+    epName: "正片", epCount: 1, playRef: { pid: "a", vid: 0 }, sources: lines() });
+  await flush();
+  assert.equal(failed.$("#mpSourceState").dataset.state, "error");
+  assert.match(failed.$("#mpSourceState").textContent, /更新失败/);
+
+  const empty = makeRuntime(async () => ({ title: "测试片", sources: [] }));
+  empty.context.__setDetail({ vid: "douban:1", title: "测试片", meta: "", desc: "", sources: [] });
+  empty.context.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", epIdx: 0,
+    epName: "正片", epCount: 1, playRef: { pid: "a", vid: 0 } });
+  await flush();
+  assert.equal(empty.$("#mpSourceState").dataset.state, "empty");
+  assert.match(empty.$("#mpSourceState").textContent, /暂未匹配到其他信号源/);
+
+  const hhkan = makeRuntime(async () => ({ title: "测试片", sources: lines() }));
+  hhkan.context.__setDetail({ vid: "hhkan:7", title: "测试片", meta: "电视剧", desc: "", sources: lines() });
+  hhkan.context.openPlayer({ kind: "vod", vid: "hhkan:7", title: "测试片", epIdx: 0,
+    epName: "第1集", epCount: 2, playRef: { pid: "a", vid: 0 }, sources: lines() });
+  await flush();
+  assert.ok(hhkan.fetches.some(row => row.url.endsWith("/hhkan/detail/7?enrich=1")),
+    "HHKan refresh uses its supported enrich endpoint instead of the Douban route");
+}
+
+console.log("== refreshed lines preserve the selected source and episode ==");
+{
+  const refreshed = [
+    { id: "line-b-new", source_id: "b", name: "源 B", episodes: [
+      { pid: "b-new", vid: 0, ep: "第1集" }, { pid: "b-new", vid: 1, ep: "第2集" },
+    ] },
+    lines()[0],
+  ];
+  const refreshResponse = deferred();
+  const runtime = makeRuntime(() => refreshResponse.promise);
+  runtime.context.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", epIdx: 1,
+    epName: "第2集", epCount: 2, lineIndex: 1, sourceKey: "id:line-b",
+    playRef: { pid: "b", vid: 1 }, linePinned: true, sources: lines() });
+  await flush();
+  runtime.requests[0].resolve({ sources: [{ url: "https://media.test/old-current.m3u8" }] });
+  await flush();
+  refreshResponse.resolve({ title: "测试片", sources: refreshed });
+  await flush();
+  assert.equal(runtime.context.__getPlayer().selected, 0, "reordered fresh detail keeps the same source selected");
+  assert.equal(runtime.context.__getPlayer().ctx.playRef.pid, "b-new",
+    "after the active request settles, the current episode follows its name when the fresh play id changes");
+  assert.equal(runtime.context.__getPlayer().ctx.epIdx, 1);
+  assert.equal(runtime.context.__getDetailSelection().line, 0);
+  assert.equal(runtime.context.__getDetailSelection().episode, 1,
+    "the underlying detail selection follows the remapped episode");
+  assert.equal(runtime.context.__getPlayer().sources.length, 2, "fresh lines replace the stale source list");
+}
+
+console.log("== detail refresh cannot rewrite a pending play target ==");
+{
+  const refreshed = [
+    { id: "line-b-new", source_id: "b", name: "源 B", episodes: [
+      { pid: "b-new", vid: 0, ep: "第1集" }, { pid: "b-new", vid: 1, ep: "第2集" },
+    ] },
+    lines()[0],
+  ];
+  const refreshResponse = deferred();
+  const runtime = makeRuntime(() => refreshResponse.promise);
+  runtime.context.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", epIdx: 1,
+    epName: "第2集", epCount: 2, lineIndex: 1, sourceKey: "id:line-b",
+    playRef: { pid: "b", vid: 1 }, linePinned: true, sources: lines() });
+  await flush();
+  refreshResponse.resolve({ title: "测试片", sources: refreshed });
+  await flush();
+  assert.equal(runtime.context.__getPlayer().ctx.playRef.pid, "b",
+    "a changed playRef cannot invalidate the already pending resolution");
+  assert.equal(runtime.context.__getPlayer().ctx.playRef.vid, 1);
+  assert.equal(runtime.context.__getPlayer().ctx.lineIndex, 2,
+    "the old selected line remains available while its request is pending");
+  assert.equal(runtime.context.__getDetailSelection().line, 2);
+  assert.equal(runtime.context.__getDetailSelection().episode, 1);
+  assert.equal(runtime.context.__getPlayer().status, "ready");
+  runtime.requests[0].resolve({ sources: [{ url: "https://media.test/current.m3u8" }] });
+  await flush();
+  assert.deepEqual(runtime.attached.map(item => item.url), ["https://media.test/current.m3u8"]);
+  assert.equal(runtime.context.__getPlayer().ctx.playRef.pid, "b");
+  assert.equal(runtime.context.__getPlayer().status, "ready");
+}
+
+console.log("== repeated refreshes with duplicate line IDs preserve identity and episode order ==");
+{
+  const replies = [deferred(), deferred(), deferred()];
+  let detailCalls = 0;
+  const duplicateIdLines = [
+    { id: "old-duplicate", source_id: "source-a", name: "源 A", episodes: [
+      { pid: "shared", vid: 0, ep: "第1集" }, { pid: "shared", vid: 1, ep: "第2集" },
+    ] },
+    { id: "old-duplicate", source_id: "source-b", name: "源 B", episodes: [
+      { pid: "shared", vid: 0, ep: "第1集" }, { pid: "shared", vid: 1, ep: "第2集" },
+    ] },
+  ];
+  const runtime = makeRuntime(() => replies[detailCalls++].promise);
+  runtime.context.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", epIdx: 1,
+    epName: "第2集", epCount: 2, lineIndex: 1, sourceKey: "id:old-duplicate",
+    playRef: { pid: "shared", vid: 1 }, linePinned: true, sources: duplicateIdLines });
+  await flush();
+  const initialRequest = runtime.context.__pv.detailRequest.promise;
+  const firstRefresh = runtime.context.refreshPlayerEpisodes({ force: true });
+  const latestRefresh = runtime.context.refreshPlayerEpisodes({ force: true });
+  assert.equal(runtime.fetches.length, 3, "repeated refreshes for the same film issue independent requests");
+  assert.equal(runtime.fetches[0].signal.aborted, true);
+  assert.equal(runtime.fetches[1].signal.aborted, true);
+  assert.equal(runtime.fetches[2].signal.aborted, false);
+
+  const latestLines = [
+    { id: "duplicate-refresh-id", source_id: "source-a", name: "源 A", episodes: [
+      { pid: "shared", vid: 1, ep: "第2集" }, { pid: "shared", vid: 0, ep: "第1集" },
+    ] },
+    { id: "duplicate-refresh-id", source_id: "source-b", name: "源 B", episodes: [
+      { pid: "shared", vid: 1, ep: "第2集" }, { pid: "shared", vid: 0, ep: "第1集" },
+    ] },
+  ];
+  replies[2].resolve({ title: "测试片", sources: latestLines });
+  await latestRefresh;
+  assert.equal(runtime.context.__getPlayer().selected, 1,
+    "duplicate line IDs are disambiguated by stable source identity");
+  assert.equal(runtime.context.__getPlayer().ctx.epIdx, 0,
+    "the current episode follows its playRef when ordering changes");
+  assert.equal(runtime.context.__getPlayer().ctx.epName, "第2集");
+  assert.equal(runtime.context.__getDetailSelection().line, 1);
+  assert.equal(runtime.context.__getDetailSelection().episode, 0);
+
+  replies[0].resolve({ title: "测试片", sources: duplicateIdLines });
+  replies[1].resolve({ title: "测试片", sources: duplicateIdLines });
+  await Promise.all([initialRequest, firstRefresh]);
+  assert.equal(runtime.context.__getPlayer().selected, 1,
+    "late results from superseded refreshes cannot replace the latest list");
+  assert.equal(runtime.context.__getPlayer().ctx.playRef.vid, 1);
+  assert.equal(runtime.context.__getPlayer().ctx.epName, "第2集");
+}
+
+console.log("== removed selected episode is retained with an explicit error ==");
+{
+  const initialDetail = deferred();
+  const removedEpisodeDetail = deferred();
+  let detailCalls = 0;
+  const oldLine = { id: "line-a", source_id: "a", name: "源 A", episodes: [
+    { pid: "a", vid: 0, ep: "第1集" }, { pid: "a", vid: 1, ep: "第2集" },
+  ] };
+  const runtime = makeRuntime(() => detailCalls++ === 0
+    ? initialDetail.promise : removedEpisodeDetail.promise);
+  runtime.context.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", epIdx: 0,
+    epName: "第1集", epCount: 2, lineIndex: 0, sourceKey: "id:line-a",
+    playRef: { pid: "a", vid: 0 }, linePinned: true, sources: [oldLine] });
+  await flush();
+  initialDetail.resolve({ title: "测试片", sources: [oldLine] });
+  await flush();
+  runtime.requests[0].resolve({ sources: [{ url: "https://media.test/old-selection.m3u8" }] });
+  await flush();
+
+  const refresh = runtime.context.refreshPlayerEpisodes({ force: true });
+  removedEpisodeDetail.resolve({ title: "测试片", sources: [{
+    id: "line-a", source_id: "a", name: "源 A",
+    episodes: [{ pid: "a", vid: 1, name: "第2集" }],
+  }] });
+  await refresh;
+  assert.equal(runtime.context.__getPlayer().ctx.playRef.pid, "a");
+  assert.equal(runtime.context.__getPlayer().ctx.playRef.vid, 0,
+    "a missing selected episode must keep the original playRef, not take the new episode at its index");
+  assert.equal(runtime.context.__getPlayer().ctx.epName, "第1集");
+  assert.equal(runtime.context.__getPlayer().ctx.epIdx, 0);
+  assert.equal(runtime.context.__getPlayer().selected, 1,
+    "the original line is retained explicitly instead of silently selecting another episode");
+  assert.equal(runtime.context.__getPlayer().status, "error");
+  assert.match(runtime.context.__getPlayer().message, /当前集“第1集”已不在刷新后的线路中/);
+  assert.equal(runtime.context.__getDetailSelection().line, 1);
+  assert.equal(runtime.context.__getDetailSelection().episode, 0);
+  const resolveCount = runtime.requests.length;
+  assert.equal(runtime.context.selectVodLine(1), true, "retry can still target the preserved original source");
+  await flush();
+  assert.equal(runtime.requests.length, resolveCount,
+    "manual retry does not resolve a stale playRef after refresh proves the selected episode is gone");
+  assert.equal(runtime.context.__getPlayer().ctx.epName, "第1集");
+  assert.match(runtime.$("#peMsg").textContent, /当前集“第1集”已不在刷新后的线路中/);
+}
+
+console.log("== forced play resolution uses fresh endpoint and latest cache write wins ==");
+{
+  const calls = [];
+  const context = vm.createContext({
+    BASE: "/web",
+    fetchJSON: (url, options) => {
+      const item = deferred();
+      calls.push({ url: String(url), signal: options.signal, ...item });
+      return item.promise;
+    },
+  });
+  vm.runInContext(app.slice(helperStart, helperEnd) + app.slice(cacheStart, cacheEnd)
+    + "\nglobalThis.__resolve=resolvePlayCached;", context);
+  const first = context.__resolve("hhkan:7", 20, 3);
+  const forced = context.__resolve("hhkan:7", 20, 3, { force: true });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, "/web/hhkan/play/7/20/3");
+  assert.equal(calls[1].url, "/web/hhkan/play/7/20/3?fresh=1");
+  calls[1].resolve({ sources: [{ url: "latest" }] });
+  await forced;
+  calls[0].resolve({ sources: [{ url: "old" }] });
+  await first;
+  const cached = await context.__resolve("hhkan:7", 20, 3);
+  assert.equal(cached.sources[0].url, "latest", "late cached result cannot overwrite forced result");
+  const douban = context.__resolve("douban:1292052", "source/one", 2, { force: true });
+  assert.equal(calls[2].url, "/web/vod/play/1292052/source%2Fone/2?fresh=1");
+  calls[2].resolve({ sources: [{ url: "douban-fresh" }] });
+  await douban;
+}
+
+console.log("All player-source harness checks passed.");

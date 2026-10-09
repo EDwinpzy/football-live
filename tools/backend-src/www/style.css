@@ -513,9 +513,20 @@ body.portrait .ctl-full{display:flex}
 
 /* 播放信息与更多选项（横屏右侧面板 / 竖屏视频下方） */
 #morePanel{position:absolute;top:0;right:0;bottom:0;width:min(560px,92vw);
-  background:rgba(18,18,22,.914);border-radius:24px 0 0 24px;overflow-y:auto;z-index:10;
+  background:rgba(18,18,22,.96);border-radius:24px 0 0 24px;overflow-y:auto;z-index:30;
   zoom:calc(1/var(--z,1))}
 .mp-inner{padding:28px 34px}
+.mp-panel-head{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.mp-panel-head .mp-sec{margin:18px 0 10px}
+#mpClose{padding:8px 14px;border-radius:10px;color:rgba(245,245,247,.82);background:rgba(255,255,255,.12);font-size:12px;flex-shrink:0}
+#mpToggle{position:absolute;right:0;top:50%;z-index:21;max-width:calc(132px/var(--z,1));padding:14px 18px;
+  border-radius:14px 0 0 14px;background:rgba(18,18,22,.9);color:#fff;font-size:14px;font-weight:600;
+  box-shadow:0 4px 18px rgba(0,0,0,.32);transform:translateY(-50%);writing-mode:vertical-rl;letter-spacing:.08em}
+.mp-source-state{min-height:18px;margin:-2px 0 10px;color:rgba(245,245,247,.64);font-size:12px;line-height:1.45}
+.mp-source-state[data-state="error"]{color:#ffb7b7}
+.mp-source-state[data-state="empty"]{color:#ffd88a}
+.mp-source-retry{margin:0 0 10px;padding:7px 11px;border-radius:9px;background:rgba(255,255,255,.12);
+  color:rgba(245,245,247,.85);font-size:11px}
 .mp-info-row{display:flex;gap:18px;align-items:flex-start}
 .mp-poster{width:96px;height:136px;border-radius:10px;object-fit:cover;background:#1C1C22;flex-shrink:0}
 .mp-info{flex:1;min-width:0}
@@ -699,6 +710,7 @@ body.portrait .ctl-progress-row{gap:calc(14px/var(--z,1))}
 body.portrait #morePanel{position:static;width:100%;height:auto;flex:1 1 auto;min-height:0;
   border-radius:0;background:#0E0E0F;backdrop-filter:none;-webkit-backdrop-filter:none;
   padding-bottom:env(safe-area-inset-bottom);zoom:calc(1/var(--z,1))}
+body.portrait #mpToggle,body.portrait #mpClose{display:none!important}
 body.portrait #morePanel .mp-inner{padding:20px 26px 26px}
 body.portrait #morePanel .mp-poster{width:72px;height:102px}
 /* 手势指示/缓冲居中于视频区（422 设计px） */
