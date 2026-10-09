@@ -75,10 +75,22 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
             'item(key = "lib-pad")',
         )
         self.assertIn("VerticalPager(", renderer)
+        self.assertIn("beyondBoundsPageCount = 1", renderer,
+                      "切页前预热相邻一页的海报，减少首次翻页空位")
         self.assertIn("PagerSnapDistance.atMost(1)", renderer)
         self.assertIn("snapAnimationSpec = spring(", renderer, "页面切换需要平滑弹性动画")
+        self.assertNotIn("modifier = Modifier.graphicsLayer {", renderer,
+                         "页面本身不应在翻页时额外缩放/淡入整屏海报层")
         self.assertIn("HomeLibraryUiPolicy.PAGE_TITLES", renderer)
         self.assertIn("LibrarySectionPage(", renderer)
+        self.assertIn("animationSpec = tween(", self.tv_home,
+                      "遥控翻页也应使用明确的平滑动画参数")
+        self.assertIn("durationMillis = 280", self.tv_home,
+                      "遥控翻页动画应短而连续，避免长时间拖慢操作")
+        self.assertIn("LaunchedEffect(sectionPagerState.settledPage)", self.tv_home,
+                      "应等翻页动画结束后再恢复焦点")
+        self.assertIn("visibleItemsInfo.none { it.index == targetColumn }", self.tv_home,
+                      "目标卡片已可见时不应再次启动横向滚动动画")
 
         back_handler = _source_block(self.tv_home, "BackHandler {", "val showLibLoading")
         self.assertIn("sectionPagerState.currentPage > 0", back_handler)
