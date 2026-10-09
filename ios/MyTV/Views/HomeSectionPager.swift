@@ -46,7 +46,10 @@ struct HomeSectionPager: View {
         HomeSectionPagerLayout.pages(for: section.items, columns: columns)
     }
     private var gridColumns: [GridItem] {
-        Array(repeating: GridItem(.fixed(cardWidth), alignment: .top), count: columns)
+        Array(
+            repeating: GridItem(.fixed(cardWidth), spacing: HomeSectionPagerLayout.spacing, alignment: .top),
+            count: columns
+        )
     }
 
     var body: some View {
@@ -93,8 +96,7 @@ struct HomeSectionPager: View {
         LazyVGrid(
             columns: gridColumns,
             alignment: .leading,
-            horizontalSpacing: HomeSectionPagerLayout.spacing,
-            verticalSpacing: 16
+            spacing: 16
         ) {
             ForEach(items.indices, id: \.self) { index in
                 if let item = items[index] {
