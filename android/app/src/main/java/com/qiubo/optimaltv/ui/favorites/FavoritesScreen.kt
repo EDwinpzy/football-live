@@ -89,8 +89,10 @@ internal fun favoritesDownTarget(licenseEnabled: Boolean, hasFavorites: Boolean,
  */
 @Composable
 fun FavoritesScreen(nav: NavController) {
-    val favorites by Graph.db.vodDao().favoritesFlow().collectAsStateWithLifecycle(initialValue = emptyList())
-    val history by Graph.db.vodDao().historyFlow(12).collectAsStateWithLifecycle(initialValue = emptyList())
+    val favoritesFlow = remember { Graph.db.vodDao().favoritesFlow() }
+    val historyFlow = remember { Graph.db.vodDao().historyFlow(12) }
+    val favorites by favoritesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val history by historyFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     val catalogState by Graph.repo.state.collectAsStateWithLifecycle()
     val s = rememberUiScale()
     // 返回落焦（需求 影视#6-2）

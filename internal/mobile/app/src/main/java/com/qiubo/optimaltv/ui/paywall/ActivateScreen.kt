@@ -44,6 +44,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -404,11 +405,6 @@ private val CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 @Composable
 private fun CodeSlot(ch: Char?, active: Boolean, s: Float, w: Float, h: Float, font: Float) {
     val shape = RoundedCornerShape((w * 0.21f).sx(s))
-    val pulse = rememberInfiniteTransition(label = "caret").animateFloat(
-        initialValue = 0.35f, targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(650), RepeatMode.Reverse),
-        label = "caretA",
-    )
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
@@ -432,18 +428,28 @@ private fun CodeSlot(ch: Char?, active: Boolean, s: Float, w: Float, h: Float, f
                 fontSize = font.sxs(s),
                 fontWeight = FontWeight.SemiBold,
             )
-            active -> Box(
-                Modifier
-                    .width((w * 0.034f).sx(s))
-                    .height((h * 0.34f).sx(s))
-                    .background(
-                        Color.White.copy(alpha = pulse.value),
-                        RoundedCornerShape(2f.sx(s)),
-                    ),
-            )
+            active -> CodeCaret(w, h, s)
             else -> Box(Modifier.size((w * 0.087f).sx(s)).background(Color(0x2EFFFFFF), CircleShape))
         }
     }
+}
+
+/** Only the active empty slot pulses; keep each animation frame at the draw layer. */
+@Composable
+private fun CodeCaret(w: Float, h: Float, s: Float) {
+    val alpha = rememberInfiniteTransition(label = "caret").animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(650), RepeatMode.Reverse),
+        label = "caretA",
+    )
+    Box(
+        Modifier
+            .width((w * 0.034f).sx(s))
+            .height((h * 0.34f).sx(s))
+            .graphicsLayer { this.alpha = alpha.value }
+            .background(Color.White, RoundedCornerShape(2f.sx(s))),
+    )
 }
 
 /** 宽胶囊 CTA（启用=白底黑字；禁用=暗底）；触控点按。w 由调用方给（竖屏收窄档）。 */

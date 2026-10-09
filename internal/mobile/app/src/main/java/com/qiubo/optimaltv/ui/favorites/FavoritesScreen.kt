@@ -69,8 +69,10 @@ import java.net.URLEncoder
  */
 @Composable
 fun FavoritesScreen(nav: NavController) {
-    val favorites by Graph.db.vodDao().favoritesFlow().collectAsStateWithLifecycle(initialValue = emptyList())
-    val history by Graph.db.vodDao().historyFlow(12).collectAsStateWithLifecycle(initialValue = emptyList())
+    val favoritesFlow = remember { Graph.db.vodDao().favoritesFlow() }
+    val historyFlow = remember { Graph.db.vodDao().historyFlow(12) }
+    val favorites by favoritesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val history by historyFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     val catalogState by Graph.repo.state.collectAsStateWithLifecycle()
     val s = rememberUiScale()
 
@@ -327,12 +329,12 @@ fun MemberTopRightLine(s: Float, hidden: Boolean = false, onOpen: () -> Unit, do
         }
     }
     // 横屏：与 MainTabBar 同款下潜动画 + 顶栏行内定位；竖屏 docked（底部条）无动画无偏移
-    val memberAlpha by androidx.compose.animation.core.animateFloatAsState(
+    val memberAlpha = androidx.compose.animation.core.animateFloatAsState(
         targetValue = if (hidden) 0f else 1f,
         animationSpec = androidx.compose.animation.core.tween(220),
         label = "memberAlpha",
     )
-    val memberTy by androidx.compose.animation.core.animateFloatAsState(
+    val memberTy = androidx.compose.animation.core.animateFloatAsState(
         targetValue = if (hidden) -90f else 0f,
         animationSpec = androidx.compose.animation.core.tween(220),
         label = "memberTy",
@@ -343,8 +345,8 @@ fun MemberTopRightLine(s: Float, hidden: Boolean = false, onOpen: () -> Unit, do
             // 横屏：与顶部标签栏（胶囊 top48/h68 设计px）同一行带内垂直居中；随标签栏滚动下潜
             .then(if (docked) Modifier else Modifier.padding(top = 48f.sx(s), end = 40f.sx(s)).height(68f.sx(s)))
             .graphicsLayer {
-                alpha = memberAlpha
-                translationY = memberTy
+                alpha = memberAlpha.value
+                translationY = memberTy.value
             }
             .tapCard(onOpen),
     ) {

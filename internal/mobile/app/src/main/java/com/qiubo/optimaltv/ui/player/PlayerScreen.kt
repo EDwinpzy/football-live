@@ -3,7 +3,9 @@ package com.qiubo.optimaltv.ui.player
 import android.app.Activity
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -46,7 +48,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -351,44 +352,10 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
         }
 
         // 影院 scrim（控制条可见或未起播时淡入；tvOS 径向压暗 + 底部渐黑，TV 版 1:1）
-        val scrimAlpha by animateFloatAsState(
-            targetValue = if ((ui.controlsVisible && !ui.isLive) || (ui.playState == EnginePlayState.IDLE && ui.fatalMsg == null && !ui.isLive)) 1f else 0f,
-            animationSpec = tween(450),
-            label = "scrimAlpha",
+        CinematicScrim(
+            visible = (ui.controlsVisible && !ui.isLive) ||
+                (ui.playState == EnginePlayState.IDLE && ui.fatalMsg == null && !ui.isLive),
         )
-        if (scrimAlpha > 0f) {
-            Box(Modifier.fillMaxSize().alpha(scrimAlpha)) {
-                BoxWithConstraints(Modifier.fillMaxSize()) {
-                    val density = LocalDensity.current
-                    val w = with(density) { maxWidth.toPx() }
-                    val h = with(density) { maxHeight.toPx() }
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.radialGradient(
-                                    colors = listOf(Color(0x33000000), Color.Transparent),
-                                    center = Offset(w / 2f, h * 0.35f),
-                                    radius = maxOf(w, h) * 0.75f,
-                                ),
-                            ),
-                    )
-                }
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .fillMaxHeight(0.3f)
-                        .align(Alignment.BottomCenter)
-                        .background(
-                            Brush.verticalGradient(
-                                0f to Color.Transparent,
-                                0.55f to Color(0x66000000),
-                                1f to Color(0xCC000000),
-                            ),
-                        ),
-                )
-            }
-        }
 
         // 缓冲指示
         if (ui.playState == EnginePlayState.BUFFERING && ui.fatalMsg == null) {
@@ -450,6 +417,49 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
         PortraitPlayerPanel(ui = ui, vm = vm)
     }
     } // Column
+}
+
+/** Isolate the animated scrim from PlayerScreen so its 450ms fade doesn't recompose the player. */
+@Composable
+private fun CinematicScrim(visible: Boolean) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(animationSpec = tween(450)),
+        exit = fadeOut(animationSpec = tween(450)),
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        Box(Modifier.fillMaxSize()) {
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+                val density = LocalDensity.current
+                val w = with(density) { maxWidth.toPx() }
+                val h = with(density) { maxHeight.toPx() }
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.radialGradient(
+                                colors = listOf(Color(0x33000000), Color.Transparent),
+                                center = Offset(w / 2f, h * 0.35f),
+                                radius = maxOf(w, h) * 0.75f,
+                            ),
+                        ),
+                )
+            }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.3f)
+                    .align(Alignment.BottomCenter)
+                    .background(
+                        Brush.verticalGradient(
+                            0f to Color.Transparent,
+                            0.55f to Color(0x66000000),
+                            1f to Color(0xCC000000),
+                        ),
+                    ),
+            )
+        }
+    }
 }
 
 /** 竖屏播放器内容区（2026-09-19 v2 设计稿定稿）：视频下方常驻 =「更多」区段平铺

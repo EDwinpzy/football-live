@@ -57,12 +57,14 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
 #pVod.gated > #histRow,
 #pVod.gated > #catChips,
 #pVod.gated > #vodSections{display:none}
-.hscroll{display:flex;overflow-x:auto;overflow-y:hidden}
+.hscroll{display:flex;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}
 .hscroll::-webkit-scrollbar{display:none}
 
 /* ===== hero 带（足球 700 / 影视 700，竖屏影视 520） ===== */
 .hero-band{position:relative;height:700px;flex-shrink:0;overflow:hidden;background:#0E0E0F}
 .hero-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.hero-swap-in{animation:heroSwapIn .45s ease both}
+@keyframes heroSwapIn{from{opacity:0}to{opacity:1}}
 /* v1.25 需求⑦：hero 左右切换影片/比赛时新海报交叉淡入（heroSwap 动态叠层） */
 .fade-swap{animation:fadeSwap .45s ease}
 @keyframes fadeSwap{from{opacity:.25;transform:translateY(6px)}to{opacity:1;transform:none}}
@@ -94,7 +96,7 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
 .today-grid-row{display:grid;grid-template-columns:repeat(2,1fr);gap:28px 36px}
 .today-grid-row .gcard{width:auto;height:auto;min-height:146px}
 .live-grid{display:grid;gap:28px 36px;padding:24px 86px 0}
-.today-pages{display:flex;gap:40px;overflow-x:auto;scroll-snap-type:x mandatory}
+.today-pages{display:flex;gap:40px;overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch}
 .today-page{display:grid;grid-template-columns:repeat(4,320px);gap:28px 40px;flex:0 0 auto;scroll-snap-align:start}
 .live-empty{color:rgba(255,255,255,.5);font-size:26px;padding:20px 90px}
 .score-team .st-name{font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;
@@ -497,10 +499,17 @@ body.portrait .ctl-full{display:flex}
 /* App：灰轨道全宽 + 白色填充 frac（App 轨道 Box bg white30 + 内部 fillMaxWidth(frac) 白） */
 .ctl-rail{position:relative;height:calc(6px/var(--z,1));width:100%;border-radius:calc(5px/var(--z,1));
   background:rgba(255,255,255,.3);pointer-events:none;overflow:visible}
-.ctl-fill{position:relative;height:100%;border-radius:calc(5px/var(--z,1));
-  background:#fff;pointer-events:none;min-width:calc(6px/var(--z,1))}
-.ctl-fill .ctl-thumb{position:absolute;right:calc(-7px/var(--z,1));top:50%;transform:translateY(-50%);
-  width:calc(14px/var(--z,1));height:calc(14px/var(--z,1));border-radius:50%;background:#fff}
+.ctl-rail::before{content:"";position:absolute;left:0;top:0;width:calc(6px/var(--z,1));height:100%;
+  border-radius:inherit;background:#fff;pointer-events:none}
+.ctl-fill{position:absolute;left:0;top:0;width:100%;height:100%;border-radius:calc(5px/var(--z,1));
+  background:#fff;pointer-events:none;min-width:calc(6px/var(--z,1));transform:scaleX(var(--progress-scale,0));transform-origin:left center;
+  transition:transform .24s linear}
+.ctl-thumb{position:absolute;left:0;top:0;width:100%;height:100%;
+  transform:translateX(max(var(--progress-position,0%),calc(6px/var(--z,1))));transition:transform .24s linear;pointer-events:none}
+.ctl-thumb::before{content:"";position:absolute;left:calc(-7px/var(--z,1));top:50%;
+  width:calc(14px/var(--z,1));height:calc(14px/var(--z,1));border-radius:50%;background:#fff;
+  transform:translateY(-50%)}
+.ctl-rail.seeking .ctl-fill,.ctl-rail.seeking .ctl-thumb{transition:none}
 
 /* 播放信息与更多选项（横屏右侧面板 / 竖屏视频下方） */
 #morePanel{position:absolute;top:0;right:0;bottom:0;width:min(560px,92vw);
@@ -534,7 +543,7 @@ body.portrait .ctl-full{display:flex}
 /* 直播信号源选择条（App LiveSourcePicker：底部居中胶囊卡，sx 设计坐标） */
 #srcPickerWrap{position:absolute;left:0;right:0;bottom:0;display:flex;justify-content:center;pointer-events:none}
 .src-picker{pointer-events:auto;margin-bottom:56px;background:rgba(17,17,20,.7);border-radius:20px;
-  padding:20px 26px;max-width:92%;overflow-x:auto}
+  padding:20px 26px;max-width:92%;overflow-x:auto;-webkit-overflow-scrolling:touch}
 .src-picker .sp-title{font-size:20px;color:rgba(255,255,255,.6);text-align:center;margin-bottom:12px}
 .src-picker .sp-chips{display:flex;gap:14px}
 .src-picker .spchip{flex-shrink:0;padding:12px 24px;border-radius:12px;font-size:25px;color:#fff;

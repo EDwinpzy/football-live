@@ -16,7 +16,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -76,12 +75,12 @@ fun MainTabBar(
     // 隐藏态必须同步撤销语义点击/触摸命中，不能只把 alpha 变成 0；
     // 否则透明顶栏仍会截获内容区点击。
     val acceptsInput = interactive && !hidden
-    val chromeAlpha by animateFloatAsState(
+    val chromeAlpha = animateFloatAsState(
         targetValue = if (hidden) 0f else 1f,
         animationSpec = tween(220),
         label = "tabChromeAlpha",
     )
-    val chromeTy by animateFloatAsState(
+    val chromeTy = animateFloatAsState(
         targetValue = if (hidden) -90f else 0f,
         animationSpec = tween(220),
         label = "tabChromeTy",
@@ -91,8 +90,8 @@ fun MainTabBar(
             .fillMaxWidth()
             .testTag(MobileUiTags.MainTabBar)
             .graphicsLayer {
-                alpha = chromeAlpha
-                translationY = chromeTy
+                alpha = chromeAlpha.value
+                translationY = chromeTy.value
             },
     ) {
         // 顶栏渐变遮罩（原版 #topbar：黑 .6→.35@55%→0 + mask 72% 后淡出）

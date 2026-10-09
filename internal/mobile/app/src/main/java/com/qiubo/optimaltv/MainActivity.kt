@@ -277,7 +277,14 @@ private fun AppRoot() {
 
     // v1.20 全局浮层：运营公告（顶部半透明悬浮窗）+ 非强更提案弹窗 + 下载进度层
     Box(Modifier.fillMaxSize()) {
-        NavHost(navController = nav, startDestination = startDestination) {
+        NavHost(
+            navController = nav,
+            startDestination = startDestination,
+            enterTransition = { androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(240)) },
+            exitTransition = { androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(120)) },
+            popEnterTransition = { androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(240)) },
+            popExitTransition = { androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(120)) },
+        ) {
                 composable("live") { LiveScreen(nav) }
 
                 composable("vod") { VodScreen(nav) }

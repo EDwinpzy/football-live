@@ -160,13 +160,17 @@ private class LibraryFocusRequests {
     var job: Job? = null
     var focusedKey: String? = null
     var awaitingPageFocus = false
+    // Navigation memory does not affect rendering; avoid recomposing every card on focus moves.
+    var row = 0
+    var column = 0
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun VodScreen(nav: NavController) {
     val catalogState by Graph.repo.state.collectAsStateWithLifecycle()
-    val history by Graph.db.vodDao().historyFlow(12).collectAsStateWithLifecycle(initialValue = emptyList())
+    val historyFlow = remember { Graph.db.vodDao().historyFlow(12) }
+    val history by historyFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     val s = rememberUiScale()
     // 返回落焦（需求 影视#6-2）：从详情/播放返回时回到上次聚焦的卡片
     val returnKey = remember { ReturnFocus.take("vod") }
@@ -183,8 +187,8 @@ fun VodScreen(nav: NavController) {
     /* 2026-09-18：进页兜底——目录为空（后端冷启动/热更重启期首轮抓取全失败）时补抓，
        否则 hero 会退化成空底板、分类卡与三栏全空。 */
     LaunchedEffect(Unit) {
-        Graph.repo.ensureCatalogFresh(force = true)
-        Graph.repo.refreshHome(force = true)
+        Graph.repo.ensureCatalogFresh()
+        Graph.repo.refreshHome()
     }
     val cat0 = catalogState.catalog
     val heroesTop = remember(cat0, home) { buildHeroes(cat0, home) }
@@ -289,9 +293,6 @@ fun VodScreen(nav: NavController) {
                 val sectionRowStates = List(HomeLibraryUiPolicy.PAGE_TITLES.size) {
                     List(2) { rememberLazyListState() }
                 }
-                var libraryCardHasFocus by remember(selCid) { mutableStateOf(false) }
-                var lastLibraryRow by remember(selCid) { mutableIntStateOf(0) }
-                var lastLibraryColumn by remember(selCid) { mutableIntStateOf(0) }
                 val pageScope = androidx.compose.runtime.rememberCoroutineScope()
                 val focusRequests = remember { LibraryFocusRequests() }
 
@@ -299,7 +300,8 @@ fun VodScreen(nav: NavController) {
                     focusRequests.job?.cancel()
                     focusRequests.focusedKey = null
                     focusRequests.awaitingPageFocus = false
-                    libraryCardHasFocus = false
+                    focusRequests.row = 0
+                    focusRequests.column = 0
                     sectionPagerState.scrollToPage(0)
                     sectionRowStates.flatten().forEach { it.scrollToItem(0) }
                 }
@@ -365,9 +367,8 @@ fun VodScreen(nav: NavController) {
                     if (sectionPagerState.isScrollInProgress || page == sectionPagerState.settledPage) return
                     focusRequests.job?.cancel()
                     focusRequests.awaitingPageFocus = true
-                    lastLibraryRow = row
-                    lastLibraryColumn = column
-                    libraryCardHasFocus = true
+                    focusRequests.row = row
+                    focusRequests.column = column
                     pageScope.launch {
                         sectionPagerState.animateScrollToPage(
                             page = page,
@@ -379,15 +380,15 @@ fun VodScreen(nav: NavController) {
                     }
                 }
                 LaunchedEffect(sectionPagerState.settledPage) {
-                    if (libraryCardHasFocus || focusRequests.awaitingPageFocus) {
-                        requestLibraryFocus(sectionPagerState.settledPage, lastLibraryRow, lastLibraryColumn)
+                    if (focusRequests.focusedKey != null || focusRequests.awaitingPageFocus) {
+                        requestLibraryFocus(sectionPagerState.settledPage, focusRequests.row, focusRequests.column)
                     }
                 }
                 BackHandler {
                     focusRequests.job?.cancel()
                     val atTop = vodListState.firstVisibleItemIndex == 0 && vodListState.firstVisibleItemScrollOffset == 0
                     if (sectionPagerState.currentPage > 0) {
-                        moveLibraryPage(sectionPagerState.currentPage - 1, lastLibraryRow, lastLibraryColumn)
+                        moveLibraryPage(sectionPagerState.currentPage - 1, focusRequests.row, focusRequests.column)
                     } else if (atTop && tabFocused) {
                         exitApp()
                     } else {
@@ -676,10 +677,9 @@ fun VodScreen(nav: NavController) {
                                     } else if (focusRequests.focusedKey == key) {
                                         focusRequests.focusedKey = null
                                     }
-                                    libraryCardHasFocus = focusRequests.focusedKey != null
                                     if (gained) {
-                                        lastLibraryRow = row
-                                        lastLibraryColumn = column
+                                        focusRequests.row = row
+                                        focusRequests.column = column
                                     }
                                 },
                                 modifier = Modifier,
@@ -752,10 +752,13 @@ private fun VodHeroBand(
                 AsyncImage(
                     // v1.10：ImageLoader 已放开硬件位图（低端机滚动性能），仅 hero 超宽图
                     // （3360×1080，MuMu 硬件位图解码失败=图空白）按请求走软件解码
-                    model = coil.request.ImageRequest.Builder(heroCtx)
-                        .data(url)
-                        .allowHardware(false)
-                        .build(),
+                    model = remember(heroCtx, url) {
+                        coil.request.ImageRequest.Builder(heroCtx)
+                            .data(url)
+                            .allowHardware(false)
+                            .crossfade(false)
+                            .build()
+                    },
                     contentDescription = h.title,
                     contentScale = ContentScale.Crop,
                     onState = { st ->

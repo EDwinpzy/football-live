@@ -33,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
@@ -305,11 +306,6 @@ fun ActivateScreen(nav: NavController) {
 @Composable
 private fun CodeSlot(ch: Char?, active: Boolean, s: Float) {
     val shape = RoundedCornerShape(22f.sx(s))
-    val pulse = rememberInfiniteTransition(label = "caret").animateFloat(
-        initialValue = 0.35f, targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(650), RepeatMode.Reverse),
-        label = "caretA",
-    )
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
@@ -333,18 +329,24 @@ private fun CodeSlot(ch: Char?, active: Boolean, s: Float) {
                 fontSize = 46f.sxs(s),
                 fontWeight = FontWeight.SemiBold,
             )
-            active -> Box(
-                Modifier
-                    .width(3.5f.sx(s))
-                    .height(46f.sx(s))
-                    .background(
-                        Color.White.copy(alpha = pulse.value),
-                        RoundedCornerShape(2f.sx(s)),
-                    ),
-            )
+            active -> ActiveCodeCaret(s)
             else -> Box(Modifier.size(9f.sx(s)).background(Color(0x2EFFFFFF), CircleShape))
         }
     }
+}
+
+@Composable
+private fun ActiveCodeCaret(s: Float) {
+    val pulse = rememberInfiniteTransition(label = "caret").animateFloat(
+        initialValue = 0.35f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(650), RepeatMode.Reverse),
+        label = "caretA",
+    )
+    Box(
+        Modifier.width(3.5f.sx(s)).height(46f.sx(s))
+            .graphicsLayer { alpha = pulse.value }
+            .background(Color.White, RoundedCornerShape(2f.sx(s))),
+    )
 }
 
 /** 卡密字母表键位（剔除 0/O/I：码里不会出现，键位更少更好按；v1.20 需求#7 补「1」） */

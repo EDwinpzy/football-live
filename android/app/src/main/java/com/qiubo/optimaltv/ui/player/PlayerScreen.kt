@@ -4,7 +4,9 @@ import android.app.Activity
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -272,13 +274,13 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
         }
 
         // 影院 scrim（控制条可见或未起播时淡入）
-        val scrimAlpha by animateFloatAsState(
-            targetValue = if ((ui.controlsVisible && !ui.isLive) || (ui.playState == EnginePlayState.IDLE && ui.fatalMsg == null)) 1f else 0f,
-            animationSpec = tween(450),
-            label = "scrimAlpha",
-        )
-        if (scrimAlpha > 0f) {
-            Box(Modifier.fillMaxSize().alpha(scrimAlpha)) {
+        AnimatedVisibility(
+            visible = (ui.controlsVisible && !ui.isLive) || (ui.playState == EnginePlayState.IDLE && ui.fatalMsg == null),
+            modifier = Modifier.fillMaxSize(),
+            enter = fadeIn(tween(450)),
+            exit = fadeOut(tween(450)),
+        ) {
+            Box(Modifier.fillMaxSize()) {
                 BoxWithConstraints(Modifier.fillMaxSize()) {
                     val density = LocalDensity.current
                     val w = with(density) { maxWidth.toPx() }

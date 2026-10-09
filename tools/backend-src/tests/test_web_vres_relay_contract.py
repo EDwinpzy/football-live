@@ -55,8 +55,8 @@ class WebVresRelayContractTest(unittest.TestCase):
 
     # ---------- ② 中继失败要回落直连，别死卡 ----------
     def test_relay_failure_falls_back_to_direct(self):
-        start = self.app_js.index('document.addEventListener("error"')
-        block = self.app_js[start:self.app_js.index("function img(u) {", start)]
+        start = self.app_js.index("function retryImageFallback(")
+        block = self.app_js[start:self.app_js.index("function doubanImg(", start)]
         # 源码里正则是转义形态（\/hhkan\/proxy\?u=），按语义片段断言即可。
         self.assertIn("hhkan", block, "error 兜底未处理中继地址")
         self.assertIn("proxy", block, "error 兜底未处理中继地址")

@@ -34,12 +34,15 @@ class WebPosterHostContractTest(unittest.TestCase):
         self.assertIn("doubanImg(", block)
 
     def test_failed_poster_rotates_to_next_host(self):
-        start = self.source.index('document.addEventListener("error"')
-        block = self.source[start:self.source.index("function img(u) {", start)]
-        self.assertIn('el.tagName !== "IMG"', block)
+        handler_at = self.source.index('document.addEventListener("error"')
+        handler = self.source[handler_at:self.source.index("}, true);", handler_at)]
+        self.assertIn('el.tagName !== "IMG"', handler)
+        self.assertIn("retryImageFallback(el, ev)", handler)
+        start = self.source.index("function retryImageFallback(")
+        block = self.source[start:self.source.index("function doubanImg(", start)]
         self.assertIn("DOUBAN_IMG_RE", block)
         # 轮换必须按 DOUBAN_IMG_HOSTS 顺序取下一台，而不是原地重试同一台。
-        self.assertIn("DOUBAN_IMG_HOSTS[i < 0 ? 0 : i + 1]", block)
+        self.assertIn("DOUBAN_IMG_HOSTS[index < 0 ? 0 : index + 1]", block)
 
 
 if __name__ == "__main__":

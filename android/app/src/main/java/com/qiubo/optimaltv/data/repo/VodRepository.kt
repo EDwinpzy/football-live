@@ -15,6 +15,9 @@ import com.qiubo.optimaltv.data.source.HhkanSource.ChannelSection as HSec
 import com.qiubo.optimaltv.data.source.HhkanSource.Companion.DetailInfo
 import com.qiubo.optimaltv.data.source.SourceSnapshot
 import com.qiubo.optimaltv.data.source.SourceState
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -40,6 +43,12 @@ data class CatalogState(
     val loading: Boolean = false,
     val catalog: Aggregated? = null,
     val sourceStates: List<SourceState> = emptyList(),
+)
+
+private data class CatalogRefreshMerge(
+    val state: CatalogState,
+    val hasItems: Boolean,
+    val snapshotToWrite: Pair<List<Category>, List<VodItem>>?,
 )
 
 /** Legacy JSON/API catalog search must use every distinct row, not the title-collapsed browse list. */
@@ -412,21 +421,73 @@ class VodRepository(
         while (_state.value.catalog == null) kotlinx.coroutines.delay(150)
     }
 
+    private val refreshLock = Any()
+    private var refreshJob: Deferred<Unit>? = null
+    private var refreshJobForce = false
+
     suspend fun refresh(force: Boolean = false) {
-        _state.value = _state.value.copy(loading = true)
-        val cfg = settings.current()
+        val sharedRefresh = synchronized(refreshLock) {
+            val current = refreshJob
+            if (current != null && !current.isCompleted) {
+                if (!force || refreshJobForce) {
+                    current
+                } else {
+                    // A forced caller cannot join a non-forced request: it must still bypass
+                    // source caches, so coalesce forced callers into one follow-up run.
+                    repoScope.async(start = CoroutineStart.LAZY) {
+                        try {
+                            current.await()
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            // A failed normal refresh does not satisfy an explicit forced refresh.
+                        }
+                        refreshOnce(force = true)
+                    }.also {
+                        refreshJob = it
+                        refreshJobForce = true
+                    }
+                }
+            } else {
+                repoScope.async(start = CoroutineStart.LAZY) { refreshOnce(force) }.also {
+                    refreshJob = it
+                    refreshJobForce = force
+                }
+            }
+        }
+        sharedRefresh.start()
         try {
+            sharedRefresh.await()
+        } finally {
+            if (sharedRefresh.isCompleted) synchronized(refreshLock) {
+                if (refreshJob === sharedRefresh) {
+                    refreshJob = null
+                    refreshJobForce = false
+                }
+            }
+        }
+    }
+
+    private suspend fun refreshOnce(force: Boolean) {
+        _state.value = _state.value.copy(loading = true)
+        try {
+          val cfg = settings.current()
           metadataCatalog.refreshIfNeeded(force)
           val installedMetadata = metadataCatalog.hasInstalledDatabase()
           if (installedMetadata) {
-              val items = metadataCatalog.previewRows().map { VodApiSource.fromCatalogMedia(it, cfg.hhkanBaseUrl) }
-              val categories = metadataCategoriesForKeys(metadataCatalog.categoryKeys())
-              val groups = items.groupBy { it.normTitle }
-              _state.value = CatalogState(
-                  loading = false,
-                  catalog = Aggregated(categories, groups.map { it.value.first() }, groups),
-                  sourceStates = listOf(SourceState("metadata", "本地影视目录", true, "${items.size} 部")),
-              )
+              val rows = metadataCatalog.previewRows()
+              val categoryKeys = metadataCatalog.categoryKeys()
+              val state = withContext(Dispatchers.Default) {
+                  val items = rows.map { VodApiSource.fromCatalogMedia(it, cfg.hhkanBaseUrl) }
+                  val categories = metadataCategoriesForKeys(categoryKeys)
+                  val groups = items.groupBy { it.normTitle }
+                  CatalogState(
+                      loading = false,
+                      catalog = Aggregated(categories, groups.map { it.value.first() }, groups),
+                      sourceStates = listOf(SourceState("metadata", "本地影视目录", true, "${items.size} 部")),
+                  )
+              }
+              _state.value = state
               catalogRetry = 0
               // SQLite is authoritative, including a valid empty result; keep a bounded preview in memory.
               return
@@ -444,51 +505,56 @@ class VodRepository(
                     try {
                         val snapshot = s.snapshot(refresh = force)
                         SourceResult(s, snapshot, null)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
                     } catch (e: Exception) {
                         SourceResult(s, null, e)
                     }
                 }
             }.awaitAll()
 
-            val cats = linkedMapOf<String, Category>()
-            val allItems = mutableListOf<VodItem>()
-            val states = mutableListOf<SourceState>()
-            for (r in results) {
-                states += if (r.snapshot != null) {
-                    r.snapshot.categories.forEach { c -> cats.putIfAbsent(c.id, c) }
-                    allItems += r.snapshot.items
-                    SourceState(r.source.id, r.source.displayName, true, "${r.snapshot.items.size} 部")
-                } else {
-                    SourceState(r.source.id, r.source.displayName, false, r.error?.message ?: "加载失败")
+            val merged = withContext(Dispatchers.Default) {
+                val cats = linkedMapOf<String, Category>()
+                val allItems = mutableListOf<VodItem>()
+                val states = mutableListOf<SourceState>()
+                for (r in results) {
+                    states += if (r.snapshot != null) {
+                        r.snapshot.categories.forEach { c -> cats.putIfAbsent(c.id, c) }
+                        allItems += r.snapshot.items
+                        SourceState(r.source.id, r.source.displayName, true, "${r.snapshot.items.size} 部")
+                    } else {
+                        SourceState(r.source.id, r.source.displayName, false, r.error?.message ?: "加载失败")
+                    }
                 }
+                val groups = allItems.groupBy { it.normTitle }
+                /* 2026-09-18 用户报障「影视界面崩了」：空结果绝不覆盖已有目录。
+                   内嵌后端在热更解压 / 冷启动期（Chaquopy + 36MB 包解压 + 快照装载）可能
+                   十几秒还没就绪，首轮 refresh 的 5 路 /vod/home 会集体连接失败；旧实现
+                   仍然把目录替换成「有分类、0 条目」的空目录 → 影视页 hero 退化成空底板
+                   （OtvColors.Panel）、片库分类卡与三栏全空，且本次会话不再重试。
+                   现在：有旧目录就保留并后台退避重试；一次都没成功过才写入空目录。 */
+                val previous = _state.value.catalog
+                val retainedPrevious = allItems.isEmpty() && previous != null && previous.dedupedItems.isNotEmpty()
+                val state = CatalogState(
+                    loading = false,
+                    catalog = if (retainedPrevious) previous else Aggregated(
+                        categories = cats.values.toList(),
+                        dedupedItems = groups.map { it.value.first() },
+                        groups = groups,
+                    ),
+                    sourceStates = states,
+                )
+                val snapshotToWrite = if (!retainedPrevious && results.any { it.snapshot != null }) {
+                    cats.values.toList() to allItems.toList()
+                } else {
+                    null
+                }
+                CatalogRefreshMerge(state, allItems.isNotEmpty(), snapshotToWrite)
             }
-            val groups = allItems.groupBy { it.normTitle }
-            /* 2026-09-18 用户报障「影视界面崩了」：空结果绝不覆盖已有目录。
-               内嵌后端在热更解压 / 冷启动期（Chaquopy + 36MB 包解压 + 快照装载）可能
-               十几秒还没就绪，首轮 refresh 的 5 路 /vod/home 会集体连接失败；旧实现
-               仍然把目录替换成「有分类、0 条目」的空目录 → 影视页 hero 退化成空底板
-               （OtvColors.Panel）、片库分类卡与三栏全空，且本次会话不再重试。
-               现在：有旧目录就保留并后台退避重试；一次都没成功过才写入空目录。 */
-            val previous = _state.value.catalog
-            if (allItems.isEmpty() && previous != null && previous.dedupedItems.isNotEmpty()) {
-                _state.value = CatalogState(loading = false, catalog = previous, sourceStates = states)
-                scheduleCatalogRetry()
-                return@coroutineScope
-            }
-            _state.value = CatalogState(
-                loading = false,
-                catalog = Aggregated(
-                    categories = cats.values.toList(),
-                    dedupedItems = groups.map { it.value.first() },
-                    groups = groups,
-                ),
-                sourceStates = states,
-            )
-            if (allItems.isEmpty()) scheduleCatalogRetry() else catalogRetry = 0
+            _state.value = merged.state
+            if (merged.hasItems) catalogRetry = 0 else scheduleCatalogRetry()
             // v1.10 目录磁盘快照：任一真实源成功才落盘（演示兜底不落），下次启动秒开
-            if (results.any { it.snapshot != null }) {
-                val catsOut = cats.values.toList()
-                val itemsOut = allItems.toList()
+            merged.snapshotToWrite?.let { (catsOut, itemsOut) ->
                 repoScope.launch { runCatching { writeSnapshot(catsOut, itemsOut) } }
             }
           }

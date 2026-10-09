@@ -562,10 +562,12 @@ private fun LiveHeroBand(
         AsyncImage(
             // v1.10：全局放开硬件位图后，仅 hero 大图按请求走软件解码
             // （超宽海报在个别 GPU 硬件位图解码失败 = 图空白，v1.4 实测）
-            model = coil.request.ImageRequest.Builder(heroCtx)
-                .data(Graph.live.posterUrl(posterIdx))
-                .allowHardware(false)
-                .build(),
+            model = remember(heroCtx, posterIdx) {
+                coil.request.ImageRequest.Builder(heroCtx)
+                    .data(Graph.live.posterUrl(posterIdx))
+                    .allowHardware(false)
+                    .build()
+            },
             contentDescription = null,
             contentScale = ContentScale.Crop,
             // 需求 足球#3：海报加载失败落日志（黑屏观感可能是海报没出+背景全黑）

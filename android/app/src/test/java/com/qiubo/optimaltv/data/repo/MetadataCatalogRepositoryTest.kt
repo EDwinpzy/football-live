@@ -6,15 +6,25 @@ import com.qiubo.optimaltv.BuildConfig
 import com.qiubo.optimaltv.data.catalog.MetadataCatalogStore
 import com.qiubo.optimaltv.data.prefs.SettingsStore
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 import kotlin.concurrent.thread
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -54,6 +64,232 @@ class MetadataCatalogRepositoryTest {
             directory.deleteRecursively()
         }
     }
+
+    @Test
+    fun `simultaneous ordinary refresh calls share one active request`() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val requestEntered = CountDownLatch(1)
+        val releaseRequest = CountDownLatch(1)
+        val manifestRequests = AtomicInteger()
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            if (request.url.encodedPath == "/metadata/manifest.json") {
+                manifestRequests.incrementAndGet()
+                requestEntered.countDown()
+                check(releaseRequest.await(10, TimeUnit.SECONDS))
+                jsonResponse(request, 200, currentCatalogManifest())
+            } else {
+                jsonResponse(request, 503, "{}")
+            }
+        }.build()
+        val fixture = createRefreshFixture(context, client)
+
+        try {
+            val first = async(start = CoroutineStart.UNDISPATCHED) { fixture.repository.refresh() }
+            awaitLatch(requestEntered)
+            val second = async(start = CoroutineStart.UNDISPATCHED) { fixture.repository.refresh() }
+            val third = async(start = CoroutineStart.UNDISPATCHED) { fixture.repository.refresh() }
+
+            assertEquals(1, manifestRequests.get())
+            releaseRequest.countDown()
+            withTimeout(10_000L) {
+                first.await()
+                second.await()
+                third.await()
+            }
+
+            assertEquals(1, manifestRequests.get())
+            assertTrue(fixture.repository.state.value.catalog?.dedupedItems?.isNotEmpty() == true)
+            assertFalse(fixture.repository.state.value.loading)
+        } finally {
+            releaseRequest.countDown()
+            fixture.cleanup()
+        }
+    }
+
+    @Test
+    fun `forced refreshes share one follow up after an ordinary refresh`() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val requestEntered = CountDownLatch(1)
+        val releaseRequest = CountDownLatch(1)
+        val manifestRequests = AtomicInteger()
+        val packageRequests = AtomicInteger()
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            if (request.url.encodedPath == "/metadata/manifest.json") {
+                if (manifestRequests.incrementAndGet() == 1) {
+                    requestEntered.countDown()
+                    check(releaseRequest.await(10, TimeUnit.SECONDS))
+                }
+                jsonResponse(request, 200, currentCatalogManifest())
+            } else {
+                packageRequests.incrementAndGet()
+                jsonResponse(request, 503, "offline")
+            }
+        }.build()
+        // Preview queries remain usable; only the forced full-schema integrity check detects this omission.
+        val fixture = createRefreshFixture(context, client, omitRequiredSearchDocColumn = true)
+
+        try {
+            val ordinary = async(start = CoroutineStart.UNDISPATCHED) { fixture.repository.refresh() }
+            awaitLatch(requestEntered)
+            val forcedOne = async(start = CoroutineStart.UNDISPATCHED) { fixture.repository.refresh(force = true) }
+            val forcedTwo = async(start = CoroutineStart.UNDISPATCHED) { fixture.repository.refresh(force = true) }
+
+            assertEquals(1, manifestRequests.get())
+            assertEquals(0, packageRequests.get())
+            releaseRequest.countDown()
+            withTimeout(10_000L) {
+                ordinary.await()
+                forcedOne.await()
+                forcedTwo.await()
+            }
+
+            assertEquals("two manifests means one ordinary pass and one shared forced pass", 2, manifestRequests.get())
+            assertEquals("forced integrity validation must still run", 1, packageRequests.get())
+            assertFalse(fixture.repository.state.value.loading)
+        } finally {
+            releaseRequest.countDown()
+            fixture.cleanup()
+        }
+    }
+
+    @Test
+    fun `cancelling one refresh waiter does not cancel the shared refresh`() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val requestEntered = CountDownLatch(1)
+        val releaseRequest = CountDownLatch(1)
+        val manifestRequests = AtomicInteger()
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            if (request.url.encodedPath == "/metadata/manifest.json") {
+                manifestRequests.incrementAndGet()
+                requestEntered.countDown()
+                check(releaseRequest.await(10, TimeUnit.SECONDS))
+                jsonResponse(request, 200, currentCatalogManifest())
+            } else {
+                jsonResponse(request, 503, "{}")
+            }
+        }.build()
+        val fixture = createRefreshFixture(context, client)
+
+        try {
+            val cancelledWaiter = async(start = CoroutineStart.UNDISPATCHED) { fixture.repository.refresh() }
+            awaitLatch(requestEntered)
+            val survivingWaiter = async(start = CoroutineStart.UNDISPATCHED) { fixture.repository.refresh() }
+            cancelledWaiter.cancel()
+            assertTrue(runCatching { cancelledWaiter.await() }.exceptionOrNull() is CancellationException)
+
+            assertEquals(1, manifestRequests.get())
+            releaseRequest.countDown()
+            withTimeout(10_000L) { survivingWaiter.await() }
+
+            assertEquals(1, manifestRequests.get())
+            assertTrue(fixture.repository.state.value.catalog?.dedupedItems?.isNotEmpty() == true)
+            assertFalse(fixture.repository.state.value.loading)
+        } finally {
+            releaseRequest.countDown()
+            fixture.cleanup()
+        }
+    }
+
+    @Test
+    fun `concurrent refresh waiters receive the same failure and loading resets`() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val requestEntered = CountDownLatch(1)
+        val releaseRequest = CountDownLatch(1)
+        val manifestRequests = AtomicInteger()
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            if (request.url.encodedPath == "/metadata/manifest.json") {
+                manifestRequests.incrementAndGet()
+                requestEntered.countDown()
+                check(releaseRequest.await(10, TimeUnit.SECONDS))
+                throw AssertionError("refresh failure sentinel")
+            }
+            jsonResponse(request, 503, "{}")
+        }.build()
+        val fixture = createRefreshFixture(context, client)
+
+        try {
+            val first = async(start = CoroutineStart.UNDISPATCHED) {
+                captureFailure { fixture.repository.refresh() }
+            }
+            awaitLatch(requestEntered)
+            val second = async(start = CoroutineStart.UNDISPATCHED) {
+                captureFailure { fixture.repository.refresh() }
+            }
+            val third = async(start = CoroutineStart.UNDISPATCHED) {
+                captureFailure { fixture.repository.refresh() }
+            }
+
+            releaseRequest.countDown()
+            val failures = withTimeout(10_000L) { listOf(first.await(), second.await(), third.await()) }
+
+            assertTrue(failures.all { it is AssertionError && it.message == "refresh failure sentinel" })
+            assertEquals(1, manifestRequests.get())
+            assertFalse(fixture.repository.state.value.loading)
+        } finally {
+            releaseRequest.countDown()
+            fixture.cleanup()
+        }
+    }
+
+    private data class RefreshFixture(
+        val repository: VodRepository,
+        private val directory: File,
+        private val snapshot: File,
+    ) {
+        fun cleanup() {
+            directory.deleteRecursively()
+            snapshot.delete()
+        }
+    }
+
+    private suspend fun createRefreshFixture(
+        context: Context,
+        client: OkHttpClient,
+        omitRequiredSearchDocColumn: Boolean = false,
+    ): RefreshFixture {
+        val directory = File(context.filesDir, "metadata-catalog")
+        directory.deleteRecursively()
+        directory.mkdirs()
+        writeInstalledMetadataDatabase(
+            File(directory, "metadata.sqlite"),
+            omitRequiredSearchDocColumn = omitRequiredSearchDocColumn,
+        )
+        val snapshot = File(context.filesDir, "catalog_snapshot.json").apply { delete() }
+        val settings = SettingsStore(context)
+        settings.setHhkanBase("")
+        return RefreshFixture(VodRepository(settings, client, context), directory, snapshot)
+    }
+
+    private suspend fun awaitLatch(latch: CountDownLatch) {
+        assertTrue(withContext(Dispatchers.IO) { latch.await(5, TimeUnit.SECONDS) })
+    }
+
+    private suspend fun captureFailure(block: suspend () -> Unit): Throwable? = try {
+        block()
+        null
+    } catch (failure: Throwable) {
+        failure
+    }
+
+    private fun currentCatalogManifest(): String {
+        val digest = "0".repeat(64)
+        return """
+            {"schema":3,"latest_version":"2026092401","full":{"version":"2026092401","url":"/metadata/full.gz","sha256":"$digest","size":1,"compression":"gzip","uncompressed_size":1,"uncompressed_sha256":"$digest"},"deltas":[]}
+        """.trimIndent()
+    }
+
+    private fun jsonResponse(request: Request, status: Int, body: String): Response =
+        Response.Builder()
+            .request(request)
+            .protocol(Protocol.HTTP_1_1)
+            .code(status)
+            .message(if (status in 200..299) "OK" else "Test response")
+            .body(body.toResponseBody("application/json".toMediaType()))
+            .build()
 
     @Test
     fun `目录快照读取和写入都限定大小`() {
@@ -652,6 +888,7 @@ class MetadataCatalogRepositoryTest {
         media: List<InstalledMedia> = listOf(
             InstalledMedia(10000013L, "本地影片", 1993, 5.0, 0L, "1291546"),
         ),
+        omitRequiredSearchDocColumn: Boolean = false,
     ) {
         val db = SQLiteDatabase.openOrCreateDatabase(file, null)
         db.execSQL("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -688,12 +925,19 @@ class MetadataCatalogRepositoryTest {
         db.execSQL("CREATE TABLE rating (media_id INTEGER, provider TEXT, score REAL, vote_count INTEGER, updated_at INTEGER, PRIMARY KEY(media_id, provider))")
         media.forEach { row -> db.execSQL("INSERT INTO rating VALUES (?, 'douban', 9.6, 1000, 0)", arrayOf(row.id)) }
         db.execSQL("CREATE TABLE image (id INTEGER PRIMARY KEY, media_id INTEGER, image_type TEXT, original_url TEXT, cached_url TEXT, width INTEGER, height INTEGER, UNIQUE(media_id, image_type))")
-        db.execSQL("CREATE TABLE search_doc (media_id INTEGER PRIMARY KEY, title_norm TEXT, aliases_norm TEXT, pinyin TEXT, pinyin_alts TEXT, initials TEXT, initials_alts TEXT, people_norm TEXT, people_pinyin TEXT, genres_norm TEXT, popularity REAL, year INTEGER)")
+        val searchDocSchema = if (omitRequiredSearchDocColumn) {
+            "CREATE TABLE search_doc (media_id INTEGER PRIMARY KEY, title_norm TEXT, aliases_norm TEXT, pinyin TEXT, pinyin_alts TEXT, initials TEXT, people_norm TEXT, people_pinyin TEXT, genres_norm TEXT, popularity REAL, year INTEGER)"
+        } else {
+            "CREATE TABLE search_doc (media_id INTEGER PRIMARY KEY, title_norm TEXT, aliases_norm TEXT, pinyin TEXT, pinyin_alts TEXT, initials TEXT, initials_alts TEXT, people_norm TEXT, people_pinyin TEXT, genres_norm TEXT, popularity REAL, year INTEGER)"
+        }
+        db.execSQL(searchDocSchema)
         media.forEach { row ->
-            db.execSQL(
-                "INSERT INTO search_doc VALUES (?, ?, '', '', '', '', '', '', '', '剧情', ?, ?)",
-                arrayOf(row.id, row.title, row.popularity, row.year),
-            )
+            val insert = if (omitRequiredSearchDocColumn) {
+                "INSERT INTO search_doc VALUES (?, ?, '', '', '', '', '', '', '剧情', ?, ?)"
+            } else {
+                "INSERT INTO search_doc VALUES (?, ?, '', '', '', '', '', '', '', '剧情', ?, ?)"
+            }
+            db.execSQL(insert, arrayOf(row.id, row.title, row.popularity, row.year))
         }
         runCatching {
             db.execSQL("CREATE VIRTUAL TABLE search_fts USING fts5(media_id UNINDEXED, title, aliases, pinyin, initials, people, genres, prefix='2 3 4')")

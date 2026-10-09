@@ -54,6 +54,44 @@ const DOUBAN_IMG_RE = /^(https?:\/\/)img\d+\.doubanio\.com/i;
 /* Douban CDN 图片走 /hhkan/proxy：服务端补豆瓣 Referer、轮换镜像并缓存海报。 */
 const DOUBAN_ANY_RE = /^(https?:\/\/)([a-z0-9-]+\.)*douban(io)?\.com/i;
 const DOUBAN_RELAY_PREFIX = "/hhkan/proxy?u=";
+const imageFallbackStates = new WeakMap();
+const handledImageFallbackEvents = new WeakSet();
+const MAX_IMAGE_FALLBACK_RETRIES = DOUBAN_IMG_HOSTS.length + 1;
+function retryImageFallback(image, event = null) {
+  if (!image) return false;
+  /* A capture listener and the target handler can see the same Event. Treat the
+     already-issued retry as handled so the target does not fail the candidate. */
+  if (event && handledImageFallbackEvents.has(event)) return true;
+  const failedSrc = image.getAttribute("src") || "";
+  if (!failedSrc) return false;
+  let state = imageFallbackStates.get(image);
+  if (!state) state = { retries: 0, lastFailedSrc: "" };
+  /* Capture and element handlers must never retry the same failed source twice. */
+  if (state.lastFailedSrc === failedSrc || state.retries >= MAX_IMAGE_FALLBACK_RETRIES) return false;
+
+  let nextSrc = "";
+  if (image.dataset && image.dataset.fbk !== "1") {
+    const proxyMatch = failedSrc.match(/\/hhkan\/proxy\?u=([^&]+)/);
+    if (proxyMatch) {
+      image.dataset.fbk = "1";
+      try { nextSrc = decodeURIComponent(proxyMatch[1]); } catch (e) { /* keep the original source */ }
+    }
+  }
+  if (!nextSrc && DOUBAN_IMG_RE.test(failedSrc)) {
+    const host = (failedSrc.match(/^https?:\/\/([^/]+)/i) || [])[1] || "";
+    const index = DOUBAN_IMG_HOSTS.indexOf(host);
+    const nextHost = DOUBAN_IMG_HOSTS[index < 0 ? 0 : index + 1];
+    if (nextHost) nextSrc = failedSrc.replace(DOUBAN_IMG_RE, "$1" + nextHost);
+  }
+  if (!nextSrc || nextSrc === failedSrc) return false;
+
+  try { image.src = nextSrc; } catch (e) { return false; }
+  state.lastFailedSrc = failedSrc;
+  state.retries++;
+  imageFallbackStates.set(image, state);
+  if (event) handledImageFallbackEvents.add(event);
+  return true;
+}
 function doubanImg(u) {
   /* imgN 与 asset 图床都要求豆瓣 Referer；/hhkan/proxy 同时提供服务端镜像轮换和海报缓存。 */
   if (DOUBAN_ANY_RE.test(u))
@@ -63,22 +101,7 @@ function doubanImg(u) {
 document.addEventListener("error", ev => {
   const el = ev.target;
   if (!el || el.tagName !== "IMG") return;
-  const src = el.getAttribute("src") || "";
-  /* 好好看 vres 封面：本地走中继时若中继本身失败（罕见），回落直连原图。
-     云端本就是直连，无需再兜。data-fallback 记一次防循环。 */
-  if (el.dataset && el.dataset.fbk !== "1") {
-    const m = src.match(/\/hhkan\/proxy\?u=([^&]+)/);
-    if (m) {
-      el.dataset.fbk = "1";
-      try { el.src = decodeURIComponent(m[1]); } catch (e) { /* 保持原样 */ }
-      return;
-    }
-  }
-  if (!DOUBAN_IMG_RE.test(src)) return;
-  const host = (src.match(/^https?:\/\/([^/]+)/i) || [])[1] || "";
-  const i = DOUBAN_IMG_HOSTS.indexOf(host);
-  const next = DOUBAN_IMG_HOSTS[i < 0 ? 0 : i + 1];
-  if (next) el.src = src.replace(DOUBAN_IMG_RE, "$1" + next);
+  retryImageFallback(el, ev);
 }, true);
 
 /* 是否本地内嵌后端（App 里 Chaquopy 跑的 127.0.0.1:8090）。
@@ -428,44 +451,173 @@ function applyGridCols(sel, cardW, gap, sidePad) {
 addEventListener("resize", () => setTimeout(() => GRIDS.forEach(g => applyGridCols(...g)), 60));
 
 /* ---------------- hero 海报带切换动画（需求⑦：左右切换影片/比赛时交叉淡入） ---------------- */
-function heroSwap(band, url) {
-  const cur = band.querySelector("img.hero-img");
-  if (!cur) return;
-  if (cur.dataset.url === url) return;
-  if (band.dataset.swapping === url) return;
-  band.dataset.swapping = url;
-  const nx = document.createElement("img");
-  nx.className = "hero-img"; nx.alt = ""; nx.decoding = "async"; nx.fetchPriority = "high";
-  /* 2026-09-18：新图必须继承 id（首屏静态 HTML 的 #vodHeroImg / #liveHeroImg）。
-     旧实现换图后 id 丢失，之后任何一次「heroes 为空」的重绘都会在
-     $("#vodHeroImg").removeAttribute("src") 上抛 TypeError，把 renderVodHero 之后的
-     renderHistRow/renderCatChips/renderVodLib 全部带走——影视页只剩一条空底板。 */
-  if (cur.id) nx.id = cur.id;
-  nx.dataset.url = url; nx.src = url;
-  nx.style.opacity = "0";
-  cur.after(nx);   /* 新图在上层淡入，盖住旧图后移除 */
-  /* 不用 requestAnimationFrame：后台标签页/部分 WebView 挂起 rAF（实测 IAB 永不回调，
-     hero 会停在 opacity:0 黑屏）。过渡改由强制回流触发，任何环境都成立。 */
-  nx.style.transition = "opacity .45s ease";
-  void nx.offsetWidth;
-  nx.style.opacity = "1";
-  setTimeout(() => {
-    cur.remove();
-    delete band.dataset.swapping;
-    /* 兜底：渲染挂起环境（IAB/后台 WebView）transition 时钟冻结，computed opacity
-     * 停在 0——transition:none + 强制回流解除冻结，退化为瞬时切换也绝不黑屏 */
-    nx.style.transition = "none";
-    nx.style.opacity = "1";
-    void nx.offsetWidth;
-    if (band.querySelector("img.hero-img") !== nx) nx.remove();   /* 极端竞态兜底 */
+const heroSwapStates = new WeakMap();
+function prepareHeroImage(image, url) {
+  let settled = false, decodeStarted = false, resolveLoad, rejectLoad;
+  const promise = new Promise((resolve, reject) => { resolveLoad = resolve; rejectLoad = reject; });
+  const cleanup = () => { image.onload = null; image.onerror = null; };
+  const fail = error => {
+    if (settled) return;
+    settled = true; cleanup(); rejectLoad(error || new Error("hero image failed to load"));
+  };
+  const decode = () => {
+    if (settled || decodeStarted) return;
+    decodeStarted = true;
+    if (!image.naturalWidth) { fail(new Error("hero image has no decoded pixels")); return; }
+    let decoded;
+    try { decoded = typeof image.decode === "function" ? image.decode() : Promise.resolve(); }
+    catch (error) { fail(error); return; }
+    Promise.resolve(decoded).then(() => {
+      if (settled) return;
+      if (!image.naturalWidth) { fail(new Error("hero image decode produced no pixels")); return; }
+      settled = true; cleanup(); resolveLoad(image);
+    }, fail);
+  };
+  image.onload = decode;
+  image.onerror = event => {
+    if (!retryImageFallback(image, event)) fail(new Error("hero image failed to load"));
+  };
+  try {
+    image.src = url;
+    if (image.complete && image.naturalWidth > 0) decode();
+  } catch (error) { fail(error); }
+  return {
+    promise,
+    cancel() {
+      if (settled) return;
+      settled = true; cleanup(); image.removeAttribute("src");
+      rejectLoad(new Error("hero image request superseded"));
+    },
+  };
+}
+function cancelHeroPending(state) {
+  if (!state.pending) return;
+  const pending = state.pending;
+  state.pending = null;
+  pending.load.cancel();
+  pending.image.removeAttribute("src");
+}
+function cancelHeroTransition(state) {
+  const transition = state.transition;
+  if (!transition) return;
+  clearTimeout(transition.timer);
+  transition.animation?.cancel();
+  transition.next.classList.remove("hero-swap-in");
+  transition.next.remove();
+  transition.current.style.opacity = "1";
+  state.transition = null;
+}
+function completeHeroTransition(band, state, transition) {
+  if (state.transition !== transition) return;
+  transition.current.remove();
+  transition.animation?.cancel();
+  transition.next.classList.remove("hero-swap-in");
+  transition.next.style.opacity = "1";
+  state.current = transition.next;
+  state.transition = null;
+  const pending = state.pending;
+  if (pending && pending.ready) {
+    state.pending = null;
+    commitHeroImage(band, state, pending.image);
+  }
+}
+function commitHeroImage(band, state, image) {
+  const current = state.current;
+  /* Keep the stable id on the attached image while loading. Transfer it only when
+     the decoded candidate is ready to enter the cross-fade. */
+  if (current.id) image.id = current.id;
+  image.className = "hero-img";
+  image.style.opacity = "1";
+  current.after(image);
+  const animation = typeof image.animate === "function"
+    ? image.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 450, easing: "ease" })
+    : null;
+  if (!animation) image.classList.add("hero-swap-in");
+  const transition = { current, next: image, animation, timer: 0 };
+  transition.timer = setTimeout(() => {
+    completeHeroTransition(band, state, transition);
   }, 520);
+  state.transition = transition;
+}
+function heroSwap(band, url) {
+  if (!band || !url) return;
+  let state = heroSwapStates.get(band);
+  if (!state) {
+    const current = band.querySelector("img.hero-img");
+    if (!current) return;
+    state = { current, pending: null, transition: null, sequence: 0 };
+    heroSwapStates.set(band, state);
+  }
+
+  if (state.pending && state.pending.url === url) return;
+  if (state.transition && state.transition.next.dataset.url === url) {
+    state.sequence++;
+    cancelHeroPending(state);
+    return;
+  }
+  if (state.current.dataset.url === url && state.current.getAttribute("src") &&
+      state.current.complete && state.current.naturalWidth > 0) {
+    state.sequence++;
+    cancelHeroPending(state);
+    cancelHeroTransition(state);
+    return;
+  }
+
+  const sequence = ++state.sequence;
+  cancelHeroPending(state);
+
+  const image = document.createElement("img");
+  image.className = "hero-img"; image.alt = ""; image.decoding = "async"; image.fetchPriority = "high";
+  image.dataset.url = url;
+  const pending = { image, url, sequence, load: null };
+  state.pending = pending;
+  pending.load = prepareHeroImage(image, url);
+  pending.load.promise.then(() => {
+    if (state.pending !== pending || state.sequence !== sequence) return;
+    pending.ready = true;
+    if (state.transition) return;
+    state.pending = null;
+    commitHeroImage(band, state, image);
+  }, () => {
+    if (state.pending !== pending || state.sequence !== sequence) return;
+    state.pending = null;
+    image.removeAttribute("src");
+  });
+}
+function clearHeroSwap(band) {
+  if (!band) return;
+  const state = heroSwapStates.get(band);
+  if (state) {
+    state.sequence++;
+    cancelHeroPending(state);
+    cancelHeroTransition(state);
+  }
+  const current = state ? state.current : band.querySelector("img.hero-img");
+  if (current) {
+    current.removeAttribute("src");
+    delete current.dataset.url;
+    current.style.opacity = "1";
+  }
+  heroSwapStates.delete(band);
 }
 /* hero 文案列轻位移淡入（与海报同步换内容时） */
+const refadeAnimations = new WeakMap();
 function refade(el) {
   if (!el) return;
+  refadeAnimations.get(el)?.cancel();
+  if (typeof el.animate === "function") {
+    const animation = el.animate(
+      [{ opacity: .25, transform: "translateY(6px)" }, { opacity: 1, transform: "translateY(0)" }],
+      { duration: 450, easing: "ease" }
+    );
+    refadeAnimations.set(el, animation);
+    animation.onfinish = () => {
+      if (refadeAnimations.get(el) === animation) refadeAnimations.delete(el);
+    };
+    return;
+  }
   el.classList.remove("fade-swap");
-  void el.offsetWidth;
-  el.classList.add("fade-swap");
+  setTimeout(() => el.classList.add("fade-swap"), 0);
 }
 
 /* ---------------- 手势返回（竖屏适配④：左缘右滑 = 返回） ---------------- */
@@ -1885,8 +2037,7 @@ function renderVodHero() {
   vod.heroes = heroes;
   const c = heroes[vod.heroIdx || 0];
   if (!c) {
-    const im = $("#vodHeroImg");
-    if (im) im.removeAttribute("src");
+    clearHeroSwap($("#vodHero"));
     $("#vodDots").innerHTML = "";
     return;
   }
@@ -2140,9 +2291,14 @@ async function loadAllPage(reset) {
   }
 }
 /* 触底自动加载 */
+let allScrollFrame = 0;
 addEventListener("scroll", () => {
-  if ($("#pAll").hidden) return;
-  if (scrollY + innerHeight >= document.documentElement.scrollHeight - 4 * (352 + 30) * state.zoom) loadAllPage(false);
+  if (allScrollFrame || $("#pAll").hidden) return;
+  allScrollFrame = requestAnimationFrame(() => {
+    allScrollFrame = 0;
+    if ($("#pAll").hidden) return;
+    if (scrollY + innerHeight >= document.documentElement.scrollHeight - 4 * (352 + 30) * state.zoom) loadAllPage(false);
+  });
 }, { passive: true });
 $("#allMore").addEventListener("click", () => loadAllPage(false));
 
@@ -3666,8 +3822,8 @@ $("#cPlayBtn").addEventListener("click", () => {
 function updatePb() {
   const v = pv.video; if (!v || pv.seeking) return;
   const isLive = pv.ctx && pv.ctx.kind === "live";
-  if (v.duration && !isLive) $("#cFill").style.width = (v.currentTime / v.duration * 100) + "%";
-  $("#cPos").textContent = fmtTime(v.currentTime);
+  if (v.duration && !isLive) setPlayerProgress(v.currentTime / v.duration);
+  setPlayerPositionText(v.currentTime);
   $("#cDur").textContent = isLive ? "直播" : "-" + fmtTime((v.duration || 0) - v.currentTime);
   /* 观看时长里程碑：每次播放会话各报一次（直播不报时长）。 */
   if (!isLive) {
@@ -3675,33 +3831,77 @@ function updatePb() {
     else if (v.currentTime >= 300) metricMilestone("PLAY_5MIN");
   }
 }
+function setPlayerProgress(value) {
+  const fraction = Math.max(0, Math.min(1, Number(value) || 0));
+  const rail = $("#cFill").parentElement;
+  rail.style.setProperty("--progress-scale", fraction);
+  rail.style.setProperty("--progress-position", (fraction * 100) + "%");
+}
+function setPlayerPositionText(seconds) {
+  const label = fmtTime(seconds);
+  const position = $("#cPos");
+  if (position.textContent !== label) position.textContent = label;
+}
 /* 进度条：点按 + 拖动 scrub（App detectTapGestures + detectHorizontalDragGestures） */
 (function () {
   const track = $("#cTrack");
-  let scrub = null;
-  const fracOf = e => {
-    const rect = track.getBoundingClientRect();
+  const rail = track.querySelector(".ctl-rail");
+  let scrub = null, trackRect = null, scrubFrame = 0;
+  const fracOf = (e, rect) => {
     return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  };
+  const renderScrub = () => {
+    scrubFrame = 0;
+    if (scrub == null || !pv.video) return;
+    setPlayerProgress(scrub);
+    setPlayerPositionText(scrub * pv.video.duration);
+  };
+  const queueScrubRender = () => {
+    if (!scrubFrame) scrubFrame = requestAnimationFrame(renderScrub);
+  };
+  const cancelScrub = () => {
+    if (scrubFrame) cancelAnimationFrame(scrubFrame);
+    scrubFrame = 0;
+    scrub = null; trackRect = null; pv.seeking = false;
+    rail.classList.remove("seeking");
+    if (pv.video && pv.video.duration) {
+      setPlayerProgress(pv.video.currentTime / pv.video.duration);
+      setPlayerPositionText(pv.video.currentTime);
+    }
   };
   track.addEventListener("pointerdown", e => {
     const v = pv.video; if (!v || !v.duration) return;
+    /* Map the actual visible rail endpoints to 0..100%; side padding only
+       enlarges the hit target and naturally clamps to the nearest endpoint. */
+    trackRect = rail.getBoundingClientRect();
+    if (!trackRect.width) { trackRect = null; return; }
     track.setPointerCapture(e.pointerId);
     pv.seeking = true;
-    scrub = fracOf(e);
+    rail.classList.add("seeking");
+    scrub = fracOf(e, trackRect);
+    queueScrubRender();
   });
   track.addEventListener("pointermove", e => {
-    if (scrub == null) return;
-    scrub = fracOf(e);
-    $("#cFill").style.width = (scrub * 100) + "%";
-    $("#cPos").textContent = fmtTime(scrub * pv.video.duration);
+    if (scrub == null || !trackRect) return;
+    scrub = fracOf(e, trackRect);
+    queueScrubRender();
   });
   track.addEventListener("pointerup", e => {
-    if (scrub == null) return;
+    if (scrub == null || !trackRect) return;
     const v = pv.video;
-    v.currentTime = scrub * v.duration;
-    scrub = null; pv.seeking = false;
+    if (!v || !v.duration) { cancelScrub(); return; }
+    scrub = fracOf(e, trackRect);
+    if (scrubFrame) cancelAnimationFrame(scrubFrame);
+    scrubFrame = 0;
+    renderScrub();
+    const targetTime = scrub * v.duration;
+    scrub = null; trackRect = null; pv.seeking = false;
+    rail.classList.remove("seeking");
+    v.currentTime = targetTime;
     if (pv.ctx && pv.ctx.kind === "vod") showControls();
   });
+  track.addEventListener("pointercancel", cancelScrub);
+  track.addEventListener("lostpointercapture", () => { if (scrub != null) cancelScrub(); });
 })();
 
 /* 画幅（App aspectConstraint：原始 contain / 裁切填充 cover / 16:9 / 4:3 约束比例） */

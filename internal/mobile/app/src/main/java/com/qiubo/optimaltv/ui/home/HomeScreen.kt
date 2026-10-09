@@ -99,7 +99,8 @@ private const val VOD_HERO_BTN_BOTTOM_PORT = 50f
 @Composable
 fun VodScreen(nav: NavController) {
     val catalogState by Graph.repo.state.collectAsStateWithLifecycle()
-    val history by Graph.db.vodDao().historyFlow(12).collectAsStateWithLifecycle(initialValue = emptyList())
+    val historyFlow = remember { Graph.db.vodDao().historyFlow(12) }
+    val history by historyFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     val s = rememberUiScale()
     val portrait = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
         android.content.res.Configuration.ORIENTATION_PORTRAIT
@@ -111,8 +112,8 @@ fun VodScreen(nav: NavController) {
     /* 2026-09-18：进页兜底——目录为空（后端冷启动/热更重启期首轮抓取全失败）时补抓，
        否则 hero 会退化成空底板、分类卡与三栏全空。 */
     LaunchedEffect(Unit) {
-        Graph.repo.ensureCatalogFresh(force = true)
-        Graph.repo.refreshHome(force = true)
+        Graph.repo.ensureCatalogFresh()
+        Graph.repo.refreshHome()
     }
     val cat0 = catalogState.catalog
     val heroesTop = remember(cat0, home) { buildHeroes(cat0, home) }
@@ -350,10 +351,12 @@ private fun VodHeroBand(
                     AsyncImage(
                         // v1.10：ImageLoader 已放开硬件位图（低端机滚动性能），仅 hero 超宽图
                         //（3360×1080，硬件位图解码失败=图空白）按请求走软件解码
-                        model = coil.request.ImageRequest.Builder(heroCtx)
-                            .data(h.bg)
-                            .allowHardware(false)
-                            .build(),
+                        model = remember(heroCtx, h.bg) {
+                            coil.request.ImageRequest.Builder(heroCtx)
+                                .data(h.bg)
+                                .allowHardware(false)
+                                .build()
+                        },
                         contentDescription = h.title,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),

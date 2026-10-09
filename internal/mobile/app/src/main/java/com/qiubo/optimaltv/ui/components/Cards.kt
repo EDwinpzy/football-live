@@ -23,9 +23,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -53,10 +53,15 @@ fun PosterPlaceholder(seed: Int, modifier: Modifier = Modifier) {
 fun Modifier.tapCard(onClick: () -> Unit): Modifier = composed {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) 0.96f else 1f, label = "tapScale")
+    val scale = animateFloatAsState(if (pressed) 0.96f else 1f, label = "tapScale")
     this
         .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-        .scale(scale)
+        // Read animated state in the layer block so each press frame updates the transform
+        // without recomposing the card content or running layout again.
+        .graphicsLayer {
+            scaleX = scale.value
+            scaleY = scale.value
+        }
 }
 
 /**
