@@ -1,9 +1,9 @@
 package com.qiubo.optimaltv.ui.home
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,10 +17,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.PagerSnapDistance
+import androidx.compose.foundation.pager.VerticalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -38,6 +43,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -49,6 +55,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import coil.compose.AsyncImage
@@ -56,6 +64,7 @@ import com.qiubo.optimaltv.Graph
 import com.qiubo.optimaltv.data.db.HistoryEntity
 import com.qiubo.optimaltv.data.model.VodItem
 import com.qiubo.optimaltv.data.model.formatTime
+import com.qiubo.optimaltv.data.repo.VodRepository
 import com.qiubo.optimaltv.data.source.HhkanSource
 import com.qiubo.optimaltv.ui.components.FocusRegistry
 import com.qiubo.optimaltv.ui.components.InitialFocusEffect
@@ -106,10 +115,19 @@ private const val VOD_HERO_TEXT_MAX = 222f
 /** hero 播放钮距海报带底部（设计钮框 y 576..640，带高 700 → 底部留 60） */
 private const val VOD_HERO_BTN_BOTTOM = 60f
 
-/** 影视首页的 TV 分类与两行片库分页规则。 */
+/** 影视首页的 TV 分类与三页片库规则。 */
 internal object HomeLibraryUiPolicy {
-    const val PAGE_SIZE = 14
-    const val ROW_SIZE = 7
+    val PAGE_TITLES = listOf("最近热门", "最近更新", "豆瓣高分")
+
+    fun sourceSectionName(page: Int, available: List<String>): String? {
+        val aliases = when (page) {
+            0 -> listOf("最近热门", "近期热门")
+            1 -> listOf("最近更新", "最新上映", "最新上线")
+            2 -> listOf("豆瓣高分")
+            else -> return null
+        }
+        return aliases.firstOrNull(available::contains)
+    }
 
     fun orderedCategories(source: List<Pair<String, String>>): List<Pair<String, String>> {
         val result = source.map { (id, name) ->
@@ -124,23 +142,9 @@ internal object HomeLibraryUiPolicy {
         return result
     }
 
-    fun targetPageForDpad(page: Int, pageCount: Int, direction: Int): Int? {
-        val delta = when (direction) {
-            NAV_RIGHT -> 1
-            NAV_LEFT -> -1
-            else -> return null
-        }
-        return (page + delta).takeIf { pageCount > 0 && page in 0 until pageCount && it in 0 until pageCount }
-    }
-
-    /** A leftward swipe advances; a rightward swipe returns to the previous page. */
-    fun targetPageForSwipe(page: Int, pageCount: Int, dragPx: Float, thresholdPx: Float): Int? {
-        if (abs(dragPx) < thresholdPx.coerceAtLeast(0f)) return null
-        val direction = if (dragPx < 0f) NAV_RIGHT else NAV_LEFT
-        return targetPageForDpad(page, pageCount, direction)
-    }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun VodScreen(nav: NavController) {
     val catalogState by Graph.repo.state.collectAsStateWithLifecycle()
@@ -155,19 +159,6 @@ fun VodScreen(nav: NavController) {
     val cardReg = remember { FocusRegistry() }
     InitialFocusEffect(tabFocus, "vod-tab", enabled = returnKey == null)
     var restoredFocus by remember { mutableStateOf(false) }
-    LaunchedEffect(catalogState.catalog, history) {
-        val key = returnKey ?: return@LaunchedEffect
-        if (restoredFocus) return@LaunchedEffect
-        if (catalogState.catalog == null && history.isEmpty()) return@LaunchedEffect
-        restoredFocus = true
-        // "hero" 用播放钮自带的 heroBtnFocus（registry 里没有注册该 key）
-        val target = if (key == "hero") heroPlayFocus else cardReg.fr(key)
-        repeat(40) {
-            if (runCatching { target.requestFocus() }.isSuccess) return@LaunchedEffect
-            delay(100)
-        }
-        runCatching { tabFocus.requestFocus() }
-    }
 
     // hero 数据（原版 refreshVod 降级链：源站轮播 carousel≥3 优先 → 首页热门板块合并 → 目录前 6 兜底）
     val home by Graph.repo.homeFlow.collectAsStateWithLifecycle()
@@ -220,16 +211,6 @@ fun VodScreen(nav: NavController) {
             true
         } else false
     }
-    BackHandler {
-        val atTop = vodListState.firstVisibleItemIndex == 0 && vodListState.firstVisibleItemScrollOffset == 0
-        if (atTop && tabFocused) {
-            exitApp()
-        } else {
-            backScope.launch { vodListState.scrollToItem(0) }
-            runCatching { tabFocus.requestFocus() }
-        }
-    }
-
     Box(Modifier.fillMaxSize().background(OtvColors.Bg)) {
         val cat = catalogState.catalog
         when {
@@ -267,6 +248,110 @@ fun VodScreen(nav: NavController) {
                  * 甩到「最新上线」（用户看到按一下下键就滚过最近热门）。 */
                 val doubanSections by Graph.repo.sectionsFlow.collectAsStateWithLifecycle()
                 val sections = if (selCid == null) emptyList() else doubanSections[selCid].orEmpty()
+                val sectionPages = remember(sections) {
+                    val available = sections.map { it.name }
+                    HomeLibraryUiPolicy.PAGE_TITLES.mapIndexed { index, title ->
+                        val sourceName = HomeLibraryUiPolicy.sourceSectionName(index, available)
+                        title to sections.firstOrNull { it.name == sourceName }
+                    }
+                }
+                val returnPage = remember(returnKey, sectionPages) {
+                    sectionPages.indexOfFirst { (_, section) ->
+                        section?.items?.any { "lib:${section.name}:${it.id}" == returnKey } == true
+                    }.takeIf { it >= 0 } ?: 0
+                }
+                val sectionPagerState = rememberPagerState(
+                    initialPage = returnPage,
+                    pageCount = { HomeLibraryUiPolicy.PAGE_TITLES.size },
+                )
+                // Each title owns two persistent horizontal rows. Switching catalog categories resets them.
+                val sectionRowStates = List(HomeLibraryUiPolicy.PAGE_TITLES.size) {
+                    List(2) { rememberLazyListState() }
+                }
+                var libraryCardHasFocus by remember(selCid) { mutableStateOf(false) }
+                var lastLibraryRow by remember(selCid) { mutableIntStateOf(0) }
+                var lastLibraryColumn by remember(selCid) { mutableIntStateOf(0) }
+                val pageScope = androidx.compose.runtime.rememberCoroutineScope()
+
+                LaunchedEffect(selCid) {
+                    libraryCardHasFocus = false
+                    sectionPagerState.scrollToPage(0)
+                    sectionRowStates.flatten().forEach { it.scrollToItem(0) }
+                }
+                LaunchedEffect(returnKey, sectionPages) {
+                    val targetPage = sectionPages.indexOfFirst { (_, section) ->
+                        section?.items?.any { "lib:${section.name}:${it.id}" == returnKey } == true
+                    }
+                    if (targetPage >= 0) sectionPagerState.scrollToPage(targetPage)
+                }
+                LaunchedEffect(catalogState.catalog, history, sectionPages) {
+                    val key = returnKey ?: return@LaunchedEffect
+                    if (restoredFocus || (catalogState.catalog == null && history.isEmpty())) return@LaunchedEffect
+                    val targetPage = sectionPages.indexOfFirst { (_, section) ->
+                        section?.items?.any { "lib:${section.name}:${it.id}" == key } == true
+                    }
+                    if (key.startsWith("lib:") && targetPage < 0) return@LaunchedEffect
+                    restoredFocus = true
+                    if (targetPage >= 0) {
+                        val section = sectionPages[targetPage].second ?: return@LaunchedEffect
+                        val itemIndex = section.items.indexOfFirst { "lib:${section.name}:${it.id}" == key }
+                        val row = itemIndex % 2
+                        val column = itemIndex / 2
+                        runCatching { vodListState.scrollToItem(3) }
+                        sectionPagerState.scrollToPage(targetPage)
+                        sectionRowStates[targetPage][row].scrollToItem(column)
+                    }
+                    val target = if (key == "hero") heroPlayFocus else cardReg.fr(key)
+                    repeat(40) {
+                        if (runCatching { target.requestFocus() }.isSuccess) return@LaunchedEffect
+                        delay(100)
+                    }
+                    runCatching { tabFocus.requestFocus() }
+                }
+
+                fun requestLibraryFocus(page: Int, row: Int, column: Int) {
+                    val section = sectionPages.getOrNull(page)?.second ?: return
+                    val requestedRow = row.coerceIn(0, 1)
+                    val rowItems = section.items.filterIndexed { index, _ -> index % 2 == requestedRow }
+                    val targetRow = if (rowItems.isEmpty()) 1 - requestedRow else requestedRow
+                    val targetItems = if (targetRow == requestedRow) rowItems else {
+                        section.items.filterIndexed { index, _ -> index % 2 == targetRow }
+                    }
+                    if (targetItems.isEmpty()) return
+                    val targetColumn = column.coerceIn(0, targetItems.lastIndex)
+                    val item = targetItems[targetColumn]
+                    val key = "lib:${section.name}:${item.id}"
+                    pageScope.launch {
+                        sectionRowStates[page][targetRow].animateScrollToItem(targetColumn)
+                        repeat(24) {
+                            delay(40)
+                            if (runCatching { cardReg.fr(key).requestFocus() }.isSuccess) return@launch
+                        }
+                    }
+                }
+                fun moveLibraryPage(page: Int, row: Int, column: Int) {
+                    if (page !in sectionPages.indices) return
+                    lastLibraryRow = row
+                    lastLibraryColumn = column
+                    pageScope.launch { sectionPagerState.animateScrollToPage(page) }
+                }
+                LaunchedEffect(sectionPagerState.currentPage) {
+                    if (libraryCardHasFocus) {
+                        delay(70)
+                        requestLibraryFocus(sectionPagerState.currentPage, lastLibraryRow, lastLibraryColumn)
+                    }
+                }
+                BackHandler {
+                    val atTop = vodListState.firstVisibleItemIndex == 0 && vodListState.firstVisibleItemScrollOffset == 0
+                    if (sectionPagerState.currentPage > 0) {
+                        moveLibraryPage(sectionPagerState.currentPage - 1, lastLibraryRow, lastLibraryColumn)
+                    } else if (atTop && tabFocused) {
+                        exitApp()
+                    } else {
+                        backScope.launch { vodListState.scrollToItem(0) }
+                        runCatching { tabFocus.requestFocus() }
+                    }
+                }
                 val showLibLoading = sectionLoading && sections.isEmpty()
 
                 // 2026-09-19 跳行修复（用户报障「电视剧→动漫后往下光标乱跑」）：
@@ -279,13 +364,17 @@ fun VodScreen(nav: NavController) {
                 //    连滚 3 步超调 2~3 行才落点（实测日志：单次 DOWN 滚 ~1300px）。
                 // 改为一律显式定向：有内容 → 直接落首个非空板块首卡；无内容 → 消费
                 // 按键并挂起，板块到账后由下述 effect 定向落下。
-                val libFirstCard = sections.firstOrNull { it.items.isNotEmpty() }?.items?.firstOrNull()
+                val firstLibraryPage = sectionPages.indexOfFirst { it.second?.items?.isNotEmpty() == true }
+                val firstLibrarySection = sectionPages.getOrNull(firstLibraryPage)?.second
+                val libFirstCard = firstLibrarySection?.items?.firstOrNull()
                 /** chip DOWN 定向：滚到首板块标题（首行随之入视口）→ 落首卡（重试覆盖组合时延） */
                 fun dropToLibFirstCard() {
                     val first = libFirstCard ?: return
-                    val focusKey = "lib:${sections.first { it.items.isNotEmpty() }.name}:${first.id}"
-                    chipScope.launch {
-                        runCatching { vodListState.scrollToItem(3) }   // 0 hero / 1 history / 2 chips / 3 首板块标题
+                    val sourceName = firstLibrarySection?.name ?: return
+                    val focusKey = "lib:$sourceName:${first.id}"
+                    pageScope.launch {
+                        runCatching { vodListState.scrollToItem(3) }   // 0 hero / 1 history / 2 chips / 3 三页片库
+                        sectionPagerState.animateScrollToPage(firstLibraryPage)
                         repeat(20) {
                             if (runCatching { cardReg.fr(focusKey).requestFocus() }.isSuccess) return@launch
                             delay(60)
@@ -314,7 +403,7 @@ fun VodScreen(nav: NavController) {
                     if (android.os.SystemClock.uptimeMillis() - pendingLibDownAt > 10_000L) return@LaunchedEffect
                     dropToLibFirstCard()
                 }
-                // 整页单 LazyColumn：hero 海报带（随内容滚动）→ 最近观看 → 片库。
+                // 整页单 LazyColumn：hero 海报带（随内容滚动）→ 最近观看 → 分类与三页片库。
                 // v1.13：方向导航统一 OtvNav 引擎——容器仅声明滚动挂靠（未组合行的滚动找回）
                 val vodScroll = remember(vodListState) { lazyNavContainer(vodListState) }
                 ProvideNavScrolls(vertical = vodScroll) {
@@ -501,46 +590,53 @@ fun VodScreen(nav: NavController) {
                             modifier = Modifier.padding(start = 86f.sx(s), top = 40f.sx(s)),
                         )
                     }
-                } else if (sections.isNotEmpty()) {
-                    // lib-grid（column gap44 mt26）× lib-block（column gap18）：标题 38 Bold .92白 + wrap 行 34/28
-                    // 2026-09-07 需求①（跳行修复）：item key 必须用【板块名】而非板块序号 si——
-                    // 三块到货顺序 = 最新上线/最近更新（channel/latest，快）→ 最近热门（hot 被
-                    // awaitHome 卡住，最慢），而 blockOrder 把最近热门排在第 0 位：它迟到插入后，
-                    // 后续所有板块序号 +1，序号 key 的全部行 item 被 LazyColumn 视为不同项整体重建，
-                    // 聚焦卡片节点销毁 → 焦点被 Compose 甩给任意节点（实测闪跳到屏幕顶部旧节点）
-                    // 再靠锚点自愈——锚点坐标在新布局里已错位 N 行，落点即「跳行」。
-                    // 板块名在 merge() 里按名去重，作 key 天然唯一且与到货顺序无关：
-                    // 迟到板块 = 纯插入，已组合行保持身份，聚焦节点存活，光标原地稳定。
-                    sections.forEachIndexed { si, sec ->
-                        item(key = "lib-sec-h-${sec.name}") {
-                            Text(
-                                (if (sec.name == "最新上映") "最近更新" else sec.name), color = OtvColors.White.copy(alpha = 0.92f),
-                                fontSize = 38f.sxs(s), fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .padding(start = 80f.sx(s), end = 80f.sx(s))
-                                    .padding(top = (if (si == 0) 26f else 44f).sx(s))
-                                    .padding(bottom = 18f.sx(s)),
+                } else {
+                    item(key = "lib-vertical-three-pages") {
+                        VerticalPager(
+                            state = sectionPagerState,
+                            modifier = Modifier.fillParentMaxHeight().fillMaxWidth(),
+                            key = { page -> "vod-library-page-${HomeLibraryUiPolicy.PAGE_TITLES[page]}" },
+                            flingBehavior = PagerDefaults.flingBehavior(
+                                state = sectionPagerState,
+                                pagerSnapDistance = PagerSnapDistance.atMost(1),
+                                snapAnimationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioNoBouncy,
+                                    stiffness = Spring.StiffnessMediumLow,
+                                ),
+                            ),
+                        ) { page ->
+                            val (title, section) = sectionPages[page]
+                            LibrarySectionPage(
+                                nav = nav,
+                                title = title,
+                                items = section?.items.orEmpty(),
+                                sectionName = section?.name ?: title,
+                                page = page,
+                                pageCount = HomeLibraryUiPolicy.PAGE_TITLES.size,
+                                s = s,
+                                cardReg = cardReg,
+                                rowStates = sectionRowStates[page],
+                                onPageMove = ::moveLibraryPage,
+                                onCardFocusChanged = { row, column, gained ->
+                                    libraryCardHasFocus = gained
+                                    if (gained) {
+                                        lastLibraryRow = row
+                                        lastLibraryColumn = column
+                                    }
+                                },
+                                modifier = Modifier.graphicsLayer {
+                                    // Keep the subtle fade/scale in the draw layer so the slide does not
+                                    // trigger a whole-page recomposition on each animation frame.
+                                    val distance = abs(
+                                        sectionPagerState.currentPage - page - sectionPagerState.currentPageOffsetFraction,
+                                    ).coerceIn(0f, 1f)
+                                    alpha = 1f - distance * 0.16f
+                                    val scale = 1f - distance * 0.012f
+                                    scaleX = scale
+                                    scaleY = scale
+                                },
                             )
                         }
-                        if (sec.items.isEmpty()) {
-                            item(key = "lib-sec-empty-${sec.name}") {
-                                Text(
-                                    "暂无${sec.name}内容", color = OtvColors.White50, fontSize = 26f.sxs(s),
-                                    modifier = Modifier.padding(start = 80f.sx(s), end = 80f.sx(s)),
-                                )
-                            }
-                        } else {
-                            item(key = "lib-pages-$selCid-${sec.name}") {
-                                PagedLibSection(nav, sec.items, s, cardReg, returnKey, sec.name)
-                            }
-                        }
-                    }
-                } else {
-                    item(key = "lib-empty") {
-                        Text(
-                            "暂无内容", color = OtvColors.White50, fontSize = 26f.sxs(s),
-                            modifier = Modifier.padding(start = 80f.sx(s), top = 26f.sx(s)),
-                        )
                     }
                 }
                 item(key = "lib-pad") { Spacer(Modifier.height(80f.sx(s))) }
@@ -803,79 +899,93 @@ private fun VodHeroBand(
 }
 
 @Composable
-private fun PagedLibSection(nav: NavController, items: List<VodItem>, s: Float, cardReg: FocusRegistry, returnKey: String?, sectionName: String) {
-    val pages = remember(items) { items.chunked(HomeLibraryUiPolicy.PAGE_SIZE) }
-    var page by remember(items) { mutableIntStateOf(pages.indexOfFirst { rows -> rows.any { "lib:$sectionName:${it.id}" == returnKey } }.coerceAtLeast(0)) }
-    // Focus slot is intentionally non-observable: moving focus must not recompose all 14 cards.
-    val focusedSlot = remember(items) { intArrayOf(0) }
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
-    if (pages.isEmpty()) return
-    val current = pages[page]
-    fun turn(next: Int, slot: Int) {
-        if (next !in pages.indices) return
-        page = next
-        val target = "lib:$sectionName:${pages[next][slot.coerceIn(0, pages[next].lastIndex)].id}"
-        scope.launch {
-            repeat(20) {
-                delay(40)
-                if (runCatching { cardReg.fr(target).requestFocus() }.isSuccess) return@launch
-            }
-        }
+private fun LibrarySectionPage(
+    nav: NavController,
+    title: String,
+    items: List<VodItem>,
+    sectionName: String,
+    page: Int,
+    pageCount: Int,
+    s: Float,
+    cardReg: FocusRegistry,
+    rowStates: List<androidx.compose.foundation.lazy.LazyListState>,
+    onPageMove: (page: Int, row: Int, column: Int) -> Unit,
+    onCardFocusChanged: (row: Int, column: Int, gained: Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val rows = remember(items) {
+        listOf(
+            items.filterIndexed { index, _ -> index % 2 == 0 },
+            items.filterIndexed { index, _ -> index % 2 == 1 },
+        )
     }
     Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 80f.sx(s))
-            .pointerInput(page, pages.size) {
-                var horizontalDrag = 0f
-                detectHorizontalDragGestures(
-                    onDragStart = { horizontalDrag = 0f },
-                    onHorizontalDrag = { _, amount -> horizontalDrag += amount },
-                    onDragEnd = {
-                        HomeLibraryUiPolicy.targetPageForSwipe(
-                            page = page,
-                            pageCount = pages.size,
-                            dragPx = horizontalDrag,
-                            thresholdPx = viewConfiguration.touchSlop * 2f,
-                        )?.let { turn(it, focusedSlot[0]) }
-                    },
-                    onDragCancel = { horizontalDrag = 0f },
-                )
-            },
-        verticalArrangement = Arrangement.spacedBy(24f.sx(s)),
+        modifier = modifier.fillMaxSize().background(OtvColors.Bg).padding(top = 26f.sx(s), bottom = 16f.sx(s)),
+        verticalArrangement = Arrangement.spacedBy(18f.sx(s)),
     ) {
-        repeat(2) { row ->
-            Row(Modifier.fillMaxWidth().height(402f.sx(s)), horizontalArrangement = Arrangement.spacedBy(20f.sx(s))) {
-                repeat(HomeLibraryUiPolicy.ROW_SIZE) { col ->
-                    val slot = row * HomeLibraryUiPolicy.ROW_SIZE + col
-                    val item = current.getOrNull(slot)
-                    if (item == null) Spacer(Modifier.width(232f.sx(s))) else LibCard(
-                        nav, item, s, cardReg, "lib:$sectionName:${item.id}",
-                        onCardFocused = { focusedSlot[0] = slot },
-                    ) { dir ->
-                        when {
-                            dir == NAV_RIGHT && (col == HomeLibraryUiPolicy.ROW_SIZE - 1 || slot == current.lastIndex) -> {
-                                HomeLibraryUiPolicy.targetPageForDpad(page, pages.size, dir)?.let {
-                                    turn(it, row * HomeLibraryUiPolicy.ROW_SIZE)
-                                }
-                                true
-                            }
-                            dir == NAV_LEFT && col == 0 -> {
-                                HomeLibraryUiPolicy.targetPageForDpad(page, pages.size, dir)?.let {
-                                    turn(it, row * HomeLibraryUiPolicy.ROW_SIZE + HomeLibraryUiPolicy.ROW_SIZE - 1)
-                                }
-                                true
-                            }
-                            dir == NAV_DOWN && row == 0 && current.size > HomeLibraryUiPolicy.ROW_SIZE -> {
-                                val targetSlot = (slot + HomeLibraryUiPolicy.ROW_SIZE).coerceAtMost(current.lastIndex)
-                                runCatching { cardReg.fr("lib:$sectionName:${current[targetSlot].id}").requestFocus() }
-                                true
-                            }
-                            dir == NAV_UP && row == 1 -> {
-                                runCatching { cardReg.fr("lib:$sectionName:${current[col].id}").requestFocus() }
-                                true
-                            }
-                            else -> false
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 80f.sx(s)),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(title, color = OtvColors.White.copy(alpha = 0.92f), fontSize = 38f.sxs(s), fontWeight = FontWeight.Bold)
+            Text("${page + 1} / $pageCount", color = OtvColors.White50, fontSize = 22f.sxs(s))
+        }
+        if (items.isEmpty()) {
+            Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                Text("暂无${title}内容", color = OtvColors.White50, fontSize = 26f.sxs(s))
+            }
+        } else {
+            repeat(2) { row ->
+                val state = rowStates[row]
+                val rowItems = rows[row]
+                val rowScroll = remember(state) { lazyNavContainer(state) }
+                ProvideNavScrolls(horizontal = rowScroll) {
+                    LazyRow(
+                        state = state,
+                        modifier = Modifier.fillMaxWidth().height(402f.sx(s)),
+                        horizontalArrangement = Arrangement.spacedBy(20f.sx(s)),
+                        contentPadding = PaddingValues(horizontal = 80f.sx(s)),
+                    ) {
+                        items(rowItems.size, key = { column -> "lib:$sectionName:${rowItems[column].id}" }) { column ->
+                            val item = rowItems[column]
+                            LibCard(
+                                nav = nav,
+                                item = item,
+                                s = s,
+                                cardReg = cardReg,
+                                focusKey = "lib:$sectionName:${item.id}",
+                                onCardFocusChanged = { gained -> onCardFocusChanged(row, column, gained) },
+                                navOverride = { direction ->
+                                    when {
+                                        direction == NAV_DOWN && row == 0 -> {
+                                            if (rows[1].getOrNull(column) != null) {
+                                                runCatching { cardReg.fr("lib:$sectionName:${rows[1][column].id}").requestFocus() }
+                                            } else if (page + 1 < pageCount) {
+                                                onPageMove(page + 1, 0, column)
+                                            }
+                                            true
+                                        }
+                                        direction == NAV_DOWN && row == 1 -> {
+                                            if (page + 1 < pageCount) onPageMove(page + 1, 0, column)
+                                            true
+                                        }
+                                        direction == NAV_UP && row == 1 && rows[0].getOrNull(column) != null -> {
+                                            runCatching { cardReg.fr("lib:$sectionName:${rows[0][column].id}").requestFocus() }
+                                            true
+                                        }
+                                        direction == NAV_UP && row == 0 && page > 0 -> {
+                                            onPageMove(page - 1, 1, column)
+                                            true
+                                        }
+                                        direction == NAV_UP && row == 1 && page > 0 -> {
+                                            onPageMove(page - 1, 1, column)
+                                            true
+                                        }
+                                        else -> false
+                                    }
+                                },
+                            )
                         }
                     }
                 }
@@ -893,7 +1003,7 @@ private fun LibCard(
     s: Float,
     cardReg: FocusRegistry? = null,
     focusKey: String = item.id,
-    onCardFocused: (() -> Unit)? = null,
+    onCardFocusChanged: ((Boolean) -> Unit)? = null,
     navOverride: ((Int) -> Boolean)? = null,
 ) {
     Column(Modifier.width(232f.sx(s))) {
@@ -902,9 +1012,9 @@ private fun LibCard(
                 .dpadFocusable(
                     scaleFocused = 1.05f,
                     onFocusedChange = {
+                        onCardFocusChanged?.invoke(it)
                         if (it) {
                             ReturnFocus.mark("vod", focusKey)
-                            onCardFocused?.invoke()
                         }
                     },
                     externalFocusRequester = cardReg?.fr(focusKey),

@@ -1,8 +1,8 @@
-"""首页片库分页布局契约（TV / mobile Compose 与网页版）。
+"""首页片库布局契约（TV / mobile Compose 与网页版）。
 
-分页的产品口径是固定两行：TV 每页 14 张（7×2），移动端每页按列数×2，
-网页版横屏 7×2、竖屏 3×2。每个分类返回的三栏都应独立走分页组件；切分类和
-重新进入页面时复用短缓存，过期后仍要刷新，不得恢复旧的 TV libBlocks UI 数据通路。
+TV 使用热门、更新、豆瓣高分三张纵向动画页，每页是两条连续横向滚动行；移动端
+与网页版维持各自两行分页。切分类和重新进入页面复用短缓存，不得恢复旧的 TV
+libBlocks UI 数据通路。
 """
 
 import pathlib
@@ -51,20 +51,39 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
         cls.web_app = WEB_APP.read_text(encoding="utf-8")
         cls.web_css = WEB_CSS.read_text(encoding="utf-8")
 
-    def test_tv_page_is_fixed_two_rows_of_seven(self):
+    def test_tv_has_three_animated_pages_with_two_horizontal_rows(self):
         pager = _source_block(
             self.tv_home,
-            "private fun PagedLibSection(",
-            "/** 片库竖卡",
+            "private fun LibrarySectionPage(",
+            "private fun LibCard(",
         )
-        self.assertIn("items.chunked(HomeLibraryUiPolicy.PAGE_SIZE)", pager, "TV 每页必须严格按 14 张分段")
-        self.assertIn("repeat(2) { row ->", pager, "TV 分页必须始终绘制两行")
-        self.assertIn("repeat(HomeLibraryUiPolicy.ROW_SIZE) { col ->", pager, "TV 每行必须有 7 个固定槽位")
-        self.assertIn("row * HomeLibraryUiPolicy.ROW_SIZE + col", pager)
+        self.assertIn("repeat(2) { row ->", pager, "每个 TV 页面必须始终绘制两行")
+        self.assertIn("LazyRow(", pager, "每行应连续横向滚动")
+        self.assertIn("items(rowItems.size", pager, "横向行不应被切成子分页")
+        self.assertIn("items.filterIndexed { index, _ -> index % 2 == 0 }", pager)
+        self.assertIn("items.filterIndexed { index, _ -> index % 2 == 1 }", pager)
+        self.assertIn("direction == NAV_DOWN && row == 1", pager, "第二行向下应进入下一页")
         self.assertNotIn('Text("上一页"', pager)
         self.assertNotIn('Text("下一页"', pager)
-        self.assertIn("detectHorizontalDragGestures(", pager)
-        self.assertIn("targetPageForDpad", pager)
+        self.assertNotIn("targetPageForSwipe", pager, "左右滑动只滚动卡片行，不切页面")
+        self.assertNotIn("NAV_LEFT", pager, "左右键由横向列表滚动，不切 TV 页面")
+        self.assertNotIn("NAV_RIGHT", pager, "左右键由横向列表滚动，不切 TV 页面")
+
+        renderer = _source_block(
+            self.tv_home,
+            'item(key = "lib-vertical-three-pages")',
+            'item(key = "lib-pad")',
+        )
+        self.assertIn("VerticalPager(", renderer)
+        self.assertIn("PagerSnapDistance.atMost(1)", renderer)
+        self.assertIn("snapAnimationSpec = spring(", renderer, "页面切换需要平滑弹性动画")
+        self.assertIn("HomeLibraryUiPolicy.PAGE_TITLES", renderer)
+        self.assertIn("LibrarySectionPage(", renderer)
+
+        back_handler = _source_block(self.tv_home, "BackHandler {", "val showLibLoading")
+        self.assertIn("sectionPagerState.currentPage > 0", back_handler)
+        self.assertIn("moveLibraryPage(sectionPagerState.currentPage - 1", back_handler,
+                      "返回键应能回到上一页")
 
     def test_mobile_page_is_two_rows_of_current_column_count(self):
         pager = _source_block(
@@ -81,18 +100,22 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
         self.assertIn('Text("下一页"', pager)
 
     def test_all_three_android_sections_use_the_paged_renderer(self):
-        for label, home, repo, renderer in (
-            ("TV", self.tv_home, self.tv_repo, "PagedLibSection(nav, sec.items"),
-            ("mobile", self.mobile_home, self.mobile_repo, "PagedMobileLibSection(nav, sec.items"),
-        ):
-            with self.subTest(client=label):
-                self.assertIn("sections.forEachIndexed", home)
-                self.assertIn(renderer, home, "每个返回板块都应交给分页组件")
-                order = re.search(r"blockOrder\s*=\s*listOf\(([^)]*)\)", repo)
-                self.assertIsNotNone(order, "仓库未声明固定三栏顺序")
-                names = tuple(re.findall(r'"([^"]+)"', order.group(1)))
-                self.assertEqual(names, EXPECTED_TV_SECTIONS)
-                self.assertIn("completeBlocks(sections)", repo)
+        self.assertIn('listOf("最近热门", "最近更新", "豆瓣高分")', self.tv_home)
+        self.assertIn("VerticalPager(", self.tv_home)
+        self.assertIn("LibrarySectionPage(", self.tv_home)
+        order = re.search(r"blockOrder\s*=\s*listOf\(([^)]*)\)", self.tv_repo)
+        self.assertIsNotNone(order, "TV 仓库未声明固定三栏顺序")
+        names = tuple(re.findall(r'"([^"]+)"', order.group(1)))
+        self.assertEqual(names, EXPECTED_TV_SECTIONS)
+        self.assertIn("completeBlocks(sections)", self.tv_repo)
+
+        self.assertIn("sections.forEachIndexed", self.mobile_home)
+        self.assertIn("PagedMobileLibSection(nav, sec.items", self.mobile_home)
+        order = re.search(r"blockOrder\s*=\s*listOf\(([^)]*)\)", self.mobile_repo)
+        self.assertIsNotNone(order, "移动端仓库未声明固定三栏顺序")
+        names = tuple(re.findall(r'"([^"]+)"', order.group(1)))
+        self.assertEqual(names, EXPECTED_TV_SECTIONS)
+        self.assertIn("completeBlocks(sections)", self.mobile_repo)
 
     def test_channel_sections_fetch_is_confined_to_io_dispatcher(self):
         for label, repo in (("TV", self.tv_repo), ("mobile", self.mobile_repo)):
@@ -208,22 +231,26 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
     def test_tv_pager_focus_keys_are_section_scoped_and_retries_are_bounded(self):
         pager = _source_block(
             self.tv_home,
-            "private fun PagedLibSection(",
-            "/** 片库竖卡",
+            "private fun LibrarySectionPage(",
+            "private fun LibCard(",
         )
         self.assertIn("sectionName: String", pager)
-        self.assertIn('rows.any { "lib:$sectionName:${it.id}" == returnKey }', pager,
-                      "从详情返回时应恢复到正确板块的页")
-        self.assertIn('val target = "lib:$sectionName:${pages[next][slot.coerceIn(0, pages[next].lastIndex)].id}"', pager)
-        self.assertIn('nav, item, s, cardReg, "lib:$sectionName:${item.id}"', pager,
+        self.assertIn('focusKey = "lib:$sectionName:${item.id}"', pager,
                       "卡片焦点注册 key 需要带板块名，避免跨栏同 ID 冲突")
-
-        turn = _source_block(pager, "fun turn(next: Int, slot: Int) {", "    Column(")
-        self.assertIn("repeat(20)", turn, "换页落焦重试必须有界")
-        self.assertIn("delay(40)", turn)
-        self.assertIn("runCatching { cardReg.fr(target).requestFocus() }.isSuccess", turn,
-                      "Compose requestFocus 返回 Unit；以调用未抛异常作为成功条件")
-        self.assertNotIn("getOrDefault(false)", turn)
+        self.assertIn("direction == NAV_DOWN && row == 0", pager)
+        self.assertIn("direction == NAV_DOWN && row == 1", pager)
+        self.assertIn("onPageMove(page + 1, 0, column)", pager)
+        self.assertIn("onPageMove(page - 1, 1, column)", pager)
+        focus_restore = _source_block(
+            self.tv_home,
+            "fun requestLibraryFocus(page: Int, row: Int, column: Int) {",
+            "fun moveLibraryPage(page: Int, row: Int, column: Int) {",
+        )
+        self.assertIn("column.coerceIn(0, targetItems.lastIndex)", focus_restore,
+                      "目标栏目条目较少时，换页焦点应落在最近可用卡片")
+        self.assertIn("repeat(24)", self.tv_home, "换页落焦重试必须有界")
+        self.assertIn("sectionRowStates[targetPage][row].scrollToItem(column)", self.tv_home,
+                      "从详情返回时应恢复到正确页面与卡片")
 
         lib_card = _source_block(self.tv_home, "private fun LibCard(", "\n/**\n * 最近观看")
         self.assertIn("focusKey: String = item.id", lib_card)
