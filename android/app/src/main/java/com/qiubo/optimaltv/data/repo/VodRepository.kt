@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -231,6 +232,33 @@ internal object SourceResolveCascade {
      */
     fun cloudUsable(status: String, hasPreferred: Boolean): Boolean =
         hasPreferred && status in setOf("MATCHED", "STALE_AVAILABLE")
+}
+
+/** Promotes the preferred source while keeping every locally discovered source available. */
+internal object PreferredPlayableLines {
+    fun reorder(lines: List<LineInfo>, preferredId: String, detailRef: String, epIndex: Int = 0): List<LineInfo> {
+        if (lines.isEmpty()) return lines
+        val hit = lines.indexOfFirst { PlayableLineIdentity.id(it) == preferredId }
+        if (hit <= 0) {
+            if (hit < 0) {
+                val synthetic = LineInfo(
+                    vodId = lines.first().vodId,
+                    label = "线路·${preferredId.substringBefore(':')}",
+                    url = "",
+                    playRef = "$detailRef|$preferredId|$epIndex",
+                )
+                return listOf(synthetic) + lines
+            }
+            return lines
+        }
+        return lines.toMutableList().also { it.add(0, it.removeAt(hit)) }
+    }
+}
+
+/** The playRef is `detailRef|lineId|episode`; last_good must store its middle field. */
+internal object PlayableLineIdentity {
+    fun id(line: LineInfo): String =
+        line.playRef.split('|').getOrNull(1)?.takeIf(String::isNotBlank) ?: line.vodId
 }
 
 /**
@@ -1454,7 +1482,7 @@ class VodRepository(
             .map { it.detailRef.ifBlank { it.id } }
 
         // ---- 按阶梯挑一条，并把所有候选线路并进可换线列表 ----
-        val localIds = localLines.map { it.playRef.substringBefore('|').ifBlank { it.vodId } }
+        val localIds = localLines.map(PlayableLineIdentity::id)
         val (pickedId, tier) = SourceResolveCascade.pick(
             lastGood = lastGoodLineId,
             cloudPreferred = resolve?.takeIf { cloudUsable }?.preferred?.lineId(),
@@ -1468,41 +1496,12 @@ class VodRepository(
         }
 
         // 把阶梯选中的线路提到列表最前：播放器按 index 起播，用户换线时其余线路仍可用。
-        val reordered = reorderWithPreferred(localLines, pickedId, detailRef)
-        val index = reordered.indexOfFirst { it.playRef.substringBefore('|') == pickedId }
+        val reordered = PreferredPlayableLines.reorder(localLines, pickedId, detailRef, epIndex)
+        val index = reordered.indexOfFirst { PlayableLineIdentity.id(it) == pickedId }
             .let { if (it >= 0) it else reordered.indexOfFirst { it.vodId == pickedId } }
             .coerceAtLeast(0)
         android.util.Log.i("OTV", "取源 tier=$tier mytv=$mytvId ep=$epIndex → 第 ${index + 1}/${reordered.size} 条")
         SourcePick(reordered, index, tier)
-    }
-
-    /**
-     * 把 [preferredId] 对应的线路提到列表首位。
-     *
-     * 命中本地线路列表时直接换序；命中不了（例如只存在于 last_good / 云端引用）时，
-     * 用 `{detailRef}|{lineId}|{epIndex}` 拼一条新线路——`/vod/play` 只按 line id 定位，
-     * 拼出来的引用照样能解析出直链。
-     */
-    private fun reorderWithPreferred(
-        lines: List<LineInfo>,
-        preferredId: String,
-        detailRef: String,
-    ): List<LineInfo> {
-        if (lines.isEmpty()) return lines
-        val hit = lines.indexOfFirst { it.playRef.substringBefore('|') == preferredId }
-        if (hit <= 0) {
-            if (hit < 0) {
-                val synthetic = LineInfo(
-                    vodId = lines.first().vodId,
-                    label = "线路·${preferredId.substringBefore(':')}",
-                    url = "",
-                    playRef = "$detailRef|$preferredId|0",
-                )
-                return listOf(synthetic) + lines
-            }
-            return lines
-        }
-        return lines.toMutableList().also { it.add(0, it.removeAt(hit)) }
     }
 
     /**
@@ -1540,6 +1539,12 @@ class VodRepository(
     /** 直链缓存条目：raw=上游直链 + 解析时刻（点播部分 CDN 直链带分钟级签名，须按 TTL 失效） */
     private class PlayEntry(val raw: String, val ts: Long)
     private val playCache = java.util.concurrent.ConcurrentHashMap<String, PlayEntry>()
+    private val refreshedPlayLineIds = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** Actual source ID used by the last successful play request, including refreshed Douban IDs. */
+    fun lineIdForLastGood(line: LineInfo): String =
+        if (line.playRef.isBlank()) "" else
+            refreshedPlayLineIds[line.playRef] ?: PlayableLineIdentity.id(line)
 
     /** 直链缓存失效（失败/卡顿重解析前调用：确保拿到带新签名的地址） */
     fun bustPlayCache(playRef: String) {
@@ -1558,26 +1563,77 @@ class VodRepository(
      * 中继清单感知预取等效 4~6 连接并行（实测 571KB/s，3.7×）。
      * preferRelay=false：该线路中继路径已被判不可用（PlayerViewModel 阶梯），退回直连。
      */
-    suspend fun resolvePlayUrl(line: LineInfo, preferRelay: Boolean = true): String = withContext(Dispatchers.IO) {
+    suspend fun resolvePlayUrl(
+        line: LineInfo,
+        preferRelay: Boolean = true,
+        forceRefresh: Boolean = false,
+    ): String = withContext(Dispatchers.IO) {
         if (line.playRef.isBlank()) return@withContext line.url
         val now = System.currentTimeMillis()
         val hit = playCache[line.playRef]
         val base = settings.current().hhkanBaseUrl
         val raw: String
-        if (hit != null && now - hit.ts < PLAY_URL_TTL_MS) {
+        if (!forceRefresh && hit != null && now - hit.ts < PLAY_URL_TTL_MS) {
             raw = hit.raw
         } else {
             val parts = line.playRef.split("|")
             if (parts.size != 3) return@withContext ""
-            val fetched = runCatching {
-                VodApiSource.fetchPlay(base, okHttp, parts[0], parts[1], parts[2]).firstOrNull().orEmpty()
-            }.getOrNull()?.takeIf { it.isNotBlank() }
+            var playLineId = parts[1]
+            var playEpisode = parts[2]
+            // Douban's /vod/play endpoint has no cache-bypass parameter. Refresh its detail
+            // first, then map the user's selected source and episode onto any refreshed IDs.
+            if (forceRefresh && line.vodId.startsWith("douban:")) {
+                val detail = try {
+                    runInterruptible(Dispatchers.IO) {
+                        VodApiSource.fetchDetail(base, detailClient, line.vodId, refresh = true)
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    android.util.Log.w("OTV", "Douban detail refresh failed ref=${line.vodId}: ${failure.message}")
+                    throw SelectedSourceRefreshException("无法刷新所选信号源", failure)
+                }
+                if (detail.lines.isEmpty()) {
+                    throw SelectedSourceRefreshException("刷新后没有可用信号源")
+                }
+                val target = DoubanRefreshPlayReference.map(
+                    selectedLineId = parts[1],
+                    selectedLineName = line.label,
+                    selectedEpisode = parts[2],
+                    previous = detailInfoCache[parts[0]],
+                    refreshed = detail,
+                ) ?: throw SelectedSourceRefreshException("刷新后找不到所选信号源或集数")
+                // Keep the detail snapshot that produced the current UI lines/playRef. The
+                // UI still carries the old line ID and episode index; replacing its mapping
+                // baseline here would make a second retry interpret that old index against
+                // this refresh's reordered episodes and silently select the wrong episode.
+                playLineId = target.lineId
+                playEpisode = target.episode
+            }
+            val fetched = try {
+                runInterruptible(Dispatchers.IO) {
+                    VodApiSource.fetchPlay(base, okHttp, parts[0], playLineId, playEpisode, fresh = forceRefresh)
+                        .firstOrNull().orEmpty()
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                android.util.Log.w("OTV", "play URL resolve failed ref=${line.playRef}: ${failure.message}")
+                ""
+            }.takeIf { it.isNotBlank() }
             if (fetched != null) {
                 playCache[line.playRef] = PlayEntry(fetched, now)
+                if (forceRefresh && line.vodId.startsWith("douban:")) {
+                    refreshedPlayLineIds[line.playRef] = playLineId
+                    if (refreshedPlayLineIds.size > 400) {
+                        refreshedPlayLineIds.keys.firstOrNull()?.let(refreshedPlayLineIds::remove)
+                    }
+                }
                 raw = fetched
             } else {
-                // 解析失败降级旧缓存（好过空串直接判线失败）
-                raw = hit?.raw.orEmpty()
+                // A manual fresh retry must not silently reuse the stale URL that it was meant
+                // to replace. Ordinary automatic recovery may still use a known-good cache entry.
+                raw = if (forceRefresh) "" else hit?.raw.orEmpty()
             }
         }
         when {

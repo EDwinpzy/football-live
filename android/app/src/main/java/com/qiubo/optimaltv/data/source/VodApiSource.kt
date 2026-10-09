@@ -237,10 +237,17 @@ class VodApiSource(
             )
         }
 
-        fun fetchPlay(base: String, client: OkHttpClient, id: String, lineId: String, episode: String): List<String> {
+        fun fetchPlay(
+            base: String,
+            client: OkHttpClient,
+            id: String,
+            lineId: String,
+            episode: String,
+            fresh: Boolean = false,
+        ): List<String> {
             if (id.startsWith("hhkan:")) {
                 return listOfNotNull(
-                    HhkanSource.fetchPlay(base, client, id.removePrefix("hhkan:"), lineId, episode)
+                    HhkanSource.fetchPlay(base, client, id.removePrefix("hhkan:"), lineId, episode, fresh)
                         .takeIf(String::isNotBlank),
                 )
             }

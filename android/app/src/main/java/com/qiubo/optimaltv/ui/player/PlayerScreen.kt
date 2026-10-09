@@ -696,7 +696,7 @@ private fun VodPlayerOverlay(
  * 右侧悬浮栏「更多」：影片信息 + 选集（仅电视剧/动漫/短剧）+ 换源 + 倍速 + 画幅（需求 影视#3）
  * 需求⑨修订（2026-08-31）：**电影不显示选集区**（含 HD中字/HD国语 这类多版本电影），
  * 电视剧/动漫/短剧保留选集（分页 + 网格，选集跳转继续播）。
- * 浮窗落焦兜底链：当前集格（选集区显示时）→ 换源首 chip → 倍速首 chip。
+ * 浮窗打开先落在当前线路（无线路时落在重查按钮）；选集区域独立参与后续方向键导航。
  * 需求 影视#1（2026-08-31）：浮窗光标无法移动修复——
  * ① 浮窗内没有行带导航修饰符，默认 Compose 几何搜索会把焦点送出浮窗（更多钮/
  *    进度条都在浮窗背后）→ 面板级 onPreviewKeyEvent 接管四方向，只在本浮窗
@@ -762,23 +762,18 @@ private fun MorePanel(
                         Spacer(Modifier.height(6.dp))
                         Text(ui.meta, color = TextPrimary.copy(alpha = 0.6f), style = MaterialTheme.typography.bodySmall, maxLines = 2)
                     }
-                    if (ui.lines.isNotEmpty()) {
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            "线路${ui.activeLine + 1}/${ui.lines.size} · ${ui.engineName}",
-                            color = TextPrimary.copy(alpha = 0.5f), style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
                 }
             }
+            Spacer(Modifier.height(16.dp))
+            VodSignalSourceSection(ui, vm, panelFocus)
             if (ui.desc.isNotBlank()) {
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(8.dp))
                 Text(
                     ui.desc, color = TextPrimary.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall,
-                    maxLines = 4, overflow = TextOverflow.Ellipsis,
+                    maxLines = 3, overflow = TextOverflow.Ellipsis,
                 )
             }
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(12.dp))
             // 选集（需求⑨修订：仅电视剧/动漫/短剧显示，电影不显示——
             // 含 HD中字/HD国语 这类多版本电影）。≥20 集按 10 集/页 + 分页 chip；<20 集全量展示
             if (!ui.isMovie && ui.epCount > 1) {
@@ -813,7 +808,6 @@ private fun MorePanel(
                 //（<20 集全量；旧版 11~19 集落在无 chip 的第 2 页，前 10 集够不着——
                 // 老板报障《深渊无间》16 集只见 11-16）
                 val pageEps = EpisodeMenuPolicy.visibleRange(ui.epCount, page)
-                val focusTarget = pageEps.indexOf(ui.epIndex).takeIf { it >= 0 } ?: 0
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(4),
                     modifier = Modifier.height(((pageEps.count() + 3) / 4 * 52).dp),
@@ -823,7 +817,6 @@ private fun MorePanel(
                             contentAlignment = Alignment.Center,
                             modifier = Modifier
                                 .padding(4.dp)
-                                .then(if (i - pageEps.first == focusTarget) Modifier.focusRequester(panelFocus) else Modifier)
                                 .dpadFocusable(navGroup = PANEL_NAV_GROUP) { onPickEpisode(i) }
                                 .background(
                                     if (i == ui.epIndex) AccentBlue else Color(0x24FFFFFF),
@@ -841,38 +834,6 @@ private fun MorePanel(
                 }
                 Spacer(Modifier.height(18.dp))
             }
-            // 换源（需求⑳ 2026-09-11：FlowRow 换行铺满面板宽——旧单行 horizontalScroll
-            // 只能看到前几个源，其余被裁切不可见；全部线路一次展示，跨行导航由面板
-            // 滚动挂靠（需求⑰）支持）
-            // ⑭（2026-09-08）：「投屏」小节整体移除（TV 版投屏功能全删，移动版保留）
-            if (ui.lines.size > 1) {
-            SectionLabel("换源线路")
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    ui.lines.forEachIndexed { idx, line ->
-                        Box(
-                            modifier = Modifier
-                                // 需求⑨修订：选集区未显示（电影/单集）时面板落焦落换源首 chip
-                                .then(
-                                    if (idx == 0 && (ui.isMovie || ui.epCount <= 1)) {
-                                        Modifier.focusRequester(panelFocus)
-                                    } else Modifier
-                                )
-                                .dpadFocusable(navGroup = PANEL_NAV_GROUP) { vm.switchLine(idx) }
-                                .background(
-                                    if (idx == ui.activeLine) AccentBlue else Color(0x24FFFFFF),
-                                    RoundedCornerShape(10.dp),
-                                )
-                                .padding(horizontal = 14.dp, vertical = 9.dp),
-                        ) {
-                            Text(line.label, color = Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1)
-                        }
-                    }
-                }
-                Spacer(Modifier.height(18.dp))
-            }
             // 倍速
             SectionLabel("倍速")
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -881,11 +842,6 @@ private fun MorePanel(
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .then(
-                                if ((ui.isMovie || ui.epCount <= 1) && ui.lines.size <= 1 && idx == 0) {
-                                    Modifier.focusRequester(panelFocus)
-                                } else Modifier
-                            )
                             .dpadFocusable(navGroup = PANEL_NAV_GROUP) { vm.setSpeed(sp) }
                             .background(
                                 if (active) AccentBlue else Color(0x24FFFFFF),
@@ -921,6 +877,68 @@ private fun MorePanel(
         }
         } // ProvideNavScrolls(panelNav)
     }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun VodSignalSourceSection(ui: PlayerUiState, vm: PlayerViewModel, panelFocus: FocusRequester) {
+    SectionLabel("信号源")
+    val activeLine = ui.lines.getOrNull(ui.activeLine)
+    val sourceStatus = when {
+        ui.lines.isEmpty() && ui.fatalMsg != null -> "暂无可用信号源：${ui.fatalMsg}"
+        ui.lines.isEmpty() && ui.sourceResolving -> "正在查找片源…"
+        ui.lines.isEmpty() -> "没有可用信号源"
+        ui.fatalMsg != null -> "当前信号源失败：${ui.fatalMsg}"
+        ui.sourceResolving || ui.playState == EnginePlayState.BUFFERING -> "正在加载：${activeLine?.label.orEmpty()}"
+        else -> "当前使用：${activeLine?.label.orEmpty()}"
+    }
+    Text(sourceStatus, color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
+    Spacer(Modifier.height(10.dp))
+    if (ui.lines.isEmpty()) {
+        Box(
+            modifier = Modifier
+                .focusRequester(panelFocus)
+                .dpadFocusable(navGroup = PANEL_NAV_GROUP) { vm.retry() }
+                .background(AccentBlue, RoundedCornerShape(10.dp))
+                .padding(horizontal = 14.dp, vertical = 9.dp),
+        ) {
+            Text(
+                if (ui.sourceResolving) "重新查找片源" else "重新查询片源",
+                color = Color.White, style = MaterialTheme.typography.labelMedium,
+            )
+        }
+    } else {
+        val focusLine = ui.activeLine.takeIf { it in ui.lines.indices } ?: 0
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            ui.lines.forEachIndexed { idx, line ->
+                Box(
+                    modifier = Modifier
+                        .then(if (idx == focusLine) Modifier.focusRequester(panelFocus) else Modifier)
+                        .dpadFocusable(navGroup = PANEL_NAV_GROUP) { vm.switchLine(idx) }
+                        .background(
+                            if (idx == ui.activeLine) AccentBlue else Color(0x24FFFFFF),
+                            RoundedCornerShape(10.dp),
+                        )
+                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                ) {
+                    Text(line.label, color = Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Box(
+            modifier = Modifier
+                .dpadFocusable(navGroup = PANEL_NAV_GROUP) { vm.switchLine(ui.activeLine) }
+                .background(Color(0x24FFFFFF), RoundedCornerShape(10.dp))
+                .padding(horizontal = 14.dp, vertical = 9.dp),
+        ) {
+            Text("重载当前信号源", color = Color.White, style = MaterialTheme.typography.labelMedium)
+        }
+    }
+    Spacer(Modifier.height(12.dp))
 }
 
 @Composable

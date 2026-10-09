@@ -10,6 +10,7 @@ import com.qiubo.optimaltv.data.db.ProgressEntity
 import com.qiubo.optimaltv.data.model.LineInfo
 import com.qiubo.optimaltv.data.prefs.AspectMode
 import com.qiubo.optimaltv.data.prefs.SettingsStore
+import com.qiubo.optimaltv.data.repo.SelectedSourceRefreshException
 import com.qiubo.optimaltv.data.repo.VodRepository
 import com.qiubo.optimaltv.playback.EnginePlayState
 import com.qiubo.optimaltv.playback.EngineRegistry
@@ -27,6 +28,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -54,6 +57,12 @@ object EpisodeRefreshPolicy {
     }
 }
 
+/** Manual selection of the active VOD line is an explicit retry; live picker behavior stays unchanged. */
+internal object ManualLineSelectionPolicy {
+    fun shouldStart(lineCount: Int, activeLine: Int, selectedLine: Int, isLive: Boolean): Boolean =
+        selectedLine in 0 until lineCount && (!isLive || selectedLine != activeLine)
+}
+
 data class PlayerUiState(
     val title: String = "",
     val epIndex: Int = 0,
@@ -68,6 +77,8 @@ data class PlayerUiState(
     val isMovie: Boolean = false,
     val lines: List<LineInfo> = emptyList(),
     val activeLine: Int = 0,
+    /** Current line/detail resolution is in progress; independent of engine buffering state. */
+    val sourceResolving: Boolean = false,
     val engineId: String = "media3",
     val engineName: String = "",
     // 引擎状态镜像（驱动 UI）
@@ -147,6 +158,8 @@ class PlayerViewModel(
     private var startedThisSession = false
     /** 会话代数：并发的 startSession 只允许最新一代操作引擎（防旧源倒灌） */
     private var sessionGen = 0
+    /** 当前正在解析点播地址的起播任务；手动切源/换集会立即取消并作废旧结果。 */
+    private var pendingVodSessionJob: Job? = null
     /** 防止同一引擎会话重复收到 ENDED 时重复切集。 */
     private var handledEndedSessionGen = -1
     private var stallRecoveries = 0
@@ -263,13 +276,20 @@ class PlayerViewModel(
     private var systemResumeNeeded = false
     private var hostPausedAtMs = 0L
     private var currentItem: com.qiubo.optimaltv.data.model.VodItem? = null
+    private var sourceBootJob: Job? = null
 
     /** 足球回放/集锦（replay:/hhkanplay:）不进观看历史/进度库——与直播同规则，
      *  否则比赛录像以「埃弗顿 对阵 曼联 第1集」混进影视最近观看（用户反馈）。 */
     private val isFootballVod = vodId.startsWith("replay:") || vodId.startsWith("hhkanplay:")
 
     init {
-        if (autoBoot) viewModelScope.launch { boot() }
+        if (autoBoot) sourceBootJob = viewModelScope.launch { boot() }
+    }
+
+    private fun launchSourceBoot(fresh: Boolean) {
+        sourceBootJob?.cancel()
+        _ui.value = _ui.value.copy(sourceResolving = true, fatalMsg = null)
+        sourceBootJob = viewModelScope.launch { boot(fresh = fresh) }
     }
 
     /**
@@ -699,18 +719,39 @@ class PlayerViewModel(
             // 集锦/已知 hhkan vid 直入播放器（原版 playVodDirect）
             vodId.startsWith("hhkanplay:") -> { bootHhkanVid(); return }
         }
+        _ui.value = _ui.value.copy(sourceResolving = true, fatalMsg = null)
         // 等目录就绪（首页已 refresh，一般瞬时）
         var guard = 0
         while (repo.state.value.catalog == null && guard++ < 100) delay(100)
-        val item = repo.itemById(vodId)
-            ?: repo.resolveDetail(vodId)   // 目录外条目（实时搜索结果）兜底
+        val item = try {
+            repo.itemById(vodId)
+                ?: repo.resolveDetail(vodId, forceRefresh = fresh)   // 目录外条目（实时搜索结果）兜底
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            currentCoroutineContext().ensureActive()
+            Log.w(TAG, "影片详情加载失败 id=$vodId: ${failure.message}")
+            _ui.value = _ui.value.copy(sourceResolving = false, fatalMsg = "影片详情加载失败，请重试")
+            return
+        }
+        currentCoroutineContext().ensureActive()
         if (item == null) {
             stopForFatal()
-            _ui.value = _ui.value.copy(fatalMsg = "影片不存在或源未加载")
+            _ui.value = _ui.value.copy(sourceResolving = false, fatalMsg = "影片不存在或源未加载")
             return
         }
         // 懒解析源（hhkan）：先补全选集元数据，vodKey/epCount 才正确
-        val effItem = repo.resolveDetail(item.id) ?: item
+        var effItem = try {
+            repo.resolveDetail(item.id, forceRefresh = fresh) ?: item
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            currentCoroutineContext().ensureActive()
+            Log.w(TAG, "片源详情刷新失败 id=${item.id}: ${failure.message}")
+            _ui.value = _ui.value.copy(sourceResolving = false, fatalMsg = "片源刷新失败，请重试")
+            return
+        }
+        currentCoroutineContext().ensureActive()
         currentItem = effItem
         // 埋点：解析开始（详情与片源解析并行的起点就在这里）。
         telemetry.mark(
@@ -720,7 +761,44 @@ class PlayerViewModel(
         )
         // 线路构建：走 L0→L5 取源阶梯（last_good → 云端 resolver → 本地全量匹配 →
         // 云端备用 → 跨源同名），拿到的首选项直接排到第 0 位起播，不等全部线路到齐。
-        val pick = repo.pickPlayableSources(effItem, epStart, db.lastGoodSourceDao())
+        var pick = try {
+            repo.pickPlayableSources(effItem, epStart, db.lastGoodSourceDao())
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            currentCoroutineContext().ensureActive()
+            Log.w(TAG, "片源解析失败 id=${effItem.id}: ${failure.message}")
+            _ui.value = _ui.value.copy(sourceResolving = false, fatalMsg = "片源解析失败，请重试")
+            return
+        }
+        currentCoroutineContext().ensureActive()
+        // A cached quick detail can omit slower HHKan source matches. If it produced no
+        // playable lines, refresh the detail once with the source-enrichment path before
+        // declaring the title empty; successful first-pass playback stays fast.
+        if (pick.isEmpty && !fresh && effItem.detailRef.isNotBlank()) {
+            val enrichedItem = try {
+                repo.resolveDetail(effItem.id, forceRefresh = true) ?: effItem
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                currentCoroutineContext().ensureActive()
+                Log.w(TAG, "空线路后的补充匹配失败 id=${effItem.id}: ${failure.message}")
+                effItem
+            }
+            currentCoroutineContext().ensureActive()
+            effItem = enrichedItem
+            currentItem = enrichedItem
+            pick = try {
+                repo.pickPlayableSources(enrichedItem, epStart, db.lastGoodSourceDao())
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                currentCoroutineContext().ensureActive()
+                Log.w(TAG, "补充匹配后的线路解析失败 id=${effItem.id}: ${failure.message}")
+                pick
+            }
+            currentCoroutineContext().ensureActive()
+        }
         if (!pick.isEmpty) {
             telemetry.mark(
                 PlaybackTelemetry.Stage.RESOLVE_FIRST_SOURCE,
@@ -736,7 +814,11 @@ class PlayerViewModel(
                 errorClass = PlaybackTelemetry.classify("no available line"),
                 detail = "该集没有可用线路",
             )
-            _ui.value = _ui.value.copy(fatalMsg = "该集没有可用线路", title = effItem.title)
+            _ui.value = _ui.value.copy(
+                sourceResolving = false,
+                fatalMsg = "该集没有可用线路",
+                title = effItem.title,
+            )
             return
         }
 
@@ -783,6 +865,7 @@ class PlayerViewModel(
             desc = effItem.desc,
             posterUrl = effItem.posterUrl,
             lines = lines,
+            sourceResolving = false,
             engineId = engine.engineId,
             engineName = engine.displayName,
             aspectOrdinal = settings.current().aspectOrdinal,
@@ -806,17 +889,32 @@ class PlayerViewModel(
         startSession(initialLine, startPos)
     }
 
-    private suspend fun startSession(lineIdx: Int, startPos: Long, reuseResolvedUrl: Boolean = false) {
+    private suspend fun startSession(
+        lineIdx: Int,
+        startPos: Long,
+        reuseResolvedUrl: Boolean = false,
+        forceFresh: Boolean = false,
+    ) {
         // 会话代数（v1.14）：看门狗换线、直连重试、卡顿重解析可能并发触发 startSession，
         // 各自挂起在解析上——旧会话恢复后必须发现自己已被取代并放弃，否则会把引擎
         // 倒灌回旧源（实测：换线 line1 已起播，8s 前的直连重试落地把引擎拽回慢速 line0）
+        val thisJob = currentCoroutineContext()[Job]
+        if (!_ui.value.isLive && thisJob != null) {
+            pendingVodSessionJob?.takeIf { it !== thisJob && it.isActive }?.cancel()
+            pendingVodSessionJob = thisJob
+        }
         val gen = ++sessionGen
         startedThisSession = false
         stallRecoveries = 0
         triedLines += lineIdx
-        _ui.value = _ui.value.copy(activeLine = lineIdx, fatalMsg = null)
+        _ui.value = _ui.value.copy(
+            activeLine = lineIdx,
+            fatalMsg = null,
+            sourceResolving = !_ui.value.isLive,
+        )
         // 兜底：线路表为空/索引越界时不抛异常（否则协程未捕获直接闪退），走防线三错误态
         val line = _ui.value.lines.getOrNull(lineIdx) ?: run {
+            _ui.value = _ui.value.copy(sourceResolving = false)
             onLineFail("线路缺失（index=$lineIdx）")
             return
         }
@@ -843,16 +941,31 @@ class PlayerViewModel(
                     }
             }
         }
-        val playUrl = url ?: run {
-            // v1.14 点播默认走本地中继（多连接并行拉片对抗 CDN 单连接限速，根治
-            // 「20 分钟后频繁卡顿」）；该线路中继已被判不可用时直连
-            val preferRelay = line.playRef.isBlank() || line.playRef !in relayBroken
-            repo.resolvePlayUrl(line, preferRelay)
+        val playUrl = try {
+            url ?: run {
+                // v1.14 点播默认走本地中继（多连接并行拉片对抗 CDN 单连接限速，根治
+                // 「20 分钟后频繁卡顿」）；该线路中继已被判不可用时直连
+                val preferRelay = line.playRef.isBlank() || line.playRef !in relayBroken
+                repo.resolvePlayUrl(line, preferRelay, forceRefresh = forceFresh)
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (unavailable: SelectedSourceRefreshException) {
+            currentCoroutineContext().ensureActive()
+            if (gen != sessionGen) return
+            stopForFatal()
+            _ui.value = _ui.value.copy(
+                sourceResolving = false,
+                fatalMsg = unavailable.message ?: "无法刷新所选信号源，请重试",
+            )
+            return
         }
+        currentCoroutineContext().ensureActive()
         if (gen != sessionGen) {
             OtvLog.w("line $lineIdx 起播准备期间已有更新会话（gen 落后），放弃旧源")
             return
         }
+        _ui.value = _ui.value.copy(sourceResolving = false)
         if (playUrl.isBlank()) {
             Log.w(TAG, "line $lineIdx(${line.label}) 直链解析失败")
             onLineFail("线路解析失败（${line.label}）")
@@ -1451,6 +1564,29 @@ class PlayerViewModel(
         viewModelScope.launch { startSession(line, if (_ui.value.isLive) 0L else resume) }
     }
 
+    /** Manual VOD selection invalidates any older resolver before it can prepare a stale URL. */
+    private fun supersedePendingVodSession() {
+        sessionGen++
+        pendingVodSessionJob?.cancel()
+        pendingVodSessionJob = null
+        watchdogJob?.cancel()
+        stallJob?.cancel()
+        healthJob?.cancel()
+        firstFrameJob?.cancel()
+        vodLadderJob?.cancel()
+    }
+
+    /** A VOD source tap also resets the player instance, including same-source retries. */
+    private fun recreateEngineForManualSourceChange() {
+        if (!hasEngine()) return
+        val id = engine.engineId
+        val speed = _ui.value.speed
+        runCatching { engine.release() }
+        installEngine(EngineRegistry.create(id, Graph.appContext))
+        runCatching { engine.setSpeed(speed) }
+        collectEngineState()
+    }
+
     private suspend fun onSessionStarted(posMs: Long) {
         startedThisSession = true
         recoveryAttempt = 0
@@ -1486,7 +1622,7 @@ class PlayerViewModel(
                 val mytvId = currentItem?.mytvId?.trim()?.toLongOrNull()
                 val started = _ui.value.lines.getOrNull(_ui.value.activeLine)
                 if (mytvId != null && started != null) {
-                    val lineId = started.playRef.substringBefore('|').ifBlank { started.vodId }
+                    val lineId = repo.lineIdForLastGood(started)
                     repo.rememberLastGoodSource(mytvId, epStart, lineId, db.lastGoodSourceDao())
                 }
             }
@@ -1730,23 +1866,40 @@ class PlayerViewModel(
                 return
             }
             _ui.value = _ui.value.copy(fatalMsg = null)
-            viewModelScope.launch { boot(fresh = true) }
+            if (_ui.value.isLive) viewModelScope.launch { boot(fresh = true) }
+            else launchSourceBoot(fresh = true)
             return
         }
         val line = _ui.value.activeLine
         val pos = _ui.value.positionMs
         triedLines.clear()
         lastAutoSwitchAt = -1L   // 手动重试 = 显式重置，切线冷却不该拦住
-        viewModelScope.launch { startSession(line, if (pos > 1_000) pos else 0L) }
+        if (_ui.value.isLive) {
+            viewModelScope.launch { startSession(line, if (pos > 1_000) pos else 0L) }
+        } else {
+            switchLine(line)
+        }
     }
 
     fun switchLine(idx: Int) {
-        if (idx !in _ui.value.lines.indices || idx == _ui.value.activeLine) return
+        val state = _ui.value
+        if (!ManualLineSelectionPolicy.shouldStart(state.lines.size, state.activeLine, idx, state.isLive)) return
+        val pos = state.positionMs
         // 手动切源 = 用户重选起点：清空换线尝试记录——旧记录会把此前起播过的线路
         // 当「已试过」跳过（实测 bb 失败后跳过此前正常播放的 plu，全线耗尽进错误态）
         // 用户一按就停住旧源并进入缓冲态，避免解析新地址期间继续播放旧线路画面。
-        if (hasEngine()) engine.pause()
-        _ui.value = _ui.value.copy(playState = EnginePlayState.BUFFERING)
+        if (state.isLive) {
+            if (hasEngine()) engine.pause()
+        } else {
+            supersedePendingVodSession()
+            recreateEngineForManualSourceChange()
+        }
+        _ui.value = _ui.value.copy(
+            activeLine = idx,
+            fatalMsg = null,
+            sourceResolving = !state.isLive,
+            playState = EnginePlayState.BUFFERING,
+        )
         triedLines.clear()
         sameLineRetries = 0
         // 需求③（2026-09-07）：直播手动选源 → 持久化，下次进直播默认直选该源
@@ -1758,9 +1911,10 @@ class PlayerViewModel(
                 }
             }
         }
-        val pos = _ui.value.positionMs
         touch()
-        viewModelScope.launch { startSession(idx, if (pos > 1_000) pos else 0L) }
+        viewModelScope.launch {
+            startSession(idx, if (pos > 1_000) pos else 0L, forceFresh = !state.isLive)
+        }
     }
 
     // ---- 直播信号源选择条（直播播放器唯一控件，需求 足球#14）----
@@ -1919,6 +2073,7 @@ class PlayerViewModel(
     fun switchEpisode(ep: Int) {
         val cur = _ui.value
         if (ep == cur.epIndex || cur.isLive) return
+        supersedePendingVodSession()
         viewModelScope.launch {
             saveProgress(force = true)
             val item = currentItem ?: return@launch

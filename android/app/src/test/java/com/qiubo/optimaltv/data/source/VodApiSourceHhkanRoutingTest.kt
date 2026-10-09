@@ -75,6 +75,43 @@ class VodApiSourceHhkanRoutingTest {
         }
     }
 
+    @Test
+    fun `手动重试 HHKan 播放请求绕过服务端缓存`() {
+        withJsonServer(
+            """{"sources":[{"url":"https://media.example/fresh.m3u8"}]}""",
+        ) { base, requestedPath ->
+            val urls = VodApiSource.fetchPlay(base, OkHttpClient(), "hhkan:721", "23", "45", fresh = true)
+
+            assertEquals("/hhkan/play/721/23/45?fresh=1", requestedPath.get())
+            assertEquals(listOf("https://media.example/fresh.m3u8"), urls)
+        }
+    }
+
+    @Test
+    fun `豆瓣播放重试保留既有播放路由`() {
+        withJsonServer(
+            """{"url":"https://media.example/douban.m3u8"}""",
+        ) { base, requestedPath ->
+            val urls = VodApiSource.fetchPlay(
+                base, OkHttpClient(), "douban:721", "source:content", "3", fresh = true,
+            )
+
+            assertEquals("/vod/play/721/source%3Acontent/3", requestedPath.get())
+            assertEquals(listOf("https://media.example/douban.m3u8"), urls)
+        }
+    }
+
+    @Test
+    fun `豆瓣手动重试先可强制刷新详情`() {
+        withJsonServer(
+            """{"title":"测试剧","sources":[]}""",
+        ) { base, requestedPath ->
+            VodApiSource.fetchDetail(base, OkHttpClient(), "douban:721", refresh = true)
+
+            assertEquals("/vod/detail/721?refresh=1", requestedPath.get())
+        }
+    }
+
     private fun withJsonServer(
         responseBody: String,
         block: (base: String, requestedPath: AtomicReference<String>) -> Unit,

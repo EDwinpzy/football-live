@@ -5,6 +5,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class EpisodeRefreshPolicyTest {
+
+    @Test
+    fun selectingTheCurrentVodLineIsAValidRetryButLivePickerKeepsItsNoopBehavior() {
+        assertTrue(ManualLineSelectionPolicy.shouldStart(lineCount = 1, activeLine = 0, selectedLine = 0, isLive = false))
+        assertFalse(ManualLineSelectionPolicy.shouldStart(lineCount = 2, activeLine = 0, selectedLine = 0, isLive = true))
+        assertFalse(ManualLineSelectionPolicy.shouldStart(lineCount = 1, activeLine = 0, selectedLine = 1, isLive = false))
+    }
+
     @Test
     fun acceptsNewEpisodesWithoutMovingCurrentEpisode() {
         assertTrue(episodes(current = 12, incoming = 14))
