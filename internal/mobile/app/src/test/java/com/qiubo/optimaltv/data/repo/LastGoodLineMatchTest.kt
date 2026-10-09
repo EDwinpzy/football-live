@@ -1,7 +1,9 @@
 package com.qiubo.optimaltv.data.repo
 
 import com.qiubo.optimaltv.data.model.LineInfo
+import com.qiubo.optimaltv.data.source.HhkanSource
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 /**
@@ -72,4 +74,86 @@ class LastGoodLineMatchTest {
         assertEquals("direct", parts?.first())
         assertEquals(1, parts?.size)
     }
+
+    @Test
+    fun `last good line is first while every local alternative remains selectable`() {
+        val local = threeLines + line("hhkan:other:0")
+
+        val ordered = LastGoodSourceLinePolicy.preferredFirst(local, "hhkan", "abc", 2)
+
+        assertEquals(listOf("hhkan:abc:2", "hhkan:abc:0", "hhkan:abc:1", "hhkan:other:0"),
+            ordered?.map { it.playRef.substringAfter('|').substringBefore('|') })
+    }
+
+    @Test
+    fun `last good source match compares content id segments rather than prefixes`() {
+        val local = listOf(line("hhkan:content-10:0"))
+
+        assertEquals(null, LastGoodSourceLinePolicy.preferredFirst(local, "hhkan", "content-1", 0))
+    }
+
+    @Test
+    fun `last good identity reads the actual line id from the playRef middle field`() {
+        val refreshed = LineInfo(
+            vodId = "douban:456",
+            label = "线路甲",
+            url = "",
+            playRef = "456|fresh-provider:fresh-content:4|2",
+        )
+
+        assertEquals("fresh-provider:fresh-content:4", PlayableLineIdentity.id(refreshed))
+    }
+
+    @Test
+    fun `unaccepted refresh does not replace the detail snapshot for visible playRefs`() {
+        val store = PlayRefDetailSnapshotStore()
+        val visibleLine = LineInfo("douban:456", "线路甲", "", "456|old-source:content|1")
+        val original = detail("UI 原始快照")
+        val refreshed = detail("后台新快照")
+
+        store.recordCandidate(visibleLine.playRef, original)
+        store.accept(listOf(visibleLine))
+        assertSame(original, store.get(visibleLine.playRef))
+
+        store.recordCandidate(visibleLine.playRef, refreshed)
+        assertSame(original, store.get(visibleLine.playRef))
+
+        store.accept(listOf(visibleLine))
+        assertSame(refreshed, store.get(visibleLine.playRef))
+    }
+
+    @Test
+    fun `synthetic preferred refs keep the requested nonzero episode and local alternatives`() {
+        val local = threeLines + line("hhkan:other:0")
+
+        val lastGood = PreferredPlayableLines.reorder(
+            lines = local,
+            preferredId = "remembered-source:content:3",
+            detailRef = "douban:456",
+            epIndex = 5,
+        )
+        val cloudPreferred = PreferredPlayableLines.reorder(
+            lines = local,
+            preferredId = "cloud-source:content",
+            detailRef = "douban:456",
+            epIndex = 8,
+            preferredLabel = "云端线路甲",
+        )
+
+        assertEquals("douban:456|remembered-source:content:3|5", lastGood.first().playRef)
+        assertEquals("线路·remembered-source", lastGood.first().label)
+        assertEquals(local.map { it.playRef }, lastGood.drop(1).map { it.playRef })
+        assertEquals("douban:456|cloud-source:content|8", cloudPreferred.first().playRef)
+        assertEquals("云端线路甲", cloudPreferred.first().label)
+        assertEquals(local.map { it.playRef }, cloudPreferred.drop(1).map { it.playRef })
+    }
+
+    private fun detail(title: String) = HhkanSource.Companion.DetailInfo(
+        title = title,
+        year = "",
+        desc = "",
+        poster = "",
+        rating = 0.0,
+        lines = emptyList(),
+    )
 }

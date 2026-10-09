@@ -13,15 +13,17 @@ import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.unit.dp
 import com.qiubo.optimaltv.data.model.VodItem
 import com.qiubo.optimaltv.ui.components.MobileBackButton
 import com.qiubo.optimaltv.ui.components.MobileUiTags
 import com.qiubo.optimaltv.ui.components.MobileVodCard
-import com.qiubo.optimaltv.ui.components.VodCardMetaStyle
 import com.qiubo.optimaltv.ui.components.VodCategorySelector
 import com.qiubo.optimaltv.ui.components.VodFilterRow
 import org.junit.Assert.assertEquals
@@ -127,7 +129,7 @@ class MobileVodComponentsTest {
     }
 
     @Test
-    fun portraitFiltersWrapAndRemainDirectlyTappable() {
+    fun portraitFilterRowScrollsHorizontallyAndRemainsTappable() {
         val chips = listOf("" to "全部") + (1..8).map { "$it" to "选项$it" }
         MobileUiHarness.scene = {
             Box(Modifier.width(250.dp)) {
@@ -137,14 +139,22 @@ class MobileVodComponentsTest {
         }
         rule.waitForIdle()
 
+        val row = rule.onNodeWithContentDescription("类型")
         val first = bounds(MobileUiTags.filter("类型", ""))
         val last = bounds(MobileUiTags.filter("类型", "8"))
-        assertTrue("竖屏筛选项应自动换行", last.top > first.top)
+        assertTrue("横向筛选项应保持同一行", kotlin.math.abs(last.top - first.top) < 1f)
+
+        repeat(3) { row.performTouchInput { swipeLeft() } }
+        rule.waitForIdle()
+        val rowBounds = row.fetchSemanticsNode().boundsInRoot
+        val lastAfterScroll = bounds(MobileUiTags.filter("类型", "8"))
+        assertTrue("末尾筛选项应可滚入触控区域", lastAfterScroll.left >= rowBounds.left)
+        assertTrue("末尾筛选项应可完整触达", lastAfterScroll.right <= rowBounds.right)
         rule.onNodeWithTag(MobileUiTags.filter("类型", "8")).performClick().assertIsSelected()
     }
 
     @Test
-    fun portraitFilterRowsKeepReadableLineSpacing() {
+    fun portraitFilterTextFitsInsideItsTouchTarget() {
         val chips = listOf("" to "全部") + (1..5).map { "$it" to "选项$it" }
         MobileUiHarness.scene = {
             Box(Modifier.width(180.dp)) {
@@ -154,9 +164,13 @@ class MobileVodComponentsTest {
         rule.waitForIdle()
 
         val first = bounds(MobileUiTags.filter("类型", ""))
-        val wrapped = bounds(MobileUiTags.filter("类型", "3"))
+        val third = bounds(MobileUiTags.filter("类型", "3"))
+        val label = rule.onNodeWithText("选项3", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
         val density = rule.activity.resources.displayMetrics.density
-        assertTrue("竖屏换行文字行距应保持清晰", (wrapped.top - first.top) / density >= 28f)
+        assertTrue("横向筛选项应处在同一触控行", kotlin.math.abs(third.top - first.top) < 1f)
+        assertTrue("竖屏胶囊高度应匹配当前 40dp 设计尺寸", first.height / density in 30f..34f)
+        assertTrue("筛选文字应完整落在胶囊触控区内", label.top >= third.top && label.bottom <= third.bottom)
+        assertTrue("筛选文字行盒不能撑满并裁切胶囊", label.height < third.height)
     }
 
     @Test
@@ -170,7 +184,7 @@ class MobileVodComponentsTest {
 
         val pill = bounds(MobileUiTags.filter("类型", ""))
         val density = rule.activity.resources.displayMetrics.density
-        assertTrue("筛选胶囊应保持紧凑高度", pill.height / density <= 23f)
+        assertTrue("竖屏胶囊应保留当前可读触控高度", pill.height / density in 30f..34f)
         assertTrue("选中筛选项应呈扁圆形", pill.width > pill.height * 1.2f)
     }
 
@@ -179,7 +193,7 @@ class MobileVodComponentsTest {
         var clicks = 0
         MobileUiHarness.scene = {
             Box(Modifier.width(110.dp)) {
-                MobileVodCard(fixture, 0.5f, true, metaStyle = VodCardMetaStyle.YearAndRating) { clicks++ }
+                MobileVodCard(fixture, 0.5f, true) { clicks++ }
             }
         }
         rule.waitForIdle()
@@ -192,22 +206,24 @@ class MobileVodComponentsTest {
     }
 
     @Test
-    fun landscapePosterCardCanShowYearAndRating() {
+    fun regularPosterCardShowsOnlyTitleAndRemark() {
         MobileUiHarness.scene = {
             Box(Modifier.width(180.dp)) {
-                MobileVodCard(fixture, 0.7f, false, metaStyle = VodCardMetaStyle.YearAndRating) {}
+                MobileVodCard(fixture, 0.7f, false) {}
             }
         }
         rule.waitForIdle()
 
-        rule.onNodeWithText("2025  ★ 8.2").assertTextEquals("2025  ★ 8.2")
+        rule.onNodeWithText("自动化测试影片").assertTextEquals("自动化测试影片")
+        rule.onNodeWithText("HD中字").assertTextEquals("HD中字")
+        rule.onNodeWithText("2025  ★ 8.2").assertDoesNotExist()
     }
 
     @Test
     fun searchStyleCardNeverAddsRating() {
         MobileUiHarness.scene = {
             Box(Modifier.width(180.dp)) {
-                MobileVodCard(fixture, 0.7f, false, metaStyle = VodCardMetaStyle.None) {}
+                MobileVodCard(fixture, 0.7f, false) {}
             }
         }
         rule.waitForIdle()

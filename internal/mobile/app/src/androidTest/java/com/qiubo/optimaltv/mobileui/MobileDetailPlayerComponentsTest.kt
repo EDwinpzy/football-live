@@ -1,12 +1,22 @@
 package com.qiubo.optimaltv.mobileui
 
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.platform.LocalInputModeManager
+import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import com.qiubo.optimaltv.data.model.Episode
 import com.qiubo.optimaltv.data.model.LineInfo
 import com.qiubo.optimaltv.data.model.VodItem
@@ -88,24 +98,26 @@ class MobileDetailPlayerComponentsTest {
             aspectOrdinal = 0,
         )
         MobileUiHarness.scene = {
-            PlayerMoreSections(
-                ui = ui,
-                onPickEpisode = { ep = it },
-                onSwitchLine = { line = it },
-                onSetSpeed = { speed = it },
-                onSetAspect = { aspect = it },
-                onStartCast = {},
-                onStopCast = {},
-                onRescanCast = { rescan++ },
-            )
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                PlayerMoreSections(
+                    ui = ui,
+                    onPickEpisode = { ep = it },
+                    onSwitchLine = { line = it },
+                    onSetSpeed = { speed = it },
+                    onSetAspect = { aspect = it },
+                    onStartCast = {},
+                    onStopCast = {},
+                    onRescanCast = { rescan++ },
+                )
+            }
         }
         rule.waitForIdle()
 
         rule.onNodeWithText("选择集数").assertExists()
         rule.onNodeWithText("5").performClick()
         rule.onNodeWithText("线路B").performClick()
-        rule.onNodeWithText("1.5x").performClick()
-        rule.onNodeWithText("4:3").performClick()
+        rule.onNodeWithText("1.5x").performScrollTo().performClick()
+        rule.onNodeWithText("4:3").performScrollTo().performClick()
         rule.runOnIdle {
             assertEquals(4, ep)
             assertEquals(1, line)
@@ -113,6 +125,48 @@ class MobileDetailPlayerComponentsTest {
             assertEquals(3, aspect)
             assertTrue("打开区段应自动扫描投屏设备", rescan >= 1)
         }
+    }
+
+    @Test
+    @OptIn(ExperimentalComposeUiApi::class)
+    fun sourceSelectorPrecedesSynopsisAndEpisodesAndReceivesDefaultFocus() {
+        val synopsis = "这是一段很长的影片简介。".repeat(80)
+        val ui = PlayerUiState(
+            title = "自动化测试影片",
+            desc = synopsis,
+            epCount = 12,
+            isMovie = false,
+            lines = listOf(LineInfo("douban:456", "高清线路甲", "", "456|source:content|0")),
+            activeLine = 0,
+            sourceStatus = com.qiubo.optimaltv.ui.player.PlayerSourceStatus.READY,
+        )
+        MobileUiHarness.scene = {
+            val inputModeManager = LocalInputModeManager.current
+            LaunchedEffect(inputModeManager) {
+                inputModeManager.requestInputMode(InputMode.Keyboard)
+            }
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                PlayerMoreSections(
+                    ui = ui,
+                    onPickEpisode = {},
+                    onSwitchLine = {},
+                    onSetSpeed = {},
+                    onSetAspect = {},
+                    onStartCast = {},
+                    onStopCast = {},
+                    onRescanCast = {},
+                    autoFocusSource = true,
+                )
+            }
+        }
+        rule.waitForIdle()
+
+        val source = rule.onNodeWithText("高清线路甲 · 当前").assertIsFocused()
+            .fetchSemanticsNode().boundsInRoot
+        val description = rule.onNodeWithText(synopsis).fetchSemanticsNode().boundsInRoot
+        val episodes = rule.onNodeWithText("选择集数").fetchSemanticsNode().boundsInRoot
+        assertTrue("线路必须在简介前", source.top < description.top)
+        assertTrue("线路必须在选集前", source.top < episodes.top)
     }
 
     /** 电影不渲染选集区（需求⑨），直播不渲染倍速区。 */

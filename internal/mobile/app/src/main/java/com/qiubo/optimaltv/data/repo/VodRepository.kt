@@ -36,6 +36,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 data class Aggregated(
     val categories: List<Category>,
@@ -56,6 +59,24 @@ private data class CatalogRefreshMerge(
     val hasItems: Boolean,
     val snapshotToWrite: Pair<List<Category>, List<VodItem>>?,
 )
+
+/** Run a blocking resolver in a cancellation-aware way and only publish its result while active. */
+internal suspend fun <T> runInterruptibleAndCommit(
+    fetch: () -> T,
+    commit: (T) -> Unit,
+): T {
+    val fetched = try {
+        runInterruptible { fetch() }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    }
+    currentCoroutineContext().ensureActive()
+    commit(fetched)
+    return fetched
+}
+
+/** The chosen Douban source/episode disappeared during a successful fresh detail refresh. */
+class SelectedSourceUnavailableException : Exception("所选线路或集数已不可用")
 
 /** Legacy JSON/API catalog search must use every distinct row, not the title-collapsed browse list. */
 internal fun searchLegacyCatalog(catalog: Aggregated?, query: String): List<VodItem> {
@@ -187,6 +208,92 @@ internal object PlaybackLineSelector {
     fun nextAfterFailure(rankedIds: List<String>, activeId: String?, failed: Set<String>): String? {
         val start = rankedIds.indexOf(activeId).coerceAtLeast(-1) + 1
         return rankedIds.drop(start).firstOrNull { it !in failed }
+    }
+}
+
+/** Put the last known good line first without hiding the remaining manual alternatives. */
+internal object LastGoodSourceLinePolicy {
+    fun preferredFirst(
+        local: List<LineInfo>,
+        sourceId: String,
+        contentId: String,
+        lineIndex: Int,
+    ): List<LineInfo>? {
+        val sameContent = local.filter { line ->
+            val lineId = line.playRef.split("|").getOrNull(1) ?: return@filter false
+            val parts = lineId.split(":")
+            parts.size >= 2 && parts[0] == sourceId && parts[1] == contentId
+        }
+        val hit = sameContent.firstOrNull { line ->
+            val parts = line.playRef.split("|").getOrNull(1)?.split(":")
+            parts != null && parts.size == 3 &&
+                (parts[2].trim().toIntOrNull() ?: 0) == lineIndex
+        } ?: sameContent.firstOrNull() ?: return null
+        return listOf(hit) + local.filterNot { it == hit }
+    }
+}
+
+/** The playRef is `detailRef|lineId|episode`; persist the real middle field. */
+internal object PlayableLineIdentity {
+    fun id(line: LineInfo): String =
+        line.playRef.split('|').getOrNull(1)?.takeIf(String::isNotBlank) ?: line.vodId
+}
+
+/** Promote a preferred local line, or expose a synthetic playable ref without dropping alternatives. */
+internal object PreferredPlayableLines {
+    fun reorder(
+        lines: List<LineInfo>,
+        preferredId: String,
+        detailRef: String,
+        epIndex: Int = 0,
+        preferredLabel: String = "",
+    ): List<LineInfo> {
+        if (lines.isEmpty() || preferredId.isBlank()) return lines
+        val preferredParts = preferredId.split(':')
+        val hit = lines.indexOfFirst { line ->
+            val actual = PlayableLineIdentity.id(line)
+            actual == preferredId || (
+                preferredParts.size == 2 && actual.split(':').take(2) == preferredParts
+            )
+        }
+        if (hit == 0) return lines
+        if (hit > 0) return lines.toMutableList().also { it.add(0, it.removeAt(hit)) }
+
+        val synthetic = LineInfo(
+            vodId = lines.first().vodId,
+            label = preferredLabel.trim().ifBlank { "线路·${preferredParts.first()}" },
+            url = "",
+            playRef = "$detailRef|$preferredId|${epIndex.coerceAtLeast(0)}",
+        )
+        return listOf(synthetic) + lines
+    }
+}
+
+/** Keeps each visible playRef tied to the detail snapshot from which its IDs were produced. */
+internal class PlayRefDetailSnapshotStore(private val maxEntries: Int = 400) {
+    private val candidates = java.util.concurrent.ConcurrentHashMap<String, DetailInfo>()
+    private val accepted = java.util.concurrent.ConcurrentHashMap<String, DetailInfo>()
+
+    fun recordCandidate(playRef: String, detail: DetailInfo) {
+        if (playRef.isBlank()) return
+        candidates[playRef] = detail
+        trim(candidates)
+    }
+
+    /** Promote only after the caller has actually installed these lines into player UI state. */
+    fun accept(lines: List<LineInfo>) {
+        lines.forEach { line ->
+            candidates[line.playRef]?.let { accepted[line.playRef] = it }
+        }
+        trim(accepted)
+    }
+
+    fun get(playRef: String): DetailInfo? = accepted[playRef]
+
+    private fun trim(map: java.util.concurrent.ConcurrentHashMap<String, DetailInfo>) {
+        while (map.size > maxEntries) {
+            map.keys.firstOrNull()?.let(map::remove) ?: return
+        }
     }
 }
 
@@ -1172,6 +1279,8 @@ class VodRepository(
      *  /hhkan/detail 抓取——旧版 resolveLines 再抓一次详情页，起播平白多一整轮
      *  网络往返（低端机+冷抓 20s+ 时翻倍），v1.10 去重 */
     private val detailInfoCache = java.util.concurrent.ConcurrentHashMap<String, DetailInfo>()
+    /** Snapshots become active only when their corresponding lines are installed in player UI. */
+    private val playRefDetailSnapshots = PlayRefDetailSnapshotStore()
     /** 已为播放会话拉取过完整补充源的好好看 vid。 */
     private val playbackDetailReady = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
@@ -1278,13 +1387,21 @@ class VodRepository(
             ?: return@withContext emptyList()
         d.lines.mapNotNull { line ->
             val ep = line.episodes.getOrNull(epIndex) ?: return@mapNotNull null
+            val playRef = "${item.detailRef}|${ep.second}|${ep.third}"
+            // Candidate is promoted only when the caller installs these refs into UI state.
+            playRefDetailSnapshots.recordCandidate(playRef, d)
             LineInfo(
                 vodId = item.id,
                 label = line.name,
                 url = "",
-                playRef = "${item.detailRef}|${ep.second}|${ep.third}",
+                playRef = playRef,
             )
         }
+    }
+
+    /** Record the mapping snapshot for the exact line table now visible in the player. */
+    fun acceptPlayRefSnapshots(lines: List<LineInfo>) {
+        playRefDetailSnapshots.accept(lines)
     }
 
     // ---------- 云端 Resolver（L0~L5 取源阶梯） ----------
@@ -1338,24 +1455,23 @@ class VodRepository(
             }.getOrNull()
             if (remembered != null) {
                 // 在已取到的 local 里找，不再为 L0 重新触发一整轮 /vod/detail。
-                // 逐段比对而非 startsWith：`content-1` 会前缀命中 `content-10`，
-                // 那样 L0 会把「上次成功的第 10 集线路」当成这集的线路送进起播——错集。
-                // 先按 source/content 前缀定位候选内容，再在**该内容内**按 line_index
-                // 精确定位真正播成功过的那条线——只比前缀会把「第 3 条」换成「第 0 条」
-                // （同一内容有多条可播线路时，BUG-03 的根因）。
-                val sameContent = local.filter { line ->
-                    ResolverRanking.matchesCandidate(
-                        lineLinePrefix(line.playRef), remembered.sourceId, remembered.contentId,
-                    )
-                }
-                val hit = sameContent.firstOrNull { line ->
-                    val parts = line.playRef.split("|").getOrNull(1)?.split(":")
-                    parts != null && parts.size == 3 &&
-                        (parts[2].trim().toIntOrNull() ?: 0) == remembered.lineIndex
-                } ?: sameContent.firstOrNull()
-                if (hit != null) {
+                // 命中后仍保留所有 local 线路；缺席时保留一个当前集的可重解析引用，
+                // 避免旧线路刚好未被本轮 detail 匹配时静默换成另一条。
+                val preferredId = LastGoodSourceCodec.Stored(
+                    remembered.sourceId, remembered.contentId, remembered.lineIndex,
+                ).lineId()
+                val localPreferred = LastGoodSourceLinePolicy.preferredFirst(
+                    local, remembered.sourceId, remembered.contentId, remembered.lineIndex,
+                )
+                val ordered = localPreferred ?: PreferredPlayableLines.reorder(
+                    lines = local,
+                    preferredId = preferredId,
+                    detailRef = item.detailRef.ifBlank { item.id.removePrefix("douban:") },
+                    epIndex = epIndex,
+                )
+                if (ordered.isNotEmpty()) {
                     PlaybackTelemetry.counters.inc("resolve.tier.l0")
-                    return@withContext ResolvedLines(listOf(hit), "L0_last_good")
+                    return@withContext ResolvedLines(ordered, "L0_last_good")
                 }
             }
         }
@@ -1375,7 +1491,12 @@ class VodRepository(
                 }
             }.getOrNull()
             if (result != null && result.hasCandidates) {
-                val ranked = applyResolverRanking(local, result)
+                val ranked = applyResolverRanking(
+                    local,
+                    result,
+                    detailRef = item.detailRef.ifBlank { item.id.removePrefix("douban:") },
+                    epIndex = epIndex,
+                )
                 if (ranked.isNotEmpty()) {
                     PlaybackTelemetry.counters.inc("resolve.tier.l1")
                     return@withContext ResolvedLines(ranked, "L1_cloud_resolver", result)
@@ -1400,6 +1521,8 @@ class VodRepository(
     private fun applyResolverRanking(
         all: List<LineInfo>,
         result: SourceResolveResult,
+        detailRef: String,
+        epIndex: Int,
     ): List<LineInfo> {
         if (!result.usable) return emptyList()
         if (all.isEmpty()) return emptyList()
@@ -1408,7 +1531,14 @@ class VodRepository(
             preferred = result.preferred,
             backups = result.backups,
         ).mapNotNull { all.getOrNull(it) }
-        return ranked
+        val preferred = result.preferred ?: return ranked
+        return PreferredPlayableLines.reorder(
+            lines = ranked,
+            preferredId = preferred.linePrefix,
+            detailRef = detailRef,
+            epIndex = epIndex,
+            preferredLabel = preferred.sourceName,
+        )
     }
 
     /**
@@ -1451,6 +1581,12 @@ class VodRepository(
     /** 直链缓存条目：raw=上游直链 + 解析时刻（点播部分 CDN 直链带分钟级签名，须按 TTL 失效） */
     private class PlayEntry(val raw: String, val ts: Long)
     private val playCache = java.util.concurrent.ConcurrentHashMap<String, PlayEntry>()
+    private val refreshedPlayLineIds = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** The line ID used by the last successful fresh Douban play for this unchanged UI ref. */
+    fun lineIdForLastGood(line: LineInfo): String =
+        if (line.playRef.isBlank()) "" else
+            refreshedPlayLineIds[line.playRef] ?: PlayableLineIdentity.id(line)
 
     /** 直链缓存失效（失败/卡顿重解析前调用：确保拿到带新签名的地址） */
     fun bustPlayCache(playRef: String) {
@@ -1469,10 +1605,15 @@ class VodRepository(
      * 中继清单感知预取等效 4~6 连接并行（实测 571KB/s，3.7×）。
      * preferRelay=false：该线路中继路径已被判不可用（PlayerViewModel 阶梯），退回直连。
      */
-    suspend fun resolvePlayUrl(line: LineInfo, preferRelay: Boolean = true): String = withContext(Dispatchers.IO) {
+    suspend fun resolvePlayUrl(
+        line: LineInfo,
+        preferRelay: Boolean = true,
+        fresh: Boolean = false,
+    ): String = withContext(Dispatchers.IO) {
         if (line.playRef.isBlank()) return@withContext line.url
         val now = System.currentTimeMillis()
-        val hit = playCache[line.playRef]
+        val hit = if (fresh) null else playCache[line.playRef]
+        if (fresh) playCache.remove(line.playRef)
         val base = settings.current().hhkanBaseUrl
         val raw: String
         if (hit != null && now - hit.ts < PLAY_URL_TTL_MS) {
@@ -1480,15 +1621,48 @@ class VodRepository(
         } else {
             val parts = line.playRef.split("|")
             if (parts.size != 3) return@withContext ""
-            val fetched = runCatching {
-                VodApiSource.fetchPlay(base, okHttp, parts[0], parts[1], parts[2]).firstOrNull().orEmpty()
-            }.getOrNull()?.takeIf { it.isNotBlank() }
+            val fetched = try {
+                runInterruptibleAndCommit(
+                    fetch = {
+                        VodApiSource.fetchPlayResult(
+                            base,
+                            okHttp,
+                            parts[0],
+                            parts[1],
+                            parts[2],
+                            fresh = fresh,
+                            sourceLabel = line.label,
+                            previousDetail = playRefDetailSnapshots.get(line.playRef) ?: detailInfoCache[parts[0]],
+                        )
+                    },
+                    commit = { result ->
+                        if (result.selectionUnavailable) throw SelectedSourceUnavailableException()
+                        val fetchedUrl = result.urls.firstOrNull()?.takeIf(String::isNotBlank)
+                        if (fetchedUrl != null) {
+                            playCache[line.playRef] = PlayEntry(fetchedUrl, now)
+                            if (fresh && line.vodId.startsWith("douban:")) {
+                                refreshedPlayLineIds[line.playRef] = result.lineId
+                                if (refreshedPlayLineIds.size > 400) {
+                                    refreshedPlayLineIds.keys.firstOrNull()?.let(refreshedPlayLineIds::remove)
+                                }
+                            }
+                        }
+                    },
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (unavailable: SelectedSourceUnavailableException) {
+                throw unavailable
+            } catch (_: Exception) {
+                null
+            }?.takeIf { it.urls.firstOrNull().orEmpty().isNotBlank() }
             if (fetched != null) {
-                playCache[line.playRef] = PlayEntry(fetched, now)
-                raw = fetched
+                val fetchedUrl = fetched.urls.first()
+                raw = fetchedUrl
             } else {
-                // 解析失败降级旧缓存（好过空串直接判线失败）
-                raw = hit?.raw.orEmpty()
+                // 手动 fresh 重试不能悄悄回放已经卡住/过期的缓存地址。
+                // 普通恢复流程仍保留旧缓存兜底，避免网络抖动导致空串。
+                raw = if (fresh) "" else hit?.raw.orEmpty()
             }
         }
         when {

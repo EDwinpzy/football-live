@@ -314,8 +314,16 @@ class HhkanSource(
         }
 
         /** GET /hhkan/play/{vodid}/{pid}/{vid}（三段斜杠）→ 该集该线路直链（取第一个可用的） */
-        fun fetchPlay(base: String, okHttp: OkHttpClient, vodId: String, pid: String, vid: String): String {
-            val o = fetchJson(base, "/hhkan/play/$vodId/$pid/$vid", slow(okHttp))
+        fun fetchPlay(
+            base: String,
+            okHttp: OkHttpClient,
+            vodId: String,
+            pid: String,
+            vid: String,
+            fresh: Boolean = false,
+        ): String {
+            val path = "/hhkan/play/$vodId/$pid/$vid" + if (fresh) "?fresh=1" else ""
+            val o = fetchJson(base, path, slow(okHttp))
             val arr = o.optJSONArray("sources") ?: return ""
             for (i in 0 until arr.length()) {
                 val u = arr.optJSONObject(i)?.optString("url").orEmpty()

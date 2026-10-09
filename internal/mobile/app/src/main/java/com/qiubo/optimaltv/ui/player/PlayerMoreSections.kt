@@ -31,6 +31,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -49,7 +51,7 @@ import com.qiubo.optimaltv.ui.theme.AccentBlue
 import com.qiubo.optimaltv.ui.theme.TextPrimary
 
 /**
- * 「更多」区段内容（2026-09-19 v2 设计稿定稿）：影片信息 + 简介 + 选集 + 换源 + 倍速 + 画幅 + 投屏。
+ * 「更多」区段内容（2026-09-19 v2 设计稿定稿）：影片信息 + 换源 + 简介 + 选集 + 倍速 + 画幅 + 投屏。
  * 横屏右侧抽屉（MorePanel）与竖屏视频下方常驻内容区（PortraitPlayerPanel）共用同一份区段，
  * 视觉 / 数据 / 动作 1:1；动作全部以回调注入，便于无 ViewModel 的自动化回归。
  */
@@ -58,6 +60,7 @@ internal fun PlayerMoreSections(
     ui: PlayerUiState,
     onPickEpisode: (Int) -> Unit,
     onSwitchLine: (Int) -> Unit,
+    onRetrySources: () -> Unit = {},
     onSetSpeed: (Float) -> Unit,
     onSetAspect: (Int) -> Unit,
     onStartCast: (DlnaDevice) -> Unit,
@@ -65,9 +68,16 @@ internal fun PlayerMoreSections(
     onRescanCast: () -> Unit,
     posterWidth: Dp = 96.dp,
     posterHeight: Dp = 136.dp,
+    autoFocusSource: Boolean = false,
 ) {
+    val sourceFocusRequester = remember { FocusRequester() }
     // 打开即扫一次局域网，设备自动列在「投屏」下方（用户要求：不用再点一次才出列表）
     LaunchedEffect(Unit) { onRescanCast() }
+    LaunchedEffect(autoFocusSource, ui.activeLine, ui.lines.size, ui.sourceStatus) {
+        if (autoFocusSource && (ui.lines.isNotEmpty() || ui.sourceStatus != PlayerSourceStatus.LOADING)) {
+            runCatching { sourceFocusRequester.requestFocus() }
+        }
+    }
     // 影片信息
     Row(verticalAlignment = Alignment.Top) {
         if (ui.posterUrl.isNotBlank()) {
@@ -101,11 +111,98 @@ internal fun PlayerMoreSections(
             }
         }
     }
+    // Put the source selector before synopsis and episode grids so it remains immediately visible.
+    // The side panel can request focus here when it opens; portrait detail content stays touch-first.
+    val sourceFocusIndex = ui.activeLine.takeIf { it in ui.lines.indices } ?: 0
+    if (!ui.isLive) {
+        SectionLabel("换源线路")
+        when {
+            ui.lines.isEmpty() && ui.sourceStatus == PlayerSourceStatus.LOADING ->
+                Text("正在查找片源…", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
+            ui.lines.isEmpty() && ui.sourceStatus == PlayerSourceStatus.EMPTY ->
+                Text("没有找到可用片源", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
+            ui.lines.isEmpty() ->
+                Text(ui.fatalMsg ?: "片源查找失败", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
+            ui.sourceStatus == PlayerSourceStatus.LOADING ->
+                Text("正在加载：${ui.lines.getOrNull(ui.activeLine)?.label.orEmpty()}", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
+            ui.sourceStatus == PlayerSourceStatus.ERROR ->
+                Text("当前线路失败，可重试或切换线路", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
+            else ->
+                Text("当前线路：${ui.lines.getOrNull(ui.activeLine)?.label.orEmpty()}", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
+        }
+        if (ui.lines.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+            ) {
+                ui.lines.forEachIndexed { idx, line ->
+                    val focusModifier = if (autoFocusSource && idx == sourceFocusIndex) {
+                        Modifier.focusRequester(sourceFocusRequester)
+                    } else Modifier
+                    Box(
+                        modifier = Modifier
+                            .then(focusModifier)
+                            .clip(RoundedCornerShape(10.dp))
+                            .tapCard { onSwitchLine(idx) }
+                            .background(
+                                if (idx == ui.activeLine) AccentBlue else Color(0x24FFFFFF),
+                                RoundedCornerShape(10.dp),
+                            )
+                            .padding(horizontal = 14.dp, vertical = 9.dp),
+                    ) {
+                        Text(
+                            if (idx == ui.activeLine) "${line.label} · 当前" else line.label,
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            SourceAction("重载当前线路", onClick = { onSwitchLine(ui.activeLine) })
+        } else if (ui.sourceStatus != PlayerSourceStatus.LOADING) {
+            Spacer(Modifier.height(8.dp))
+            SourceAction(
+                "重新查找片源",
+                onClick = onRetrySources,
+                modifier = if (autoFocusSource) Modifier.focusRequester(sourceFocusRequester) else Modifier,
+            )
+        }
+        Spacer(Modifier.height(18.dp))
+    } else if (ui.lines.size > 1) {
+        SectionLabel("换源线路")
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+        ) {
+            ui.lines.forEachIndexed { idx, line ->
+                val focusModifier = if (autoFocusSource && idx == sourceFocusIndex) {
+                    Modifier.focusRequester(sourceFocusRequester)
+                } else Modifier
+                Box(
+                    modifier = Modifier
+                        .then(focusModifier)
+                        .clip(RoundedCornerShape(10.dp))
+                        .tapCard { onSwitchLine(idx) }
+                        .background(
+                            if (idx == ui.activeLine) AccentBlue else Color(0x24FFFFFF),
+                            RoundedCornerShape(10.dp),
+                        )
+                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                ) {
+                    Text(line.label, color = Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                }
+            }
+        }
+        Spacer(Modifier.height(18.dp))
+    }
     if (ui.desc.isNotBlank()) {
         Spacer(Modifier.height(14.dp))
         Text(
             ui.desc, color = TextPrimary.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall,
-            maxLines = 4, overflow = TextOverflow.Ellipsis,
+            maxLines = 3, overflow = TextOverflow.Ellipsis,
         )
     }
     Spacer(Modifier.height(20.dp))
@@ -165,30 +262,6 @@ internal fun PlayerMoreSections(
                         color = Color.White, style = MaterialTheme.typography.labelMedium,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
-                }
-            }
-        }
-        Spacer(Modifier.height(18.dp))
-    }
-    // 换源（horizontalScroll：14+ 条线路不裁切）
-    if (ui.lines.size > 1) {
-        SectionLabel("换源线路")
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-        ) {
-            ui.lines.forEachIndexed { idx, line ->
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .tapCard { onSwitchLine(idx) }
-                        .background(
-                            if (idx == ui.activeLine) AccentBlue else Color(0x24FFFFFF),
-                            RoundedCornerShape(10.dp),
-                        )
-                        .padding(horizontal = 14.dp, vertical = 9.dp),
-                ) {
-                    Text(line.label, color = Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1)
                 }
             }
         }
@@ -308,6 +381,19 @@ internal fun PlayerMoreSections(
         }
     }
     Spacer(Modifier.height(28.dp))
+}
+
+@Composable
+private fun SourceAction(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .tapCard(onClick)
+            .background(Color(0x24FFFFFF), RoundedCornerShape(10.dp))
+            .padding(horizontal = 14.dp, vertical = 9.dp),
+    ) {
+        Text(label, color = Color.White, style = MaterialTheme.typography.labelMedium)
+    }
 }
 
 @Composable

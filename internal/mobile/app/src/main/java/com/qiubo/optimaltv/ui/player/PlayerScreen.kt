@@ -368,6 +368,8 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                 message = msg,
                 onRetry = { vm.retry() },
                 onBack = { nav.popBackStack() },
+                onMore = { vm.setPanel(Panel.MORE) },
+                showMore = !ui.isLive,
             )
         }
 
@@ -478,6 +480,7 @@ private fun PortraitPlayerPanel(ui: PlayerUiState, vm: PlayerViewModel) {
             ui = ui,
             onPickEpisode = { vm.switchEpisode(it) },
             onSwitchLine = vm::switchLine,
+            onRetrySources = vm::retry,
             onSetSpeed = vm::setSpeed,
             onSetAspect = vm::setAspect,
             onStartCast = vm::startCast,
@@ -979,17 +982,19 @@ private fun MorePanel(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 34.dp, vertical = 28.dp),
         ) {
-            // 区段与竖屏视频下方内容区同源（PlayerMoreSections，2026-09-19 v2 定稿）：
-            // 影片信息/简介/选集/换源/倍速/画幅/投屏；打开即自动扫投屏设备（区段内 LaunchedEffect）
+            // 区段与竖屏视频下方内容区同源（PlayerMoreSections）：
+            // 影片信息/换源/简介/选集/倍速/画幅/投屏；换源优先进入视口并接收默认焦点。
             PlayerMoreSections(
                 ui = ui,
                 onPickEpisode = onPickEpisode,
                 onSwitchLine = vm::switchLine,
+                onRetrySources = vm::retry,
                 onSetSpeed = vm::setSpeed,
                 onSetAspect = vm::setAspect,
                 onStartCast = vm::startCast,
                 onStopCast = { vm.stopCast(resumeLocal = true) },
                 onRescanCast = { vm.scanCastDevices() },
+                autoFocusSource = true,
             )
         }
     }
@@ -1062,6 +1067,8 @@ private fun ErrorWidget(
     message: String,
     onRetry: () -> Unit,
     onBack: () -> Unit,
+    onMore: () -> Unit,
+    showMore: Boolean,
 ) {
     Box(
         Modifier
@@ -1073,9 +1080,9 @@ private fun ErrorWidget(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(18.dp),
             modifier = Modifier
-                .width(720.dp)
+                .fillMaxWidth(0.92f)
                 .background(Color(0xFF1C1C22), RoundedCornerShape(20.dp))
-                .padding(40.dp),
+                .padding(24.dp),
         ) {
             Text("无法播放", style = MaterialTheme.typography.titleLarge, color = TextPrimary)
             Text(
@@ -1084,25 +1091,39 @@ private fun ErrorWidget(
                 color = Color(0xFFB9C0CC),
                 maxLines = 4,
             )
-            Text("已尝试全部线路。可重试或返回选择其他影片。",
+            Text("可重试、打开线路面板选择片源，或返回选择其他影片。",
                 style = MaterialTheme.typography.bodyMedium, color = Color(0xFFB9C0CC))
-            Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
+                        .weight(1f)
                         .clip(RoundedCornerShape(12.dp))
                         .tapCard(onRetry)
                         .background(AccentBlue, RoundedCornerShape(12.dp))
-                        .padding(horizontal = 34.dp, vertical = 12.dp),
+                        .padding(horizontal = 8.dp, vertical = 12.dp),
                 ) { Text("重试", color = Color.White, style = MaterialTheme.typography.labelLarge) }
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
+                        .weight(1f)
                         .clip(RoundedCornerShape(12.dp))
                         .tapCard(onBack)
                         .background(Color(0x2EFFFFFF), RoundedCornerShape(12.dp))
-                        .padding(horizontal = 34.dp, vertical = 12.dp),
+                        .padding(horizontal = 8.dp, vertical = 12.dp),
                 ) { Text("返回", color = Color.White, style = MaterialTheme.typography.labelLarge) }
+                if (showMore) Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .tapCard(onMore)
+                        .background(Color(0x2EFFFFFF), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 8.dp, vertical = 12.dp),
+                ) { Text("线路", color = Color.White, style = MaterialTheme.typography.labelLarge) }
             }
         }
     }

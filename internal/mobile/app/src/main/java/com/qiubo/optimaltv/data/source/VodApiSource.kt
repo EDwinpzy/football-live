@@ -32,6 +32,96 @@ data class ResolvedSource(
     val linePrefix: String get() = "$sourceId:$contentId"
 }
 
+/** Map a refreshed Douban play reference back to the source and episode the user selected. */
+internal object FreshPlayReferencePolicy {
+    data class Reference(val lineId: String, val episode: String)
+
+    fun remapDouban(
+        previous: HhkanSource.Companion.DetailInfo?,
+        refreshed: HhkanSource.Companion.DetailInfo,
+        sourceLabel: String,
+        oldLineId: String,
+        oldEpisode: String,
+    ): Reference? {
+        val providerId = oldLineId.substringBefore(':').takeIf { ':' in oldLineId }
+        val previousLine = previous?.lines?.firstOrNull { line ->
+            line.episodes.any { it.second == oldLineId }
+        } ?: run {
+            val named = sourceLabel.takeUnless(::isAnonymousSignalName)
+                ?.takeIf(String::isNotBlank)
+                ?.let { name -> previous?.lines.orEmpty().filter { normalized(it.name) == normalized(name) } }
+                .orEmpty()
+            val byProvider = providerId?.let { id ->
+                named.filter { line -> line.episodes.any { it.second.substringBefore(':') == id } }
+            }.orEmpty()
+            byProvider.singleOrNull() ?: named.singleOrNull()
+        }
+        val previousEpisodeName = previousLine?.episodes
+            ?.firstOrNull { it.second == oldLineId && it.third == oldEpisode }
+            ?.first
+            ?.takeIf(String::isNotBlank)
+            ?: previousLine?.episodes
+                ?.firstOrNull { it.third == oldEpisode }
+                ?.first
+                ?.takeIf(String::isNotBlank)
+
+        val selectedName = sourceLabel
+            .takeUnless(::isAnonymousSignalName)
+            ?.takeIf(String::isNotBlank)
+            ?: previousLine?.name.orEmpty()
+
+        val refreshedLine = refreshed.lines.firstOrNull { line ->
+            line.episodes.any { it.second == oldLineId }
+        } ?: run {
+            val named = selectedName.takeIf(String::isNotBlank)?.let { name ->
+                refreshed.lines.filter { normalized(it.name) == normalized(name) }
+            }.orEmpty()
+            val byProvider = providerId?.let { id ->
+                named.filter { line -> line.episodes.any { it.second.substringBefore(':') == id } }
+            }.orEmpty()
+            when {
+                byProvider.size == 1 -> byProvider.single()
+                named.size == 1 -> named.single()
+                named.isNotEmpty() -> return null
+                else -> {
+                    val byStableProviderId = providerId?.let { id ->
+                        refreshed.lines.filter { line -> line.episodes.any { it.second.substringBefore(':') == id } }
+                    }.orEmpty()
+                    byStableProviderId.singleOrNull()
+                }
+            }
+        } ?: return null
+
+        val newEpisode = if (previousEpisodeName != null) {
+            val sameNamedEpisodes = refreshedLine.episodes.filter {
+                normalized(it.first) == normalized(previousEpisodeName)
+            }
+            when {
+                sameNamedEpisodes.size == 1 -> sameNamedEpisodes.single()
+                sameNamedEpisodes.size > 1 -> sameNamedEpisodes.firstOrNull { it.third == oldEpisode }
+                else -> null
+            }
+        } else {
+            refreshedLine.episodes.firstOrNull { it.third == oldEpisode }
+        } ?: return null
+        return Reference(newEpisode.second, newEpisode.third)
+    }
+
+    private fun isAnonymousSignalName(name: String): Boolean =
+        name.trim().matches(Regex("信号源\\s*\\d+", RegexOption.IGNORE_CASE))
+
+    private fun normalized(value: String): String =
+        value.trim().lowercase().replace(Regex("\\s+"), " ")
+}
+
+data class VodPlayFetchResult(
+    val urls: List<String>,
+    val lineId: String,
+    val episode: String,
+    /** Fresh Douban detail succeeded, but the selected source/episode no longer exists. */
+    val selectionUnavailable: Boolean = false,
+)
+
 /**
  * Resolver 结果。status 与后端 `RESOLVE_STATUSES` 一一对应。
  *
@@ -345,19 +435,68 @@ class VodApiSource(
             )
         }
 
-        fun fetchPlay(base: String, client: OkHttpClient, id: String, lineId: String, episode: String): List<String> {
+        fun fetchPlay(
+            base: String,
+            client: OkHttpClient,
+            id: String,
+            lineId: String,
+            episode: String,
+            fresh: Boolean = false,
+            sourceLabel: String? = null,
+            previousDetail: HhkanSource.Companion.DetailInfo? = null,
+        ): List<String> = fetchPlayResult(
+            base, client, id, lineId, episode, fresh, sourceLabel, previousDetail,
+        ).urls
+
+        fun fetchPlayResult(
+            base: String,
+            client: OkHttpClient,
+            id: String,
+            lineId: String,
+            episode: String,
+            fresh: Boolean = false,
+            sourceLabel: String? = null,
+            previousDetail: HhkanSource.Companion.DetailInfo? = null,
+        ): VodPlayFetchResult {
             if (id.startsWith("hhkan:")) {
-                return HhkanSource.fetchPlay(
+                val urls = HhkanSource.fetchPlay(
                     base = base,
                     okHttp = client,
                     vodId = id.removePrefix("hhkan:"),
                     pid = lineId,
                     vid = episode,
+                    fresh = fresh,
                 ).takeIf(String::isNotBlank)?.let(::listOf).orEmpty()
+                return VodPlayFetchResult(urls, lineId, episode)
             }
-            val path = "/vod/play/${id.removePrefix("douban:")}/${URLEncoder.encode(lineId, "UTF-8")}/${episode.toIntOrNull() ?: 0}"
+            // 豆瓣的 /vod/play 没有 fresh 参数。刷新 detail 后按来源标签和集名重映射，
+            // 避免上游重新匹配后 lineId / episode 已变化，旧引用落到空源或别的线路。
+            val refreshed = if (fresh) {
+                fetchDetail(base, client, id, refresh = true)
+            } else null
+            val mapped = if (refreshed != null && !sourceLabel.isNullOrBlank()) {
+                FreshPlayReferencePolicy.remapDouban(
+                    previous = previousDetail,
+                    refreshed = refreshed,
+                    sourceLabel = sourceLabel,
+                    oldLineId = lineId,
+                    oldEpisode = episode,
+                )
+            } else null
+            // A successful detail refresh is authoritative. If the selected line/episode
+            // disappeared, do not silently send the stale reference (or another source).
+            if (fresh && refreshed == null) {
+                return VodPlayFetchResult(emptyList(), lineId, episode)
+            }
+            if (fresh && mapped == null) {
+                return VodPlayFetchResult(emptyList(), lineId, episode, selectionUnavailable = true)
+            }
+            val selectedLineId = mapped?.lineId ?: lineId
+            val selectedEpisode = mapped?.episode ?: episode
+            val path = "/vod/play/${id.removePrefix("douban:")}/${URLEncoder.encode(selectedLineId, "UTF-8")}/${selectedEpisode.toIntOrNull() ?: 0}"
             val json = fetchJson(base, path, client)
-            return listOfNotNull(json.optString("url").takeIf(String::isNotBlank))
+            val urls = listOfNotNull(json.optString("url").takeIf(String::isNotBlank))
+            return VodPlayFetchResult(urls, selectedLineId, selectedEpisode)
         }
 
         /**
