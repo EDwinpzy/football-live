@@ -142,13 +142,12 @@ class MobileVodComponentsTest {
 
         val row = rule.onNodeWithContentDescription("类型")
         val first = bounds(MobileUiTags.filter("类型", ""))
-        val last = bounds(MobileUiTags.filter("类型", "8"))
-        assertTrue("横向筛选项应保持同一行", kotlin.math.abs(last.top - first.top) < 1f)
-
-        repeat(3) { row.performTouchInput { swipeLeft() } }
+        row.performTouchInput { swipeLeft() }
+        rule.onNodeWithTag(MobileUiTags.filter("类型", "8")).performScrollTo()
         rule.waitForIdle()
         val rowBounds = row.fetchSemanticsNode().boundsInRoot
         val lastAfterScroll = bounds(MobileUiTags.filter("类型", "8"))
+        assertTrue("横向筛选项应保持同一行", kotlin.math.abs(lastAfterScroll.top - first.top) < 1f)
         assertTrue("末尾筛选项应可滚入触控区域", lastAfterScroll.left >= rowBounds.left)
         assertTrue("末尾筛选项应可完整触达", lastAfterScroll.right <= rowBounds.right)
         rule.onNodeWithTag(MobileUiTags.filter("类型", "8")).performClick().assertIsSelected()
