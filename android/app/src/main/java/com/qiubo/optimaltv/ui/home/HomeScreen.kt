@@ -35,7 +35,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -88,6 +91,7 @@ import androidx.compose.foundation.layout.size
 import com.qiubo.optimaltv.ui.theme.sx
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import java.net.URLEncoder
 
 /**
@@ -142,6 +146,20 @@ internal object HomeLibraryUiPolicy {
         return result
     }
 
+    fun targetIndex(itemCount: Int, row: Int, column: Int): Int? {
+        if (itemCount <= 0) return null
+        val targetRow = row.coerceIn(0, 1).coerceAtMost(itemCount - 1)
+        val lastColumn = (itemCount - 1 - targetRow) / 2
+        return column.coerceIn(0, lastColumn) * 2 + targetRow
+    }
+
+}
+
+/** Keep only the latest asynchronous focus request; an outgoing page may lose focus while settling. */
+private class LibraryFocusRequests {
+    var job: Job? = null
+    var focusedKey: String? = null
+    var awaitingPageFocus = false
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -179,6 +197,9 @@ fun VodScreen(nav: NavController) {
     val vodListState = rememberLazyListState()
     val backScope = androidx.compose.runtime.rememberCoroutineScope()
     var tabFocused by remember { mutableStateOf(false) }
+    val libraryKeepsChromeHidden by remember {
+        derivedStateOf { vodListState.firstVisibleItemIndex >= 3 && !tabFocused }
+    }
     var hint by remember { mutableStateOf<String?>(null) }
     // 需求②：分类 chip 行「从任何地方进入都回上次选中项」的行内持焦守卫——
     // gen 代际计数消除 LOST/GAINED 乱序歧义（行内移动时旧 chip 的 LOST 先到，
@@ -272,8 +293,12 @@ fun VodScreen(nav: NavController) {
                 var lastLibraryRow by remember(selCid) { mutableIntStateOf(0) }
                 var lastLibraryColumn by remember(selCid) { mutableIntStateOf(0) }
                 val pageScope = androidx.compose.runtime.rememberCoroutineScope()
+                val focusRequests = remember { LibraryFocusRequests() }
 
                 LaunchedEffect(selCid) {
+                    focusRequests.job?.cancel()
+                    focusRequests.focusedKey = null
+                    focusRequests.awaitingPageFocus = false
                     libraryCardHasFocus = false
                     sectionPagerState.scrollToPage(0)
                     sectionRowStates.flatten().forEach { it.scrollToItem(0) }
@@ -310,30 +335,36 @@ fun VodScreen(nav: NavController) {
                 }
 
                 fun requestLibraryFocus(page: Int, row: Int, column: Int) {
+                    if (sectionPagerState.isScrollInProgress || page != sectionPagerState.settledPage) return
                     val section = sectionPages.getOrNull(page)?.second ?: return
-                    val requestedRow = row.coerceIn(0, 1)
-                    val rowItems = section.items.filterIndexed { index, _ -> index % 2 == requestedRow }
-                    val targetRow = if (rowItems.isEmpty()) 1 - requestedRow else requestedRow
-                    val targetItems = if (targetRow == requestedRow) rowItems else {
-                        section.items.filterIndexed { index, _ -> index % 2 == targetRow }
-                    }
-                    if (targetItems.isEmpty()) return
-                    val targetColumn = column.coerceIn(0, targetItems.lastIndex)
-                    val item = targetItems[targetColumn]
+                    val index = HomeLibraryUiPolicy.targetIndex(section.items.size, row, column) ?: return
+                    val targetRow = index % 2
+                    val targetColumn = index / 2
+                    val item = section.items[index]
                     val key = "lib:${section.name}:${item.id}"
-                    pageScope.launch {
+                    focusRequests.job?.cancel()
+                    focusRequests.job = pageScope.launch {
                         val rowState = sectionRowStates[page][targetRow]
                         if (rowState.layoutInfo.visibleItemsInfo.none { it.index == targetColumn }) {
                             rowState.animateScrollToItem(targetColumn)
                         }
                         repeat(24) {
-                            delay(40)
-                            if (runCatching { cardReg.fr(key).requestFocus() }.isSuccess) return@launch
+                            if (sectionPagerState.isScrollInProgress || sectionPagerState.settledPage != page) return@launch
+                            runCatching { cardReg.fr(key).requestFocus() }
+                            if (focusRequests.focusedKey == key) {
+                                focusRequests.awaitingPageFocus = false
+                                return@launch
+                            }
+                            // Retry only after layout gets another frame, without a fixed input delay.
+                            withFrameNanos { }
                         }
                     }
                 }
                 fun moveLibraryPage(page: Int, row: Int, column: Int) {
                     if (page !in sectionPages.indices) return
+                    if (sectionPagerState.isScrollInProgress || page == sectionPagerState.settledPage) return
+                    focusRequests.job?.cancel()
+                    focusRequests.awaitingPageFocus = true
                     lastLibraryRow = row
                     lastLibraryColumn = column
                     libraryCardHasFocus = true
@@ -348,19 +379,27 @@ fun VodScreen(nav: NavController) {
                     }
                 }
                 LaunchedEffect(sectionPagerState.settledPage) {
-                    if (libraryCardHasFocus) {
+                    if (libraryCardHasFocus || focusRequests.awaitingPageFocus) {
                         requestLibraryFocus(sectionPagerState.settledPage, lastLibraryRow, lastLibraryColumn)
                     }
                 }
                 BackHandler {
+                    focusRequests.job?.cancel()
                     val atTop = vodListState.firstVisibleItemIndex == 0 && vodListState.firstVisibleItemScrollOffset == 0
                     if (sectionPagerState.currentPage > 0) {
                         moveLibraryPage(sectionPagerState.currentPage - 1, lastLibraryRow, lastLibraryColumn)
                     } else if (atTop && tabFocused) {
                         exitApp()
                     } else {
-                        backScope.launch { vodListState.scrollToItem(0) }
-                        runCatching { tabFocus.requestFocus() }
+                        backScope.launch {
+                            vodListState.scrollToItem(0)
+                            withFrameNanos { }
+                            repeat(24) {
+                                runCatching { tabFocus.requestFocus() }
+                                if (tabFocused) return@launch
+                                withFrameNanos { }
+                            }
+                        }
                     }
                 }
                 val showLibLoading = sectionLoading && sections.isEmpty()
@@ -380,16 +419,11 @@ fun VodScreen(nav: NavController) {
                 val libFirstCard = firstLibrarySection?.items?.firstOrNull()
                 /** chip DOWN 定向：滚到首板块标题（首行随之入视口）→ 落首卡（重试覆盖组合时延） */
                 fun dropToLibFirstCard() {
-                    val first = libFirstCard ?: return
-                    val sourceName = firstLibrarySection?.name ?: return
-                    val focusKey = "lib:$sourceName:${first.id}"
+                    if (libFirstCard == null) return
                     pageScope.launch {
                         runCatching { vodListState.scrollToItem(3) }   // 0 hero / 1 history / 2 chips / 3 三页片库
                         sectionPagerState.animateScrollToPage(firstLibraryPage)
-                        repeat(20) {
-                            if (runCatching { cardReg.fr(focusKey).requestFocus() }.isSuccess) return@launch
-                            delay(60)
-                        }
+                        requestLibraryFocus(firstLibraryPage, 0, 0)
                     }
                 }
                 // 2026-09-22 跳行修复（用户报障「最近观看 DOWN 跳过标签栏直达最近热门」）：
@@ -631,7 +665,18 @@ fun VodScreen(nav: NavController) {
                                 onRowFocus = { row, column -> requestLibraryFocus(page, row, column) },
                                 onPageMove = ::moveLibraryPage,
                                 onCardFocusChanged = { row, column, gained ->
-                                    libraryCardHasFocus = gained
+                                    val item = section?.items?.getOrNull(column * 2 + row)
+                                    val key = item?.let { "lib:${section?.name ?: title}:${it.id}" }
+                                    if (gained) {
+                                        focusRequests.focusedKey = key
+                                        focusRequests.job?.cancel()
+                                        if (page == sectionPagerState.settledPage && !sectionPagerState.isScrollInProgress) {
+                                            focusRequests.awaitingPageFocus = false
+                                        }
+                                    } else if (focusRequests.focusedKey == key) {
+                                        focusRequests.focusedKey = null
+                                    }
+                                    libraryCardHasFocus = focusRequests.focusedKey != null
                                     if (gained) {
                                         lastLibraryRow = row
                                         lastLibraryColumn = column
@@ -654,6 +699,7 @@ fun VodScreen(nav: NavController) {
             contentDownScrollTop = { vodListState.scrollToItem(0) },
             onTabFocused = { tabFocused = it },
             autoHide = true,   // v1.16：光标下移进内容区隐藏顶栏，回顶部显示
+            contentKeepsChromeHidden = libraryKeepsChromeHidden,
         )
         OtvHint(hint)
     }
@@ -1030,15 +1076,7 @@ private fun LibCard(
                 .aspectRatio(232f / 352f)
                 .clip(RoundedCornerShape(12f.sx(s))),
         ) {
-            PosterPlaceholder(seed = item.id.hashCode(), modifier = Modifier.fillMaxSize())
-            if (item.posterUrl.isNotBlank()) {
-                AsyncImage(
-                    model = item.posterUrl,
-                    contentDescription = item.title,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
+            LibraryPoster(item.posterUrl, item.title, item.id.hashCode())
             if (item.remark.isNotBlank()) {
                 Text(
                     item.remark,
@@ -1053,8 +1091,29 @@ private fun LibCard(
             }
         }
         Spacer(Modifier.height(12f.sx(s)))
-        Text(item.title, color = OtvColors.White, fontSize = 24f.sxs(s), fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(item.title, color = OtvColors.White, fontSize = 24f.sxs(s), lineHeight = 28f.sxs(s), fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
         // 2026-09-17 用户要求：卡片下方不再显示豆瓣评分与年份，只留片名
+    }
+}
+
+@Composable
+private fun LibraryPoster(url: String, title: String, seed: Int) {
+    val context = LocalContext.current
+    var ready by remember(url) { mutableStateOf(false) }
+    PosterPlaceholder(seed, Modifier.fillMaxSize(), visible = { !ready })
+    if (url.isNotBlank()) {
+        val request = remember(context, url) {
+            coil.request.ImageRequest.Builder(context).data(url).crossfade(false).build()
+        }
+        AsyncImage(
+            model = request,
+            contentDescription = title,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+            onLoading = { ready = false },
+            onSuccess = { ready = true },
+            onError = { ready = false },
+        )
     }
 }
 
@@ -1100,10 +1159,7 @@ private fun HistoryCard(
                 .aspectRatio(232f / 352f)
                 .clip(RoundedCornerShape(12f.sx(s))),
         ) {
-            PosterPlaceholder(seed = h.vodId.hashCode(), modifier = Modifier.fillMaxSize())
-            if (h.posterUrl.isNotBlank()) {
-                AsyncImage(model = h.posterUrl, contentDescription = title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-            }
+            LibraryPoster(h.posterUrl, title, h.vodId.hashCode())
             // v1.17 需求：「上次看到 第N集 时间」移入封面右下角 + 灰色背景（替代卡下方副标题）
             Text(
                 "上次看到 第${h.epIndex + 1}集 " + formatTime(h.positionMs),

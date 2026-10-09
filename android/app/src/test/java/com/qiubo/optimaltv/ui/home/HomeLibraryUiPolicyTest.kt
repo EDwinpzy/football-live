@@ -7,6 +7,16 @@ import org.junit.Test
 class HomeLibraryUiPolicyTest {
 
     @Test
+    fun `落焦索引处理空行奇数尾项和列边界`() {
+        assertNull(HomeLibraryUiPolicy.targetIndex(0, 0, 0))
+        assertEquals(0, HomeLibraryUiPolicy.targetIndex(1, 1, 7))
+        assertEquals(18, HomeLibraryUiPolicy.targetIndex(19, 0, 99))
+        assertEquals(17, HomeLibraryUiPolicy.targetIndex(19, 1, 99))
+        assertEquals(1, HomeLibraryUiPolicy.targetIndex(20, 1, -1))
+        assertEquals(14, HomeLibraryUiPolicy.targetIndex(20, 0, 7))
+    }
+
+    @Test
     fun `国漫标签改名并紧跟电视剧`() {
         val ordered = HomeLibraryUiPolicy.orderedCategories(
             listOf(

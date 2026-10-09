@@ -93,6 +93,8 @@ fun MainTabBar(
     /** v1.16 自动隐藏（用户需求：光标下移进内容区隐藏顶栏，回顶部才显示）：
      *  true = 聚焦节点顶边越过阈值即淡出上移本栏；光标回顶自动淡入。 */
     autoHide: Boolean = false,
+    /** 内容滚动到顶后仍需隐藏顶栏时使用（如海报行滚到视口顶部）。 */
+    contentKeepsChromeHidden: Boolean = false,
 ) {
     val s = rememberUiScale()
     // 进入页面挂阈值、离开时清除（OtvNav 全局单值；各带栏页面均传 autoHide=true）。
@@ -109,13 +111,14 @@ fun MainTabBar(
         }
     }
     val chromeHidden by OtvNav.chromeHidden.collectAsState()
+    val shouldHideChrome = autoHide && (chromeHidden || contentKeepsChromeHidden)
     val chromeAlpha by androidx.compose.animation.core.animateFloatAsState(
-        targetValue = if (autoHide && chromeHidden) 0f else 1f,
+        targetValue = if (shouldHideChrome) 0f else 1f,
         animationSpec = androidx.compose.animation.core.tween(220),
         label = "tabChromeAlpha",
     )
     val chromeTy by androidx.compose.animation.core.animateFloatAsState(
-        targetValue = if (autoHide && chromeHidden) -90f else 0f,
+        targetValue = if (shouldHideChrome) -90f else 0f,
         animationSpec = androidx.compose.animation.core.tween(220),
         label = "tabChromeTy",
     )

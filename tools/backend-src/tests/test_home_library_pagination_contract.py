@@ -260,7 +260,7 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
             "fun requestLibraryFocus(page: Int, row: Int, column: Int) {",
             "fun moveLibraryPage(page: Int, row: Int, column: Int) {",
         )
-        self.assertIn("column.coerceIn(0, targetItems.lastIndex)", focus_restore,
+        self.assertIn("HomeLibraryUiPolicy.targetIndex(section.items.size, row, column)", focus_restore,
                       "目标栏目条目较少时，换页焦点应落在最近可用卡片")
         self.assertIn("repeat(24)", self.tv_home, "换页落焦重试必须有界")
         self.assertIn("sectionRowStates[targetPage][row].scrollToItem(column)", self.tv_home,

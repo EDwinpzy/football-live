@@ -2,7 +2,6 @@ package com.qiubo.optimaltv.ui.components
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.ScrollState
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -23,6 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
@@ -273,12 +273,7 @@ fun Modifier.dpadFocusable(
     val vertScroll = LocalNavVertical.current
     val horzScroll = LocalNavHorizontal.current
     val regionOverride = LocalNavOverride.current
-    SideEffect {
-        bandNode.vertScroll = vertScroll
-        bandNode.horzScroll = horzScroll
-        bandNode.override = navOverride ?: regionOverride
-        bandNode.autoSelectNode = autoSelect
-    }
+    val latestNode = androidx.compose.runtime.rememberUpdatedState(bandNode)
     // 2026-09-19 光标乱跑根修：注册表必须始终指向【当前附着】的 bandNode。
     // bandNode 由 remember(externalFocusRequester) 生成——LazyColumn item key
     // （lib-sec-板块名-rN）跨分类同名，切分类/数据刷新后卡片组合被保留但 vod 已换，
@@ -288,8 +283,13 @@ fun Modifier.dpadFocusable(
     // DOWN 跳行——「光标乱跑」全家族症状都从这来。
     // SideEffect 每次重组后同步一次（registerCard 无焦点簿记副作用，重复写同一对象零成本）；
     // 真销毁时经 rememberUpdatedState 拿最新节点注销，避免误伤重注册的新节点。
-    val latestNode = androidx.compose.runtime.rememberUpdatedState(bandNode)
-    SideEffect { OtvNav.registerCard(bandId, latestNode.value) }
+    SideEffect {
+        bandNode.vertScroll = vertScroll
+        bandNode.horzScroll = horzScroll
+        bandNode.override = navOverride ?: regionOverride
+        bandNode.autoSelectNode = autoSelect
+        OtvNav.registerCard(bandId, latestNode.value)
+    }
     DisposableEffect(bandId) {
         onDispose {
             OtvNav.unregisterCardIf(bandId, latestNode.value)
@@ -417,16 +417,28 @@ fun Modifier.dpadFocusable(
         }
 }
 
+private val POSTER_PLACEHOLDER_PALETTES = listOf(
+    listOf(Color(0xFF20304A), Color(0xFF0E1626)),
+    listOf(Color(0xFF3A2545), Color(0xFF160F1D)),
+    listOf(Color(0xFF1E3B33), Color(0xFF0D1A16)),
+    listOf(Color(0xFF453225), Color(0xFF1B140E)),
+)
+
 /** 渐变占位海报（图片源不可达时的兜底视觉）。floorMod：hashCode 可能为负，% 会得负索引 */
 @Composable
-fun PosterPlaceholder(seed: Int, modifier: Modifier = Modifier) {
-    val palettes = listOf(
-        listOf(Color(0xFF20304A), Color(0xFF0E1626)),
-        listOf(Color(0xFF3A2545), Color(0xFF160F1D)),
-        listOf(Color(0xFF1E3B33), Color(0xFF0D1A16)),
-        listOf(Color(0xFF453225), Color(0xFF1B140E)),
+fun PosterPlaceholder(
+    seed: Int,
+    modifier: Modifier = Modifier,
+    visible: () -> Boolean = { true },
+) {
+    val brush = remember(seed) {
+        Brush.linearGradient(POSTER_PLACEHOLDER_PALETTES[Math.floorMod(seed, POSTER_PLACEHOLDER_PALETTES.size)])
+    }
+    Box(
+        modifier.drawBehind {
+            if (visible()) drawRect(brush)
+        },
     )
-    Box(modifier.background(Brush.linearGradient(palettes[Math.floorMod(seed, palettes.size)])))
 }
 
 private const val TAG = "OptimalTV"
