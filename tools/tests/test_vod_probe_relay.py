@@ -19,6 +19,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from email.message import Message
 from pathlib import Path
 from unittest import mock
 
@@ -122,7 +123,8 @@ class SourceProbeTests(unittest.TestCase):
         payload = {"list": [{"vod_play_url": self._play_url("v.cdnlz29.com")}]}
         with mock.patch.object(relay, "_search", return_value=payload):
             with mock.patch.object(relay, "_fetch",
-                                   return_value=(200, b"#EXTM3U", 120.0)):
+                                   return_value=(200, b"#EXTM3U", 120.0,
+                                                 "application/vnd.apple.mpegurl")):
                 with dns_mock("1.2.3.4"):
                     result = relay.probe_source(
                         "https://cj.lziapi.com/api.php/provide/vod/", "Q")
@@ -133,7 +135,8 @@ class SourceProbeTests(unittest.TestCase):
     def test_reports_dead_lines_separately_from_a_dead_interface(self):
         payload = {"list": [{"vod_play_url": self._play_url("v.cdnlz29.com")}]}
         with mock.patch.object(relay, "_search", return_value=payload):
-            with mock.patch.object(relay, "_fetch", return_value=(404, b"", 30.0)):
+            with mock.patch.object(relay, "_fetch", return_value=(404, b"", 30.0,
+                                                                   "text/plain")):
                 with dns_mock("1.2.3.4"):
                     result = relay.probe_source(
                         "https://cj.lziapi.com/api.php/provide/vod/", "Q")
@@ -143,11 +146,130 @@ class SourceProbeTests(unittest.TestCase):
 
     def test_a_cloudflare_challenge_page_is_not_reported_as_healthy(self):
         body = b"<title>Just a moment...</title>"
-        with mock.patch.object(relay, "_fetch", return_value=(403, body, 70.0)):
+        with mock.patch.object(relay, "_fetch", return_value=(403, body, 70.0, "text/html")):
             with dns_mock("1.2.3.4"):
                 result = relay.probe_one("https://cj.lziapi.com/api.php/provide/vod/")
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "challenge page")
+
+    def test_http_200_html_content_type_is_not_playable(self):
+        with mock.patch.object(relay, "_fetch",
+                               return_value=(200, b"welcome", 12.0, "text/html")):
+            with dns_mock("1.2.3.4"):
+                result = relay.probe_one("https://cj.lziapi.com/api.php/provide/vod/")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(result["error"], "html page")
+
+    def test_http_200_json_and_xml_content_are_not_playable(self):
+        for content_type, body in (
+                ("application/json", b'{"code":0,"message":"ok"}'),
+                ("application/xml", b'<?xml version="1.0"?><response>ok</response>')):
+            with self.subTest(content_type=content_type):
+                with mock.patch.object(relay, "_fetch",
+                                       return_value=(200, body, 12.0, content_type)):
+                    with dns_mock("1.2.3.4"):
+                        result = relay.probe_one(
+                            "https://cj.lziapi.com/api.php/provide/vod/")
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["status"], 200)
+                self.assertEqual(result["error"], "non-media response")
+
+    def test_empty_http_204_body_is_not_playable(self):
+        with mock.patch.object(relay, "_fetch",
+                               return_value=(204, b"", 12.0, "application/octet-stream")):
+            with dns_mock("1.2.3.4"):
+                result = relay.probe_one("https://cj.lziapi.com/api.php/provide/vod/")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], 204)
+        self.assertEqual(result["error"], "empty response body")
+
+    def test_html_document_signature_is_not_playable_without_html_content_type(self):
+        with mock.patch.object(relay, "_fetch",
+                               return_value=(200, b"<!doctype html><title>blocked</title>",
+                                             12.0, "application/octet-stream")):
+            with dns_mock("1.2.3.4"):
+                result = relay.probe_one("https://cj.lziapi.com/api.php/provide/vod/")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "html page")
+
+    def test_valid_hls_and_media_responses_remain_playable(self):
+        for content_type, body in (
+                ("application/vnd.apple.mpegurl", b"#EXTM3U\n#EXTINF:5,"),
+                ("video/mp2t", b"\x47\x40\x11\x10"),
+                ("audio/mpeg", b"\x02\xff\xf3\x84audio-frame")):
+            with self.subTest(content_type=content_type):
+                with mock.patch.object(relay, "_fetch",
+                                       return_value=(200, body, 12.0, content_type)):
+                    with dns_mock("1.2.3.4"):
+                        result = relay.probe_one("https://cj.lziapi.com/api.php/provide/vod/")
+                self.assertTrue(result["ok"])
+
+    def test_nonempty_opaque_octet_stream_is_playable_without_magic_bytes(self):
+        body = b"\x02\xff\x13\x00encrypted-ts-payload"
+        self.assertFalse(relay._looks_like_media(body))
+        with mock.patch.object(relay, "_fetch",
+                               return_value=(200, body, 12.0, "application/octet-stream")):
+            with dns_mock("1.2.3.4"):
+                result = relay.probe_one("https://cj.lziapi.com/api.php/provide/vod/")
+        self.assertTrue(result["ok"])
+
+    def test_valid_hls_body_survives_a_misleading_html_content_type(self):
+        with mock.patch.object(relay, "_fetch",
+                               return_value=(200, b"#EXTM3U\n#EXTINF:5,", 12.0, "text/html")):
+            with dns_mock("1.2.3.4"):
+                result = relay.probe_one("https://cj.lziapi.com/api.php/provide/vod/")
+        self.assertTrue(result["ok"])
+
+    def test_fetch_returns_normalized_response_content_type(self):
+        headers = Message()
+        headers.add_header("Content-Type", "Application/Vnd.Apple.MpegURL; charset=utf-8")
+        response = mock.MagicMock()
+        response.status = 200
+        response.headers = headers
+        response.read.return_value = b"#EXTM3U"
+        response.__enter__.return_value = response
+        with mock.patch.object(relay.urllib.request, "urlopen", return_value=response):
+            result = relay._fetch("https://cj.lziapi.com/a.m3u8", timeout=1)
+        self.assertEqual(result[3], "application/vnd.apple.mpegurl")
+
+    def test_all_allowlist_rejected_candidates_are_inconclusive(self):
+        payload = {"list": [{"vod_play_url": self._play_url("blocked.example")}]}
+        with mock.patch.object(relay, "_search", return_value=payload):
+            with mock.patch.object(relay, "_fetch") as fetch:
+                with dns_mock("1.2.3.4"):
+                    result = relay.probe_source(
+                        "https://cj.lziapi.com/api.php/provide/vod/", "Q")
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["inconclusive"])
+        self.assertEqual(result["probed"], 0)
+        self.assertEqual(result["error"],
+                         "all sampled stream URLs rejected before HTTP probe")
+        self.assertNotIn("blocked.example", result["error"])
+        fetch.assert_not_called()
+
+    def test_api_url_rejected_before_http_is_inconclusive(self):
+        with mock.patch.object(relay, "_search") as search:
+            result = relay.probe_source("https://blocked.example/api.php/provide/vod/", "Q")
+        self.assertTrue(result["inconclusive"])
+        self.assertEqual(result["error"], "source API URL rejected before HTTP probe")
+        self.assertNotIn("blocked.example", result["error"])
+        search.assert_not_called()
+
+    def test_allowlist_refusal_does_not_hide_a_real_http_failure(self):
+        payload = {"list": [{"vod_play_url":
+                              "E01$https://blocked.example/ep1.m3u8#"
+                              "E02$https://v.cdnlz29.com/ep2.m3u8"}]}
+        with mock.patch.object(relay, "_search", return_value=payload):
+            with mock.patch.object(relay, "_fetch",
+                                   return_value=(403, b"forbidden", 12.0, "text/plain")):
+                with dns_mock("1.2.3.4"):
+                    result = relay.probe_source(
+                        "https://cj.lziapi.com/api.php/provide/vod/", "Q")
+        self.assertFalse(result["ok"])
+        self.assertFalse(result.get("inconclusive", False))
+        self.assertEqual(result["probed"], 1)
+        self.assertIn("1 lines probed, none played", result["error"])
 
     def test_error_summary_stays_short_and_leaks_no_query(self):
         summary = relay._summarize_error(urllib.error.URLError("boom"))

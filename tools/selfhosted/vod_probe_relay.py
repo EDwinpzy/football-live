@@ -116,12 +116,13 @@ def validate_target(url: str) -> str:
     return raw
 
 
-def _fetch(url: str, *, timeout: float, max_bytes: int = 4096) -> tuple[int, bytes, float]:
+def _fetch(url: str, *, timeout: float, max_bytes: int = 4096) -> tuple[int, bytes, float, str]:
     request = urllib.request.Request(url, headers={**BROWSER_HEADERS, "Accept": "*/*"})
     started = time.monotonic()
     with urllib.request.urlopen(request, timeout=timeout) as response:
         body = response.read(max_bytes)
-        return response.status, body, (time.monotonic() - started) * 1000.0
+        content_type = response.headers.get_content_type().lower()
+        return response.status, body, (time.monotonic() - started) * 1000.0, content_type
 
 
 def _summarize_error(exc: BaseException) -> str:
@@ -176,21 +177,72 @@ def _spread_sample(items: list[str], count: int) -> list[str]:
     return [items[round(index * step)] for index in range(count)]
 
 
+def _looks_like_html(body: bytes) -> bool:
+    """Recognize common HTML document starts without rejecting HLS/media data."""
+    prefix = body[:2048].lstrip(b"\xef\xbb\xbf\x00\t\r\n ").lower()
+    return bool(re.match(
+        rb"<(?:!doctype\s+html\b|html\b|head\b|body\b|title\b|script\b|meta\b|iframe\b)",
+        prefix))
+
+
+def _looks_like_media(body: bytes) -> bool:
+    """Recognize common HLS and segment signatures if a server mislabels them."""
+    if body.lstrip(b"\xef\xbb\xbf\x00\t\r\n ").startswith(b"#EXTM3U"):
+        return True
+    if body.startswith(b"FLV") or body.startswith(b"\x1a\x45\xdf\xa3"):
+        return True
+    if len(body) >= 376 and body[0] == 0x47 and body[188] == 0x47:
+        return True
+    return len(body) >= 8 and body[4:8] in {b"ftyp", b"moof", b"styp"}
+
+
+def _is_explicit_non_media_type(content_type: str) -> bool:
+    """Reject declared document/text types unless their body has a media signature."""
+    value = str(content_type or "").lower().split(";", 1)[0].strip()
+    if value.startswith(("text/", "image/", "font/")):
+        return True
+    if value in {
+        "application/json", "text/json", "application/xml", "text/xml",
+        "application/xhtml+xml", "application/javascript", "text/javascript",
+        "application/x-javascript", "application/pdf", "application/zip",
+        "application/x-www-form-urlencoded",
+    }:
+        return True
+    if value.endswith(("+json", "+xml")) and value != "application/dash+xml":
+        return True
+    return False
+
+
+def _probe_validated(target: str) -> dict:
+    try:
+        status, body, elapsed, content_type = _fetch(target, timeout=PROBE_TIMEOUT_SECONDS)
+    except Exception as exc:  # noqa: BLE001 — a probe must never raise
+        return {"url": target, "ok": False, "status": None, "latency_ms": None,
+                "error": _summarize_error(exc)}
+    if _CLOUDFLARE_CHALLENGE.search(body):
+        return {"url": target, "ok": False, "status": status,
+                "latency_ms": round(elapsed), "error": "challenge page"}
+    if not body.strip(b" \t\r\n"):
+        return {"url": target, "ok": False, "status": status,
+                "latency_ms": round(elapsed), "error": "empty response body"}
+    media_signature = _looks_like_media(body)
+    is_html_type = content_type in {"text/html", "application/xhtml+xml"}
+    if (is_html_type or _looks_like_html(body)) and not media_signature:
+        return {"url": target, "ok": False, "status": status,
+                "latency_ms": round(elapsed), "error": "html page"}
+    if _is_explicit_non_media_type(content_type) and not media_signature:
+        return {"url": target, "ok": False, "status": status,
+                "latency_ms": round(elapsed), "error": "non-media response"}
+    return {"url": target, "ok": 200 <= status < 400, "status": status,
+            "latency_ms": round(elapsed), "error": ""}
+
+
 def probe_one(url: str) -> dict:
     try:
         target = validate_target(url)
     except ProbeRefused as exc:
         return {"url": url, "ok": False, "status": None, "latency_ms": None, "error": str(exc)}
-    try:
-        status, body, elapsed = _fetch(target, timeout=PROBE_TIMEOUT_SECONDS)
-    except Exception as exc:  # noqa: BLE001 — a probe must never raise
-        return {"url": url, "ok": False, "status": None, "latency_ms": None,
-                "error": _summarize_error(exc)}
-    if _CLOUDFLARE_CHALLENGE.search(body):
-        return {"url": url, "ok": False, "status": status,
-                "latency_ms": round(elapsed), "error": "challenge page"}
-    return {"url": url, "ok": 200 <= status < 400, "status": status,
-            "latency_ms": round(elapsed), "error": ""}
+    return _probe_validated(target)
 
 
 def probe_source(api_url: str, title: str = "") -> dict:
@@ -205,7 +257,8 @@ def probe_source(api_url: str, title: str = "") -> dict:
     try:
         base = validate_target(api_url)
     except ProbeRefused as exc:
-        result["error"] = str(exc)
+        result["inconclusive"] = True
+        result["error"] = "source API URL rejected before HTTP probe"
         return result
     try:
         payload = _search(base, title)
@@ -220,24 +273,30 @@ def probe_source(api_url: str, title: str = "") -> dict:
         result["error"] = "no playable line in search result"
         return result
     sample = _spread_sample(direct_urls, LINE_SAMPLE_SIZE)
-    refused = ""
+    refused_count = 0
+    probed = 0
     for candidate in sample:
         try:
-            validate_target(candidate)
-        except ProbeRefused as exc:
-            # Playback lines live on per-source CDN hostnames that are not in
-            # the source allowlist.  Report why instead of silently skipping,
-            # so a missing CDN entry is visible rather than looking "dead".
-            refused = refused or str(exc)
+            target = validate_target(candidate)
+        except ProbeRefused:
+            # The source returned a candidate the relay is not allowed to
+            # fetch. This is a measurement gap, not evidence the source is dead.
+            refused_count += 1
             continue
-        checked = probe_one(candidate)
+        probed += 1
+        checked = _probe_validated(target)
         if checked["ok"]:
             result["ok"] = True
             result["direct"] = result["lines"]
             result["preview_url"] = candidate
+            result["probed"] = probed
             return result
-    result["probed"] = len(sample)
-    result["error"] = refused or f"interface ok, {len(sample)} lines probed, none played"
+    result["probed"] = probed
+    if probed == 0 and refused_count:
+        result["inconclusive"] = True
+        result["error"] = "all sampled stream URLs rejected before HTTP probe"
+        return result
+    result["error"] = f"interface ok, {probed} lines probed, none played"
     return result
 
 

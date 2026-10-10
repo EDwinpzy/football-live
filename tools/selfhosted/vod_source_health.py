@@ -133,6 +133,29 @@ def _relay_post(relay_url, path, payload, timeout):
         return json.loads(response.read(256 * 1024).decode("utf-8", "replace"))
 
 
+def _empty_title_result(report):
+    """Whether a successful search had no playable line for this one title.
+
+    The relay's ``no playable line in search result`` contract is emitted only
+    after the source API returned valid JSON.  It says nothing about whether
+    other titles on that source work, so it must not count toward disabling the
+    entire source.  Search/network errors and searched lines that all fail HTTP
+    playback remain ordinary failures.
+    """
+    if not isinstance(report, dict):
+        return False
+    try:
+        no_lines = int(report.get("lines") or 0) == 0
+    except (TypeError, ValueError):
+        no_lines = False
+    search_completed = isinstance(report.get("search_latency_ms"), (int, float))
+    return (
+        no_lines
+        and search_completed
+        and str(report.get("error") or "") == "no playable line in search result"
+    )
+
+
 def probe_all(relay_url, sources, title):
     """Probe every source through the relay, serially.
 
@@ -157,6 +180,7 @@ def probe_all(relay_url, sources, title):
                 error=detail[:80], inconclusive=True))
             continue
         latency = report.get("search_latency_ms")
+        empty_title_result = _empty_title_result(report)
         verdicts.append(HealthVerdict(
             source_id=source_id,
             name=name,
@@ -164,6 +188,7 @@ def probe_all(relay_url, sources, title):
             latency_ms=int(latency) if isinstance(latency, (int, float)) else None,
             lines=int(report.get("lines") or 0),
             error=str(report.get("error") or "")[:120],
+            inconclusive=empty_title_result or report.get("inconclusive") is True,
         ))
         time.sleep(1.0)
     return verdicts

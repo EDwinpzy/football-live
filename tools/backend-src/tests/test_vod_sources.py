@@ -71,6 +71,262 @@ class VodSourcesTest(unittest.TestCase):
         self.assertLess(vod_sources.match_score(subject, dict(candidate, raw={})), 80)
         self.assertLess(vod_sources.match_score(subject, dict(candidate, title="仙逆剧场版")), 80)
 
+    def test_hhkan_annual_base_title_requires_detail_episode_pair_and_slices_target_range(self):
+        from unittest.mock import patch
+        import hhkan
+
+        subject = {
+            "title": "凡人修仙传 年番4", "year": "2026", "category": "anime",
+            "aliases": ["凡人修仙传 第177-228集"],
+        }
+        search_calls = []
+        detail_calls = []
+
+        def search_html():
+            return "".join(
+                '<div class="module-item"><a href="/detail/%d.html">'
+                '<div class="v-item-title" style="display:none">site watermark</div>'
+                '<div class="v-item-title">凡人修仙传</div></a></div>' % candidate_id
+                for candidate_id in (101, 102))
+
+        def detail_html(vid):
+            episode_numbers = [176, 178, 179, 228, 229] if vid == 101 else range(176, 230)
+            episodes = "".join(
+                '<a href="/play/%d-7-%d.html"><span>第%d集</span></a>'
+                % (vid, number, number) for number in episode_numbers)
+            return (
+                '<div class="detail-title"><strong>片名</strong>'
+                '<strong>凡人修仙传</strong></div>'
+                '<a class="detail-tags-item">国产动漫</a>'
+                '<a class="detail-tags-item">2020</a>'
+                '<div class="source-list-box-main"><div>'
+                '<span class="source-item-label">线路</span></div></div></div>'
+                '<div><div><div class="episode-list-box-main"><div><div class="episode-list">'
+                + episodes + '</div><span></span></div></div></div></div>')
+
+        class FakeHhkan:
+            @staticmethod
+            def get_search_token():
+                return "test-token"
+
+            @staticmethod
+            def get_page(path, **_kwargs):
+                if path.startswith("/search"):
+                    search_calls.append(urllib.parse.parse_qs(
+                        urllib.parse.urlsplit("https://hhkan.test" + path).query).get("k", [""])[0])
+                    return search_html()
+                return detail_html(int(path.rsplit("/", 1)[-1].split(".", 1)[0]))
+
+            @staticmethod
+            def parse_detail(path, vid=0):
+                detail_calls.append(vid)
+                return hhkan.parse_detail(path, vid=vid)
+
+            _parse_vod_list = staticmethod(hhkan._parse_vod_list)
+
+        source = vod_sources.VodSource(
+            "hhkan", "好好看", "https://hhkan.test", "", "hhkan")
+        registry = vod_sources.SourceRegistry([source])
+        self.addCleanup(registry.close)
+        real_adapter = vod_sources.HhkanAdapter
+        with patch.object(vod_sources, "HhkanAdapter",
+                          side_effect=lambda current: real_adapter(current, FakeHhkan)):
+            _source, lines, error, _elapsed = registry._search_one(source, subject)
+
+        self.assertIsNone(error)
+        self.assertEqual(search_calls, vod_sources._search_terms(subject))
+        self.assertEqual(detail_calls, [101, 102])
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["vod_id"], 102)
+        self.assertEqual(lines[0]["match_score"], 90)
+        self.assertEqual(len(lines[0]["episodes"]), 52)
+        self.assertEqual(lines[0]["episodes"][0]["name"], "第177集")
+        self.assertEqual(lines[0]["episodes"][-1]["name"], "第228集")
+        self.assertEqual(lines[0]["episodes"][0]["index"], 0)
+
+    def test_hhkan_annual_base_title_without_both_opening_episodes_is_rejected(self):
+        from unittest.mock import patch
+
+        subject = {
+            "title": "凡人修仙传 年番4", "year": "2026", "category": "anime",
+            "aliases": ["凡人修仙传 第177-228集"],
+        }
+        detail_calls = []
+
+        class FakeHhkan:
+            @staticmethod
+            def get_search_token(): return "test-token"
+
+            @staticmethod
+            def get_page(path, **_kwargs):
+                if path.startswith("/search"):
+                    return ('<a href="/detail/101.html"><div class="title">'
+                            '凡人修仙传</div></a>')
+                return path
+
+            @staticmethod
+            def parse_detail(_path, vid=0):
+                detail_calls.append(vid)
+                return {"id": vid, "title": "凡人修仙传", "year": "2020",
+                        "meta": "国产动漫 / 2020", "sources": [{"name": "线路", "episodes": [
+                            {"ep": "第177集", "pid": 7, "vid": 177},
+                            {"ep": "第179集", "pid": 7, "vid": 179},
+                        ]}]}
+
+        source = vod_sources.VodSource(
+            "hhkan", "好好看", "https://hhkan.test", "", "hhkan")
+        registry = vod_sources.SourceRegistry([source])
+        self.addCleanup(registry.close)
+        real_adapter = vod_sources.HhkanAdapter
+        with patch.object(vod_sources, "HhkanAdapter",
+                          side_effect=lambda current: real_adapter(current, FakeHhkan)):
+            _source, lines, error, _elapsed = registry._search_one(source, subject)
+
+        self.assertIsNone(error)
+        self.assertEqual(detail_calls, [101])
+        self.assertEqual(lines, [])
+
+    def test_hhkan_other_season_title_is_never_treated_as_the_annual_base_candidate(self):
+        from unittest.mock import patch
+
+        subject = {
+            "title": "凡人修仙传 年番4", "year": "2026", "category": "anime",
+            "aliases": ["凡人修仙传 第177-228集"],
+        }
+        detail_calls = []
+
+        class FakeHhkan:
+            @staticmethod
+            def get_search_token(): return "test-token"
+
+            @staticmethod
+            def get_page(path, **_kwargs):
+                if path.startswith("/search"):
+                    return ('<a href="/detail/103.html"><div class="title">'
+                            '凡人修仙传 年番3</div></a>')
+                return path
+
+            @staticmethod
+            def parse_detail(_path, vid=0):
+                detail_calls.append(vid)
+                return {"id": vid, "title": "凡人修仙传 年番3", "year": "2025",
+                        "meta": "国产动漫 / 2025", "sources": []}
+
+        source = vod_sources.VodSource(
+            "hhkan", "好好看", "https://hhkan.test", "", "hhkan")
+        registry = vod_sources.SourceRegistry([source])
+        self.addCleanup(registry.close)
+        real_adapter = vod_sources.HhkanAdapter
+        with patch.object(vod_sources, "HhkanAdapter",
+                          side_effect=lambda current: real_adapter(current, FakeHhkan)):
+            _source, lines, error, _elapsed = registry._search_one(source, subject)
+
+        self.assertIsNone(error)
+        self.assertEqual(detail_calls, [])
+        self.assertEqual(lines, [])
+
+    def test_hhkan_exact_title_is_rechecked_against_real_detail_year(self):
+        from unittest.mock import patch
+        import hhkan
+
+        subject = {"title": "测试片", "year": "2024", "category": "movie", "season": 0}
+        source = vod_sources.VodSource(
+            "hhkan", "好好看", "https://hhkan.test", "", "hhkan")
+        real_adapter = vod_sources.HhkanAdapter
+        for category, actual_type, actual_year, should_match in (
+                ("movie", "电影", "2024", True),
+                ("movie", "电影", "2004", False),
+                ("tv", "电视剧", "2024", True),
+                ("tv", "电视剧", "2004", False)):
+            subject["category"] = category
+            with self.subTest(category=category, actual_year=actual_year):
+                detail_html = (
+                    '<div class="detail-title"><strong>片名</strong><strong>测试片</strong></div>'
+                    '<a class="detail-tags-item">%s</a>'
+                    '<a class="detail-tags-item">%s</a>' % (actual_type, actual_year)
+                    + '<div class="source-list-box-main"><div>'
+                    '<span class="source-item-label">线路</span></div></div></div>'
+                    '<div><div><div class="episode-list-box-main"><div><div class="episode-list">'
+                    '<a href="/play/8-2-1.html"><span>第1集</span></a>'
+                    '</div><span></span></div></div></div></div>')
+
+                class FakeHhkan:
+                    @staticmethod
+                    def get_search_token(): return "test-token"
+
+                    @staticmethod
+                    def get_page(path, **_kwargs):
+                        if path.startswith("/search"):
+                            return ('<div class="module-item"><a href="/detail/8.html">'
+                                    '<div class="v-item-title">测试片</div></a></div>')
+                        return detail_html
+
+                    _parse_vod_list = staticmethod(hhkan._parse_vod_list)
+                    parse_detail = staticmethod(hhkan.parse_detail)
+
+                registry = vod_sources.SourceRegistry([source])
+                self.addCleanup(registry.close)
+                with patch.object(vod_sources, "HhkanAdapter",
+                                  side_effect=lambda current: real_adapter(current, FakeHhkan)):
+                    _source, lines, error, _elapsed = registry._search_one(source, subject)
+                self.assertIsNone(error)
+                self.assertEqual(bool(lines), should_match)
+                if should_match:
+                    self.assertEqual(lines[0]["match_score"], 100)
+                else:
+                    self.assertEqual(lines, [])
+
+    def test_hhkan_search_uses_bounded_terms_without_inventing_metadata_and_detail_cache_is_request_local(self):
+        subject = {
+            "title": "庆余年2", "year": "2024", "category": "tv", "season": 2,
+            "aliases": ["庆余年2"],
+        }
+        search_calls = []
+        detail_calls = []
+
+        class FakeHhkan:
+            @staticmethod
+            def get_search_token(): return "test-token"
+
+            @staticmethod
+            def get_page(path, **_kwargs):
+                if path.startswith("/search"):
+                    search_calls.append(path)
+                    return ('<a href="/detail/7.html"><div class="title">'
+                            '庆余年2</div></a>')
+                return path
+
+            @staticmethod
+            def parse_detail(_path, vid=0):
+                detail_calls.append(vid)
+                return {"id": vid, "title": "庆余年2", "year": "2024",
+                        "meta": "电视剧 / 2024", "sources": [{"name": "线路", "episodes": [
+                            {"ep": "第1集", "pid": 2, "vid": 3},
+                        ]}]}
+
+        source = vod_sources.VodSource(
+            "hhkan", "好好看", "https://hhkan.test", "", "hhkan")
+        adapter = vod_sources.HhkanAdapter(source, module=FakeHhkan)
+        candidates = adapter.search(subject)
+        self.assertEqual(len(candidates), 1)
+        self.assertNotIn("year", candidates[0])
+        self.assertNotIn("category", candidates[0])
+        self.assertNotIn("season", candidates[0])
+        self.assertEqual(len(search_calls), 1)
+
+        first = adapter.detail(candidates[0])
+        second = adapter.detail(candidates[0])
+        self.assertEqual(first, second)
+        self.assertEqual(candidates[0]["year"], "2024")
+        self.assertEqual(candidates[0]["category"], "tv")
+        self.assertEqual(detail_calls, [7])
+
+        # A newly created adapter represents a fresh source-search request, so
+        # its detail lookup must reach HHKan again rather than reuse old data.
+        refreshed = vod_sources.HhkanAdapter(source, module=FakeHhkan)
+        refreshed.detail({"id": "7", "title": "庆余年2"})
+        self.assertEqual(detail_calls, [7, 7])
+
     def test_default_registry_contains_reachable_fallback_candidates(self):
         registry = vod_sources.SourceRegistry.load_default()
         self.addCleanup(registry.close)

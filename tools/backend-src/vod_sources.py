@@ -47,6 +47,7 @@ RESOLVE_MAX_WORKERS = 12
 RESOLVE_TOTAL_BUDGET = 10.0
 RESOLVE_EARLY_SOURCES = 2
 RESOLVE_CACHE_TTL = 1800
+HHKAN_BASE_CANDIDATE_DETAIL_MAX = 3
 """探测预算：9 个源全通时线路能到 40+ 条，逐条探测会把详情拖到 15~40 秒（实测），
 播放器会保留全部线路。这里按源轮转取前 N 条探测，其余保留「未探测」状态
 （alive=None，排序垫后但不判死），既保住排序质量又压住耗时。"""
@@ -549,17 +550,85 @@ class SourceRegistry:
                 _remaining_source_timeout(deadline)
             best = max(candidates, key=lambda item: match_score(subject, item), default=None)
             confidence = match_score(subject, best) if best else 0
-            if not best or confidence < AUTO_MATCH_THRESHOLD:
-                return source, [], None, _elapsed_ms(started)
-            lines = adapter.detail(best)
-            episode_range = _continuous_anime_range(subject, best)
-            if episode_range:
-                start, end = episode_range
-                for line in lines:
-                    selected = [episode for episode in line.get("episodes", [])
-                                if start <= (_episode_number(episode.get("name")) or 0) <= end]
-                    line["episodes"] = [dict(episode, index=index) for index, episode in enumerate(selected)]
-                lines = [line for line in lines if line.get("episodes")]
+            episode_range = None
+            if source.adapter_type == "hhkan":
+                # Search cards lack reliable year/type fields. Re-score a
+                # bounded set of exact title/alias hits using detail metadata.
+                # The base-title annual exception remains stricter: it needs
+                # the exact declared episode pair from one detail line.
+                subject_titles = _titles(subject)
+                base_candidates = {
+                    str(candidate.get("id") or index): target_range
+                    for index, candidate in enumerate(candidates)
+                    if (target_range := _continuous_anime_target_range(
+                        subject, candidate, allow_unknown_year=True,
+                        allow_unknown_category=True, require_episode_evidence=False))
+                }
+                ordered = []
+                seen_candidates = set()
+                if best is not None:
+                    ordered.append(best)
+                ordered.extend(candidates)
+                selected = None
+                details_checked = 0
+                for index, candidate in enumerate(ordered):
+                    candidate_id = str(candidate.get("id") or index)
+                    if candidate_id in seen_candidates:
+                        continue
+                    seen_candidates.add(candidate_id)
+                    candidate_range = base_candidates.get(candidate_id)
+                    exact_title = normalize_title(candidate.get("title")) in subject_titles
+                    if candidate_range is None and not exact_title:
+                        continue
+                    if details_checked >= HHKAN_BASE_CANDIDATE_DETAIL_MAX:
+                        break
+                    details_checked += 1
+                    if deadline is not None:
+                        _remaining_source_timeout(deadline)
+                    try:
+                        candidate_lines = adapter.detail(candidate)
+                    except Exception:
+                        # A malformed search hit should not hide a later
+                        # plausible hit. The adapter propagates the shared
+                        # deadline to every network read.
+                        if deadline is not None:
+                            _remaining_source_timeout(deadline)
+                        continue
+                    if deadline is not None:
+                        _remaining_source_timeout(deadline)
+                    if candidate_range is not None:
+                        verified_range = _continuous_anime_target_range(
+                            subject, candidate, allow_unknown_year=True,
+                            require_episode_evidence=True)
+                        if not verified_range:
+                            continue
+                        candidate_lines = _slice_episode_range(
+                            candidate_lines, verified_range, require_start_pair=True)
+                        if not candidate_lines:
+                            continue
+                        confidence = 90
+                        episode_range = verified_range
+                    else:
+                        confidence = match_score(subject, candidate)
+                        if confidence < AUTO_MATCH_THRESHOLD:
+                            continue
+                        episode_range = _continuous_anime_range(subject, candidate)
+                        if episode_range:
+                            candidate_lines = _slice_episode_range(candidate_lines, episode_range)
+                    if not candidate_lines:
+                        continue
+                    best, selected = candidate, candidate_lines
+                    break
+                if selected is None:
+                    return source, [], None, _elapsed_ms(started)
+                lines = selected
+            else:
+                episode_range = _continuous_anime_range(subject, best) if best else None
+                if not best or confidence < AUTO_MATCH_THRESHOLD:
+                    return source, [], None, _elapsed_ms(started)
+                lines = adapter.detail(best)
+                if episode_range:
+                    lines = _slice_episode_range(lines, episode_range)
             if deadline is not None:
                 _remaining_source_timeout(deadline)
             for line in lines:
@@ -872,18 +941,45 @@ def _episode_number(name):
     return int(match.group(1)) if match else None
 
 
-def _continuous_anime_range(subject, candidate):
-    """Require explicit total-episode evidence before using a merged annual series."""
+def _candidate_has_episode_pair(candidate, start):
+    raw = candidate.get("raw") or {}
+    play_urls = raw.get("vod_play_url") if isinstance(raw, dict) else ""
+    if play_urls:
+        for group in str(play_urls).split("$$$"):
+            numbers = {
+                _episode_number(value.rsplit("$", 1)[0])
+                for value in group.split("#") if "$" in value
+            }
+            if start in numbers and start + 1 in numbers:
+                return True
+    for source in (raw.get("sources") or []) if isinstance(raw, dict) else []:
+        numbers = {
+            _episode_number(episode.get("ep") or episode.get("name"))
+            for episode in source.get("episodes") or []
+            if isinstance(episode, dict)
+        }
+        if start in numbers and start + 1 in numbers:
+            return True
+    return False
+
+
+def _continuous_anime_target_range(subject, candidate, *, allow_unknown_year=False,
+                                   allow_unknown_category=False, require_episode_evidence=True):
+    """Return an explicitly declared annual episode range for an exact base-title candidate."""
     # Old enriched snapshots sometimes retained "movie" for a TV animation.
     # Explicit animation metadata plus an annual episode range still identifies it.
     subject_is_anime = subject.get("category") == "anime" or "动画" in (subject.get("genres") or [])
-    if not subject_is_anime or candidate.get("category") != "anime":
+    candidate_category = candidate.get("category")
+    if (not subject_is_anime
+            or (candidate_category != "anime"
+                and not (allow_unknown_category and not candidate_category))):
         return None
     base = _base_search_title(subject.get("title"))
     if not base or normalize_title(candidate.get("title")) != normalize_title(base):
         return None
     subject_year, candidate_year = _year(subject.get("year")), _year(candidate.get("year"))
-    if not subject_year or not candidate_year or candidate_year > subject_year:
+    if (not subject_year or (candidate_year is None and not allow_unknown_year)
+            or (candidate_year is not None and candidate_year > subject_year)):
         return None
     for alias in subject.get("aliases") or []:
         match = re.fullmatch(r"(.+?)\s*第\s*(\d+)\s*[-－~～至]\s*(\d+)\s*集", str(alias).strip())
@@ -892,12 +988,36 @@ def _continuous_anime_range(subject, candidate):
         start, end = int(match.group(2)), int(match.group(3))
         if not 1 < start <= end:
             continue
-        groups = str((candidate.get("raw") or {}).get("vod_play_url") or "").split("$$$")
-        for group in groups:
-            numbers = {_episode_number(value.rsplit("$", 1)[0]) for value in group.split("#") if "$" in value}
-            if start in numbers and start + 1 in numbers:
-                return start, end
+        if not require_episode_evidence or _candidate_has_episode_pair(candidate, start):
+            return start, end
     return None
+
+
+def _continuous_anime_range(subject, candidate):
+    """Require explicit total-episode evidence before using a merged annual series."""
+    return _continuous_anime_target_range(subject, candidate)
+
+
+def _slice_episode_range(lines, episode_range, require_start_pair=False):
+    start, end = episode_range
+    selected_lines = []
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        episodes = line.get("episodes") or []
+        numbers = {_episode_number(episode.get("name"))
+                   for episode in episodes if isinstance(episode, dict)}
+        if require_start_pair and not {start, start + 1}.issubset(numbers):
+            continue
+        selected = [copy.deepcopy(episode) for episode in episodes
+                    if isinstance(episode, dict)
+                    and start <= (_episode_number(episode.get("name")) or 0) <= end]
+        if selected:
+            copied_line = copy.deepcopy(line)
+            copied_line["episodes"] = [dict(episode, index=index)
+                                       for index, episode in enumerate(selected)]
+            selected_lines.append(copied_line)
+    return selected_lines
 
 
 def match_score(subject, candidate):
@@ -1408,12 +1528,29 @@ class MacCmsAdapter:
         return ""
 
 
+def _hhkan_category(meta):
+    text = str(meta or "")
+    if any(value in text for value in ("动漫", "动画")):
+        return "anime"
+    if any(value in text for value in ("综艺", "真人秀")):
+        return "variety"
+    if any(value in text for value in ("电视剧", "连续剧", "国产剧", "欧美剧", "日韩剧")):
+        return "tv"
+    if any(value in text for value in ("电影", "纪录片", "剧情片", "动作片")):
+        return "movie"
+    return ""
+
+
 class HhkanAdapter:
     def __init__(self, source, module=None):
         self.source = source
         if module is None:
             import hhkan as module
         self.module = module
+        # Adapter instances live for one source-search job. Keep detail reuse
+        # request-local so refresh_subject() always creates a fresh adapter and
+        # cannot inherit a cross-request stale episode list.
+        self._detail_cache = {}
 
     def _get_search_token(self):
         deadline = _active_source_deadline()
@@ -1432,23 +1569,71 @@ class HhkanAdapter:
             max_bytes=HHKAN_SOURCE_RESPONSE_MAX_BYTES)
 
     def search(self, subject):
-        title = str(subject.get("title") or "").strip()
         token = self._get_search_token()
-        path = "/search?t=%s&k=%s&p=1" % (
-            urllib.parse.quote(token), urllib.parse.quote(title))
-        html = self._get_page(path)
         candidates = []
-        for match in re.finditer(r'href=["\']/detail/(\d+)\.html["\'][^>]*>(.*?)</a>', html, re.I | re.S):
-            block = match.group(2)
-            title_match = re.search(r'class=["\']title["\'][^>]*>([^<]+)', block, re.I)
-            candidates.append({"id": match.group(1), "title": (title_match.group(1).strip() if title_match else title),
-                               "year": subject.get("year") or "", "category": subject.get("category"),
-                               "season": subject.get("season") or 0})
+        seen = set()
+        subject_titles = _titles(subject)
+        for term in _search_terms(subject):
+            path = "/search?t=%s&k=%s&p=1" % (
+                urllib.parse.quote(token), urllib.parse.quote(term))
+            html = self._get_page(path)
+            parsed_items = []
+            parser = getattr(self.module, "_parse_vod_list", None)
+            if callable(parser):
+                try:
+                    parsed_items.extend(parser(html) or [])
+                except Exception:
+                    # Keep the bounded legacy fallback for older mirrors whose
+                    # search markup predates the shared .module-item parser.
+                    pass
+            parsed_items.extend(
+                {"id": match.group(1), "title": title_match.group(1).strip()}
+                for match in re.finditer(
+                    r'href=["\']/detail/(\d+)\.html["\'][^>]*>(.*?)</a>',
+                    html, re.I | re.S)
+                if (title_match := re.search(
+                    r'class=["\']title["\'][^>]*>([^<]+)', match.group(2), re.I))
+            )
+            for item in parsed_items:
+                candidate_id = str(item.get("id") or "").strip()
+                candidate_title = str(item.get("title") or "").strip()
+                if not candidate_title or candidate_id in seen:
+                    continue
+                seen.add(candidate_id)
+                # Search cards do not reliably carry source year/category.
+                # Preserve only fields actually present; detail parsing below
+                # adds real metadata before a candidate can be accepted.
+                candidates.append({"id": candidate_id, "title": candidate_title})
+            if any(normalize_title(candidate.get("title")) in subject_titles
+                   for candidate in candidates):
+                # An exact title/alias hit can be detail-verified immediately;
+                # avoid spending the full search-term budget on unrelated aliases.
+                break
         return candidates
 
     def detail(self, candidate):
-        vid = int(candidate.get("id") or 0)
+        candidate_id = str(candidate.get("id") or "").strip()
+        cached = self._detail_cache.get(candidate_id) if candidate_id else None
+        if cached is not None:
+            for key, value in cached["candidate"].items():
+                candidate[key] = copy.deepcopy(value)
+            return copy.deepcopy(cached["lines"])
+
+        vid = int(candidate_id or 0)
         detail = self.module.parse_detail(self._get_page("/detail/%d.html" % vid), vid=vid)
+        actual_title = str(detail.get("title") or "").strip()
+        actual_year = str(detail.get("year") or "").strip()
+        actual_meta = str(detail.get("meta") or "").strip()
+        if actual_title:
+            candidate["title"] = actual_title
+        if actual_year:
+            candidate["year"] = actual_year
+        if actual_meta:
+            candidate["meta"] = actual_meta
+        actual_category = _hhkan_category(actual_meta)
+        if actual_category:
+            candidate["category"] = actual_category
+        candidate["raw"] = detail
         lines = []
         for index, raw in enumerate(detail.get("sources") or []):
             episodes = []
@@ -1460,6 +1645,15 @@ class HhkanAdapter:
                 lines.append({"id": "%s:%d:%d" % (self.source.id, vid, pid), "source_id": self.source.id,
                               "source_name": self.source.name, "name": "%s·%s" % (self.source.name, raw.get("name") or "线路%d" % (index + 1)),
                               "vod_id": vid, "episodes": episodes, "height": 0, "latency_ms": None, "alive": True})
+        if candidate_id:
+            if len(self._detail_cache) >= HHKAN_BASE_CANDIDATE_DETAIL_MAX + 1:
+                self._detail_cache.pop(next(iter(self._detail_cache)))
+            self._detail_cache[candidate_id] = {
+                "candidate": {key: copy.deepcopy(candidate[key])
+                              for key in ("title", "year", "meta", "category", "raw")
+                              if key in candidate},
+                "lines": copy.deepcopy(lines),
+            }
         return lines
 
     def resolve(self, line, episode_index):

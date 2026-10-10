@@ -31,11 +31,11 @@ class EndpointMigrationContractTests(unittest.TestCase):
                 self.assertIn("OTV_RELEASE_API_BASE_URL", gradle)
                 # 后续正式发布必须可以递增，不能被迁移当时的 V1.1/110 锁住。
                 code = re.search(r"Integer\.parseInt\(apkVersionCodeOverride\.toString\(\)\)\s*:\s*(\d+)", gradle)
-                name = re.search(r'apkVersionNameOverride\.toString\(\)\s*:\s*"(\d+)\.(\d+)"', gradle)
+                name = re.search(r'apkVersionNameOverride\.toString\(\)\s*:\s*"(\d+\.\d+(?:\.\d+)?)"', gradle)
                 self.assertIsNotNone(code)
                 self.assertIsNotNone(name)
                 self.assertGreaterEqual(int(code.group(1)), 110)
-                self.assertGreaterEqual(tuple(map(int, name.groups())), (1, 1))
+                self.assertGreaterEqual(tuple(map(int, name.group(1).split("."))), (1, 1))
 
     def test_network_security_keeps_local_http_backend_working(self):
         for module in (APP_CONFIG, MOBILE_CONFIG):

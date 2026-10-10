@@ -96,6 +96,14 @@ class ProbeAllTests(unittest.TestCase):
         {"id": "b", "name": "B", "api_url": "https://b.example/api.php/provide/vod/"},
     ]
 
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self.tmp.close()
+        self.path = self.tmp.name
+
+    def tearDown(self):
+        Path(self.path).unlink(missing_ok=True)
+
     def test_healthy_source_reports_latency_and_lines(self):
         report = {"ok": True, "search_latency_ms": 420, "lines": 46, "error": ""}
         with mock.patch.object(health, "_relay_post", return_value=report):
@@ -124,6 +132,83 @@ class ProbeAllTests(unittest.TestCase):
         by_id = {v.source_id: v for v in verdicts}
         self.assertTrue(by_id["a"].ok)
         self.assertTrue(by_id["b"].inconclusive)
+
+    def test_a_successful_search_without_this_title_is_inconclusive(self):
+        report = {
+            "ok": False,
+            "search_latency_ms": 420,
+            "lines": 0,
+            "probed": 0,
+            "error": "no playable line in search result",
+        }
+        with mock.patch.object(health, "_relay_post", return_value=report):
+            with mock.patch.object(health.time, "sleep"):
+                verdicts = health.probe_all("http://relay", self.SOURCES[:1], "anime title")
+        self.assertFalse(verdicts[0].ok)
+        self.assertTrue(verdicts[0].inconclusive)
+        self.assertEqual(verdicts[0].lines, 0)
+
+    def test_repeated_empty_title_searches_do_not_demote_a_source(self):
+        report = {
+            "ok": False,
+            "search_latency_ms": 420,
+            "lines": 0,
+            "error": "no playable line in search result",
+        }
+        reg = health.SourceHealthRegistry(self.path, consecutive_failures_required=2)
+        with mock.patch.object(health, "_relay_post", return_value=report):
+            with mock.patch.object(health.time, "sleep"):
+                for _ in range(4):
+                    verdicts = health.probe_all("http://relay", self.SOURCES[:1], "anime title")
+                    self.assertEqual(reg.record(verdicts), [])
+        self.assertEqual(reg.failure_count("a"), 0)
+
+    def test_real_search_http_error_is_still_counted(self):
+        report = {"ok": False, "search_latency_ms": None, "lines": 0, "error": "HTTP 403"}
+        reg = health.SourceHealthRegistry(self.path, consecutive_failures_required=3)
+        with mock.patch.object(health, "_relay_post", return_value=report):
+            with mock.patch.object(health.time, "sleep"):
+                verdicts = health.probe_all("http://relay", self.SOURCES[:1], "anime title")
+        self.assertFalse(verdicts[0].inconclusive)
+        self.assertEqual(reg.record(verdicts), [])
+        self.assertEqual(reg.failure_count("a"), 1)
+
+    def test_relay_allowlist_refusal_is_inconclusive_and_not_counted(self):
+        report = {
+            "ok": False,
+            "search_latency_ms": 420,
+            "lines": 2,
+            "probed": 0,
+            "inconclusive": True,
+            "error": "all sampled stream URLs rejected before HTTP probe",
+        }
+        reg = health.SourceHealthRegistry(self.path, consecutive_failures_required=2)
+        with mock.patch.object(health, "_relay_post", return_value=report):
+            with mock.patch.object(health.time, "sleep"):
+                for _ in range(3):
+                    verdicts = health.probe_all("http://relay", self.SOURCES[:1], "anime title")
+                    self.assertTrue(verdicts[0].inconclusive)
+                    self.assertEqual(reg.record(verdicts), [])
+        self.assertEqual(reg.failure_count("a"), 0)
+
+    def test_real_failed_playback_lines_still_accumulate_to_demotion(self):
+        report = {
+            "ok": False,
+            "search_latency_ms": 420,
+            "lines": 8,
+            "probed": 8,
+            "error": "interface ok, 8 lines probed, none played",
+        }
+        reg = health.SourceHealthRegistry(self.path, consecutive_failures_required=3)
+        with mock.patch.object(health, "_relay_post", return_value=report):
+            with mock.patch.object(health.time, "sleep"):
+                demotions = []
+                for _ in range(3):
+                    verdicts = health.probe_all("http://relay", self.SOURCES[:1], "anime title")
+                    demotions = reg.record(verdicts)
+        self.assertFalse(verdicts[0].inconclusive)
+        self.assertEqual(reg.failure_count("a"), 3)
+        self.assertEqual([v.source_id for v in demotions], ["a"])
 
     def test_sources_without_api_url_are_skipped(self):
         sources = [{"id": "x", "name": "X", "api_url": ""}, {"name": "no id"}]
