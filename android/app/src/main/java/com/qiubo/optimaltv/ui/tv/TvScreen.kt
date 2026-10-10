@@ -128,16 +128,6 @@ fun TvScreen(nav: NavController) {
     )
     val vmUi by vm.ui.collectAsStateWithLifecycle()
 
-    // v1.17 二重门控（公测版）：电视页为内嵌播放不走 player 路由——授权中途失效
-    // （联网复验命中吊销降级/过期）立即停播；内测版编译期剔除
-    if (com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED) {
-        LaunchedEffect(Unit) {
-            com.qiubo.optimaltv.license.LicenseManager.state.collect {
-                if (it != null && !com.qiubo.optimaltv.license.LicenseManager.isPremium()) vm.onHostPause()
-            }
-        }
-    }
-
     // KEEP_SCREEN_ON：直播场景防息屏（对齐播放页）
     val activity = androidx.compose.ui.platform.LocalContext.current as android.app.Activity
     DisposableEffect(Unit) {

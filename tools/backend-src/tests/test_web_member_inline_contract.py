@@ -57,12 +57,14 @@ class TestWebMemberInlineContract(unittest.TestCase):
         # 有效态： 套餐 + 到期 yyyy-MM-dd + 剩余 N 天
         self.assertRegex(body, r"到期 \$\{ymd\} · 剩余 \$\{left\} 天")
 
-    def test_only_leaf_renders_when_activated(self):
-        """未持票 → 整行不渲染（App：未激活走统一会员页，不带行内小字）。"""
+    def test_unactivated_user_can_open_optional_member_activation(self):
+        """无卡密时保留用户主动打开会员/激活弹窗的入口。"""
         m = re.search(r"function renderMemberInline\(\)\s*\{(.*?)\n\}", APP_JS, re.S)
         self.assertIsNotNone(m, "app.js 缺少 renderMemberInline()")
         body = m.group(1)
-        self.assertIn("el.hidden = !show", body)
+        self.assertIn("if (!license.data)", body)
+        self.assertIn("会员 / 激活", body)
+        self.assertIn("openMemberModal", body)
         self.assertIn("license.data", body)
 
     def test_leaf_is_inline_not_card(self):

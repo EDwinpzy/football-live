@@ -120,8 +120,7 @@ android {
         // v1.28（2026-09-16）：与 TV 版同步（重装免重激活 + 激活失败诊断与重试）
         // v1.29（2026-09-16）：与 TV 版同步（源匹配重试 / 代理 fake-IP 放行 / 探测预算 / 海报兜底）
         // v1.32（2026-09-16）：云端接口从 Sites 切回腾讯云 CloudBase（国内可直连）。
-        // 2026-09-18：正式包已开卡密门禁（LICENSE_ENABLED=true）。同一版本此前出过一版
-        // 「测试版：false —— 默认视为已激活」的构建，已归档到 apk/归档-测试版-门禁关/。
+        // 2026-10-11：按用户要求，所有变体关闭内容准入门禁；会员/激活功能仍可主动访问。
     // v1.34（2026-09-21）：APK 应用内更新支持分片下载——对象桶单对象硬上限 100 MiB，
     // 大包按 < 100 MiB 拆段，客户端按序下载拼成整包后仍校验 SHA-256 与签名证书。
     // v1.35（2026-09-21）：长按画面左右两侧 = 3.0x 倍速播放；并含播放器渲染层 key
@@ -133,24 +132,20 @@ android {
     //   versionCode = 主版本×100 + 次版本×10 → V1.0=100、V1.1=110、V1.2=120、V2.0=200
     // 必须严格递增：客户端只比较 versionCode，系统安装也不允许降级覆盖。V1.0 取 100
     // 而非 10，是为了高于重置前的 42，已装 1.4x 的设备仍能收到 V1.0 的更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 262)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "2.6.2")
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 263)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "2.6.3")
         // 与 TV 版一致的三 ABI（Chaquopy/libVLC so 需要）；移动版无 cpp 拼音解码器
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
 
         // v1.19 版本重规划：内测/公测双 flavor 退役——只保留原公测移动一条线。
-        // 卡密门控为正式线标配；热更新与 TV 版共用同一通道（同一后端 zip）
+        // 热更新与 TV 版共用同一通道（同一后端 zip）；授权端点保留给手动激活页面。
         // 2026-09-19 老板要求：**桌面应用名不带「TV版/移动版」**，两端统一 'My TV'；
         // 区分只保留在 APK 产物文件名（MyTV-TV版.apk / MyTV-移动版.apk，见文件末尾归档块）。
         // 注意：两端 label 相同，故**同一台设备不要同时装 TV 版与移动版**（靠 applicationId
         // 可以共存，但桌面会出现两个同名图标），分发时按设备类型二选一。
         resValue 'string', 'app_name', 'My TV'
-        // 卡密门控由 buildType 决定（见 buildTypes 里的 licenseEnabled）：
-        // 默认值为 false；是否启用卡密门禁由具体 buildType 的覆盖值决定。
-        // Debug 默认可直接进入主界面，做 UI 回归不消耗正式卡密槽位（一卡限 2 台设备）。
-        // 需要在 Debug 上验证真实卡密流程时：-PdebugLicenseEnabled=true 覆盖。
-        buildConfigField 'boolean', 'LICENSE_ENABLED',
-                (project.findProperty('debugLicenseEnabled') ?: 'false').toString()
+        // 所有构建变体都不启用内容准入门禁；会员/激活页仍保留为用户主动访问功能。
+        buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'
         buildConfigField 'String', 'API_BASE_URL', apiBaseUrlConstant
         buildConfigField 'String', 'LICENSE_ENDPOINT', '"' + apiBaseUrl + '/activate"'
         buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'true'
@@ -193,19 +188,20 @@ android {
         release {
             minifyEnabled false   // Chaquopy + 反射（引擎/Room）保守不混淆
             signingConfig signingConfigs.release
-            // 2026-10-08 按用户要求隐藏正式 APK 的卡密门禁，免激活进入主界面。
+            // 所有变体都允许未激活用户进入主功能。
             buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'
         }
         debug {
             // v1.20 QA：debug 也用发布签名（同 TV 版）——可覆盖安装 release 保数据
             signingConfig signingConfigs.release
-            // Debug 跳过卡密门控：defaultConfig 的默认值已是 false，这里显式写一遍，
-            // 免得有人改默认值时无声地把「Debug 进不了主界面」这个坑带回来。
+            // Debug 必须验证 APK 内嵌的当前后端；不要让线上热更新覆盖本地测试代码。
+            buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'false'
+            // Debug 与 Release 一致，不启用内容准入门禁。
             buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'
         }
     }
 
-    // buildConfig：v1.17 LICENSE_ENABLED / LICENSE_ENDPOINT 门控开关（flavor 注入）
+    // 保留授权端点供手动激活；LICENSE_ENABLED 为兼容旧代码的常量，始终 false。
     buildFeatures { compose true; buildConfig true }
     composeOptions { kotlinCompilerExtensionVersion '1.5.14' }
 

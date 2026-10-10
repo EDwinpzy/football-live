@@ -19,6 +19,97 @@ assert.ok(helperStart >= 0 && helperEnd > helperStart, "VOD route helpers are pr
 assert.ok(playerStart >= 0 && playerEnd > playerStart, "player implementation is present");
 assert.ok(cacheStart >= 0 && cacheEnd > cacheStart, "play resolution cache is present");
 
+const relayStart = app.indexOf("function relay(u, ref)");
+const relayEnd = app.indexOf("\n}", relayStart) + 2;
+assert.ok(relayStart >= 0 && relayEnd > relayStart, "relay helper is present");
+const relayContext = vm.createContext({ BASE: "/web" });
+vm.runInContext(app.slice(relayStart, relayEnd), relayContext);
+assert.equal(
+  vm.runInContext('relay("https://cdn.test/live.m3u8?token=x", "https://play.88player.top/m3u8.html?url=https%3A%2F%2Fcdn.test%2Flive.m3u8")', relayContext),
+  "/web/api/relay?u=https%3A%2F%2Fcdn.test%2Flive.m3u8%3Ftoken%3Dx&ref=https%3A%2F%2Fplay.88player.top%2Fm3u8.html%3Furl%3Dhttps%253A%252F%252Fcdn.test%252Flive.m3u8",
+  "relay forwards the 88player Referer without losing the signed stream URL",
+);
+assert.equal(vm.runInContext('relay("https://cdn.test/live.m3u8", "none")', relayContext),
+  "/web/api/relay?u=https%3A%2F%2Fcdn.test%2Flive.m3u8&ref=none",
+  "the existing no-Referer behavior remains available");
+assert.doesNotMatch(app, /LIVE_SRCS|LIVE_SRC_LABELS/,
+  "football source selection is not restricted to a static source allowlist");
+assert.match(app, /srcIds: \[\]/, "live playback retains each backend source ID");
+assert.match(app, /sourceRefs: \[\]/, "live playback keeps each source's relay Referer");
+
+console.log("== live player lists only backend-probed HLS routes and renews by source ID ==");
+{
+  const calls = [];
+  const attached = [];
+  const fatal = [];
+  const handlers = [];
+  const nodes = new Map();
+  const liveCtx = { kind: "live", matchId: "match/42" };
+  const routeStart = app.indexOf("async function resolveLiveAndPlay(");
+  const routeEnd = app.indexOf("\nfunction attachPlayer(", routeStart);
+  assert.ok(routeStart >= 0 && routeEnd > routeStart, "live source resolver is present");
+  const liveSandbox = {
+    BASE: "/web",
+    pv: { ctx: liveCtx, playerSession: 7, sources: [], srcIds: [], srcNames: [], sourceRefs: [],
+      srcIdx: 0, picker: true, recoveryGen: 0 },
+    fetchJSON: async (url, options) => {
+      calls.push({ url: String(url), options });
+      if (calls.length === 1) return { sources: [
+        { url: "https://cdn.test/a2.m3u8?sig=first", player: "m3u8", source: "88z_0",
+          name: "线路A2-高清", referer: "https://www.88zhibo.tv/" },
+        { url: "https://cdn.test/not-hls.mp4", player: "mp4", source: "88z_1", name: "错误类型" },
+        { url: "", player: "m3u8", source: "88z_2", name: "空地址" },
+        { url: "https://cdn.test/premier.m3u8?sig=next", player: "m3u8", source: "88z_17",
+          name: "Premier-EN", referer: "https://embed.test/match/42" },
+      ] };
+      return { url: "https://cdn.test/premier-fresh.m3u8?sig=renewed",
+        referer: "https://embed.test/match/42?renewed=1" };
+    },
+    relay: (url, referer) => `/api/relay?u=${encodeURIComponent(url)}&ref=${encodeURIComponent(referer)}`,
+    attachPlayer: (url, resume) => attached.push({ url, resume }),
+    renderSrcPicker: null,
+    playerFatal: error => fatal.push(String(error)),
+    srcLabel: value => String(value || "信号源"),
+    esc: value => String(value),
+    syncPlayerBackBtn() {},
+    $: selector => {
+      if (!nodes.has(selector)) nodes.set(selector, { innerHTML: "", hidden: true });
+      return nodes.get(selector);
+    },
+    $$: selector => selector === "#srcPicker .spchip"
+      ? liveSandbox.pv.srcNames.map((_, index) => ({ dataset: { i: String(index) },
+        addEventListener: (name, callback) => { if (name === "click") handlers[index] = callback; } })) : [],
+  };
+  liveSandbox.window = liveSandbox;
+  const liveContext = vm.createContext(liveSandbox);
+  vm.runInContext(app.slice(routeStart, routeEnd) + `
+    globalThis.__openLive = () => resolveLiveAndPlay(pv.ctx, pv.playerSession);
+    globalThis.__freshLive = index => resolveFreshLiveSource(index);
+  `, liveContext);
+  await liveContext.__openLive();
+  assert.equal(calls[0].url, "/web/api/stream/match%2F42?src=all&fresh=1",
+    "opening a match asks the backend to discover and probe every route");
+  assert.deepEqual(Array.from(liveSandbox.pv.srcIds), ["88z_0", "88z_17"],
+    "only probed m3u8 routes with a URL and stable source ID are kept");
+  assert.deepEqual(Array.from(liveSandbox.pv.srcNames), ["线路A2-高清", "Premier-EN"],
+    "dynamic backend route names are retained for the picker");
+  assert.equal(nodes.get("#srcPicker").innerHTML.includes("Premier-EN"), true,
+    "the picker displays dynamic route names, including hyphenated names");
+  assert.equal(nodes.get("#srcPicker").innerHTML.includes("错误类型"), false,
+    "a non-HLS route is not displayed");
+  assert.equal(attached[0].url.includes(encodeURIComponent("https://www.88zhibo.tv/")), true,
+    "the initial playable route is relayed with its Referer");
+
+  await handlers[1]();
+  assert.equal(calls[1].url, "/web/api/stream/match%2F42?src=88z_17&fresh=1",
+    "manual switching renews the selected route by its backend source ID");
+  assert.equal(liveSandbox.pv.sourceRefs[1], "https://embed.test/match/42?renewed=1",
+    "route renewal keeps the returned Referer for subsequent relays");
+  assert.equal(attached.at(-1).url.includes(encodeURIComponent("https://embed.test/match/42?renewed=1")), true,
+    "switch playback uses the renewed route Referer");
+  assert.deepEqual(fatal, [], "usable routes do not raise a playback error");
+}
+
 class FakeNode {
   constructor() {
     this.hidden = true;

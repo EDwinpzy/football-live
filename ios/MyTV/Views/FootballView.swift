@@ -8,6 +8,10 @@ struct FootballView: View {
     @State private var errorMessage: String?
     @State private var retryToken = 0
     @State private var selectedMatch: FootballMatch?
+    @State private var playableStreams: [FootballStreamReference] = []
+    @State private var isLoadingPlayableStreams = false
+    @State private var playableStreamsError: String?
+    @State private var sourceRetryToken = 0
 
     var body: some View {
         Group {
@@ -91,6 +95,10 @@ struct FootballView: View {
                     .lineLimit(1)
                 Spacer()
                 Button {
+                    playableStreams = []
+                    playableStreamsError = nil
+                    isLoadingPlayableStreams = true
+                    sourceRetryToken += 1
                     selectedMatch = match
                 } label: {
                     Label("选择线路", systemImage: "play.fill")
@@ -101,8 +109,6 @@ struct FootballView: View {
                         .background(MyTVStyle.accent, in: Capsule())
                 }
                 .buttonStyle(.plain)
-                .disabled(match.streams.isEmpty)
-                .opacity(match.streams.isEmpty ? 0.5 : 1)
                 .accessibilityIdentifier("football-select-source-\(match.id)")
             }
         }
@@ -125,14 +131,34 @@ struct FootballView: View {
                     }
                     .padding(.bottom, 4)
 
-                    if match.streams.isEmpty {
+                    if isLoadingPlayableStreams {
+                        HStack(spacing: 10) {
+                            ProgressView().tint(MyTVStyle.accent)
+                            Text("正在检查可用线路…")
+                                .font(.subheadline)
+                                .foregroundStyle(MyTVStyle.secondaryText)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                        .accessibilityIdentifier("football-sources-loading")
+                    } else if let playableStreamsError {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(playableStreamsError)
+                                .font(.subheadline)
+                                .foregroundStyle(MyTVStyle.secondaryText)
+                            Button("重试") { sourceRetryToken += 1 }
+                                .buttonStyle(AccentButtonStyle())
+                                .accessibilityIdentifier("football-sources-retry")
+                        }
+                        .accessibilityIdentifier("football-sources-error")
+                    } else if playableStreams.isEmpty {
                         Text("当前比赛没有可用线路。")
                             .font(.subheadline)
                             .foregroundStyle(MyTVStyle.secondaryText)
+                            .accessibilityIdentifier("football-sources-empty")
                     } else {
-                        ForEach(match.streams.indices, id: \.self) { index in
-                            let stream = match.streams[index]
-                            NavigationLink(value: PlaybackRoute(footballMatch: match, sourceIndex: index)) {
+                        ForEach(playableStreams) { stream in
+                            NavigationLink(value: PlaybackRoute(footballMatch: match, stream: stream)) {
                                 HStack(spacing: 12) {
                                     Image(systemName: "dot.radiowaves.left.and.right")
                                         .foregroundStyle(MyTVStyle.accent)
@@ -153,7 +179,7 @@ struct FootballView: View {
                                 .background(MyTVStyle.surface, in: RoundedRectangle(cornerRadius: 14))
                             }
                             .buttonStyle(.plain)
-                            .accessibilityIdentifier("football-source-\(match.id)-\(index)")
+                            .accessibilityIdentifier("football-source-\(match.id)-\(stream.id)")
                         }
                     }
                 }
@@ -173,7 +199,34 @@ struct FootballView: View {
             }
         }
         .myTVScreen()
+        .task(id: sourceRetryToken) { await loadPlayableStreams(for: match) }
         .accessibilityIdentifier("football-source-picker")
+    }
+
+    @MainActor
+    private func loadPlayableStreams(for match: FootballMatch) async {
+        guard let client = settings.client else {
+            playableStreams = []
+            isLoadingPlayableStreams = false
+            playableStreamsError = "请先在设置中填写有效的 HTTPS 服务地址。"
+            return
+        }
+        isLoadingPlayableStreams = true
+        playableStreamsError = nil
+        do {
+            let loaded = try await client.matchStreams(match: match)
+            try Task.checkCancellation()
+            guard selectedMatch?.id == match.id else { return }
+            playableStreams = loaded
+            isLoadingPlayableStreams = false
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled, selectedMatch?.id == match.id else { return }
+            playableStreams = []
+            playableStreamsError = userFacingNetworkMessage(error)
+            isLoadingPlayableStreams = false
+        }
     }
 
     @MainActor

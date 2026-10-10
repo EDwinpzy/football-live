@@ -116,8 +116,8 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { it[VOD_LAST_CAT] = cat }
     }
 
-    // ---- 足球直播：上次手动选择的信号源标识（2026-09-07 需求③：进直播默认直选，
-    // 记忆源不在本场线路表时由 VM 回退 bb）----
+    // ---- 足球直播：上次手动选择的信号源标识（2026-09-07 需求③：进直播默认直选；
+    // 旧源记忆由 VM 迁移到新线路默认 A2）----
     private val LIVE_LAST_SRC = stringPreferencesKey("live_last_src")
 
     suspend fun liveLastSrc(): String? = context.dataStore.data.first()[LIVE_LAST_SRC]

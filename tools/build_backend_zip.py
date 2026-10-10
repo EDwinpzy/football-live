@@ -72,6 +72,26 @@ def write_entry(zout, filename, data, template=None):
     zout.writestr(info, data)
 
 
+def atomic_copy_file(source, destination):
+    """Replace a generated archive without truncating the current package in place."""
+    destination = Path(destination)
+    staged = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                prefix=destination.name + ".", suffix=".tmp",
+                dir=str(destination.parent), delete=False) as output:
+            staged = output.name
+            with open(source, "rb") as input_file:
+                shutil.copyfileobj(input_file, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(staged, str(destination))
+        staged = None
+    finally:
+        if staged and os.path.exists(staged):
+            os.remove(staged)
+
+
 def copied_web_files(manifest_bytes):
     try:
         manifest = json.loads(manifest_bytes.decode("utf-8"))
@@ -195,8 +215,8 @@ def main():
         added += 1
     zout.close()
     zin.close()
-    shutil.copyfile(TMP_ZIP, SRC_ZIP)
-    shutil.copyfile(TMP_ZIP, MOBILE_ZIP)
+    atomic_copy_file(TMP_ZIP, SRC_ZIP)
+    atomic_copy_file(TMP_ZIP, MOBILE_ZIP)
     os.remove(TMP_ZIP)
     print("已替换:", replaced[:12], ("…共 %d 项" % len(replaced)) if len(replaced) > 12 else "")
     print("新增 %d 项；旧海报删除 %d 个，过期 Web 哈希资源删除 %d 个，新海报写入 %d 个" % (

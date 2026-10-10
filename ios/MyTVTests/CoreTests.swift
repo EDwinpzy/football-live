@@ -327,15 +327,16 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath, "/web/vod/detail/a%2Fb%20%3F%23")
     }
 
-    func testFootballUsesChannelIDAndReturnsAlreadyRelayedURL() async throws {
+    func testFootballDiscoversOnlyResolvedM3U8SourcesForEachMatchOpen() async throws {
         let requests = RequestRecorder()
         StubURLProtocol.install { request in
             requests.append(request)
             if request.url?.path == "/web/api/matches" {
-                let body = #"{"count":1,"matches":[{"match_id":"9001","title":"甲队 vs 乙队","home":"甲队","away":"乙队","league":"联赛","date":"2026-10-09","time":"20:00","status":"live","minute":"32","score":{"home":1,"away":0},"channels":[{"id":"8123","src":"plu","name":"线路甲"}]}]}"#
+                let body = #"{"count":1,"matches":[{"match_id":"9001","title":"甲队 vs 乙队","home":"甲队","away":"乙队","league":"联赛","date":"2026-10-09","time":"20:00","status":"live","score":{"home":1,"away":0},"channels":[{"id":"8121","src":"a2","name":"旧名称A2"}]}]}"#
                 return (200, Data(body.utf8))
             }
-            let body = #"{"url":"https://stream.example.test/live/index.m3u8?token=a+b&x=1"}"#
+            XCTAssertEqual(request.url?.path, "/web/api/stream/9001")
+            let body = #"{"url":"https://stream.example.test/first.m3u8","source":"88z_2","name":"英超-线路 Q2","referer":"https://embed.example.test/premier?id=2","sources":[{"url":"https://stream.example.test/first.m3u8","player":"m3u8","source":"88z_2","name":"英超-线路 Q2","referer":"https://embed.example.test/premier?id=2"},{"url":"http://cdn.example.test/live.m3u8?token=a+b","player":"m3u8","source":"88z_11","name":"法甲-线路 Q11","referer":"https://embed.example.test/ligue1"},{"url":"https://player.example.test/embed/2","player":"iframe","source":"88z_12","name":"网页线路","referer":"https://embed.example.test/other"},{"url":"not a url","player":"m3u8","source":"88z_13","name":"损坏地址"},{"url":"https://cdn.example.test/no-id.m3u8","player":"m3u8","source":"","name":"缺少线路 ID"}]}"#
             return (200, Data(body.utf8))
         }
         let client = makeClient()
@@ -343,25 +344,60 @@ final class CoreTests: XCTestCase {
         let match = try XCTUnwrap(matches.first)
 
         XCTAssertEqual(match.id, "9001")
-        XCTAssertEqual(match.score, "1-0")
-        XCTAssertEqual(match.streams.first?.id, "8123")
-        let stream = try await client.matchStream(match: match, sourceIndex: 0)
+        let streams = try await client.matchStreams(match: match)
 
-        let streamRequest = try XCTUnwrap(requests.all.first { $0.url?.path.contains("/api/stream/") == true })
-        XCTAssertEqual(streamRequest.url?.path, "/web/api/stream/8123")
-        XCTAssertEqual(URLComponents(url: try XCTUnwrap(streamRequest.url), resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "src" })?.value, "plu")
+        XCTAssertEqual(streams.map(\.id), ["88z_2", "88z_11"])
+        XCTAssertEqual(streams.map(\.src), ["88z_2", "88z_11"])
+        XCTAssertEqual(streams.map(\.name), ["英超-线路 Q2", "法甲-线路 Q11"])
+        XCTAssertEqual(streams.map(\.player), ["m3u8", "m3u8"])
+        XCTAssertEqual(streams.map(\.referer), ["https://embed.example.test/premier?id=2", "https://embed.example.test/ligue1"])
+        XCTAssertEqual(streams.map { $0.url.host }, ["stream.example.test", "cdn.example.test"])
+        let streamRequest = try XCTUnwrap(requests.all.first { $0.url?.path == "/web/api/stream/9001" })
+        let query = URLComponents(url: try XCTUnwrap(streamRequest.url), resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(query?.first(where: { $0.name == "src" })?.value, "all")
+        XCTAssertEqual(query?.first(where: { $0.name == "fresh" })?.value, "1")
+    }
+
+    func testFootballRenewsSelectedSourceByMatchAndPreservesItsReferer() async throws {
+        let requests = RequestRecorder()
+        StubURLProtocol.install { request in
+            requests.append(request)
+            let body = #"{"url":"https://stream.example.test/live/index.m3u8?token=a+b&x=1","source":"88z_7","name":"Premier League - Channel 7","referer":"https://embed.example.test/watch?id=1&source=88z_7"}"#
+            return (200, Data(body.utf8))
+        }
+        let client = makeClient()
+        let match = FootballMatch(
+            id: "9001", title: "甲队 vs 乙队", home: "甲队", away: "乙队", league: "英超",
+            time: "20:00", status: "live"
+        )
+        let source = FootballStreamReference(
+            id: "88z_7", src: "88z_7", name: "Premier League - Channel 7", player: "m3u8",
+            url: URL(string: "https://stream.example.test/old.m3u8")!,
+            referer: "https://embed.example.test/old"
+        )
+
+        let stream = try await client.matchStream(match: match, source: source)
+
+        let request = try XCTUnwrap(requests.all.first)
+        XCTAssertEqual(request.url?.path, "/web/api/stream/9001")
+        let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(query?.first(where: { $0.name == "src" })?.value, "88z_7")
+        XCTAssertEqual(query?.first(where: { $0.name == "fresh" })?.value, "1")
         XCTAssertEqual(stream.url.path, "/web/api/relay")
         let relayComponents = try XCTUnwrap(URLComponents(url: stream.url, resolvingAgainstBaseURL: false))
-        XCTAssertNil(relayComponents.queryItems?.first(where: { $0.name == "ref" }))
+        XCTAssertEqual(relayComponents.queryItems?.first(where: { $0.name == "ref" })?.value, "https://embed.example.test/watch?id=1&source=88z_7")
         XCTAssertEqual(relayComponents.queryItems?.first(where: { $0.name == "u" })?.value, "https://stream.example.test/live/index.m3u8?token=a+b&x=1")
         XCTAssertTrue(relayComponents.percentEncodedQuery?.contains("a%2Bb%26x%3D1") == true)
+        XCTAssertTrue(relayComponents.percentEncodedQuery?.contains("ref=https%3A%2F%2Fembed.example.test%2Fwatch%3Fid%3D1%26source%3D88z_7") == true)
     }
 
     func testRelayDoesNotWrapItsOwnURLTwice() throws {
         let client = makeClient()
         let existing = try client.endpointURL(segments: ["api", "relay"], query: [URLQueryItem(name: "u", value: "https://stream.example.test/a.m3u8")])
+        let defaultRelay = client.relayURL(for: "https://stream.example.test/a.m3u8")
 
         XCTAssertEqual(client.relayURL(for: existing.absoluteString), existing)
+        XCTAssertNil(URLComponents(url: defaultRelay, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "ref" }))
     }
 
     func testVodPlayUsesNoRefererAndPreservesPlusAndAmpersandInSourceURL() async throws {

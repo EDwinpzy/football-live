@@ -73,8 +73,8 @@ import java.net.URLEncoder
 
 internal enum class FavoritesDownTarget { MEMBER, CONTENT, UPDATE }
 
-internal fun favoritesDownTarget(licenseEnabled: Boolean, hasFavorites: Boolean, hasHistory: Boolean) = when {
-    licenseEnabled -> FavoritesDownTarget.MEMBER
+internal fun favoritesDownTarget(memberActionAvailable: Boolean, hasFavorites: Boolean, hasHistory: Boolean) = when {
+    memberActionAvailable -> FavoritesDownTarget.MEMBER
     hasFavorites || hasHistory -> FavoritesDownTarget.CONTENT
     else -> FavoritesDownTarget.UPDATE
 }
@@ -145,19 +145,6 @@ fun FavoritesScreen(nav: NavController) {
     val hasFav = favItems.isNotEmpty()
     val hasHis = history.isNotEmpty()
 
-    // 需求 我的#7 → 会员④（2026-09-04 重构）→ 需求②③（2026-09-04 追加批次）：
-    // 未激活态 = 整页复用会员页（与 paywall 路由页统一）；已激活态 = 顶部一行会员小字
-    val licState = if (com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED) {
-        com.qiubo.optimaltv.license.LicenseManager.state.collectAsStateWithLifecycle()
-    } else null
-    val notActivated = licState?.value is com.qiubo.optimaltv.license.LicenseState.NotActivated
-
-    // 需求②：未开通 = 整页会员页（自带套餐首卡焦点/可切标签栏）；激活成功自动切回常规页
-    if (notActivated) {
-        com.qiubo.optimaltv.ui.paywall.PaywallScreen(nav, tabKey = "favorites")
-        return
-    }
-
     Box(Modifier.fillMaxSize().background(OtvColors.Bg)) {
         // 全页单 LazyColumn：所有内容随页滚动（TabBar 悬浮顶层，需求 我的#5）
         // v1.13：方向导航统一 OtvNav 引擎，容器仅声明滚动挂靠
@@ -173,14 +160,12 @@ fun FavoritesScreen(nav: NavController) {
                 // 右上与标题不同行；光标只能选中行尾「续费」两字（整行不可聚焦）
                 favHisItems(s, favItems, history, contentFocus, cardReg, nav, titleTop = 120f,
                     updateFocus = updateFocus,
-                    memberRow = if (com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED) {
-                        { MemberInlineInfo(s = s, renewFocus = memberFocus) { nav.navigate("paywall") } }
-                    } else null)
+                    memberRow = { MemberInlineInfo(s = s, renewFocus = memberFocus) { nav.navigate("paywall") } })
             }
         } // ProvideNavScrolls(favScroll)
         MainTabBar(
             "favorites", { key -> navigateToTab(nav, key) }, { nav.navigate("search") }, tabFocus,
-            contentDownFocus = when (favoritesDownTarget(com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED, hasFav, hasHis)) {
+            contentDownFocus = when (favoritesDownTarget(true, hasFav, hasHis)) {
                 FavoritesDownTarget.MEMBER -> memberFocus
                 FavoritesDownTarget.CONTENT -> contentFocus
                 FavoritesDownTarget.UPDATE -> updateFocus
@@ -328,9 +313,9 @@ private fun HistoryVodCard(
 
 /**
  * 需求⑥（2026-09-11）：我的页会员信息——并入「我的收藏」标题行靠右的一行小字
- * （状态点+状态/套餐/到期/剩余），无背景框；**仅行尾带下划线的「续费」两字可聚焦**
- * （旧版整行 dpadFocusable，光标落在整行上；现光标选中环只套「续费」），
- * OK 进会员页（续费/兑换）。仅已激活态渲染（未激活走统一会员页）。
+ * （状态点+状态/套餐/到期/剩余），无背景框；**仅行尾动作可聚焦**
+ * （旧版整行 dpadFocusable，光标落在整行上；现光标只套行尾动作），
+ * OK 进会员页（激活/续费/兑换）。
  */
 @Composable
 private fun MemberInlineInfo(
@@ -340,11 +325,14 @@ private fun MemberInlineInfo(
 ) {
     val st by com.qiubo.optimaltv.license.LicenseManager.state.collectAsStateWithLifecycle()
     val d = (st as? com.qiubo.optimaltv.license.LicenseState.Activated)?.data
+    val activateAction = st is com.qiubo.optimaltv.license.LicenseState.NotActivated
     val status: String
     val statusColor: Color
     val infoText: String
     when {
-        d == null -> { status = "加载中…"; statusColor = OtvColors.White50; infoText = "" }
+        st == null -> { status = "加载中…"; statusColor = OtvColors.White50; infoText = "" }
+        activateAction -> { status = "尚未开通"; statusColor = OtvColors.White50; infoText = "输入卡密可激活" }
+        d == null -> { status = "会员状态暂不可用"; statusColor = OtvColors.White50; infoText = "" }
         d.expiryAt != null && com.qiubo.optimaltv.license.LicenseManager.effNow() >= d.expiryAt -> {
             status = "会员已过期"; statusColor = Color(0xFFFF453A)
             infoText = com.qiubo.optimaltv.ui.paywall.planDisplayName(d.plan) + " · 续费可用"
@@ -379,7 +367,7 @@ private fun MemberInlineInfo(
             fontSize = 22f.sxs(s),
             maxLines = 1,
         )
-        // 用户需求（2026-09-05）：行尾带下划线的「续费」入口；
+        // 行尾带下划线的会员操作入口；未开通时可直接进入激活页。
         // 需求⑥（2026-09-11）：只有这两个字可被光标选中
         // 2026-09-19 老板定版（第二轮）：选中效果**改为细白描边框**，去掉之前那套
         // 「白底反色胶囊 + 放大 1.08 + 四周柔和外发光」——
@@ -411,7 +399,7 @@ private fun MemberInlineInfo(
                 .padding(horizontal = 20f.sx(s), vertical = 9f.sx(s)),
         ) {
             Text(
-                "续费",
+                if (activateAction) "激活" else "续费",
                 color = if (renewFocused) OtvColors.White else AccentBlue,
                 fontSize = 22f.sxs(s),
                 fontWeight = FontWeight.SemiBold,

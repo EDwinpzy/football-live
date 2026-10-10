@@ -105,17 +105,6 @@ import kotlin.math.roundToInt
 @Composable
 fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: Long = 0L) {
     val vodId = URLDecoder.decode(vodIdArg, "UTF-8")
-    // v1.17 二重门控（公测版，L1 验签分散）：即使路由层门控被绕过，播放页自身也校验——
-    // 授权中途失效（如联网复验命中吊销降级）立即退出播放；内测版编译期剔除
-    if (com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED) {
-        androidx.compose.runtime.LaunchedEffect(Unit) {
-            com.qiubo.optimaltv.license.LicenseManager.state.collect {
-                if (it != null && !com.qiubo.optimaltv.license.LicenseManager.isPremium()) {
-                    runCatching { nav.popBackStack() }
-                }
-            }
-        }
-    }
     val vm: PlayerViewModel = viewModel(
         key = "player:$vodId:$epIndex:$resumeMs",
         factory = simpleFactory {

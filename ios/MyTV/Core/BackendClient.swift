@@ -207,29 +207,77 @@ public struct BackendClient {
         return rawMatches.compactMap(parseFootballMatch)
     }
 
-    public func matchStream(match: FootballMatch, sourceIndex: Int) async throws -> PlayableStream {
-        guard match.streams.indices.contains(sourceIndex) else {
-            throw BackendError.malformedPayload("所选直播线路不存在。")
-        }
-        let source = match.streams[sourceIndex]
+    public func matchStreams(match: FootballMatch) async throws -> [FootballStreamReference] {
         let data = try await get(
-            // The upstream's channel id can differ from match_id; the browser
-            // client requests /api/stream/{channel.id}?src=... for each line.
-            segments: ["api", "stream", source.id],
-            query: [URLQueryItem(name: "src", value: source.src)]
+            segments: ["api", "stream", match.id],
+            query: [
+                URLQueryItem(name: "src", value: "all"),
+                URLQueryItem(name: "fresh", value: "1")
+            ]
         )
         let object = try jsonObject(data)
-        let firstSource = (object["sources"] as? [[String: Any]])?.compactMap {
-            Self.string($0["url"]).nilIfBlank
-        }.first ?? ""
+        guard let rawSources = object["sources"] as? [[String: Any]] else {
+            throw BackendError.malformedPayload("直播线路列表格式不正确。")
+        }
+        var seenSources = Set<String>()
+        return rawSources.compactMap { raw -> FootballStreamReference? in
+            let source = Self.string(raw["source"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let player = Self.string(raw["player"]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let rawURL = Self.string(raw["url"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !source.isEmpty,
+                  seenSources.insert(source).inserted,
+                  player == "m3u8",
+                  let streamURL = Self.validStreamURL(rawURL) else { return nil }
+            let name = Self.string(raw["name"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let referer = Self.string(raw["referer"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            return FootballStreamReference(
+                id: source,
+                src: source,
+                name: name.isEmpty ? source : name,
+                player: player,
+                url: streamURL,
+                referer: referer
+            )
+        }
+    }
+
+    public func matchStream(match: FootballMatch, source: FootballStreamReference) async throws -> PlayableStream {
+        guard source.player.lowercased() == "m3u8" else {
+            throw BackendError.malformedPayload("所选直播线路不是原生 HLS。")
+        }
+        let data = try await get(
+            segments: ["api", "stream", match.id],
+            query: [
+                URLQueryItem(name: "src", value: source.src),
+                URLQueryItem(name: "fresh", value: "1")
+            ]
+        )
+        let object = try jsonObject(data)
+        let responseSource = Self.string(object["source"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard responseSource.isEmpty || responseSource == source.src else {
+            throw BackendError.malformedPayload("刷新后的直播线路与所选线路不一致。")
+        }
+        let matchingSource = (object["sources"] as? [[String: Any]])?.first {
+            Self.string($0["source"]).trimmingCharacters(in: .whitespacesAndNewlines) == source.src
+        }
+        let matchingPlayer = Self.string(matchingSource?["player"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard matchingPlayer.isEmpty || matchingPlayer.lowercased() == "m3u8" else {
+            throw BackendError.malformedPayload("刷新后的直播线路不再提供原生 HLS。")
+        }
         let rawURL = Self.string(object["url"]).ifBlank(computing: {
-            Self.string(object["m3u8"]).ifBlank(firstSource)
-        })
+            Self.string(matchingSource?["url"])
+        }).trimmingCharacters(in: .whitespacesAndNewlines)
         guard let streamURL = URL(string: rawURL),
-              ["https", "http"].contains(streamURL.scheme?.lowercased() ?? "") else {
+              ["https", "http"].contains(streamURL.scheme?.lowercased() ?? ""),
+              streamURL.host?.isEmpty == false else {
             throw BackendError.malformedPayload("此场比赛当前没有可播放信号。")
         }
-        return PlayableStream(url: relayURL(for: streamURL.absoluteString))
+        let referer = Self.string(object["referer"]).ifBlank(computing: {
+            Self.string(matchingSource?["referer"]).ifBlank(source.referer)
+        })
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfBlank
+        return PlayableStream(url: relayURL(for: streamURL.absoluteString, ref: referer))
     }
 
     public func relayURL(for rawURL: String, ref: String? = nil) -> URL {
@@ -466,15 +514,6 @@ public struct BackendClient {
         let home = Self.string(raw["home"])
         let away = Self.string(raw["away"])
         guard !id.isEmpty, !home.isEmpty, !away.isEmpty else { return nil }
-        let streams = (raw["channels"] as? [[String: Any]] ?? []).compactMap { channel -> FootballStreamReference? in
-            let source = Self.string(channel["src"])
-            guard !source.isEmpty else { return nil }
-            return FootballStreamReference(
-                id: Self.string(channel["id"]).ifBlank(id),
-                src: source,
-                name: Self.string(channel["name"]).ifBlank(source)
-            )
-        }
         let date = Self.string(raw["date"])
         let clock = Self.string(raw["time"])
         let time = [date, clock].filter { !$0.isEmpty }.joined(separator: " ")
@@ -492,9 +531,15 @@ public struct BackendClient {
             time: time,
             status: Self.string(raw["status"]),
             score: score,
-            minute: Self.string(raw["minute"]),
-            streams: streams
+            minute: Self.string(raw["minute"])
         )
+    }
+
+    private static func validStreamURL(_ raw: String) -> URL? {
+        guard let url = URL(string: raw),
+              ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+              url.host?.isEmpty == false else { return nil }
+        return url
     }
 
     private static func string(_ value: Any?) -> String {

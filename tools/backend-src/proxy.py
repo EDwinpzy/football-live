@@ -3,7 +3,7 @@
 """
 球迹直播 数据代理服务器
 - 静态文件服务（designs/ 各套前端）
-- GET /api/matches : 抓取 yoozb.live/m.html → 解析为 JSON（缓存 60s）
+- GET /api/matches : 抓取 88zhibo.tv → 解析为 JSON（缓存 60s）
 - GET /api/health  : 健康检查
 用法: python proxy.py [port]   (默认 8090)
 """
@@ -11,6 +11,8 @@ import os
 import atexit
 import re
 import json
+import html as _html
+from html.parser import HTMLParser
 import hashlib
 import hhkan  # 影视源（hhkan0.com 抓取）
 import hhkan_snapshot  # 好好看静态快照（云函数出口受风控时容灾，绝不引入外部卡片）
@@ -29,7 +31,7 @@ import concurrent.futures
 import http.client
 import base64
 import copy
-from urllib.parse import urljoin, quote, unquote, urlparse, parse_qs
+from urllib.parse import urljoin, quote, unquote, urlparse, urlsplit, parse_qs
 import urllib.request as urlreq
 from http.server import HTTPServer, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -46,7 +48,7 @@ try:
 except ImportError:
     HAS_URLLIB3 = False
 
-SOURCE_URL = "http://www.yoozb.live/m.html"
+SOURCE_URL = "https://www.88zhibo.tv/"
 WWW_ROOT = Path(__file__).parent / "www"
 
 # ---- 网页静态资源缓存合同（内容寻址资源 immutable）----
@@ -133,12 +135,8 @@ def _web_static_root() -> Path:
     if override:
         return Path(override)
     return WWW_ROOT
-# 同族镜像站（2026-08-15 验证 5cj.tv 存活且数据同源；fifa2022.tv 已 404 剔除）：
-# 主源网络失败自动切换，保证直播列表不断供
-SOURCE_MIRRORS = [
-    "http://www.yoozb.live/m.html",
-    "http://www.5cj.tv/m.html",
-]
+# 足球直播列表源。88zhibo 首页同时混排篮球，parse_matches 会过滤非足球赛事。
+SOURCE_MIRRORS = [SOURCE_URL]
 _active_source = {"i": 0, "url": SOURCE_MIRRORS[0]}
 # 云端兜底（2026-09-10「足球无比赛」根因修复）：家宽出口被 yoozb 系拉黑
 # （实测长沙移动 IP 对 yoozb.live/5cj.tv 全 403，镜像回退无效）时，比赛列表与
@@ -506,6 +504,217 @@ def _now_cn():
     return datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)
 
 
+_88Z_STREAM_SRCS = frozenset(("a2", "migu", "q2", "q3", "c4"))
+_88Z_VISIBLE_STREAM_SRCS = ("a2", "migu", "q3", "c4")
+_88Z_DYNAMIC_SOURCE_RE = re.compile(r"^88z_(\d{1,4})$")
+_88Z_SOURCE_LABELS = {
+    "a2": "线路A2",
+    "migu": "线路migu",
+    "q2": "线路Q2",
+    "q3": "线路Q3",
+    "c4": "线路C4",
+}
+_88Z_NON_FOOTBALL_RE = re.compile(
+    r"篮球|男篮|女篮|NBA|CBA|WNBA|NBL|排球|羽毛球|乒乓球|网球|"
+    r"棒球|冰球|橄榄球|手球|拳击|搏击|综合格斗|斯诺克|台球|高尔夫|赛车|F1|电竞",
+    re.I,
+)
+
+
+def _88z_text(fragment):
+    """把 88zhibo 页面片段转成紧凑纯文本。"""
+    text = re.sub(r"(?is)<(script|style)\b[^>]*>.*?</\1\s*>", " ", fragment or "")
+    text = re.sub(r"<[^>]*>", " ", text)
+    return re.sub(r"\s+", " ", _html.unescape(text)).strip()
+
+
+def _88z_class_texts(fragment, class_name):
+    """遍历 HTML 节点按 class token 取文本（支持目标节点嵌套在赛事 li 内）。"""
+    class Collector(HTMLParser):
+        VOID_TAGS = {
+            "area", "base", "br", "col", "embed", "hr", "img", "input",
+            "link", "meta", "param", "source", "track", "wbr",
+        }
+
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.stack = []
+            self.values = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag.lower() in self.VOID_TAGS:
+                return
+            attr_map = dict(attrs)
+            classes = set((attr_map.get("class") or "").split())
+            self.stack.append({
+                "tag": tag.lower(),
+                "target": class_name in classes,
+                "parts": [],
+            })
+
+        def handle_startendtag(self, tag, attrs):
+            return
+
+        def handle_data(self, data):
+            for node in self.stack:
+                node["parts"].append(data)
+
+        def handle_endtag(self, tag):
+            tag = tag.lower()
+            index = next((i for i in range(len(self.stack) - 1, -1, -1)
+                          if self.stack[i]["tag"] == tag), None)
+            if index is None:
+                return
+            closed = self.stack[index:]
+            del self.stack[index:]
+            for node in reversed(closed):
+                if node["target"]:
+                    value = re.sub(r"\s+", " ", "".join(node["parts"])).strip()
+                    if value:
+                        self.values.append(value)
+
+    parser = Collector()
+    parser.feed(fragment or "")
+    parser.close()
+    return parser.values
+
+
+def _88z_list_rows(page):
+    """按 HTML 节点深度提取赛事与日期 li，避免嵌套 li 让正则提早截断。"""
+    target_classes = {"live-list-group-time", "group-game-item"}
+
+    class RowCollector(HTMLParser):
+        VOID_TAGS = {
+            "area", "base", "br", "col", "embed", "hr", "img", "input",
+            "link", "meta", "param", "source", "track", "wbr",
+        }
+
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.rows = []
+            self.parts = None
+            self.classes = None
+            self.li_depth = 0
+
+        def handle_starttag(self, tag, attrs):
+            raw = self.get_starttag_text() or "<%s>" % tag
+            if self.parts is None and tag.lower() == "li":
+                classes = set((dict(attrs).get("class") or "").split())
+                if classes & target_classes:
+                    self.parts = [raw]
+                    self.classes = classes
+                    self.li_depth = 1
+                    return
+            elif self.parts is not None:
+                self.parts.append(raw)
+                if tag.lower() == "li":
+                    self.li_depth += 1
+
+        def handle_startendtag(self, tag, attrs):
+            if self.parts is not None:
+                self.parts.append(self.get_starttag_text() or "<%s/>" % tag)
+
+        def handle_data(self, data):
+            if self.parts is not None:
+                self.parts.append(_html.escape(data, quote=False))
+
+        def handle_endtag(self, tag):
+            if self.parts is None:
+                return
+            self.parts.append("</%s>" % tag)
+            if tag.lower() == "li":
+                self.li_depth -= 1
+                if self.li_depth <= 0:
+                    self.rows.append((self.classes or set(), "".join(self.parts)))
+                    self.parts = None
+                    self.classes = None
+                    self.li_depth = 0
+
+    parser = RowCollector()
+    parser.feed(page or "")
+    parser.close()
+    if parser.parts is not None:
+        parser.rows.append((parser.classes or set(), "".join(parser.parts)))
+    return parser.rows
+
+
+def _parse_88zhibo_matches(page):
+    """解析 88zhibo 首页比赛列表；源站同页包含 NBA/CBA，剔除篮球等非足球项目。"""
+    matches = []
+    current_date = None
+    for classes, row in _88z_list_rows(page):
+        if "live-list-group-time" in classes:
+            date_match = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", _88z_text(row))
+            current_date = "%s-%s" % (date_match.group(2), date_match.group(3)) if date_match else None
+            continue
+        if "group-game-item" not in classes:
+            continue
+
+        sport_values = _88z_class_texts(row, "game-type")
+        league = sport_values[0] if sport_values else ""
+        if not league or _88Z_NON_FOOTBALL_RE.search(league):
+            continue
+
+        id_match = re.search(r"\bdata-id\s*=\s*([\"'])(\d+)\1", row, re.I)
+        play_match = re.search(
+            r"\bhref\s*=\s*([\"'])/live/(\d+)/play\1[^>]*>(.*?)</a\s*>",
+            row, re.I | re.S,
+        )
+        match_id = id_match.group(2) if id_match else (play_match.group(2) if play_match else "")
+        if not match_id:
+            continue
+
+        team_names = _88z_class_texts(row, "team-name")
+        # 页面存在桌面/移动双份布局，去掉完全相同的重复标签并保留源顺序。
+        teams = []
+        for name in team_names:
+            if name and name not in teams:
+                teams.append(name)
+        if len(teams) < 2:
+            continue
+
+        time_values = _88z_class_texts(row, "category-game-time")
+        raw_time = time_values[0] if time_values else ""
+        time_match = re.search(r"\b(\d{1,2}:\d{2})\b", raw_time)
+        match_time = time_match.group(1) if time_match else ""
+        status_label = _88z_text(play_match.group(3)) if play_match else ""
+        if any(word in status_label for word in ("已结束", "完场", "回看")):
+            status = "finished"
+        elif "直播" in status_label:
+            status = "live"
+        else:
+            status = "upcoming"
+
+        date = current_date or "%02d-%02d" % (_now_cn().month, _now_cn().day)
+        channels = [
+            {"src": src, "id": match_id, "name": _88Z_SOURCE_LABELS[src]}
+            for src in _88Z_VISIBLE_STREAM_SRCS
+        ]
+        matches.append({
+            "league": league,
+            "league_color": "#5E5E5E",
+            "time": match_time,
+            "date": date,
+            "home": teams[0],
+            "away": teams[1],
+            "status": status,
+            "minute": "",
+            "score": None,
+            "match_id": match_id,
+            "channels": channels,
+            "page_id": "live_" + match_id,
+        })
+
+    now = _now_cn()
+    matches = [project_match_state(item, now) for item in matches]
+    rank = {"live": 0, "upcoming": 1, "finished": 2}
+    matches.sort(key=lambda item: (
+        rank.get(item.get("status"), 1),
+        -(int(item.get("minute") or 0)) if item.get("status") == "live" else item.get("time") or "",
+    ))
+    return matches
+
+
 def parse_matches(html):
     """
     解析 m.html → 比赛列表
@@ -516,6 +725,10 @@ def parse_matches(html):
       class='live'/第XX' → 直播中（站点偶尔把开赛时间当 live，需时间修正）
       无标记裸时间        → 结合日期+开赛时间推断：今日已过→直播中/完场，未到→未开始
     """
+    # 88zhibo 以首页 li 分组列比赛，旧解析保留供离线兼容测试与历史缓存恢复。
+    if re.search(r"<li\b[^>]*class=[\"'][^\"']*\bgroup-game-item\b", html or "", re.I):
+        return _parse_88zhibo_matches(html)
+
     # 1. 主列表行（顺序解析日期分隔行 → 每场比赛归属日期）
     items = re.findall(
         r'(<li data-role="list-divider"[^>]*>[^<]*</li>|<li>\s*<a href="#(page_\d+)"[^>]*>(.*?)</a>\s*<li>)',
@@ -1190,6 +1403,419 @@ def _stream_via_cloud(match_id, src, fresh):
 STREAM_SUCCESS_TTL = 60
 
 
+def _decode_88zhibo_source_links(response_text):
+    """解开 /live/{id}/source 的前后包装 Base64 数据并返回 links 列表。"""
+    outer = json.loads(response_text)
+    wrapped = outer.get("data") if isinstance(outer, dict) else None
+    if not isinstance(wrapped, str) or len(wrapped) <= 8:
+        raise ValueError("88zhibo source 响应缺少 data")
+    encoded = re.sub(r"\s+", "", wrapped[6:-2])
+    if not encoded:
+        raise ValueError("88zhibo source data 为空")
+    encoded += "=" * ((4 - len(encoded) % 4) % 4)
+    decoded = base64.b64decode(encoded, altchars=b"-_", validate=True).decode("utf-8")
+    payload = json.loads(decoded)
+    links = payload.get("links") if isinstance(payload, dict) else None
+    if not isinstance(links, list):
+        raise ValueError("88zhibo source data 缺少 links")
+    return [item for item in links if isinstance(item, dict)]
+
+
+def _88z_direct_hls_url(link_url):
+    """从 88player 的 m3u8.html 包装页提取源 HLS URL，不截断未编码的内层查询串。"""
+    parsed = urlsplit(_html.unescape(str(link_url or "").strip()))
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None
+    if not (parsed.hostname.lower() == "88player.top" or parsed.hostname.lower().endswith(".88player.top")):
+        return None
+    if not parsed.path.rstrip("/").lower().endswith("/m3u8.html"):
+        return None
+    match = re.search(r"(?:^|&)url=(.+)$", parsed.query, re.I | re.S)
+    if not match:
+        return None
+    stream_url = _html.unescape(unquote(match.group(1).strip()))
+    stream = urlsplit(stream_url)
+    if (stream.scheme not in ("http", "https") or not stream.hostname or
+            not re.search(r"\.m3u8$", stream.path, re.I) or _blocked_internal_url(stream_url)):
+        return None
+    return stream_url
+
+
+def _88z_hls_candidates(text, base_url):
+    """从页面/脚本源码中找显式 HLS URL；只解析文本，不执行第三方 JS。"""
+    source = _html.unescape(str(text or ""))
+    source = source.replace(r"\/", "/").replace(r"\u002f", "/").replace(r"\x2f", "/")
+    pattern = re.compile(
+        r"(?:(?:https?:)?//|/|\.\.?/)?[A-Za-z0-9._~:/?%+&=,@!-]+?\.m3u8"
+        r"(?:\?[A-Za-z0-9._~:/?%+&=,@!-]*)?",
+        re.I,
+    )
+    seen = set()
+    for raw in pattern.findall(source):
+        candidate = urljoin(base_url, raw.rstrip("),;]"))
+        parsed = urlsplit(candidate)
+        if (candidate in seen or parsed.scheme not in ("http", "https") or
+                not parsed.hostname or not re.search(r"\.m3u8$", parsed.path, re.I) or
+                _blocked_internal_url(candidate)):
+            continue
+        seen.add(candidate)
+        yield candidate
+
+
+def _88z_fetch_embed_script(script_url, page_url, timeout=12):
+    """请求 embed.st 的数据脚本时带浏览器脚本请求头，但不执行响应内容。"""
+    parsed = urlsplit(script_url)
+    if (parsed.scheme != "https" or (parsed.hostname or "").lower() != "capitalhospitals.org" or
+            _blocked_internal_url(script_url)):
+        raise ValueError("embed 播放脚本不是受支持的 HTTPS 来源")
+    headers = {
+        "User-Agent": UA,
+        "Accept": "*/*",
+        "Referer": page_url,
+        "Origin": "https://embed.st",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-Fetch-Mode": "no-cors",
+        "Sec-Fetch-Dest": "script",
+    }
+    if HAS_URLLIB3:
+        response = _http.request(
+            "GET", script_url, headers=headers,
+            timeout=urllib3.Timeout(connect=5, read=timeout), redirect=False,
+        )
+        status = response.status
+        body = response.data or b""
+        response.release_conn()
+    else:
+        request = urlreq.Request(script_url, headers=headers)
+        try:
+            with _no_redirect_opener.open(request, timeout=timeout) as response:
+                status = response.getcode()
+                body = response.read()
+        except urlreq.HTTPError as exc:
+            status = exc.code
+            body = exc.read()
+            exc.close()
+    if not 200 <= status < 300:
+        raise ValueError("embed 播放脚本请求失败 HTTP %s" % status)
+    if not body:
+        raise ValueError("embed 播放脚本响应为空")
+    return body.decode("utf-8", errors="ignore")
+
+
+def _88z_embed_st_hls_url(page_url):
+    """尝试从 embed.st 的赛事、酒店与高尔夫页面静态提取 HLS；不运行第三方 JS。"""
+    parsed = urlsplit(page_url)
+    if (parsed.scheme != "https" or (parsed.hostname or "").lower() != "embed.st" or
+            not parsed.path.startswith("/embed/")):
+        raise ValueError("该独立线路不是受支持的 embed.st 页面")
+    page = fetch_url(page_url, referer=SOURCE_URL, timeout=20)
+    for stream_url in _88z_hls_candidates(page, page_url):
+        return stream_url
+
+    class ScriptSourceParser(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.urls = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag.lower() != "script":
+                return
+            src = dict(attrs).get("src")
+            if src:
+                self.urls.append(urljoin(page_url, _html.unescape(src.strip())))
+
+    parser = ScriptSourceParser()
+    parser.feed(page or "")
+    parser.close()
+    script_urls = list(dict.fromkeys(parser.urls))
+    if not script_urls:
+        raise ValueError("embed.st 页面没有可静态解析的 HLS 地址或数据脚本")
+    script_urls.sort(key=lambda url: 0 if (urlsplit(url).hostname or "").lower() == "capitalhospitals.org" else 1)
+    saw_forbidden = False
+    for script_url in script_urls[:6]:
+        try:
+            if (urlsplit(script_url).hostname or "").lower() == "capitalhospitals.org":
+                script = _88z_fetch_embed_script(script_url, page_url)
+                script_base = script_url
+            else:
+                script, script_base = _88z_fetch_public_text(script_url, page_url, timeout=8, max_bytes=512 * 1024)
+            for stream_url in _88z_hls_candidates(script, script_base):
+                return stream_url
+        except ValueError as exc:
+            if "HTTP 403" in str(exc):
+                saw_forbidden = True
+        except Exception:
+            continue
+    try:
+        stream_url, _referer = _88z_generic_embed_hls_url(page_url)
+        return stream_url
+    except Exception:
+        pass
+    if saw_forbidden:
+        raise ValueError("embed.st 数据脚本返回 HTTP 403，无法静态解析 HLS")
+    raise ValueError("embed.st 页面脚本未提供可静态解析的 HLS 地址")
+
+
+def _88z_fetch_public_text(url, referer, timeout=12, max_bytes=1024 * 1024):
+    """读取一个公开播放器页面或脚本；所有跳转逐跳经过现有 SSRF 防护。"""
+    parsed = urlsplit(str(url or ""))
+    if parsed.scheme != "https" or not parsed.hostname or _blocked_internal_url(url):
+        raise ValueError("播放器页面不是受支持的公开 HTTPS 地址")
+    headers = {"User-Agent": UA, "Accept": "text/html,application/javascript,*/*;q=0.8"}
+    if referer:
+        headers["Referer"] = referer
+    response = None
+    try:
+        response, final_url = _open_upstream(
+            url, headers, read_timeout=timeout, preload=False, connect_timeout=5,
+        )
+        status = getattr(response, "status", None)
+        if status is None and hasattr(response, "getcode"):
+            status = response.getcode()
+        if not status or not 200 <= status < 300:
+            raise ValueError("播放器页面请求失败 HTTP %s" % (status or "?"))
+        if HAS_URLLIB3:
+            body = response.read(max_bytes, decode_content=True)
+        else:
+            body = response.read(max_bytes)
+        if not body:
+            raise ValueError("播放器页面响应为空")
+        return body.decode("utf-8", errors="ignore"), final_url
+    finally:
+        if response is not None:
+            try:
+                if HAS_URLLIB3:
+                    response.release_conn()
+                else:
+                    response.close()
+            except Exception:
+                pass
+
+
+def _88z_generic_embed_hls_url(page_url, depth=0, seen=None):
+    """静态检查其他公开播放器页及少量 iframe/script；不执行第三方 JavaScript。"""
+    seen = seen if seen is not None else set()
+    page_url = str(page_url or "").strip()
+    if page_url in seen or depth > 2:
+        raise ValueError("播放器页面没有可静态解析的 HLS 地址")
+    seen.add(page_url)
+    page, final_url = _88z_fetch_public_text(page_url, SOURCE_URL)
+    candidates = list(_88z_hls_candidates(page, final_url))
+    if candidates:
+        return candidates[0], final_url
+
+    class EmbeddedPageParser(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.iframes = []
+            self.scripts = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            tag = tag.lower()
+            if tag == "iframe" and attrs.get("src"):
+                self.iframes.append(urljoin(final_url, _html.unescape(attrs["src"].strip())))
+            elif tag == "script" and attrs.get("src"):
+                self.scripts.append(urljoin(final_url, _html.unescape(attrs["src"].strip())))
+
+    parser = EmbeddedPageParser()
+    parser.feed(page)
+    parser.close()
+
+    for frame_url in parser.iframes[:4]:
+        try:
+            return _88z_generic_embed_hls_url(frame_url, depth + 1, seen)
+        except Exception:
+            continue
+
+    # Inspect only a few public script files and never evaluate them. Same-origin
+    # scripts are checked first; external scripts are still guarded against private
+    # hosts and unsafe redirects by _88z_fetch_public_text.
+    script_urls = sorted(
+        dict.fromkeys(parser.scripts),
+        key=lambda candidate: 0 if urlsplit(candidate).hostname == urlsplit(final_url).hostname else 1,
+    )
+    for script_url in script_urls[:4]:
+        try:
+            script, script_final = _88z_fetch_public_text(script_url, final_url, timeout=8, max_bytes=512 * 1024)
+            candidates = list(_88z_hls_candidates(script, script_final))
+            if candidates:
+                return candidates[0], final_url
+        except Exception:
+            continue
+    raise ValueError("播放器页面没有可静态解析的 HLS 地址")
+
+
+def _88z_source_links(match_id):
+    if not str(match_id).isdigit():
+        raise ValueError("invalid_match_id")
+    endpoint = "https://www.88zhibo.tv/live/%s/source" % match_id
+    raw = fetch_url(endpoint, referer=SOURCE_URL, timeout=20)
+    return _decode_88zhibo_source_links(raw)
+
+
+def _88z_source_link_for_src(src, links):
+    dynamic = _88Z_DYNAMIC_SOURCE_RE.fullmatch(str(src or ""))
+    if dynamic:
+        index = int(dynamic.group(1))
+        if index >= len(links):
+            raise ValueError("当前比赛没有该线路")
+        item = links[index]
+        label = _88z_text(str(item.get("name") or "")) or "线路%d" % (index + 1)
+        return item, label
+    label = _88Z_SOURCE_LABELS.get(src)
+    if not label:
+        raise ValueError("unsupported_source")
+    source_link = next(
+        (item for item in links if _88z_text(str(item.get("name") or "")) == label),
+        None,
+    )
+    if source_link is None:
+        raise ValueError("当前比赛没有%s" % label)
+    return source_link, label
+
+
+def _resolve_88zhibo_link(source_link, label):
+    """将源站任一线路项静态解析为原生播放器可用的 HLS URL 与 Referer。"""
+    link_url = source_link.get("url")
+    if not isinstance(link_url, str) or not link_url.strip():
+        raise ValueError("%s没有播放地址" % label)
+    parsed = urlsplit(link_url)
+    host = (parsed.hostname or "").lower()
+    wrapped = host.endswith(".88player.top")
+    if parsed.scheme not in ("http", "https") or not host or _blocked_internal_url(link_url):
+        raise ValueError("%s播放地址被安全策略拒绝" % label)
+    if re.search(r"\.m3u8$", parsed.path, re.I):
+        stream_url, embed_referer = link_url, SOURCE_URL
+    elif host == "embed.st":
+        stream_url = _88z_embed_st_hls_url(link_url)
+        embed_referer = link_url
+    else:
+        stream_url = _88z_direct_hls_url(link_url)
+        if not stream_url:
+            stream_url, _player_page = _88z_generic_embed_hls_url(link_url)
+        # m3u8.html/播放器页是 CDN 清单和分片校验 Referer 的来源页。
+        embed_referer = link_url if wrapped or stream_url != link_url else SOURCE_URL
+    if not stream_url:
+        raise ValueError("无法从%s提取 HLS 直链" % label)
+    if _blocked_internal_url(stream_url):
+        raise ValueError("%s播放地址被安全策略拒绝" % label)
+    return stream_url, embed_referer, label
+
+
+def _resolve_88zhibo_direct(match_id, src, source_links=None):
+    """解析源站源清单中的一个线路；line IDs 对应本次清单的原始下标。"""
+    links = source_links if source_links is not None else _88z_source_links(match_id)
+    source_link, label = _88z_source_link_for_src(src, links)
+    stream_url, referer, _label = _resolve_88zhibo_link(source_link, label)
+    return stream_url, referer, label
+
+
+def resolve_88zhibo_stream(match_id, src="a2", fresh=False, source_links=None):
+    """88zhibo 单线路入口；动态 line IDs 指向本场源站清单的下标。"""
+    if src not in _88Z_STREAM_SRCS and not _88Z_DYNAMIC_SOURCE_RE.fullmatch(str(src or "")):
+        return {"url": None, "error": "unsupported_source"}, False
+    if not str(match_id).isdigit():
+        return {"url": None, "error": "invalid_match_id"}, False
+    now = time.time()
+    key = "%s-%s" % (src, match_id)
+    with _stream_lock:
+        cached = STREAM_CACHE.get(key)
+        if not fresh and cached and cached["ts"] > 0 and now - cached["ts"] < STREAM_SUCCESS_TTL:
+            return cached["data"], True
+    try:
+        stream_url, embed_referer, label = _resolve_88zhibo_direct(
+            str(match_id), src, source_links=source_links,
+        )
+        if not _probe_88z_hls_playable(stream_url, embed_referer):
+            raise ValueError("%s清单或媒体分片当前不可用" % label)
+        payload = {
+            "url": stream_url,
+            "player": "m3u8",
+            "source": src,
+            "name": label,
+            "referer": embed_referer,
+            "error": None,
+        }
+        with _stream_lock:
+            _trim_cache(STREAM_CACHE, STREAM_CACHE_MAX)
+            STREAM_CACHE[key] = {"ts": now, "data": payload}
+        return payload, False
+    except Exception as exc:
+        payload = {"url": None, "error": str(exc)[:160] or "88zhibo 线路解析失败"}
+        return payload, False
+
+
+def resolve_88zhibo_streams(match_id, fresh=False):
+    """按源站本场清单枚举线路，只返回 HLS 解析并通过上游探测的线路。"""
+    if not str(match_id).isdigit():
+        return {"url": None, "sources": [], "error": "invalid_match_id"}, False
+    try:
+        links = _88z_source_links(str(match_id))
+    except Exception as exc:
+        return {"url": None, "sources": [], "error": str(exc)[:160] or "88zhibo 线路列表读取失败"}, False
+
+    # 保留源站原顺序，同时压掉完全重复的条目。A2/migu/Q3/C4 仍按用户先前
+    # 指定的顺序优先，其余每场比赛实际返回的线路紧随其后。
+    entries = []
+    seen = set()
+    for index, item in enumerate(links):
+        raw_name = item.get("name") if isinstance(item, dict) else ""
+        raw_url = item.get("url") if isinstance(item, dict) else ""
+        name = _88z_text(str(raw_name or ""))
+        url = str(raw_url or "").strip()
+        if not name or not url or (name, url) in seen:
+            continue
+        seen.add((name, url))
+        entries.append({"src": "88z_%d" % index, "index": index, "name": name, "item": item})
+
+    preferred_order = {"线路A2": 0, "线路migu": 1, "线路Q3": 2, "线路C4": 3}
+    entries.sort(key=lambda item: (preferred_order.get(item["name"], 4), item["index"]))
+    label_counts = {}
+    for item in entries:
+        label_counts[item["name"]] = label_counts.get(item["name"], 0) + 1
+        if label_counts[item["name"]] > 1:
+            item["display_name"] = "%s (%d)" % (item["name"], label_counts[item["name"]])
+        else:
+            item["display_name"] = item["name"]
+
+    available = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {
+            pool.submit(
+                resolve_88zhibo_stream,
+                str(match_id), item["src"], fresh, links,
+            ): item
+            for item in entries
+        }
+        for future in concurrent.futures.as_completed(futures):
+            item = futures[future]
+            try:
+                payload, _cached = future.result()
+            except Exception:
+                continue
+            if not payload.get("url"):
+                continue
+            payload = dict(payload)
+            payload["name"] = item["display_name"]
+            payload["source"] = item["src"]
+            available.append(payload)
+
+    # Future completion order depends on CDN latency. Restore deterministic order.
+    order = {item["src"]: position for position, item in enumerate(entries)}
+    available.sort(key=lambda item: order.get(item.get("source"), len(order)))
+    first = available[0] if available else None
+    return {
+        "url": first.get("url") if first else None,
+        "player": "m3u8" if first else None,
+        "source": first.get("source") if first else None,
+        "name": first.get("name") if first else None,
+        "referer": first.get("referer") if first else None,
+        "sources": available,
+        "error": None if available else "当前没有可播放的线路",
+    }, False
+
+
 def resolve_stream(match_id, src="bb", fresh=False):
     """返回 (payload, cached) — 通过 node 解密播放器提取流地址
     src: plu / bb → 每场专属频道页 → ballbar.php/plu.php 混淆播放器
@@ -1573,6 +2199,19 @@ def _relay_strategies(ref):
     ]
 
 
+def _is_88z_player_embed_referer(ref):
+    """88zhibo 的 m3u8.html 包装页是线路 CDN 校验用的真实 Referer。"""
+    try:
+        parsed = urlsplit(str(ref or ""))
+        return (
+            parsed.scheme in ("http", "https") and
+            (parsed.hostname or "").lower() == "play.88player.top" and
+            parsed.path.rstrip("/").lower().endswith("/m3u8.html")
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def _is_tiny_junk(u, ctype, size):
     """点播 CDN 防盗链拦截形态识别：HTTP 200 + 正文仅 3 字节 "OK\\n"（142.248.x 系
     签名校验拒绝时实测）。合法小文件（EXT-X-KEY 的 16B AES 密钥/字幕等）不带 .ts
@@ -1673,6 +2312,133 @@ def _probe_alive(u, ref=None, per_try=3):
     return False
 
 
+def _88z_probe_fetch(url, ref, max_bytes, valid_body, per_try=2):
+    """按播放器的 Referer 策略读取有限响应；每次跳转仍经过 SSRF 检查。"""
+    if not url or not url.startswith(("http://", "https://")) or _blocked_internal_url(url):
+        return None
+    for headers in _relay_strategies(ref):
+        resp = None
+        try:
+            resp, final_url = _open_upstream(
+                url, headers, read_timeout=per_try, preload=False, connect_timeout=per_try,
+            )
+            status = getattr(resp, "status", None)
+            if status is None and hasattr(resp, "getcode"):
+                status = resp.getcode()
+            if not status or not 200 <= status < 400:
+                continue
+            if HAS_URLLIB3:
+                body = resp.read(max_bytes, decode_content=True)
+            else:
+                body = resp.read(max_bytes)
+            if body and valid_body(body, getattr(resp, "headers", {})):
+                return body, final_url
+        except Exception:
+            continue
+        finally:
+            if resp is not None:
+                try:
+                    if HAS_URLLIB3:
+                        resp.release_conn()
+                    else:
+                        resp.close()
+                except Exception:
+                    pass
+    return None
+
+
+def _88z_hls_targets(text):
+    """Return a master playlist's variants or a media playlist's recent segments."""
+    lines = [line.strip() for line in text.splitlines()]
+    if any(line.startswith("#EXT-X-STREAM-INF:") for line in lines):
+        variants = []
+        for index, line in enumerate(lines):
+            if not line.startswith("#EXT-X-STREAM-INF:"):
+                continue
+            for candidate in lines[index + 1:]:
+                if candidate and not candidate.startswith("#"):
+                    variants.append(candidate)
+                    break
+        return "master", variants[:3], []
+
+    segments = []
+    waiting_for_segment = False
+    key_uris = []
+    for line in lines:
+        if line.startswith("#EXT-X-KEY:") and "METHOD=NONE" not in line.upper():
+            match = re.search(r'(?:^|,)URI=(?:"([^"]+)"|([^,]+))', line, re.I)
+            if match:
+                key_uris.append(match.group(1) or match.group(2).strip())
+        if line.startswith("#EXTINF:"):
+            waiting_for_segment = True
+        elif line.startswith("#EXT-X-PART:") or line.startswith("#EXT-X-PRELOAD-HINT:"):
+            match = re.search(r'(?:^|,)URI=(?:"([^"]+)"|([^,]+))', line, re.I)
+            if match:
+                segments.append(match.group(1) or match.group(2).strip())
+        elif line and not line.startswith("#") and waiting_for_segment:
+            segments.append(line)
+            waiting_for_segment = False
+    # A live playlist's newest segment is the best approximation of what a client
+    # will request at startup. Keep one fallback in case its URL has just expired.
+    return "media", list(reversed(segments[-2:])), list(dict.fromkeys(key_uris))
+
+
+def _probe_88z_hls_playable(url, ref=None):
+    """Require a valid HLS manifest, a recent media segment, and any AES key.
+
+    This is a bounded upstream check, not a codec decoder. Actual decoder playback
+    is covered by the client verification path; this prevents dead segments and
+    HTML error pages from appearing as selectable sources.
+    """
+    visited = set()
+
+    def probe(current, depth):
+        if depth >= 3:
+            return False
+        if current in visited:
+            return False
+        visited.add(current)
+        fetched = _88z_probe_fetch(
+            current, ref, 96 * 1024,
+            lambda body, _headers: body.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"#EXTM3U"),
+        )
+        if not fetched:
+            return False
+        body, final_url = fetched
+        text = body.decode("utf-8", errors="replace").lstrip("\ufeff \t\r\n")
+        kind, targets, key_uris = _88z_hls_targets(text)
+        if kind == "master":
+            for target in targets:
+                next_url = urljoin(final_url, target)
+                if not _blocked_internal_url(next_url) and probe(next_url, depth + 1):
+                    return True
+            return False
+        if not targets:
+            return False
+
+        if key_uris:
+            key_url = urljoin(final_url, key_uris[-1])
+            key = _88z_probe_fetch(key_url, ref, 64, lambda data, _headers: len(data) >= 16)
+            if not key:
+                return False
+
+        for target in targets:
+            segment_url = urljoin(final_url, target)
+            segment = _88z_probe_fetch(
+                segment_url, ref, 4096,
+                lambda data, headers: (
+                    len(data) >= 64
+                    and "text/html" not in str(headers.get("Content-Type", "")).lower()
+                    and not data.lstrip().lower().startswith((b"<!doctype html", b"<html", b"{\"error"))
+                ),
+            )
+            if segment:
+                return True
+        return False
+
+    return probe(url, 0)
+
+
 def relay_url(u, ref=None):
     """
     HLS 中继：经本服务转发 m3u8/分片/直链，规避跨域与防盗链。
@@ -1741,9 +2507,10 @@ def relay_url(u, ref=None):
         def rw(uri):
             full = urljoin(base, uri)
             q = quote(full, safe="").replace("+", "%2B")
-            # v1.14：点播链路（ref=none）把 none 传导给分片/子清单请求——
-            # 否则分片会带上「清单 URL」当 Referer（异站 Referer 可能被 CDN 拒）
-            rq = "none" if ref == "none" else quote(u, safe="").replace("+", "%2B")
+            # v1.14：点播链路（ref=none）把 none 传导给分片/子清单请求。
+            # 88zhibo m3u8.html 来源则必须保留原 embed Referer；其他旧线路沿用当前清单 URL。
+            relay_ref = ref if _is_88z_player_embed_referer(ref) else u
+            rq = "none" if ref == "none" else quote(relay_ref, safe="").replace("+", "%2B")
             # v1.21 相对形式「relay?...」：以清单 URL（…/api/relay?u=…）所在目录解析
             # → 同目录 /api/relay；绝对路径 /api/relay 在「网关子路径部署」（网页版
             # https://…/web/）下会被浏览器解析到网关根而 404。设备端（根部署）
@@ -1993,8 +2760,11 @@ def relayts_generator(match_id, src):
     """生成器：yield TS 字节块。断流自动 fresh 重解析；45s 无新分片重解析防签名静默失效；
     直链（非 m3u8）经 relay_stream 透传。客户端断开 → GeneratorExit 结束（每连接独立游标）。"""
     url = None
+    referer = SOURCE_URL
     try:
-        url = (resolve_stream(match_id, src, fresh=True)[0] or {}).get("url")
+        resolved, _cached = resolve_88zhibo_stream(match_id, src, fresh=True)
+        url = resolved.get("url")
+        referer = resolved.get("referer") or SOURCE_URL
     except Exception:
         pass
     if not url:
@@ -2003,9 +2773,10 @@ def relayts_generator(match_id, src):
     def _refresh_url():
         """fresh 重解析当前源签名；变化则返回新地址（调用方重置游标追新边缘）。"""
         try:
-            nu = (resolve_stream(match_id, src, fresh=True)[0] or {}).get("url")
+            resolved, _cached = resolve_88zhibo_stream(match_id, src, fresh=True)
+            nu = resolved.get("url")
             if nu and nu != url:
-                return nu
+                return nu, resolved.get("referer") or SOURCE_URL
         except Exception:
             pass
         return None
@@ -2013,7 +2784,7 @@ def relayts_generator(match_id, src):
     # 非清单直链（mp4/flv 等少见形态）：流式透传
     if "m3u8" not in url.lower():
         try:
-            status, ctype, extra, it, _m = relay_stream(url)
+            status, ctype, extra, it, _m = relay_stream(url, referer)
             if status != 200:
                 return
             for b in it:
@@ -2039,7 +2810,7 @@ def relayts_generator(match_id, src):
     empty_refresh_budget = 8
     while True:
         try:
-            st, _ct, body, _err, _m = relay_url(url)
+            st, _ct, body, _err, _m = relay_url(url, referer)
             if st != 200:
                 raise IOError("playlist HTTP %d" % st)
             text = body.decode("utf-8", errors="replace")
@@ -2047,9 +2818,9 @@ def relayts_generator(match_id, src):
             raise
         except Exception:
             # 清单抓失败（签名轮换/抖动）→ fresh 重解析换地址，从新直播边缘续播
-            nu = _refresh_url()
-            if nu:
-                url = nu
+            refreshed = _refresh_url()
+            if refreshed:
+                url, referer = refreshed
                 watermark = None
             time.sleep(min(backoff, 5.0))
             backoff = min(backoff * 2, 5.0)
@@ -2072,9 +2843,9 @@ def relayts_generator(match_id, src):
                 empty_polls = 0
                 if empty_refresh_budget > 0:
                     empty_refresh_budget -= 1
-                nu = _refresh_url()
-                if nu:
-                    url = nu
+                refreshed = _refresh_url()
+                if refreshed:
+                    url, referer = refreshed
                     watermark = None
             else:
                 time.sleep(1.5)
@@ -2083,7 +2854,7 @@ def relayts_generator(match_id, src):
         empty_polls = 0
         for sg, sdur in todo:
             try:
-                st2, _ct2, seg, _e2, _m2 = relay_url(sg)
+                st2, _ct2, seg, _e2, _m2 = relay_url(sg, referer)
                 if st2 == 200 and seg:
                     yield seg
                     watermark = sg
@@ -3795,10 +4566,14 @@ class Handler(SimpleHTTPRequestHandler):
         mm = re.match(r'^/api/stream/(\d+)$', parsed.path)
         if mm:
             qs = parse_qs(parsed.query)
-            src = (qs.get("src") or ["bb"])[0]
+            src = (qs.get("src") or ["a2"])[0]
             # fresh=1：绕过服务端成功缓存强制重新解析（静默续签/失败重试链路）
             fresh = (qs.get("fresh") or ["0"])[0].lower() in ("1", "true", "yes")
-            data, cached = resolve_stream(mm.group(1), src, fresh=fresh)
+            # API 可读取本场源站清单中的任意已解析线路；不回落到旧 yoozb 插件线路。
+            if src == "all":
+                data, cached = resolve_88zhibo_streams(mm.group(1), fresh=fresh)
+            else:
+                data, cached = resolve_88zhibo_stream(mm.group(1), src, fresh=fresh)
             body = json.dumps(data, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -3813,7 +4588,7 @@ class Handler(SimpleHTTPRequestHandler):
             # VLC 兜底引擎专用：HLS→连续 TS 直出（绕开 VLC adaptive 模块的 assert 崩溃，
             # 签名轮换由生成器内部自愈）。无 Content-Length 流式响应，连接关闭即结束。
             qs = parse_qs(parsed.query)
-            src = (qs.get("src") or ["bb"])[0]
+            src = (qs.get("src") or ["a2"])[0]
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "video/mp2t")

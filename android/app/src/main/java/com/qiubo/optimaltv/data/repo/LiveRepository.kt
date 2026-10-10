@@ -1,6 +1,7 @@
 package com.qiubo.optimaltv.data.repo
 
 import com.qiubo.optimaltv.OtvLog
+import com.qiubo.optimaltv.data.model.LiveStreamSource
 import com.qiubo.optimaltv.data.model.MatchChannel
 import com.qiubo.optimaltv.data.model.MatchItem
 import com.qiubo.optimaltv.data.model.NewsItem
@@ -8,9 +9,6 @@ import com.qiubo.optimaltv.data.model.ResultItem
 import com.qiubo.optimaltv.data.model.VideoItem
 import com.qiubo.optimaltv.data.prefs.SettingsStore
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -21,7 +19,7 @@ import java.net.URLEncoder
 /**
  * 足球直播仓库（1:1 复刻原版 web 数据链路，同一后端）：
  * - matches: /api/matches（90 场左右，含 live 比分）
- * - 直播信号: /api/stream/{matchId}?src=plu|bb|qqlive100..103 ×6 并发 → /api/relay?u= 包裹
+ * - 直播信号: /api/stream/{matchId}?src=all&fresh=1 → 仅返回已解析并探活的 HLS 线路
  * - 回看: /api/football-results（战报比分）→ 播放走 hhkan 搜索回放
  * - 集锦: /api/football-videos（hhkan vid，7 天内）
  * - 新闻: /api/football-news
@@ -33,19 +31,9 @@ class LiveRepository(
 ) {
 
     companion object {
-        /** 原版 playMatch 的信号源清单（顺序即优先级）。
-         *  2026-08-30 bb 提到首位（直播稳定性方案「附加变更」）：bb 线（原版足球直播2）
-         *  签名有效期 ~50 分钟、最稳定；plu 前置时默认线 17 分钟即过期，起播体验差 */
-        val STREAM_SRCS = listOf("bb", "plu", "qqlive100", "qqlive101", "qqlive102", "qqlive103")
-
-        /** 信号源显示名（站点频道页原始命名）：bb=原版足球直播2（默认源，签名最稳）；
-         *  plu=原版足球直播；qqlive1xx=高清足球直播（公共高清线路） */
-        fun srcLabel(src: String): String = when {
-            src == "bb" -> "原版足球直播2"
-            src == "plu" -> "原版足球直播"
-            src.startsWith("qqlive") -> "高清足球直播" + src.removePrefix("qqlive")
-            else -> "信号源 $src"
-        }
+        /** 直播源由服务端提供对应 Referer，供中继播放清单及分片。 */
+        fun relayUrl(base: String, raw: String, referer: String = "https://www.88zhibo.tv/"): String =
+            "$base/api/relay?u=" + URLEncoder.encode(raw, "UTF-8") + "&ref=" + URLEncoder.encode(referer, "UTF-8")
 
         private const val TAG = "OTV"
 
@@ -84,29 +72,6 @@ class LiveRepository(
     }
 
     private var matchesCache: Pair<Long, List<MatchItem>>? = null
-
-    /** v1.22 起播提速（2026-09-05 需求⑤）：列表页预热——正在直播的比赛后台逐个预解析
-     *  bb 源（fresh=false 命中后端 300s 成功缓存），用户点卡时 bootLive 快路径的解析
-     *  直接秒回，省去 1-2s+ 的「频道页+播放器页+解密」链路等待。逐个 2s 错峰，
-     *  不与真实起播抢 8091 WebView 解密桥；下一次预热/页面离开可随时取消。 */
-    private val prefetchScope = kotlinx.coroutines.CoroutineScope(
-        kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob(),
-    )
-    private var prefetchJob: kotlinx.coroutines.Job? = null
-    fun prefetchLiveStreams(matchIds: List<String>) {
-        if (matchIds.isEmpty()) return
-        prefetchJob?.cancel()
-        prefetchJob = prefetchScope.launch {
-            // v1.23（2026-09-06）：错峰 2s→1s——12 场预热从最慢 ~24s 缩到 ~12s，
-            // 用户点卡时更大概率已命中后端 300s 成功缓存；后端解密桥本就串行排队，
-            // 客户端 1s 间隔不会压垮 8091。
-            matchIds.take(12).forEach { id ->
-                runCatching { streamUrlForSrc(id, "bb", fresh = false) }
-                    .onSuccess { if (!it.isNullOrBlank()) OtvLog.i("live 预热完成: $id bb") }
-                kotlinx.coroutines.delay(1_000)
-            }
-        }
-    }
 
     /** 冷抓接口（/hhkan/search 站点实时抓取）专用：75s 读超时——后端 _fetch 会在
      *  镜像域间切换重试（每域最长 25s×挑战求解），45s 会把「慢而能成」的搜索截成空结果（需求 搜索#2） */
@@ -223,7 +188,7 @@ class LiveRepository(
     suspend fun matches(force: Boolean = false): List<MatchItem> = withContext(Dispatchers.IO) {
         matchesCache?.takeIf { !force && System.currentTimeMillis() - it.first < 30_000 }?.second?.let { return@withContext it }
         waitBackendReady(baseUrl())
-        // 内置后端冷抓数据源(yoozb)需 20s+，首次拉取可能超时：失败则 sleep 重试几次再抛
+        // 内置后端冷抓比赛数据可能较慢，首次拉取可能超时：失败则 sleep 重试几次再抛
         var jarr: org.json.JSONArray? = null
         var lastErr: Exception? = null
         for (i in 0..3) {
@@ -241,14 +206,13 @@ class LiveRepository(
             val sc = o.optJSONObject("score")
             fun sc2(k: String): String =
                 if (sc == null || sc.isNull(k)) "" else sc.optString(k).takeUnless { it == "null" } ?: ""
-            // channels：该场动态信号线路（v1.23 信号源补全——站点 m.html 按场次给出
-            // plu/bb/qqlive15~33/666 组合，编号随时轮换，硬编码源表已大面积失效）
+            // 列表频道只作目录元信息；播放页从 /api/stream?src=all 获取已探活线路。
             val chArr = o.optJSONArray("channels")
-            val channels = (0 until (chArr?.length() ?: 0)).mapNotNull { ci ->
-                val c = chArr?.optJSONObject(ci) ?: return@mapNotNull null
+            val channels = (0 until (chArr?.length() ?: 0)).mapNotNull channel@ { ci ->
+                val c = chArr?.optJSONObject(ci) ?: return@channel null
                 fun cs(k: String): String = if (c.isNull(k)) "" else c.optString(k).takeUnless { it == "null" } ?: ""
                 val src = cs("src")
-                if (src.isBlank()) return@mapNotNull null
+                if (src.isBlank()) return@channel null
                 MatchChannel(src = src, id = cs("id"), name = cs("name"))
             }
             MatchItem(
@@ -301,10 +265,10 @@ class LiveRepository(
         (0 until arr.length()).mapNotNull { i ->
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
             val chArr = o.optJSONArray("chs")
-            val channels = (0 until (chArr?.length() ?: 0)).mapNotNull { ci ->
-                val c = chArr?.optJSONObject(ci) ?: return@mapNotNull null
+            val channels = (0 until (chArr?.length() ?: 0)).mapNotNull channel@ { ci ->
+                val c = chArr?.optJSONObject(ci) ?: return@channel null
                 val src = c.optString("s")
-                if (src.isBlank()) return@mapNotNull null
+                if (src.isBlank()) return@channel null
                 MatchChannel(src = src, id = c.optString("i"), name = c.optString("n"))
             }
             MatchItem(
@@ -347,111 +311,54 @@ class LiveRepository(
         }
     }
 
-    /** 直播信号源（原版 playMatch：6 源并发 → relay 包裹，保序去重）。
-     *  fresh=true 时请求带 &fresh=1：后端绕过 300s 成功缓存强制重新解析——
-     *  失败重试链路用（签名 URL 有效期仅 17~50 分钟，普通重试会拿到已过期地址） */
-    suspend fun streamUrls(matchId: String, fresh: Boolean = false): List<String> =
-        streamUrlPairs(matchId, fresh).map { it.second }
-
-    /** 比赛的动态信号源表（v1.23 信号源补全）：bb（最稳）→ plu → qqlive 按编号升序。
-     *  数据来自 /api/matches 的 channels（站点按场次动态给出的线路组合——qqlive15~33/666
-     *  等编号随时轮换，旧硬编码 qqlive100~103 实测已 3 死 1 错）。列表缓存未命中/快照
-     *  旧数据无 channels → 回退 STREAM_SRCS 硬编码表（保底可用）。返回 (src, 显示名)。 */
-    fun srcsFor(matchId: String): List<Pair<String, String>> {
-        val chans = matchesCache?.second?.find { it.matchId == matchId }?.channels.orEmpty()
-        if (chans.isEmpty()) return STREAM_SRCS.map { it to srcLabel(it) }
-        fun rank(src: String): Int = when {
-            src == "bb" -> 0
-            src == "plu" -> 1
-            src.startsWith("qqlive") -> 2
-            else -> 3
-        }
-        fun qqNum(src: String): Int = src.removePrefix("qqlive").toIntOrNull() ?: 0
-        return chans
-            .sortedWith(compareBy({ rank(it.src) }, { if (it.src.startsWith("qqlive")) qqNum(it.src) else 0 }))
-            .map { it.src to it.name.ifBlank { srcLabel(it.src) } }
-    }
-
-    /** 同 streamUrls，但保留 (src, relayUrl, 显示名) 三元组——播放器侧续签要 src、
-     *  信号源选择条要显示名（站点原始命名，如「高清足球直播24」「CCTV5+」）。
-     *  2026-08-30 实测改用 slow 客户端：冷启动首播多源并发 → 后端抓频道页+播放器页
-     *  经 8091 WebView 桥串行解密（每源 ~1-2s，WebView 冷init 更慢），默认 10s 读超时
-     *  恰好截断——解密 OK 日志在超时后 1-2s 才返回，bootLive 稳定判 0 源进错误态 */
-    suspend fun streamUrlPairs(matchId: String, fresh: Boolean = false): List<Triple<String, String, String>> = withContext(Dispatchers.IO) {
-        val base = baseUrl()
-        val srcs = srcsFor(matchId)
-        coroutineScope {
-            srcs.map { (src, label) ->
-                async {
-                    runCatching {
-                        val o = getSlow(base, "/api/stream/$matchId?src=$src" + if (fresh) "&fresh=1" else "")
-                        // optString 对 JSON null 会返回字面量 "null"，必须先 isNull 判断
-                        fun str(key: String): String = if (o.isNull(key)) "" else o.optString(key)
-                        val u = str("url").ifBlank {
-                            str("m3u8").ifBlank {
-                                o.optJSONArray("sources")?.optJSONObject(0)?.let { s ->
-                                    if (s.isNull("url")) "" else s.optString("url")
-                                }.orEmpty()
-                            }
-                        }
-                        if (u.isNotBlank() && u != "null") Triple(src, relayUrl(base, u), label) else null
-                    }.onFailure { android.util.Log.w(TAG, "stream $src 失败: ${it.message}") }.getOrNull()
+    /**
+     * Get only server-resolved HLS lines that passed the upstream probe. The all-lines request is
+     * intentionally made when opening every football player so stale match-list channels never
+     * appear in the picker. Source order and labels come directly from the backend.
+     */
+    suspend fun liveStreamSources(matchId: String, fresh: Boolean = true): List<LiveStreamSource> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val base = baseUrl()
+                val o = getSlow(base, LiveStreamRequestPath.build(matchId, "all", fresh))
+                LiveStreamPayloadParser.available(o).map { payload ->
+                    LiveStreamSource(
+                        source = payload.source,
+                        name = payload.name,
+                        playbackUrl = relayUrl(base, payload.url, payload.referer),
+                        referer = payload.referer,
+                    )
                 }
-            }.awaitAll().filterNotNull().distinctBy { it.second }
+            }.onFailure { android.util.Log.w(TAG, "stream $matchId all 线路解析失败: ${it.message}") }
+                .getOrDefault(emptyList())
         }
-    }
 
-    /** 单信号源解析（播放中 90s 静默续签用：只解析当前源不打满全部 6 源）。
-     *  返回 relay 包裹后的 URL；未开播/解析失败返回 null。
-     *  同 streamUrlPairs 用 slow 客户端（冷 WebView 解密可超 10s） */
-    suspend fun streamUrlForSrc(matchId: String, src: String, fresh: Boolean = true): String? = withContext(Dispatchers.IO) {
+    /** Resolve one previously listed source again, preserving its source-specific referer if the
+     *  renewal response omits it. Dynamic source IDs are URL-encoded instead of allowlisted. */
+    suspend fun refreshLiveStreamSource(
+        matchId: String,
+        source: String,
+        fresh: Boolean = true,
+        fallbackName: String = "",
+        fallbackReferer: String = "",
+    ): LiveStreamSource? = withContext(Dispatchers.IO) {
+        if (source.isBlank()) return@withContext null
         runCatching {
             val base = baseUrl()
-            val o = getSlow(base, "/api/stream/$matchId?src=$src" + if (fresh) "&fresh=1" else "")
-            fun str(key: String): String = if (o.isNull(key)) "" else o.optString(key)
-            val u = str("url").ifBlank { str("m3u8") }
-            if (u.isNotBlank() && u != "null") relayUrl(base, u) else null
-        }.onFailure { android.util.Log.w(TAG, "renew stream $src 失败: ${it.message}") }.getOrNull()
+            val payload = LiveStreamPayloadParser.renewed(
+                getSlow(base, LiveStreamRequestPath.build(matchId, source, fresh)),
+                requestedSource = source,
+                fallbackName = fallbackName,
+                fallbackReferer = fallbackReferer,
+            ) ?: return@withContext null
+            LiveStreamSource(
+                source = payload.source,
+                name = payload.name,
+                playbackUrl = relayUrl(base, payload.url, payload.referer),
+                referer = payload.referer,
+            )
+        }.onFailure { android.util.Log.w(TAG, "renew stream $source 失败: ${it.message}") }.getOrNull()
     }
-
-    /**
-     * 增量版信号源解析（2026-09-07 需求②）：按 srcsFor 优先序全源并发，但【每源
-     * 解析到货即回调】——不等最慢源。旧 streamUrlPairs 的 awaitAll 要等全源到齐才
-     * 返回，串行解密桥（单 WebView 排队，每源 1.5~12s）下场次 10+ 源时最慢源把整条
-     * 信号源选择条拖到分钟级才出现。回调在主线程派发（调用方直接改 UI 状态）。
-     * 解析失败/未开播的源不回调（选择条只显示可用源，与旧语义一致）。
-     */
-    suspend fun streamUrlsIncremental(
-        matchId: String,
-        fresh: Boolean = false,
-        onSource: (Triple<String, String, String>) -> Unit,
-    ): Unit = withContext(Dispatchers.IO) {
-        val base = baseUrl()
-        val srcs = srcsFor(matchId)
-        coroutineScope {
-            srcs.forEach { (src, label) ->
-                launch {
-                    val t = runCatching {
-                        val o = getSlow(base, "/api/stream/$matchId?src=$src" + if (fresh) "&fresh=1" else "")
-                        fun str(key: String): String = if (o.isNull(key)) "" else o.optString(key)
-                        val u = str("url").ifBlank {
-                            str("m3u8").ifBlank {
-                                o.optJSONArray("sources")?.optJSONObject(0)?.let { s ->
-                                    if (s.isNull("url")) "" else s.optString("url")
-                                }.orEmpty()
-                            }
-                        }
-                        if (u.isNotBlank() && u != "null") Triple(src, relayUrl(base, u), label) else null
-                    }.onFailure { android.util.Log.w(TAG, "stream $src 失败: ${it.message}") }.getOrNull()
-                    if (t != null) withContext(Dispatchers.Main) { onSource(t) }
-                }
-            }
-        }
-    }
-
-    /** relay 包裹（原版同款：走后端中继，规避直连限制） */
-    fun relayUrl(base: String, raw: String): String =
-        "$base/api/relay?u=" + URLEncoder.encode(raw, "UTF-8")
 
     /** 直播续签健康检查（v1.14）：当前 relay 清单还能否拉到（HTTP 200=活）。
      *  用于「签名已轮换但旧地址仍在服务期 → 延后切换」——上游轮换常有宽限期，

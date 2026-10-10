@@ -96,9 +96,9 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
 .today-grid-row{display:grid;grid-template-columns:repeat(2,1fr);gap:28px 36px}
 .today-grid-row .gcard{width:auto;height:auto;min-height:146px}
 .live-grid{display:grid;gap:28px 36px;padding:24px 86px 0}
-.today-pages{display:flex;gap:40px;overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch}
+.today-pages{display:flex;gap:40px;padding:24px 86px 40px;overflow-x:auto;scroll-snap-type:x mandatory;scroll-padding-inline-start:86px;-webkit-overflow-scrolling:touch}
 .today-page{display:grid;grid-template-columns:repeat(4,320px);gap:28px 40px;flex:0 0 auto;scroll-snap-align:start}
-.live-empty{color:rgba(255,255,255,.5);font-size:26px;padding:20px 90px}
+.live-empty{color:rgba(255,255,255,.5);font-size:26px;padding:20px 86px}
 .score-team .st-name{font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis;flex:1;min-width:0;margin-left:16px}
 .score-team .score-x{font-size:76px;font-weight:700;color:#fff;margin-left:12px;flex-shrink:0}
@@ -122,8 +122,8 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0}
 .row-sec-title{font-size:38px;font-weight:700;color:rgba(255,255,255,.92);padding:26px 80px 18px}
 /* 最近观看标题（App：34 Bold start86 top24 底20） */
 .row-sec-title.home-sec{font-size:34px;padding:24px 80px 20px 86px}
-/* 足球日期标题（App：38 Bold start90 top40；N 场 23 white50） */
-.row-sec-title.live-sec{padding:40px 90px 0}
+/* 足球日期标题与卡片区同缩进（App：38 Bold、top40；N 场 23 white50） */
+.row-sec-title.live-sec{padding:40px 86px 0}
 .row-sec-title .sec-count{font-size:23px;font-weight:400;color:rgba(255,255,255,.5)}
 .hist-empty{color:rgba(255,255,255,.5);font-size:26px;padding:4px 86px 0}
 .lib-empty{color:rgba(255,255,255,.5);font-size:26px;padding:0 86px;min-height:40px}
@@ -314,7 +314,7 @@ body.portrait .fav-title-row{padding-top:150px}
    App 基准：会员信息并入「我的收藏」标题行、靠右对齐，无背景框；
    Row{ 状态点 14px(sx) + Spacer 12 + Text「状态 · 套餐/到期/剩余」22sp + Spacer 14 + 「续费」胶囊 }
    行尾 padding(end = 86f.sx) 与 .fav-body 的 86px 同源——标题行右缘正好落在内容列右边界。
-   未激活态不渲染本行（App：未激活走整页会员页）。 */
+   未激活时保留主动进入的会员/激活入口，播放不受会员状态影响。 */
 .fav-title-row{display:flex;align-items:center;gap:20px;padding-top:120px}
 .member-inline{margin-left:auto;display:flex;align-items:center;gap:12px}
 .member-inline .mi-dot{flex-shrink:0;width:14px;height:14px;border-radius:50%}
@@ -390,32 +390,6 @@ body.portrait .mm-redeem input{flex:none;width:100%;height:64px;font-size:22px}
 body.portrait .mm-redeem button{width:100%;height:66px;font-size:24px}
 body.portrait .mm-renew-row{flex-wrap:wrap;gap:12px}
 body.portrait .mm-renew-btn{width:100%;justify-content:center;text-align:center}
-
-/* ===== 付费墙（播放门控浮层） ===== */
-#paywall{position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.72);backdrop-filter:blur(6px);
-  display:flex;align-items:center;justify-content:center;padding:40px}
-.pw-card{width:min(680px,94vw);background:#1C1C22;border-radius:24px;padding:44px 40px;
-  display:flex;flex-direction:column;align-items:center;gap:20px;text-align:center}
-.pw-title{font-size:34px;font-weight:700;color:#fff}
-.pw-sub{font-size:24px;color:rgba(255,255,255,.6)}
-.pw-form{display:flex;gap:14px;width:100%;margin-top:6px}
-.pw-form input{flex:1;min-width:0;height:76px;padding:0 24px;border-radius:14px;
-  background:rgba(255,255,255,.1);font-size:26px;color:#fff;text-align:center;letter-spacing:1px}
-.pw-form input::placeholder{color:rgba(255,255,255,.35);letter-spacing:0}
-.pw-form button{flex-shrink:0;height:76px;padding:0 44px;border-radius:14px;background:#0A84FF;
-  font-size:28px;font-weight:700;color:#fff}
-.pw-form button:disabled{opacity:.6}
-.pw-msg{font-size:22px;color:#e06554;min-height:28px}
-.pw-close{font-size:24px;color:rgba(255,255,255,.5);padding:10px 20px}
-/* 竖屏：弹窗收窄留边距，表单改上下堆叠——输入框全宽，卡密不再被截断 */
-body.portrait .pw-card{width:calc(100vw - 48px);padding:32px 28px;gap:16px}
-body.portrait .pw-title{font-size:27px;white-space:nowrap}
-body.portrait .pw-sub{font-size:22px;line-height:32px}
-body.portrait .pw-form{flex-direction:column;gap:16px;margin-top:2px}
-body.portrait .pw-form input{width:100%;height:68px;padding:0 18px;font-size:22px;text-align:left}
-body.portrait .pw-form button{width:100%;height:72px;font-size:26px}
-body.portrait .pw-msg{font-size:20px}
-body.portrait .pw-close{font-size:22px;padding:8px 20px}
 
 /* ===== 电视浏览态（App TvBrowseScreen：top150 start/end76 bottom50；chips+网格4列） ===== */
 .tv-browse{padding:150px 76px 50px}

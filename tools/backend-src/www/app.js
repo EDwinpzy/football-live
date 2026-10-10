@@ -1,7 +1,7 @@
 /* My TV 网页版 — APK 前端 1:1 复刻（v1.23）
  * 设计坐标系与 App 一致：横屏 1920 / 竖屏 750，body.zoom = 视口宽/基准（sx() 同思路）。
  * 数据层：与 App 共用同一后端 API（proxy.py）：
- *   足球  /api/matches → /api/stream/{id}?src=bb|plu|qqlive100..103 → /api/relay
+ *   足球  /api/matches → /api/stream/{id}?src=all&fresh=1 → /api/relay
  *   影视目录 /hhkan/home|channel|latest|detail|search|filters|show|channel-sections（好好看唯一卡片源）；
  *   播放    /hhkan/play（详情中可附加其他信号源线路）
  *   电视  /api/iptv（服务端聚合频道表）→ /api/relay
@@ -128,7 +128,7 @@ function img(u) {
   return BASE + "/hhkan/proxy?u=" + encodeURIComponent(u);
 }
 function relay(u, ref) {
-  return BASE + "/api/relay?u=" + encodeURIComponent(u) + (ref === "none" ? "&ref=none" : "");
+  return BASE + "/api/relay?u=" + encodeURIComponent(u) + (ref ? "&ref=" + encodeURIComponent(ref) : "");
 }
 
 /* 影视播放的取流策略（2026-09-24）：
@@ -794,7 +794,7 @@ async function activateCode(raw) {
   if (jo && jo.ret === 400) return { ok: false, msg: "卡密格式不正确（OTV-XXXXX-XXXXX）" };
   return { ok: false, msg: `激活失败（${jo && jo.ret != null ? jo.ret : "网络"}），请稍后重试` };
 }
-/* 成功复验刷新 24h 窗口；网络/5xx 保留旧时间，满 24h 后播放门控自动暂停。 */
+/* 成功复验刷新会员状态；网络/5xx 保留上次结果，不影响播放。 */
 let licenseVerifyPromise = null;
 function licenseReverify() {
   if (licenseVerifyPromise) return licenseVerifyPromise;
@@ -824,29 +824,6 @@ async function doLicenseReverify() {
     }
   } catch (e) {}
 }
-/* 播放统一门控（App isPremium 同位）：未激活 → 付费墙 */
-function gatePlay(what) {
-  licenseReverify();
-  if (isPremium()) return true;
-  $("#pwSub").textContent = what ? `开通会员后可观看「${what}」` : "开通会员后可观看全部影视与直播内容";
-  $("#pwMsg").textContent = "";
-  $("#paywall").hidden = false;
-  return false;
-}
-async function pwSubmit() {
-  const btn = $("#pwBtn");
-  btn.disabled = true; btn.textContent = "激活中…";
-  const r = await activateCode($("#pwInput").value);
-  btn.disabled = false; btn.textContent = "激活";
-  if (r.ok) {
-    $("#paywall").hidden = true;
-    hint("激活成功，欢迎成为会员");
-  } else $("#pwMsg").textContent = r.msg;
-}
-$("#pwBtn").addEventListener("click", pwSubmit);
-$("#pwInput").addEventListener("keydown", e => { if (e.key === "Enter") pwSubmit(); });
-$("#pwClose").addEventListener("click", () => { $("#paywall").hidden = true; });
-
 /* ---------------- 导航（tab pill） ---------------- */
 const PAGE_IDS = { live: "pLive", vod: "pVod", tv: "pTv", fav: "pFav", search: "pSearch" };
 function switchTab(t) {
@@ -878,18 +855,9 @@ addEventListener("scroll", () => {
  * ================================================================ */
 const live = { data: null, heroId: null, league: "all", loaded: false, lastOk: 0, refreshing: false,
   posterIdx: (Date.now() % 36) };
-/* LiveRepository.STREAM_SRCS（bb 首位=默认源，签名最稳；仅作 channels 缺失时的兜底表） */
-const LIVE_SRCS = ["bb", "plu", "qqlive100", "qqlive101", "qqlive102", "qqlive103"];
-/* 站点动态线路命名（src → channels 原始 name，v1.23 信号源补全：
-   站点按场次给出 qqlive15~33/666 动态组合，编号随时轮换，旧硬编码已大面积失效） */
-const SRC_NAMES = new Map();
-/* LiveRepository.srcLabel：信号源显示名（站点原始命名优先，如「高清足球直播24」「CCTV5+」） */
+/* 88zhibo 动态返回的线路名称直接显示在播放器选择器中。 */
 function srcLabel(src) {
-  if (SRC_NAMES.has(src)) return SRC_NAMES.get(src);
-  if (src === "bb") return "原版足球直播2";
-  if (src === "plu") return "原版足球直播";
-  if (String(src).startsWith("qqlive")) return "高清足球直播" + String(src).slice("qqlive".length);
-  return "信号源 " + src;
+  return String(src || "信号源");
 }
 
 /* 固定分类集（App LEAGUE_FILTERS v1.16）与 filterLeagues 语义 */
@@ -1036,9 +1004,6 @@ async function refreshLive(silent) {
     live.lastOk = Date.now();
     $("#liveLoading").hidden = true;
     renderLive();
-    /* v1.22 起播提速（2026-09-05 需求⑤）：预热正在直播比赛的 bb 源（TV 版同款）——
-       命中后端 300s 成功缓存，点卡进直播时解析秒回；两两并发错峰，不抢真实起播 */
-    prefetchLiveStreams(ms.filter(m => m.status === "live").map(m => m.match_id));
     scheduleVodWarmup();
   } catch (e) {
     if (!silent && !live.data) $("#liveLoading").textContent = "直播数据加载失败：" + e.message;
@@ -1048,22 +1013,6 @@ async function refreshLive(silent) {
 function liveMatches() {
   const ms = (live.data && live.data.matches) || [];
   return live.league === "all" ? ms : ms.filter(m => matchLeagueFilter(m, live.league));
-}
-
-/* v1.22 起播提速：bb 源预热（两两并发，链式错峰；失败静默） */
-let _pfBusy = false;
-async function prefetchLiveStreams(ids) {
-  if (_pfBusy || !ids.length) return;
-  _pfBusy = true;
-  (async () => {
-    for (let i = 0; i < Math.min(ids.length, 12); i += 2) {
-      await Promise.allSettled(
-        ids.slice(i, i + 2).map(id =>
-          fetchJSON(`${BASE}/api/stream/${id}?src=bb`, { timeout: 60000 }).catch(() => {})));
-      await new Promise(r => setTimeout(r, 2000));
-    }
-    _pfBusy = false;
-  })();
 }
 
 function renderLive() {
@@ -1096,8 +1045,7 @@ function renderLive() {
     }
     if (isFirst) {
       /* 需求⑦：今日比赛横排；2026-09-05 需求④：超一屏宽折两行（均分、时间顺序），未超出才单行 */
-      /* 竖屏优化：侧距 86→40（与 CSS portrait 分支同步）；v1.25 需求12②：竖屏改 2 列网格自适应宽度 */
-      const sp = state.portrait ? 40 : 86;
+      /* 竖屏优化：2 列网格自适应宽度；横屏卡片区与日期标题共用 CSS 侧距 */
       if (state.portrait) {
         const half = Math.ceil(g.length / 2);
         const rows = [g.slice(0, half), g.slice(half)];
@@ -1106,7 +1054,7 @@ function renderLive() {
           + `</div>`;
       } else {
         const pages = Array.from({length: Math.ceil(g.length / 8)}, (_, p) => g.slice(p * 8, p * 8 + 8));
-        html += `<div class="today-pages" style="padding:24px ${sp}px 40px">` + pages.map(page =>
+        html += `<div class="today-pages">` + pages.map(page =>
           `<div class="today-page">${page.map(gameCard).join("")}</div>`).join("") + `</div>`;
       }
     } else {
@@ -2946,7 +2894,7 @@ search.cat = "全部";
  *     expiryAt == null                -> "终身会员"      #30D158 ; info = "终身 · 永久有效"
  *     else                            -> "会员有效"      #30D158 ; info = 套餐+" · 到期 yyyy-MM-dd · 剩余 N 天"
  *   }
- *   渲染形态 = 「状态点 + 状态 · info」+ 行尾「续费」；仅已激活态渲染（未激活走整页会员页）。
+ *   渲染形态 = 「状态点 + 状态 · info」+ 行尾「续费」；未激活显示主动会员/激活入口。
  *
  * 旧版是带背景框的三行大卡（标题/副行/卡密/徽章）且横屏竖屏两套布局，与两端 App 都不像；
  * 现统一为无框行内小字，横竖屏同构。 */
@@ -2973,11 +2921,14 @@ function planName(plan) {
 function renderMemberInline() {
   const el = $("#memberInline");
   if (!el) return;
-  /* 未激活/未持票 → 整行不渲染（App：未激活态走统一会员页，不带行内小字） */
+  /* 会员激活是可选功能；未激活时仍提供主动入口，播放不受会员状态影响。 */
   const st = memberStatus();
-  const show = !!license.data;
-  el.hidden = !show;
-  if (!show) { el.innerHTML = ""; return; }
+  el.hidden = false;
+  if (!license.data) {
+    el.innerHTML = `<button class="mi-renew" id="miRenew">会员 / 激活</button>`;
+    $("#miRenew").addEventListener("click", openMemberModal);
+    return;
+  }
   el.innerHTML = `
     <span class="mi-dot" style="background:${st.color}"></span>
     <span class="mi-text">${esc(st.status)}${st.info ? " · " + esc(st.info) : ""}</span>
@@ -3044,7 +2995,7 @@ function openMemberModal() {
   const st = memberStatus();
   $("#mmSub").textContent = license.data
     ? `${st.status}${st.info ? " · " + st.info : ""}`
-    : "尚未开通 · 购买卡密后兑换即可解锁全部内容";
+    : "尚未开通 · 会员服务为可选功能";
   renderMemberModal();
   $("#mmMsg").textContent = "";
   $("#memberModal").hidden = false;
@@ -3286,9 +3237,6 @@ function tvNextLine() {
   }
 }
 function playTvChannel(gi, ci, silent) {
-  /* 需求②：直播播放统一门控 */
-  const ch0 = tv.groups[gi] && tv.groups[gi].channels[ci];
-  if (!gatePlay(ch0 ? ch0.name : "电视直播")) return;
   const ch = tv.groups[gi].channels[ci];
   tv.cur = { gi, ci }; tv.lineIdx = 0; tv.autoSwapped = false;
   tv.urls = ch.urls.slice();
@@ -3365,7 +3313,7 @@ function renderTvSidebar() {
  * 播放器（PlayerScreen 复刻：影视 tvOS 控制层 + 直播信号源条 + 手势）
  * ================================================================ */
 const MAX_RECOVERY_ATTEMPTS = 4;
-const pv = { hls: null, video: null, ctx: null, sources: [], srcNames: [], hideTimer: 0, progTimer: 0,
+const pv = { hls: null, video: null, ctx: null, sources: [], srcIds: [], srcNames: [], sourceRefs: [], hideTimer: 0, progTimer: 0,
   stallTimer: 0, speedIdx: 2, pausedAt: -1, controls: false, picker: false,
   recoveryGen: 0, recoveryAttempts: 0, recovering: false, loadGen: 0, playerSession: 0,
   playController: null, detailController: null, detailRequest: null,
@@ -3377,8 +3325,6 @@ const SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
 const ASPECTS = ["原始", "裁切填充", "16:9", "4:3"];
 
 function openPlayer(ctx) {
-  /* 需求②：播放统一门控（App isPremium 同位）——未激活弹付费墙 */
-  if (!gatePlay(ctx.title)) return;
   if (pv.ctx && pv.ctx.kind === "vod") stopVodMediaPipeline();
   pv.playController?.abort(); pv.playController = null;
   pv.detailController?.abort(); pv.detailController = null; pv.detailRequest = null;
@@ -3386,6 +3332,7 @@ function openPlayer(ctx) {
   const session = pv.playerSession;
   const sources = ctx.kind === "vod" ? initialPlayerVodSources(ctx) : [];
   pv.ctx = { ...ctx, sources };
+  pv.sources = []; pv.srcIds = []; pv.srcNames = []; pv.sourceRefs = [];
   if (ctx.kind === "vod") pv.playController = new AbortController();
   pv.srcIdx = 0; pv.speedIdx = 2; pv.pausedAt = -1;
   pv.recoveryGen++; pv.recoveryAttempts = 0; pv.recovering = false;
@@ -3422,7 +3369,7 @@ function openPlayer(ctx) {
   }
   try {
     if (ctx.kind === "vod") resolveVodAndPlay(pv.ctx, pv.loadGen, { force: false });
-    else if (ctx.kind === "live") resolveLiveAndPlay(ctx);
+    else if (ctx.kind === "live") resolveLiveAndPlay(pv.ctx, session);
   } catch (e) { playerFatal(e.message); }
 }
 
@@ -3778,57 +3725,31 @@ async function resolveVodAndPlay(ctx, loadGen = pv.loadGen, options = {}) {
   }
 }
 
-/* App bootLive：首选源（=上次手动选择的源，localStorage 记忆；无记忆回退 bb）快路径
-   立即起播，其余源【到货即上屏】进选择条（2026-09-07 需求②③：旧版 Promise.allSettled
-   等全源到齐才渲染选择条，最慢源拖到分钟级；默认源恒 bb 不记忆的问题一并修掉） */
-async function resolveLiveAndPlay(ctx) {
-  /* v1.23（2026-09-06 信号源补全）：qqlive 公共线路的 id 本就是空串（后端
-     qqlive 分支不用比赛 id），旧版 filter 连带 id 把 qqlive15~33/666 全部滤掉，
-     网页版只剩 bb/plu 两源。改为只要求 src；id 空用 ctx.matchId 兜底拼 URL
-     （2026-09-05 需求⑪ 的 /api/stream/?src= 404 防回归语义保留）。
-     qqlive 按站点给出顺序；首选源 = 记忆源（不在本场线路表时回退 bb）。 */
-  const chans0 = (ctx.channels || []).filter(c => c && c.src);
-  const chans = chans0.length
-    ? chans0.map(c => ({ src: c.src, id: c.id || ctx.matchId, name: c.name || "" }))
-    : LIVE_SRCS.map(s => ({ src: s, id: ctx.matchId, name: "" }));
-  if (!ctx.matchId && !chans0.length) { playerFatal("比赛数据缺失，请刷新重试"); return; }
-  chans.forEach(c => { if (c.name) SRC_NAMES.set(c.src, c.name); });
-  const ordered = LIVE_SRCS.map(s => chans.find(c => c.src === s)).filter(Boolean)
-    .concat(chans.filter(c => !LIVE_SRCS.includes(c.src)));
-  const tryOne = async ch => {
-    const d = await fetchJSON(BASE + `/api/stream/${ch.id}?src=${ch.src}`, { timeout: 60000 });
-    if (!d.url) throw new Error(d.error || "no url");
-    return { src: ch.src, url: d.url };
-  };
-  /* 需求③：上次手动选择的源（记忆源不在本场线路表时回退 bb——qqlive 编号随场次轮换） */
-  let remembered = "";
-  try { remembered = localStorage.getItem("liveLastSrc") || ""; } catch (e) {}
-  const bb = ordered.find(c => c.src === "bb") || ordered[0];
-  const pref = (remembered && ordered.find(c => c.src === remembered)) || bb;
-  const rest = ordered.filter(c => c !== pref);
-  const appendSource = x => {
-    if (!pv.srcNames.includes(x.src)) { pv.sources.push(x.url); pv.srcNames.push(x.src); renderSrcPicker(); }
-  };
+/* 后端解析并探测当前比赛的全部线路；选择器只展示返回的 HLS 可用项。 */
+async function resolveLiveAndPlay(ctx, session = pv.playerSession) {
+  if (!ctx || !ctx.matchId) { playerFatal("比赛数据缺失，请刷新重试"); return; }
   try {
-    const first = await tryOne(pref);
-    pv.sources = [first.url]; pv.srcNames = [first.src];
+    const matchId = encodeURIComponent(ctx.matchId);
+    const d = await fetchJSON(BASE + `/api/stream/${matchId}?src=all&fresh=1`, { timeout: 60000 });
+    if (pv.playerSession !== session || pv.ctx !== ctx) return;
+    const seen = new Set();
+    const routes = (Array.isArray(d.sources) ? d.sources : []).filter(route => {
+      const source = String((route && route.source) || "").trim();
+      if (!route || route.player !== "m3u8" || !route.url || !source || seen.has(source)) return false;
+      seen.add(source);
+      return true;
+    });
+    if (!routes.length) throw new Error((d && d.error) || "没有检测到可播放线路");
+    pv.sources = routes.map(route => route.url);
+    pv.srcIds = routes.map(route => String(route.source));
+    pv.srcNames = routes.map(route => String(route.name || route.source));
+    pv.sourceRefs = routes.map(route => route.referer || "https://www.88zhibo.tv/");
+    pv.srcIdx = 0;
     renderSrcPicker();
-    attachPlayer(relay(first.url), 0);
-    /* 2026-09-19 修：足球直播不再写进观看历史。App 端 history 表只由影视页写入
-       （HistoryEntity.vodId），直播从不入历史 —— 旧版这里 pushHistory("live:xxx")
-       导致网页版「最近观看」混进「热刺 对阵 埃弗顿」这类比赛卡，且封面恒为空
-       （live 无 poster）显示成空卡。去掉即与 App 同构。 */
-    /* 需求②：其余源到货一个上屏一个（不等最慢源） */
-    rest.forEach(ch => tryOne(ch).then(appendSource).catch(() => {}));
+    attachPlayer(relay(pv.sources[0], pv.sourceRefs[0]), 0);
   } catch (e) {
-    /* 首选源失败 → 回退全源并发解析（App 无快路径回退语义） */
-    const results = await Promise.allSettled(ordered.map(tryOne));
-    const ok = results.filter(r => r.status === "fulfilled").map(r => r.value);
-    if (!ok.length) { playerFatal("信号尚未开播（开赛后自动可用），可稍后重试"); return; }
-    pv.sources = ok.map(s => s.url);
-    pv.srcNames = ok.map(s => s.src);
-    renderSrcPicker();
-    attachPlayer(relay(pv.sources[0]), 0);
+    if (pv.playerSession !== session || pv.ctx !== ctx) return;
+    playerFatal(e && e.message ? e.message : "信号尚未开播（开赛后自动可用），可稍后重试");
   }
 }
 
@@ -3839,14 +3760,12 @@ function renderSrcPicker() {
       `<button class="spchip ${i === pv.srcIdx ? "on" : ""}" data-i="${i}">${esc(srcLabel(n))}</button>`).join("") + `</div>`;
   $$("#srcPicker .spchip").forEach(c => c.addEventListener("click", async () => {
     pv.srcIdx = +c.dataset.i;
-    /* 需求③：手动选源记忆到 localStorage，下次进直播默认直选 */
-    try { localStorage.setItem("liveLastSrc", pv.srcNames[pv.srcIdx] || ""); } catch (e) {}
     renderSrcPicker();
     $("#bufSpin").hidden = false;
     const gen = ++pv.recoveryGen;
     try {
       const url = await resolveFreshLiveSource(pv.srcIdx);
-      if (gen === pv.recoveryGen) attachPlayer(relay(url), 0);
+      if (gen === pv.recoveryGen) attachPlayer(relay(url, pv.sourceRefs[pv.srcIdx]), 0);
     } catch (e) { if (gen === pv.recoveryGen) recoverPlayback("手动切源失败", gen); }
   }));
   $("#srcPickerWrap").hidden = !pv.picker;
@@ -3856,12 +3775,14 @@ function renderSrcPicker() {
 async function resolveFreshLiveSource(index) {
   const ctx = pv.ctx;
   if (!ctx || ctx.kind !== "live") throw new Error("not live");
-  const src = pv.srcNames[index];
-  const channel = (ctx.channels || []).find(c => c && c.src === src) || {};
-  const matchId = channel.id || ctx.matchId;
-  const d = await fetchJSON(BASE + `/api/stream/${matchId}?src=${src}&fresh=1`, { timeout: 60000 });
+  const src = pv.srcIds[index];
+  if (!src) throw new Error("missing live source");
+  const matchId = encodeURIComponent(ctx.matchId || "");
+  const d = await fetchJSON(BASE + `/api/stream/${matchId}?src=${encodeURIComponent(src)}&fresh=1`, { timeout: 60000 });
+  if (pv.ctx !== ctx || pv.srcIds[index] !== src) throw new Error("live source changed");
   if (!d.url) throw new Error(d.error || "no url");
   pv.sources[index] = d.url;
+  pv.sourceRefs[index] = d.referer || "https://www.88zhibo.tv/";
   return d.url;
 }
 
@@ -3966,7 +3887,7 @@ async function recoverPlayback(reason, expectedGen) {
       const url = await resolveFreshLiveSource(pv.srcIdx);
       if (pv.ctx !== ctx || pv.recoveryGen !== recoveryGen) return;
       pv.recovering = false;
-      attachPlayer(relay(url), 0);
+      attachPlayer(relay(url, pv.sourceRefs[pv.srcIdx]), 0);
       renderSrcPicker();
       return;
     }
@@ -4047,7 +3968,7 @@ function nextSource() {
   if (pv.srcIdx < pv.sources.length) {
     hint("线路失效，切换下一个源");
     if (pv.ctx.kind === "vod") vodAttach(pv.sources[pv.srcIdx], 0);
-    else attachPlayer(relay(pv.sources[pv.srcIdx]), 0);
+    else attachPlayer(relay(pv.sources[pv.srcIdx], pv.sourceRefs[pv.srcIdx]), 0);
     if (pv.ctx.kind === "live") renderSrcPicker();
   } else if (pv.ctx.kind === "vod" && pv.ctx.epIdx < pv.ctx.epCount - 1) {
     hint("本集所有源失败，尝试下一集");

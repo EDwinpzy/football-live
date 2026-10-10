@@ -134,7 +134,7 @@ object LicenseManager {
     }
 
     fun init(context: Context) {
-        if (!BuildConfig.LICENSE_ENABLED || inited) return
+        if (inited) return
         inited = true
         appContext = context.applicationContext
         scope.launch {
@@ -175,7 +175,6 @@ object LicenseManager {
     }
 
     fun isPremium(): Boolean {
-        if (!BuildConfig.LICENSE_ENABLED) return true
         val data = (_state.value as? LicenseState.Activated)?.data ?: return false
         val localNow = System.currentTimeMillis()
         return LicensePolicy.withinOfflineGrace(lastVerifySuccessAt, localNow) &&
@@ -274,7 +273,6 @@ object LicenseManager {
      * 正常走激活页）。这样同一台机器重装后用户不必再输一遍卡密。
      */
     private suspend fun tryRestore(): Boolean {
-        if (!BuildConfig.LICENSE_ENABLED) return false
         val resp = callEndpoint("restore", "", deviceId(), null) ?: return false
         if (resp.ret != 0) {
             OtvLog.i("license restore: ret=${resp.ret}（未认领到，按未激活处理）")

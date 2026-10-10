@@ -159,7 +159,7 @@ class MainActivity : ComponentActivity() {
         }
         // v1.17 调试注入激活码（模拟器注键丢键，测试用；码本身仍走完整验证链路：
         // 云端查表+设备绑定+本地 ECDSA 验签，无任何安全豁免；公测版 debug 构建限定）
-        if (com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED && com.qiubo.optimaltv.BuildConfig.DEBUG) {
+        if (com.qiubo.optimaltv.BuildConfig.DEBUG) {
             intent?.getStringExtra("otvDebugLicense")?.takeIf { it.isNotBlank() }?.let { code ->
                 com.qiubo.optimaltv.OtvLog.i("debug-nav（intent extra）license=${code.take(4)}***")
                 Graph.appScope.launch {
@@ -231,26 +231,13 @@ private fun AppRoot() {
         Graph.repo.refresh()
     }
 
-    // 启动门禁（2026-09-18）：开启卡密后，未激活 / 已过期 / 已封禁 → 直接落在激活页，
-    // 不给进主界面。判定与 LicensePlayerGate 同款（isPremium：24h 离线宽限 + 未过期）；
-    // 激活成功后 ActivateScreen 自行跳足球页（见该页 resultOk 分支）。
-    val licenseOn = com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED
-    val licState: com.qiubo.optimaltv.license.LicenseState? =
-        if (licenseOn) com.qiubo.optimaltv.license.LicenseManager.state.collectAsStateWithLifecycle().value else null
-    if (licenseOn && licState == null) {
-        // 授权状态尚未落地（启动门闸后才读，瞬时）→ 先不建 NavHost，
-        // 免得把已激活用户误判成未激活
-        Box(Modifier.fillMaxSize().background(Color.Black))
-        return
-    }
     // 调试直达页（2026-09-19）：debug 构建下可用 adb 直接落在指定二级页，
     // 便于对会员页/激活页做版式截图与回归（release 无写入方，恒为 null）。
     // adb shell am start -n <pkg>/com.qiubo.optimaltv.MainActivity --es otvDebugRoute paywall
     val debugRoute = if (com.qiubo.optimaltv.BuildConfig.DEBUG) {
         DebugNavBus.pendingRoute
     } else null
-    val startDestination = debugRoute
-        ?: if (licenseOn && !com.qiubo.optimaltv.license.LicenseManager.isPremium()) "activate" else "live"
+    val startDestination = debugRoute ?: "live"
 
     // v1.20 全局浮层：运营公告（顶部半透明悬浮窗）+ 非强更提案弹窗 + 下载进度层
     Box(Modifier.fillMaxSize()) {
@@ -266,13 +253,8 @@ private fun AppRoot() {
 
                 composable("vod") { VodScreen(nav) }
 
-                // 电视页为内嵌播放（不走 player 路由），门控须在路由层拦截（与 TV 版同构）；
-                // 未激活渲染会员页不进电视页；内测版直接透传
-                composable("tv") {
-                    com.qiubo.optimaltv.ui.paywall.LicensePlayerGate(nav) {
-                        com.qiubo.optimaltv.ui.tv.TvScreen(nav)
-                    }
-                }
+                // 电视页为内嵌播放（不走 player 路由），所有用户都可直接浏览与播放。
+                composable("tv") { com.qiubo.optimaltv.ui.tv.TvScreen(nav) }
 
                 composable("all") { AllScreen(nav) }
 
@@ -295,16 +277,12 @@ private fun AppRoot() {
                         navArgument("resumeMs") { type = NavType.LongType; defaultValue = 0L },
                     ),
                 ) { entry ->
-                    // v1.17 全量门控收口点（方案 §4.5）：公测版统一播放入口一处拦截——
-                    // 未激活渲染会员页不进播放器；内测版直接透传零差异
-                    com.qiubo.optimaltv.ui.paywall.LicensePlayerGate(nav) {
-                        PlayerScreen(
-                            nav,
-                            java.net.URLDecoder.decode(entry.arguments?.getString("vodId").orEmpty(), "UTF-8"),
-                            entry.arguments?.getInt("ep") ?: 0,
-                            entry.arguments?.getLong("resumeMs") ?: 0L,
-                        )
-                    }
+                    PlayerScreen(
+                        nav,
+                        java.net.URLDecoder.decode(entry.arguments?.getString("vodId").orEmpty(), "UTF-8"),
+                        entry.arguments?.getInt("ep") ?: 0,
+                        entry.arguments?.getLong("resumeMs") ?: 0L,
+                    )
                 }
 
                 composable("search") { SearchScreen(nav) }

@@ -259,7 +259,6 @@ enum UITestFixtures {
 
 @MainActor
 struct UITestFixtureRootView: View {
-    @EnvironmentObject private var license: LicenseStore
     @StateObject private var fixtureSettings: AppSettings
 
     init() {
@@ -279,11 +278,6 @@ struct UITestFixtureRootView: View {
                 .installMyTVDestinations(fixtureDetail: UITestFixtures.detail(for:))
         }
         .environmentObject(fixtureSettings)
-        .task {
-            await MainActor.run {
-                license.enableUITestPlaybackAccessIfRequested()
-            }
-        }
         .myTVScreen()
     }
 }

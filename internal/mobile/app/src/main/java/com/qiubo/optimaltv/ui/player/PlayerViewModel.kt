@@ -11,6 +11,7 @@ import com.qiubo.optimaltv.data.cast.DlnaDiscovery
 import com.qiubo.optimaltv.data.db.HistoryEntity
 import com.qiubo.optimaltv.data.db.ProgressEntity
 import com.qiubo.optimaltv.data.model.LineInfo
+import com.qiubo.optimaltv.data.model.LiveStreamSource
 import com.qiubo.optimaltv.data.prefs.AspectMode
 import com.qiubo.optimaltv.data.prefs.SettingsStore
 import com.qiubo.optimaltv.data.repo.SelectedSourceUnavailableException
@@ -280,11 +281,28 @@ class PlayerViewModel(
         }
     }
 
-    /** 直播：与 lines 平行的信号源标识（bb/plu/qqlive100..），续签时只重解析当前源 */
+    /** Live source IDs and referers returned for this match; IDs stay aligned with [PlayerUiState.lines]. */
     private var liveSrcs: List<String> = emptyList()
+    private val liveReferers = mutableMapOf<String, String>()
     private var liveMatchId: String? = null
     /** 引擎实际在播的直播地址（v1.14 续签对比基准；线路表只作展示/手动换线入口） */
     private var livePlayingUrl: String? = null
+
+    /** Refresh exactly one previously probed dynamic source and keep its referer for later renewals. */
+    private suspend fun refreshLiveSource(source: String, fallbackName: String = ""): LiveStreamSource? {
+        val matchId = liveMatchId ?: return null
+        val fallbackReferer = liveReferers[source].orEmpty()
+        return Graph.live.refreshLiveStreamSource(
+            matchId = matchId,
+            source = source,
+            fresh = true,
+            fallbackName = fallbackName,
+            fallbackReferer = fallbackReferer,
+        )?.also { liveReferers[it.source] = it.referer }
+    }
+
+    private suspend fun refreshLivePlaybackUrl(source: String, fallbackName: String = ""): String? =
+        refreshLiveSource(source, fallbackName)?.playbackUrl
 
     /** 当前会话的最终播放 URL（v1.21 投屏取投地址用；startSession 赋值） */
     private var sessionUrl: String = ""
@@ -492,65 +510,38 @@ class PlayerViewModel(
         }
     }
 
-    /** 直播分支（vodId = "live:{matchId}"）：6 信号源并发解析 → relay 包裹，复用换线/看门狗。
-     *  fresh=true（失败重试链路）：后端绕过 300s 成功缓存强制重新解析拿新签名。
-     *  默认起播源（2026-09-07 需求③）：上次手动选择的信号源（liveLastSrc 持久化）；
-     *  无记忆或记忆源不在本场线路表（qqlive 编号随场次轮换）→ 回退 bb（原版足球直播2）。
-     *  v1.10（2026-08-31 低端机起播提速）：旧版「全 6 源并发 awaitAll → startSession 再对
-     *  bb fresh 重解析」= 双重解析，最慢源拖住起播。现在：首选源单源先解析（享受后端 300s
-     *  成功缓存）→ 立即复用该 URL 起播；其余源后台到货即上屏（需求②：不再等全源到齐）。
-     *  首选源不可用才回退全源并发链路。标题异步补（不阻塞起播）。 */
-    private suspend fun bootLive(fresh: Boolean = false) {
+    /** Football opens always refresh the server's probed HLS list, so the picker only contains
+     * sources that are playable now. The server owns source IDs, display names, and order. */
+    private suspend fun bootLive() {
         val matchId = vodId.removePrefix("live:")
         liveMatchId = matchId
-        // 标题异步补：matches() 冷抓可能 20s+，绝不能挡在起播链路上（LiveScreen 进入过则为缓存命中）
+        // 标题异步补：matches() 冷抓可能 20s+，绝不能挡在起播链路上。
         viewModelScope.launch {
             val m = runCatching { Graph.live.matches().find { it.matchId == matchId } }.getOrNull()
             if (m != null) _ui.value = _ui.value.copy(title = "${m.home} 对阵 ${m.away}")
         }
-        // 需求③：首选源 = 上次手动选择的源；记忆源不在本场动态线路表时回退 bb
-        val srcTable = Graph.live.srcsFor(matchId)
-        val remembered = runCatching { Graph.settings.liveLastSrc() }.getOrNull().orEmpty()
-        val preferred = if (remembered.isNotBlank() && srcTable.any { it.first == remembered }) remembered else "bb"
-        if (preferred != "bb") OtvLog.i("bootLive：需求③ 直选上次信号源 $preferred（bb 兜底）")
-        // 快路径：仅解析首选源——冷启动也只做 1 次频道页+播放器页+解密，
-        // 而非旧版的全源并发（低端机 WebView 解密串行，最慢源拖垮整体）。
-        // 显示名从 srcsFor（站点 channels 原始命名）取，与慢路径/选择条补齐一致
-        val prefLabel = srcTable.firstOrNull { it.first == preferred }?.second
-            ?: com.qiubo.optimaltv.data.repo.LiveRepository.srcLabel("bb")
-        val tBb = android.os.SystemClock.elapsedRealtime()
-        val prefUrl = if (!fresh) runCatching { Graph.live.streamUrlForSrc(matchId, preferred, fresh = false) }.getOrNull() else null
-        OtvLog.i("boot 计时：$preferred 解析 ${android.os.SystemClock.elapsedRealtime() - tBb}ms（命中=${prefUrl != null}）")
-        if (!prefUrl.isNullOrBlank()) {
-            OtvLog.i("bootLive fast-path：$preferred（$prefLabel）单源解析成功 → 立即起播，其余源后台补齐")
-            if (this::engine.isInitialized) runCatching { engine.release() }
-            installEngine(EngineRegistry.create(settings.current().engineId, Graph.appContext))
-            liveSrcs = listOf(preferred)
-            _ui.value = _ui.value.copy(
-                title = "足球直播", epCount = 1,
-                lines = listOf(LineInfo(vodId, prefLabel, prefUrl)),
-                isLive = true,
-                engineId = engine.engineId, engineName = engine.displayName,
-                aspectOrdinal = settings.current().aspectOrdinal,
-            )
-            collectEngineState()
-            startLiveRenewal()
-            startSession(0, 0L, reuseResolvedUrl = true)
-            appendRemainingLiveSrcs(matchId, fresh, skipSrc = preferred)
-            return
-        }
-        val pairs = runCatching { Graph.live.streamUrlPairs(matchId, fresh) }.getOrDefault(emptyList())
-        OtvLog.i("bootLive match=$matchId fresh=$fresh 信号源=${pairs.size} 个")
-        if (pairs.isEmpty()) {
+        // Clear prior options immediately so a retry never leaves stale lines visible while loading.
+        liveSrcs = emptyList()
+        liveReferers.clear()
+        _ui.value = _ui.value.copy(lines = emptyList(), activeLine = 0)
+        val sources = runCatching { Graph.live.liveStreamSources(matchId, fresh = true) }
+            .getOrDefault(emptyList())
+        OtvLog.i("bootLive match=$matchId probed HLS 信号源=${sources.size} 个")
+        if (sources.isEmpty()) {
             OtvLog.w("bootLive 无可用信号 → fatalMsg")
             stopForFatal()
             _ui.value = _ui.value.copy(fatalMsg = "直播信号暂不可用", title = "足球直播", isLive = true)
             scheduleLiveAutoRetry()
             return
         }
-        liveSrcs = pairs.map { it.first }
-        val lines = pairs.mapIndexed { _, p ->
-            LineInfo(vodId, p.third, p.second)
+        liveSrcs = sources.map { it.source }
+        liveReferers.putAll(sources.associate { it.source to it.referer })
+        val lines = sources.map { source -> LineInfo(vodId, source.name, source.playbackUrl) }
+        val remembered = runCatching { Graph.settings.liveLastSrc() }.getOrNull().orEmpty()
+        val selectedSource = remembered.takeIf { it in liveSrcs } ?: liveSrcs.first()
+        val selIdx = liveSrcs.indexOf(selectedSource)
+        if (remembered.isNotBlank() && remembered !in liveSrcs) {
+            runCatching { Graph.settings.rememberLiveLastSrc(selectedSource) }
         }
         // 重试路径重建：先释放旧引擎（否则每次重试泄漏一个 ExoPlayer 实例）
         if (this::engine.isInitialized) runCatching { engine.release() }
@@ -560,19 +551,14 @@ class PlayerViewModel(
         }
         installEngine(EngineRegistry.create(engineOverride ?: settings.current().engineId, Graph.appContext))
         _ui.value = _ui.value.copy(
-            title = "足球直播", epCount = 1, lines = lines, isLive = true,
+            title = "足球直播", epCount = 1, lines = lines, isLive = true, activeLine = selIdx,
             engineId = engine.engineId, engineName = engine.displayName,
             aspectOrdinal = settings.current().aspectOrdinal,
         )
         collectEngineState()
         startLiveRenewal()
-        // 需求③：首选源=上次选择（在场则直选）；缺 bb/记忆源时回退首个可用源
-        //（错误态自动重试会再回首选源）
-        val selIdx = liveSrcs.indexOf(preferred).takeIf { it >= 0 } ?: 0
         if (selIdx > 0) {
-            OtvLog.i("bootLive：首选源 $preferred 位于第 ${selIdx + 1} 位，直选之")
-        } else if (liveSrcs.firstOrNull() != "bb") {
-            OtvLog.w("bootLive：bb/记忆源（$preferred）未解析出，回退 ${liveSrcs.firstOrNull()}")
+            OtvLog.i("bootLive：使用上次仍可用的信号源 $selectedSource（第 ${selIdx + 1} 位）")
         }
         startSession(selIdx, 0L, reuseResolvedUrl = true)
     }
@@ -643,26 +629,6 @@ class PlayerViewModel(
         startSession(0, 0L, reuseResolvedUrl = true)
     }
 
-    /** 快路径起播后，其余信号源后台补齐进选择条。
-     *  2026-09-07 需求②：改用 streamUrlsIncremental（每源到货即上屏）——旧版
-     *  streamUrlPairs awaitAll 等全源到齐才一次性上屏，串行解密桥下大场次要等
-     *  分钟级才有完整选择条（用户报障「只有一个信号源，几分钟才出现所有源」）。
-     *  v1.23：源表来自 /api/matches 动态 channels（qqlive 编号随站点轮换），显示名用
-     *  站点原始命名（「高清足球直播24」「CCTV5+」），硬编码映射仅作 label 兜底。
-     *  lines 与 liveSrcs 必须同步追加（两表按下标平行，续签按 liveSrcs[activeLine] 取源）。 */
-    private fun appendRemainingLiveSrcs(matchId: String, fresh: Boolean, skipSrc: String = "bb") {
-        viewModelScope.launch {
-            runCatching {
-                Graph.live.streamUrlsIncremental(matchId, fresh) { (src, url, label) ->
-                    val s = _ui.value
-                    if (src == skipSrc || liveSrcs.contains(src)) return@streamUrlsIncremental
-                    _ui.value = s.copy(lines = s.lines + LineInfo(vodId, label, url))
-                    liveSrcs = liveSrcs + src
-                }
-            }
-        }
-    }
-
     /**
      * 直播播放中静默续签（v1.7 引入，v1.14 重写）：
      * 每 90s 对当前信号源 fresh 重解析；签名变化时**先探测旧地址健康**——
@@ -678,7 +644,7 @@ class PlayerViewModel(
             while (isActive) {
                 // 90s 一轮；期间被 kick（直播卡顿）则立刻进入本轮
                 kotlinx.coroutines.withTimeoutOrNull(90_000) { renewKick.receive() }
-                val mid = liveMatchId ?: break
+                if (liveMatchId == null) break
                 val idx = _ui.value.activeLine
                 val src = liveSrcs.getOrNull(idx) ?: continue
                 val s = _ui.value
@@ -687,7 +653,7 @@ class PlayerViewModel(
                 val playingUrl = livePlayingUrl
                 if (playingUrl.isNullOrBlank()) continue
                 if (s.playState == EnginePlayState.BUFFERING) {
-                    val fresh = runCatching { Graph.live.streamUrlForSrc(mid, src, fresh = true) }.getOrNull()
+                    val fresh = runCatching { refreshLivePlaybackUrl(src) }.getOrNull()
                     if (!fresh.isNullOrBlank()) {
                         writeBackLineUrl(idx, fresh)
                         livePlayingUrl = fresh
@@ -700,7 +666,7 @@ class PlayerViewModel(
                     // 暂停中：先廉价健康检查（不打上游解析）；活着就什么都不做
                     val alive = runCatching { Graph.live.playlistAlive(playingUrl) }.getOrDefault(true)
                     if (alive) continue
-                    val fresh = runCatching { Graph.live.streamUrlForSrc(mid, src, fresh = true) }.getOrNull()
+                    val fresh = runCatching { refreshLivePlaybackUrl(src) }.getOrNull()
                     if (fresh.isNullOrBlank() || fresh == playingUrl) continue
                     writeBackLineUrl(idx, fresh)
                     livePlayingUrl = fresh
@@ -713,7 +679,7 @@ class PlayerViewModel(
                     }
                     continue
                 }
-                val freshUrl = runCatching { Graph.live.streamUrlForSrc(mid, src, fresh = true) }.getOrNull()
+                val freshUrl = runCatching { refreshLivePlaybackUrl(src) }.getOrNull()
                 if (freshUrl.isNullOrBlank()) {
                     OtvLog.w("live renew：src=$src 解析失败（继续播当前流，下轮再试）")
                     continue
@@ -848,7 +814,7 @@ class PlayerViewModel(
         OtvLog.i("boot 计时：awaitBackendReady ${android.os.SystemClock.elapsedRealtime() - tBoot}ms")
         when {
             // 直播比赛走独立分支（无目录依赖）
-            vodId.startsWith("live:") -> { bootLive(fresh); return }
+            vodId.startsWith("live:") -> { bootLive(); return }
             // IPTV 电视直播（v1.13）：公开 m3u 源原生直连，无目录依赖
             vodId.startsWith("iptv:") -> { bootIptv(); return }
             // 回放（原版 playRewatch：hhkan 搜索 → 多线路）
@@ -1026,8 +992,7 @@ class PlayerViewModel(
         var url: String? = null
         if (_ui.value.isLive && liveMatchId != null && !reuseResolvedUrl) {
             liveSrcs.getOrNull(lineIdx)?.let { src ->
-                val mId = liveMatchId!!
-                url = runCatching { Graph.live.streamUrlForSrc(mId, src, fresh = true) }.getOrNull()
+                url = runCatching { refreshLivePlaybackUrl(src, line.label) }.getOrNull()
                     ?.also { freshUrl ->
                         if (gen != sessionGen) {
                             OtvLog.w("line $lineIdx 解析期间已有更新会话（gen 落后），放弃")
@@ -1512,7 +1477,7 @@ class PlayerViewModel(
         // 长时体检基线：起播现场（30s 验收与长跑对比都以这条为参考）
         runCatching { PlaybackHealthLog.start(healthSnapshot("起播")) }
         if (_ui.value.isLive) armIptvAudioCodecCheck()   // 电视#8：无声编解码检查
-        // 线路记忆（仅点播；直播始终默认 bb＝原版足球直播2，需求 足球#14）
+        // 线路记忆（仅点播；足球线路按当前探活列表恢复上次选择）
         if (!_ui.value.isLive) {
             runCatching { settings.rememberLine(vodId, engine.engineId, _ui.value.activeLine) }
         }
@@ -1698,9 +1663,7 @@ class PlayerViewModel(
         if (iptvRotateLine(reason)) return
         if (_ui.value.isLive) {
             // 解码类失败重解析无意义（URL 本身有效，是解码器不行）——直进错误态
-            // 等 30s 自动重试。2026-08-30 实测教训：尤文场 bb 流 AVC High 在模拟器
-            // 解不动，旧逻辑 3 次同线 fresh 重解析（10s 内密集抓上游）+自动重试连环
-            // boot 把 bb 通道解析打成限流不可用，连带其他比赛 bb 回退错源
+            // 等 30s 自动重试。解码类错误不是 URL 过期，避免同线密集重解析触发上游限流。
             if (reason.contains("DECODING_FAILED")) {
                 OtvLog.w("line fail(${_ui.value.activeLine}): 解码失败（重解析无效）→ 错误态等 30s 自动重试")
                 viewModelScope.launch { saveProgress(force = false) }
@@ -1837,7 +1800,7 @@ class PlayerViewModel(
         val state = _ui.value
         if (!ManualLineSelectionPolicy.shouldStart(state.lines.size, idx, state.activeLine, state.isLive)) return
         // 手动切源 = 用户重选起点：清空换线尝试记录——旧记录会把此前起播过的线路
-        // 当「已试过」跳过（实测 bb 失败后跳过此前正常播放的 plu，全线耗尽进错误态）
+        // 当「已试过」跳过，避免换线尝试记录误跳过此前正常播放过的线路。
         if (hasEngine()) engine.pause()
         _ui.value = _ui.value.copy(
             playState = EnginePlayState.BUFFERING,

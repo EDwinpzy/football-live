@@ -90,7 +90,7 @@ class LiveViewModel : ViewModel() {
 
     init {
         // v1.10（低端机秒开）：先恢复磁盘快照立即上屏——冷启动链路
-        //（python 后端 2~5s + yoozb 冷抓 20s+）不再白屏转圈；后台 refresh 到货后替换
+        //（后端冷抓期间）不再白屏转圈；后台 refresh 到货后替换
         // v1.19 流畅度：快照读盘+JSON 解析挪 IO（旧版在 VM 构造=组合期主线程同步执行）
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             runCatching { Graph.live.matchesFromSnapshot() }.getOrNull()?.let { cached ->
@@ -186,12 +186,6 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
     // 竖屏（2026-09-07 竖屏优化）：hero 内容列/CTA/分组标题/筛选行侧距按 750 基准收窄
     val portrait = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
         android.content.res.Configuration.ORIENTATION_PORTRAIT
-    // v1.22 起播提速（2026-09-05 需求⑤）：列表就绪即后台预热正在直播比赛的 bb 源（TV 版同款）
-    androidx.compose.runtime.LaunchedEffect(ui.matches) {
-        if (ui.matches.isNotEmpty()) {
-            com.qiubo.optimaltv.Graph.live.prefetchLiveStreams(ui.matches.filter { it.isLive }.map { it.matchId })
-        }
-    }
     // v1.19 竖屏自适应：比赛卡列数（横屏公式自然=5）
     val liveCols = com.qiubo.optimaltv.ui.theme.rememberRowColumns(cardW = 320f, gap = 36f, sidePad = 86f)
 

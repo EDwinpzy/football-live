@@ -97,8 +97,8 @@ object Graph {
  *   hero 前 6 条的片源匹配（单条 12~30s、预算 60s）全塞进启动门闸，进 app 30~90s，
  *   是「进入 app 的加载界面很慢」的主根因。
  * - 现行口径（方案 A+B，用户确认接受「秒点 hero 第一条可能等片源」的取舍）：
- *   门闸只等「决定落点 + 首屏可见内容」——授权状态（决定落激活页还是主页）、
- *   IPTV 磁盘快照、目录快照、后端就绪 + home + hero 简介（0.4s 快路径）+ hero 海报；
+ *   门闸只等首屏必要内容：IPTV 磁盘快照、目录快照、后端就绪 + home + hero 简介（0.4s 快路径）+ hero 海报；
+ *   会员状态在后台独立初始化，仅供用户主动打开会员页查看，不参与内容访问判定；
  *   足球赛程/IPTV 拉新/目录刷新/影视三栏/全量封面/首屏片源匹配全部转后台补，
  *   片源预热结果仍落 detailCache/detailInfoCache，用户浏览几秒后点开大概率已命中，
  *   未命中也有详情页「正在查找片源」等待态兜底。
@@ -164,14 +164,6 @@ object AppStartup {
             try {
                 val settled = kotlinx.coroutines.withTimeoutOrNull(FULL_GATE_MS) {
                     _status.value = "正在连接服务器…"
-                    // 授权状态（门控判定依赖；DataStore 本地读，亚秒级）
-                    val lic = if (com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED) {
-                        launch {
-                            kotlinx.coroutines.withTimeoutOrNull(4_000) {
-                                com.qiubo.optimaltv.license.LicenseManager.state.first { it != null }
-                            }
-                        }
-                    } else null
                     // IPTV 频道表：init 已读磁盘快照，这里只等它上屏（拉新转后台）
                     val iptv = launch {
                         var guard = 0
@@ -189,7 +181,7 @@ object AppStartup {
                             .onFailure { OtvLog.w("首屏预载失败（进页后按需拉取）: ${it.message}") }
                     }
                     _status.value = "正在加载首屏…"
-                    listOfNotNull(lic, iptv, cat, firstScreen).joinAll()
+                    listOf(iptv, cat, firstScreen).joinAll()
                     _status.value = "即将进入…"
                     true
                 }
@@ -392,7 +384,7 @@ class App : android.app.Application(), ImageLoaderFactory {
         // 拉起 :backend 后端进程（App.onCreate 分叉内自启 python）
         BackendService.ensure(this)
         Graph.init(this)
-        // v1.17 公测版：授权管理器（内测版 LICENSE_ENABLED=false 时为空操作）
+        // 会员状态仅供用户主动访问会员/激活页面查看；授权结果不参与内容访问门控。
         com.qiubo.optimaltv.license.LicenseManager.init(this)
         // v1.18 公测版：热更新（内测版 HOTUPDATE_ENABLED=false 时为空操作）；
         // v1.20 起 check 与下载分离：check 快速结束不阻塞进 app，非强更弹窗让用户选

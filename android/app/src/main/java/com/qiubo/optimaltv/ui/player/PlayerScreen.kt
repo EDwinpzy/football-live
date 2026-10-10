@@ -109,24 +109,13 @@ import java.net.URLDecoder
  * - 影视：OK 呼出菜单（标题+meta / 中央三键组 / 进度条 / 更多钮）；BACK 隐藏菜单；
  *   菜单隐藏时两次返回退出（首次提示）；左右=±10s；更多钮或菜单键 → 右侧悬浮栏（影片信息+选集+换源+倍速+画幅）
  * - 足球直播（需求 足球#14）：无任何菜单、无比分板；唯一控件=信号源选择条
- *   （OK/菜单键呼出，左右移动、OK 切换，BACK/5s 自动隐藏）；默认源=bb（原版足球直播2）；
+ *   （OK/菜单键呼出，左右移动、OK 切换，BACK/5s 自动隐藏）；默认源=上次可用线路或服务端首条；
  *   两次返回退出（首次提示）
  * - KEEP_SCREEN_ON / 断点续播 / 看门狗换线（VM 承担）
  */
 @Composable
 fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: Long = 0L) {
     val vodId = URLDecoder.decode(vodIdArg, "UTF-8")
-    // v1.17 二重门控（公测版，L1 验签分散）：即使路由层门控被绕过，播放页自身也校验——
-    // 授权中途失效（如联网复验命中吊销降级）立即退出播放；内测版编译期剔除
-    if (com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED) {
-        androidx.compose.runtime.LaunchedEffect(Unit) {
-            com.qiubo.optimaltv.license.LicenseManager.state.collect {
-                if (it != null && !com.qiubo.optimaltv.license.LicenseManager.isPremium()) {
-                    runCatching { nav.popBackStack() }
-                }
-            }
-        }
-    }
     val vm: PlayerViewModel = viewModel(
         key = "player:$vodId:$epIndex:$resumeMs",
         factory = simpleFactory {
@@ -226,7 +215,7 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                 val kc = e.nativeKeyEvent.keyCode
                 when (kc) {
                     // 菜单键：影视=更多面板；直播=呼出/收起信号源选择条（需求 足球#14）。
-                    // 错误态也放行：bb 解码失败的盒子可经此手动换源（bb 仍是自动默认）
+                    // 错误态也放行：当前线路解码失败时仍可手动切换其他线路
                     KeyEvent.KEYCODE_MENU -> {
                         if (ui.isLive) {
                             vm.toggleSrcPicker()
@@ -383,7 +372,7 @@ private const val CTL_NAV_GROUP = "player-ctl"
 /**
  * 直播信号源选择条（需求 足球#14：直播播放器唯一控件）：
  * OK/菜单键呼出 → 焦点落当前源；左右移动、OK 切源（即时换线）；BACK 或 5s 无操作隐藏。
- * 默认源 = bb（原版足球直播2），由 bootLive 固定 index 0 起播。
+ * 默认源 = 上次仍可用的线路，否则使用服务端返回的首条线路。
  */
 @Composable
 private fun LiveSourcePicker(

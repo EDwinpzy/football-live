@@ -105,13 +105,22 @@ fun normalizeRemark(remark: String): String {
 
 // ---------- 足球直播（原版 /api/matches 等，1:1 复刻字段） ----------
 
-/** 比赛信号通道（/api/matches channels：站点每场比赛的动态线路组合）。
- *  src=请求标识（bb/plu/qqlive15..33/666…编号随时轮换）、id=专属频道数字段
- *  （qqlive 公共线为空串，后端不用）、name=站点原始命名（已剥「(无插件)」与尾部数字）。 */
+/** 比赛信号通道（/api/matches channels：该场当前可用的足球直播线路）。
+ *  src=请求标识，id=专属频道数字段，name=该赛事对应的线路显示名。 */
 data class MatchChannel(
     val src: String,
     val id: String,
     val name: String,
+)
+
+/** A football stream returned by the backend after resolving and probing one source. */
+data class LiveStreamSource(
+    val source: String,
+    val name: String,
+    /** Playback-ready URL wrapped by the local relay. */
+    val playbackUrl: String,
+    /** Source-specific page referer retained for renewal requests. */
+    val referer: String,
 )
 
 data class MatchItem(
@@ -126,7 +135,7 @@ data class MatchItem(
     val minute: String = "",
     val homeScore: String = "",   // score.h，空 = 无比分
     val awayScore: String = "",
-    val channels: List<MatchChannel> = emptyList(),   // 该场动态信号线路（空=旧数据/快照，回退默认源表）
+    val channels: List<MatchChannel> = emptyList(),   // 该场动态可用信号线路（空=无可选线路）
 ) {
     /** 上游旧快照曾写 ended；统一由模型归一，避免卡片/点击链路各自判断出不同状态。 */
     val isLive: Boolean get() = status.trim().equals("live", ignoreCase = true)

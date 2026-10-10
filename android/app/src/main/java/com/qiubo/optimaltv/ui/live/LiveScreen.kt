@@ -100,7 +100,7 @@ class LiveViewModel : ViewModel() {
 
     init {
         // v1.10（2026-08-31 低端机秒开）：先恢复磁盘快照立即上屏——冷启动链路
-        // （python 后端 2~5s + yoozb 冷抓 20s+）不再白屏转圈；后台 refresh 到货后替换。
+        // （后端冷抓期间）不再白屏转圈；后台 refresh 到货后替换。
         // v1.19 流畅度：快照读盘+JSON 解析挪 IO（旧版在 VM 构造=组合期主线程同步执行）
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             runCatching { Graph.live.matchesFromSnapshot() }.getOrNull()?.let { cached ->
@@ -191,14 +191,6 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
     val s = rememberUiScale()
     LaunchedEffect(refreshEpoch) {
         if (refreshEpoch > 0L) vm.refresh(silent = true)
-    }
-    // v1.22 起播提速（2026-09-05 需求⑤）：列表就绪即后台预热正在直播比赛的 bb 源
-    //（命中后端 300s 成功缓存）——点卡进直播时解析秒回，省去 1-2s+ 的
-    //「频道页+播放器页+解密」链路等待
-    LaunchedEffect(ui.matches) {
-        if (ui.matches.isNotEmpty()) {
-            Graph.live.prefetchLiveStreams(ui.matches.filter { it.isLive }.map { it.matchId })
-        }
     }
     // 返回落焦（需求 影视#6-2）：从播放页返回时回到上次聚焦的比赛卡/hero 按钮
     val returnKey = remember { ReturnFocus.take("live") }

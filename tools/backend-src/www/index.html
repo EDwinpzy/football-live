@@ -8,7 +8,7 @@
 <title>My TV</title>
 <link rel="icon" href="assets/logo.png">
 <link rel="apple-touch-icon" href="assets/logo.png">
-<link rel="stylesheet" href="style.css?v=131">
+<link rel="stylesheet" href="style.css?v=133">
 </head>
 <body>
 
@@ -82,9 +82,7 @@
   <div class="fav-body">
     <div class="fav-title-row">
       <div class="fav-sec-title">我的收藏</div>
-      <!-- 会员信息行：与 App `MemberInlineInfo` 同构——状态点 + 「状态 · 套餐/到期/剩余」，
-           无背景框；行尾「续费」胶囊开会员弹窗（App 同位置也是「续费」入口）。
-           未激活时本行整体隐藏，与 App「未激活走统一会员页」一致。 -->
+      <!-- 会员兑换为可选入口，不影响播放；已激活时显示状态和续费，未激活时显示「会员 / 激活」。 -->
       <div class="member-inline" id="memberInline" hidden></div>
       <!-- 版本行：桌面版显示当前热更版本与「检查更新」；网页版隐藏（网页随服务器更新）。
            胶囊与 member-inline 同层级，不加背景框。 -->
@@ -243,20 +241,6 @@
   </div>
 </div>
 
-<!-- 会员付费墙（App PaywallScreen/ActivateScreen 网页对应物：播放门控） -->
-<div id="paywall" hidden>
-  <div class="pw-card">
-    <div class="pw-title">My TV · 会员服务</div>
-    <div class="pw-sub" id="pwSub">开通会员后可观看全部影视与直播内容</div>
-    <div class="pw-form">
-      <input id="pwInput" placeholder="卡密 OTV-XXXXX-XXXXX" autocomplete="off" spellcheck="false">
-      <button id="pwBtn">激活</button>
-    </div>
-    <div class="pw-msg" id="pwMsg"></div>
-    <button class="pw-close" id="pwClose">暂不开通</button>
-  </div>
-</div>
-
 <!-- 会员续费 / 兑换弹窗（2026-09-19 需求④：网页版顶部新增续费窗口） -->
 <div id="memberModal" hidden>
   <div class="mm-card">
@@ -298,6 +282,6 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js" defer onerror="window.__hlsFail=1"></script>
-<script src="app.js?v=134" defer></script>
+<script src="app.js?v=136" defer></script>
 </body>
 </html>

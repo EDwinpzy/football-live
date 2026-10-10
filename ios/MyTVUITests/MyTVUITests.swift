@@ -91,7 +91,7 @@ final class MyTVUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
-    func testFixtureUnlicensedEpisodeShowsPlayerGateWithoutStreamRequest() {
+    func testFixturePlaybackCanResolveWithoutActivation() {
         let app = fixtureApp()
         app.launch()
 
@@ -105,15 +105,15 @@ final class MyTVUITests: XCTestCase {
         XCTAssertTrue(episode.waitForExistence(timeout: 10))
         episode.tap()
 
-        let licenseGate = app.staticTexts["播放需要激活"]
-        XCTAssertTrue(licenseGate.waitForExistence(timeout: 10), "An unlicensed fixture playback route must stop at the activation gate.")
-        XCTAssertTrue(licenseGate.isHittable, "The activation gate should be visible to the user.")
-        XCTAssertFalse(app.descendants(matching: .any)["native-video-player"].exists, "The activation gate must appear before AVPlayer is created.")
-        attachScreenshot(of: app, named: "fixture-player-license-gate")
+        assertFixturePlaybackError(app, status: 503)
+        XCTAssertFalse(app.staticTexts["播放需要激活"].exists, "Playback must not show an activation gate for an unactivated user.")
+        XCTAssertTrue(app.staticTexts["高清线路"].isHittable, "The player should reach normal playback resolution without activation.")
+        XCTAssertTrue(app.buttons["选择线路重试"].isHittable, "Playback controls should remain available after a resolver error.")
+        attachScreenshot(of: app, named: "fixture-player-without-activation")
     }
 
     func testFixtureSingleSourceRetryOpensPickerAndRetriesSameEpisode() {
-        let app = fixturePlaybackApp()
+        let app = fixtureApp()
         app.launch()
 
         let secondCard = app.buttons["media-card-fixture-movie-2"]
@@ -151,7 +151,7 @@ final class MyTVUITests: XCTestCase {
     }
 
     func testFixtureMultipleSourcesCanSwitchAndReopenPickerAfterFailure() {
-        let app = fixturePlaybackApp()
+        let app = fixtureApp()
         app.launch()
 
         let firstCard = app.buttons["media-card-fixture-movie-1"]
@@ -194,7 +194,7 @@ final class MyTVUITests: XCTestCase {
     }
 
     func testFixtureEmptyRefreshShowsErrorAndKeepsPreviousSourcePickerReachable() {
-        let app = fixturePlaybackApp()
+        let app = fixtureApp()
         app.launch()
 
         let card = app.buttons["media-card-fixture-movie-3"]
@@ -227,12 +227,6 @@ final class MyTVUITests: XCTestCase {
     private func fixtureApp() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments.append("--ui-test-fixtures")
-        return app
-    }
-
-    private func fixturePlaybackApp() -> XCUIApplication {
-        let app = fixtureApp()
-        app.launchArguments.append("--ui-test-playback-access")
         return app
     }
 

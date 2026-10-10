@@ -1,31 +1,22 @@
 package com.qiubo.optimaltv.ui.paywall
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.Dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.navigation.NavController
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
-import com.qiubo.optimaltv.BuildConfig
 import com.qiubo.optimaltv.license.LicenseManager
 import com.qiubo.optimaltv.license.LicenseState
-import com.qiubo.optimaltv.ui.theme.OtvColors
 
 /**
  * v1.17 会员/卡密付费的跨端共享层（TV 版与移动版字节级一致，tools/sync_shared.py 监管）：
- * 套餐目录、发卡链接、二维码绘制、状态行文案、统一播放入口门控。
+ * 套餐目录、发卡链接、二维码绘制与状态行文案。
  * 平台差异（焦点/触控 UI）留在各自的 PaywallScreen.kt / ActivateScreen.kt。
  */
 
@@ -108,25 +99,5 @@ fun statusLine(st: LicenseState?): String = when {
             d.expiryAt == null -> "终身会员"
             else -> "会员有效 · 剩余 ${LicenseManager.daysLeft()} 天"
         }
-    }
-}
-
-/**
- * 统一播放入口门控（方案 §4.5 全量门控收口点）：
- * 公测版未激活/已过期/已封禁 → 渲染本端会员页（不进播放页）；激活成功自动放行。
- * 内测版（LICENSE_ENABLED=false）直接透传，零行为差异。
- */
-@Composable
-fun LicensePlayerGate(nav: NavController, content: @Composable () -> Unit) {
-    if (!BuildConfig.LICENSE_ENABLED) {
-        content()
-        return
-    }
-    val st by LicenseManager.state.collectAsStateWithLifecycle()
-    LaunchedEffect(st) { LicenseManager.requestReverify() }
-    when {
-        st == null -> Box(Modifier.fillMaxSize().background(OtvColors.Bg))   // 状态加载中（启动门闸后瞬时）
-        LicenseManager.isPremium() -> content()
-        else -> PaywallScreen(nav)
     }
 }

@@ -122,7 +122,7 @@ object OkKeyBus {
  * - 电视#7：侧边栏记住上次浏览的分组（rememberSaveable，不拽回播放分组）。
  *
  * 健壮性与播放链路与 TV 版一致：bootIptv 全链路（UrlGuard/看门狗/三段回退）、
- * 起播失败 12s 自动跳台（3 次上限）、公测版授权失效立即停播、KEEP_SCREEN_ON、
+ * 起播失败 12s 自动跳台（3 次上限）、KEEP_SCREEN_ON、
  * 后台暂停/回来自动恢复。竖屏（总体#2）：侧边栏宽度上限 86% 屏宽、菜单字号自适应。
  */
 @Composable
@@ -142,16 +142,6 @@ fun TvScreen(nav: NavController) {
         },
     )
     val vmUi by vm.ui.collectAsStateWithLifecycle()
-
-    // v1.17 二重门控（公测版）：电视页为内嵌播放不走 player 路由——授权中途失效
-    //（联网复验命中吊销降级/过期）立即停播；内测版编译期剔除
-    if (com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED) {
-        LaunchedEffect(Unit) {
-            com.qiubo.optimaltv.license.LicenseManager.state.collect {
-                if (it != null && !com.qiubo.optimaltv.license.LicenseManager.isPremium()) vm.onHostPause()
-            }
-        }
-    }
 
     // KEEP_SCREEN_ON：直播场景防息屏（对齐播放页）
     val activity = androidx.compose.ui.platform.LocalContext.current as android.app.Activity

@@ -4,7 +4,6 @@ import SwiftUI
 
 struct PlaybackView: View {
     @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var license: LicenseStore
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dismiss) private var dismiss
 
@@ -13,7 +12,6 @@ struct PlaybackView: View {
     @State private var player: AVPlayer?
     @State private var isLoading = true
     @State private var errorMessage: String?
-    @State private var isLocked = false
     @State private var requestGeneration = 0
     @State private var availableSources: [MediaSource]
     @State private var selectedSource: MediaSource?
@@ -44,7 +42,7 @@ struct PlaybackView: View {
             } else {
                 ZStack {
                     Color.black
-                    if isLoading && !isLocked {
+                    if isLoading {
                         VStack(spacing: 12) {
                             ProgressView().tint(MyTVStyle.accent)
                             Text("正在连接播放线路…")
@@ -56,15 +54,6 @@ struct PlaybackView: View {
                                     .accessibilityIdentifier("player-source-picker-loading")
                             }
                         }
-                    } else if isLocked {
-                        ScreenStateView(
-                            symbol: "lock.fill",
-                            title: "播放需要激活",
-                            message: "请先在设置页完成自用版激活，再开始播放。",
-                            actionTitle: "返回",
-                            action: { dismiss() }
-                        )
-                        .accessibilityIdentifier("player-license-gate")
                     } else if let errorMessage {
                         ScreenStateView(
                             symbol: "play.slash.fill",
@@ -142,23 +131,8 @@ struct PlaybackView: View {
                   stalledItem === player?.currentItem else { return }
             scheduleStallCheck(for: stalledItem, generation: requestGeneration, after: 4_000_000_000)
         }
-        .onChange(of: license.isActive) { active in
-            guard !active else { return }
-            requestGeneration += 1
-            resolutionTask?.cancel()
-            resolutionTask = nil
-            stallCheckTask?.cancel()
-            stallCheckTask = nil
-            isSourcePickerPresented = false
-            relayFallbackURL = nil
-            isDirectAttempt = false
-            tearDownPlayer()
-            isLoading = false
-            errorMessage = nil
-            isLocked = true
-        }
         .toolbar {
-            if hasSourcePicker && !isLocked {
+            if hasSourcePicker {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("线路/集数") { isSourcePickerPresented = true }
                         .accessibilityIdentifier("player-source-picker")
@@ -186,16 +160,10 @@ struct PlaybackView: View {
         tearDownPlayer()
         if !keepsEpisode { savedPlaybackTime = 0 }
         errorMessage = nil
-        isLocked = false
         relayFallbackURL = nil
         isDirectAttempt = false
         relayFallbackAttempted = false
 
-        guard license.isActive else {
-            isLoading = false
-            isLocked = true
-            return
-        }
         guard let client = settings.client else {
             isLoading = false
             errorMessage = "服务地址无效，请返回设置页检查地址。"
@@ -260,8 +228,8 @@ struct PlaybackView: View {
                         upstreamURL = stream.url
                     }
                 } else if let match = route.footballMatch,
-                          let sourceIndex = route.footballSourceIndex {
-                    let stream = try await client.matchStream(match: match, sourceIndex: sourceIndex)
+                          let footballStream = route.footballStream {
+                    let stream = try await client.matchStream(match: match, source: footballStream)
                     try Task.checkCancellation()
                     upstreamURL = stream.url
                 } else {
@@ -269,11 +237,6 @@ struct PlaybackView: View {
                 }
                 try Task.checkCancellation()
                 guard generation == requestGeneration else { return }
-                guard license.isActive else {
-                    isLoading = false
-                    isLocked = true
-                    return
-                }
                 installPlayer(url: upstreamURL, generation: generation, resumeTime: resumeTime)
                 if let item = route.item {
                     library.recordWatching(item: item)
@@ -291,11 +254,6 @@ struct PlaybackView: View {
     @MainActor
     private func installPlayer(url: URL, generation: Int, resumeTime: TimeInterval = 0) {
         guard generation == requestGeneration else { return }
-        guard license.isActive else {
-            isLoading = false
-            isLocked = true
-            return
-        }
         let item = AVPlayerItem(url: url)
         let newPlayer = AVPlayer(playerItem: item)
         newPlayer.automaticallyWaitsToMinimizeStalling = true
@@ -321,12 +279,6 @@ struct PlaybackView: View {
         guard failedItem === player?.currentItem else { return }
         stallCheckTask?.cancel()
         stallCheckTask = nil
-        guard license.isActive else {
-            tearDownPlayer()
-            isLoading = false
-            isLocked = true
-            return
-        }
         if isDirectAttempt,
            !relayFallbackAttempted,
            let relayFallbackURL {
@@ -493,6 +445,7 @@ struct PlaybackView: View {
     }
 
     private var playerDescription: String {
+        if let footballStream = route.footballStream { return footballStream.name }
         if route.footballMatch != nil { return "足球直播" }
         if route.channelURL != nil { return "IPTV 直播" }
         return selectedSource?.name ?? "影视播放"

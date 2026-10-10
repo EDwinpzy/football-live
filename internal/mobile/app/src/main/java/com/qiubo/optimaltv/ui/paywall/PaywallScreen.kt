@@ -42,7 +42,7 @@ import com.qiubo.optimaltv.ui.theme.sxs
  * v1.18 会员页（视觉与 TV 版 1:1 同款，方案 §4.4）：
  * 月/季/年/终身四张 Apple TV 风格套餐卡；点选卡片右侧出购买二维码
  * （ZXing 生成，指向发卡平台商品页，手机扫码付款自动收货）；
- * 底部「输入卡密激活」入口。复用为播放门控拦截页（PaywallShared.LicensePlayerGate）。
+ * 底部「输入卡密激活」入口。仅由用户主动打开，授权状态不拦截主功能。
  * 套餐目录/二维码/状态行在 PaywallShared.kt（与 TV 版共享同步）。
  * 触控差异：点选卡片选中（TV 版为 D-pad 聚焦），选中态 = 白底反色卡。
  *

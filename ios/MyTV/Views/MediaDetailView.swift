@@ -225,7 +225,7 @@ struct PlaybackRoute: Hashable, Identifiable {
     let availableSources: [MediaSource]
     let channelURL: String?
     let footballMatch: FootballMatch?
-    let footballSourceIndex: Int?
+    let footballStream: FootballStreamReference?
 
     init(
         item: MediaItem,
@@ -243,7 +243,7 @@ struct PlaybackRoute: Hashable, Identifiable {
         self.availableSources = availableSources.isEmpty ? [source] : availableSources
         self.channelURL = nil
         self.footballMatch = nil
-        self.footballSourceIndex = nil
+        self.footballStream = nil
     }
 
     init(channel: TVChannel, streamURL: String) {
@@ -256,11 +256,11 @@ struct PlaybackRoute: Hashable, Identifiable {
         self.availableSources = []
         self.channelURL = streamURL
         self.footballMatch = nil
-        self.footballSourceIndex = nil
+        self.footballStream = nil
     }
 
-    init(footballMatch: FootballMatch, sourceIndex: Int) {
-        self.id = "football-\(footballMatch.id)-\(sourceIndex)"
+    init(footballMatch: FootballMatch, stream: FootballStreamReference) {
+        self.id = "football-\(footballMatch.id)-\(stream.id)"
         self.title = "\(footballMatch.home) vs \(footballMatch.away)"
         self.item = nil
         self.detailRef = nil
@@ -269,6 +269,6 @@ struct PlaybackRoute: Hashable, Identifiable {
         self.availableSources = []
         self.channelURL = nil
         self.footballMatch = footballMatch
-        self.footballSourceIndex = sourceIndex
+        self.footballStream = stream
     }
 }

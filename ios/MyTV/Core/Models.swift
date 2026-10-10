@@ -157,11 +157,17 @@ public struct FootballStreamReference: Identifiable, Codable, Hashable {
     public var id: String
     public var src: String
     public var name: String
+    public var player: String
+    public var url: URL
+    public var referer: String
 
-    public init(id: String, src: String, name: String) {
+    public init(id: String, src: String, name: String, player: String, url: URL, referer: String = "") {
         self.id = id
         self.src = src
         self.name = name
+        self.player = player
+        self.url = url
+        self.referer = referer
     }
 }
 
@@ -175,7 +181,6 @@ public struct FootballMatch: Identifiable, Codable, Hashable {
     public var status: String
     public var score: String
     public var minute: String
-    public var streams: [FootballStreamReference]
 
     public init(
         id: String,
@@ -186,8 +191,7 @@ public struct FootballMatch: Identifiable, Codable, Hashable {
         time: String,
         status: String,
         score: String = "",
-        minute: String = "",
-        streams: [FootballStreamReference]
+        minute: String = ""
     ) {
         self.id = id
         self.title = title
@@ -198,7 +202,6 @@ public struct FootballMatch: Identifiable, Codable, Hashable {
         self.status = status
         self.score = score
         self.minute = minute
-        self.streams = streams
     }
 }
 

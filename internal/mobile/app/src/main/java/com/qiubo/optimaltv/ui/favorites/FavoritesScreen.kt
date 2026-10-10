@@ -108,18 +108,6 @@ fun FavoritesScreen(nav: NavController) {
         cat?.dedupedItems?.filter { it.id in ids }.orEmpty()
     }
 
-    // 需求②（2026-09-04）：未开通会员 = 「我的」页与会员页统一——整页复用
-    // PaywallScreen（自带左上返回按钮/标签栏/固定底部输码入口），激活成功授权状态
-    // 变化自动切回常规「我的」页（一行会员小字 + 收藏/历史）
-    val licState = if (com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED) {
-        com.qiubo.optimaltv.license.LicenseManager.state.collectAsStateWithLifecycle()
-    } else null
-    val notActivated = licState?.value is com.qiubo.optimaltv.license.LicenseState.NotActivated
-    if (notActivated) {
-        com.qiubo.optimaltv.ui.paywall.PaywallScreen(nav, tabKey = "favorites")
-        return
-    }
-
     Box(Modifier.fillMaxSize().background(OtvColors.Bg)) {
         // 全页单 LazyColumn：所有内容随页滚动（TabBar 悬浮顶层，需求 我的#5）
         // 竖屏：底部固定会员条让位（需求⑥，条高约 100 设计px + 底部系统栏）
@@ -139,25 +127,23 @@ fun FavoritesScreen(nav: NavController) {
                 portrait = favPortrait,
             )
         }
-        if (com.qiubo.optimaltv.BuildConfig.LICENSE_ENABLED) {
-            if (favPortrait) {
-                // 需求⑥（2026-09-12）：竖屏会员信息固定底部条——不随页面滚动、不与顶部标签栏重合
-                Box(Modifier.align(Alignment.BottomCenter)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Color(0xF5141418))
-                            .navigationBarsPadding()
-                            .padding(horizontal = 40f.sx(s), vertical = 16f.sx(s)),
-                    ) {
-                        MemberTopRightLine(s = s, onOpen = { nav.navigate("paywall") }, docked = true)
-                    }
+        if (favPortrait) {
+            // 竖屏会员信息固定底部条，保留用户主动进入会员/激活页面的入口。
+            Box(Modifier.align(Alignment.BottomCenter)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xF5141418))
+                        .navigationBarsPadding()
+                        .padding(horizontal = 40f.sx(s), vertical = 16f.sx(s)),
+                ) {
+                    MemberTopRightLine(s = s, onOpen = { nav.navigate("paywall") }, docked = true)
                 }
-            } else {
-                Box(Modifier.align(Alignment.TopEnd)) {
-                    MemberTopRightLine(s = s, hidden = chromeGone, onOpen = { nav.navigate("paywall") })
-                }
+            }
+        } else {
+            Box(Modifier.align(Alignment.TopEnd)) {
+                MemberTopRightLine(s = s, hidden = chromeGone, onOpen = { nav.navigate("paywall") })
             }
         }
         MainTabBar(
@@ -297,18 +283,21 @@ private fun HistoryVodCard(
 /**
  * 需求③（2026-09-04）：我的页顶部会员信息——一行小字（状态点+状态/套餐/到期/剩余），
  * 无背景框；轻点进会员页（续费/兑换）。替代 v1.20 的右上角卡片小块。
- * 仅已激活态渲染（未激活走统一会员页）。
+ * 未开通时也显示激活入口，轻点可主动打开会员/激活页。
  * 需求⑥（2026-09-12）：竖屏 docked=true 由调用方固定到底部条内（去顶栏同款定位/下潜动画）。
  */
 @Composable
 fun MemberTopRightLine(s: Float, hidden: Boolean = false, onOpen: () -> Unit, docked: Boolean = false) {
     val st by com.qiubo.optimaltv.license.LicenseManager.state.collectAsStateWithLifecycle()
     val d = (st as? com.qiubo.optimaltv.license.LicenseState.Activated)?.data
+    val activateAction = st is com.qiubo.optimaltv.license.LicenseState.NotActivated
     val status: String
     val statusColor: Color
     val infoText: String
     when {
-        d == null -> { status = "加载中…"; statusColor = OtvColors.White50; infoText = "" }
+        st == null -> { status = "加载中…"; statusColor = OtvColors.White50; infoText = "" }
+        activateAction -> { status = "尚未开通"; statusColor = OtvColors.White50; infoText = "输入卡密可激活" }
+        d == null -> { status = "会员状态暂不可用"; statusColor = OtvColors.White50; infoText = "" }
         d.expiryAt != null && com.qiubo.optimaltv.license.LicenseManager.effNow() >= d.expiryAt -> {
             status = "已过期"
             statusColor = Color(0xFFFF453A)
@@ -365,10 +354,10 @@ fun MemberTopRightLine(s: Float, hidden: Boolean = false, onOpen: () -> Unit, do
             fontSize = 20f.sxs(s),
             maxLines = 1,
         )
-        // 用户需求（2026-09-05）：行尾带下划线的「续费」入口（整行轻点同进会员页）
+        // 行尾显示与会员状态对应的激活/续费入口（整行轻点同进会员页）
         Spacer(Modifier.width(12f.sx(s)))
         Text(
-            "续费",
+            if (activateAction) "激活" else "续费",
             color = OtvColors.AccentBlue,
             fontSize = 20f.sxs(s),
             fontWeight = FontWeight.Medium,
