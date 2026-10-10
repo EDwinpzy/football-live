@@ -2,6 +2,7 @@ package com.qiubo.optimaltv.ui.home
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HomeLibraryUiPolicyTest {
@@ -43,6 +44,17 @@ class HomeLibraryUiPolicyTest {
     @Test
     fun `影视片库固定为热门更新豆瓣高分三页`() {
         assertEquals(listOf("最近热门", "最近更新", "豆瓣高分"), HomeLibraryUiPolicy.PAGE_TITLES)
+    }
+
+    @Test
+    fun `TV分类滚轮首尾循环并突出中心选项`() {
+        assertEquals(4, HomeLibraryUiPolicy.moveCategorySelection(0, -1, 5))
+        assertEquals(0, HomeLibraryUiPolicy.moveCategorySelection(4, 1, 5))
+        assertEquals(4, HomeLibraryUiPolicy.categoryWheelIndex(-1, 5))
+        assertEquals(1.30f, HomeLibraryUiPolicy.categoryWheelScale(0f), 0.001f)
+        assertTrue(HomeLibraryUiPolicy.categoryWheelScale(0f) > HomeLibraryUiPolicy.categoryWheelScale(1f))
+        assertTrue(HomeLibraryUiPolicy.categoryWheelAlpha(0f) > HomeLibraryUiPolicy.categoryWheelAlpha(1f))
+        assertTrue(HomeLibraryUiPolicy.categoryWheelAlpha(1f) > HomeLibraryUiPolicy.categoryWheelAlpha(2f))
     }
 
     @Test

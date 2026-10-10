@@ -122,6 +122,19 @@ private const val VOD_HERO_BTN_BOTTOM = 60f
 /** 影视首页的 TV 分类与三页片库规则。 */
 internal object HomeLibraryUiPolicy {
     val PAGE_TITLES = listOf("最近热门", "最近更新", "豆瓣高分")
+    const val CATEGORY_WHEEL_SELECTED_SCALE = 1.30f
+
+    fun moveCategorySelection(index: Int, delta: Int, count: Int): Int =
+        if (count <= 0) 0 else Math.floorMod(index + delta, count)
+
+    fun categoryWheelIndex(position: Int, count: Int): Int =
+        if (count <= 0) 0 else Math.floorMod(position, count)
+
+    fun categoryWheelScale(distance: Float): Float =
+        (CATEGORY_WHEEL_SELECTED_SCALE - kotlin.math.abs(distance) * 0.28f).coerceAtLeast(0.72f)
+
+    fun categoryWheelAlpha(distance: Float): Float =
+        (1f - kotlin.math.abs(distance) * 0.27f).coerceIn(0f, 1f)
 
     fun sourceSectionName(page: Int, available: List<String>): String? {
         val aliases = when (page) {
@@ -201,19 +214,13 @@ fun VodScreen(nav: NavController) {
     val vodListState = rememberLazyListState()
     val backScope = androidx.compose.runtime.rememberCoroutineScope()
     var tabFocused by remember { mutableStateOf(false) }
+    val libraryWheelVisible by remember {
+        derivedStateOf { vodListState.firstVisibleItemIndex >= 3 }
+    }
     val libraryKeepsChromeHidden by remember {
         derivedStateOf { vodListState.firstVisibleItemIndex >= 3 && !tabFocused }
     }
     var hint by remember { mutableStateOf<String?>(null) }
-    // 需求②：分类 chip 行「从任何地方进入都回上次选中项」的行内持焦守卫——
-    // gen 代际计数消除 LOST/GAINED 乱序歧义（行内移动时旧 chip 的 LOST 先到，
-    // 150ms 内无本行新事件才认定焦点真离开本行）。
-    var chipRowHasFocus by remember { mutableStateOf(false) }
-    var chipRowGen by remember { mutableIntStateOf(0) }
-    // 2026-09-19 跳行修复：分类 chip DOWN 挂起落点（板块未就绪时消费下键+记账，到账定向落首卡）
-    var pendingLibDown by remember { mutableStateOf(false) }
-    var pendingLibDownAt by remember { mutableStateOf(0L) }
-    val chipScope = androidx.compose.runtime.rememberCoroutineScope()
     LaunchedEffect(hint) { if (hint != null) { kotlinx.coroutines.delay(2500); hint = null } }
     val exitApp = com.qiubo.optimaltv.ui.components.rememberDoubleBackExit { hint = it }
     // 2026-09-05（用户反馈）：内容顶行 UP 直达顶部 tab 栏——此前 hero「立即播放」是
@@ -250,21 +257,22 @@ fun VodScreen(nav: NavController) {
                 val categories = remember(cat) {
                     HomeLibraryUiPolicy.orderedCategories(cat.categories.map { it.id to it.name }) + ("" to "全部 ›")
                 }
-                // v1.17 需求：进页恢复上次选中的分类 chip（按分类 ID 持久化），不回「电影」
+                // 进页恢复上次选中的分类（按分类 ID 持久化），不回「电影」。
                 var catSel by remember(cat) { mutableIntStateOf(0) }
-                val selectedCatChipFocus = remember { FocusRequester() }
+                var categoryWheelTurn by remember(cat) { mutableIntStateOf(0) }
+                val categoryWheelFocus = remember { FocusRequester() }
                 LaunchedEffect(cat) {
                     val saved = runCatching { Graph.settings.vodLastCat() }.getOrNull()
                     if (!saved.isNullOrBlank()) {
-                        categories.indexOfFirst { it.first == saved }.takeIf { it >= 0 }?.let { catSel = it }
+                        categories.indexOfFirst { it.first == saved }.takeIf { it >= 0 }?.let {
+                            catSel = it
+                            categoryWheelTurn = it
+                        }
                     }
                 }
                 // 分类 tab 固定三块，以好好看频道页的当前分类三栏目为主；「全部 ›」独立跳转 all 页。
                 val selCatId = categories.getOrNull(catSel)?.first.orEmpty()
                 var sectionLoading by remember(selCatId) { mutableStateOf(true) }
-                LaunchedEffect(selCatId) {
-                    try { Graph.repo.channelSections(selCatId) } finally { sectionLoading = false }
-                }
                 /* 分类 id 现为 `douban:movie` 形态；用与 libBlocks 同一套解析，
                    否则恒为 null → 三栏恒空（影视 tab 一直「暂无内容」）。 */
                 val selCid = com.qiubo.optimaltv.data.repo.VodRepository.categoryCid(selCatId)
@@ -273,6 +281,17 @@ fun VodScreen(nav: NavController) {
                  * 甩到「最新上线」（用户看到按一下下键就滚过最近热门）。 */
                 val doubanSections by Graph.repo.sectionsFlow.collectAsStateWithLifecycle()
                 val sections = if (selCid == null) emptyList() else doubanSections[selCid].orEmpty()
+                LaunchedEffect(selCatId) {
+                    try {
+                        // A category with no usable cached rows waits briefly so fast D-pad repeats
+                        // issue one request for the category where the user stops. Selection itself
+                        // updates immediately; categories with visible cache rows still check the repo TTL.
+                        if (sections.none { it.items.isNotEmpty() }) delay(180)
+                        Graph.repo.channelSections(selCatId)
+                    } finally {
+                        sectionLoading = false
+                    }
+                }
                 val sectionPages = remember(sections) {
                     val available = sections.map { it.name }
                     HomeLibraryUiPolicy.PAGE_TITLES.mapIndexed { index, title ->
@@ -295,6 +314,18 @@ fun VodScreen(nav: NavController) {
                 }
                 val pageScope = androidx.compose.runtime.rememberCoroutineScope()
                 val focusRequests = remember { LibraryFocusRequests() }
+
+                fun requestCategoryWheelFocus() {
+                    pageScope.launch {
+                        if (vodListState.firstVisibleItemIndex < 3) {
+                            runCatching { vodListState.animateScrollToItem(3) }
+                        }
+                        repeat(24) {
+                            if (runCatching { categoryWheelFocus.requestFocus() }.isSuccess) return@launch
+                            withFrameNanos { }
+                        }
+                    }
+                }
 
                 LaunchedEffect(selCid) {
                     focusRequests.job?.cancel()
@@ -405,51 +436,28 @@ fun VodScreen(nav: NavController) {
                 }
                 val showLibLoading = sectionLoading && sections.isEmpty()
 
-                // 2026-09-19 跳行修复（用户报障「电视剧→动漫后往下光标乱跑」）：
-                // 分类 chip 的 DOWN 不再交给引擎几何+滚动找回——
-                // ① 切分类后板块未就绪时 chips 下方无可聚焦目标，滚动找回会把整页下滚、
-                //    chip 离场销毁，焦点靠陈旧锚点随机自愈（跳行/光标消失的根源）；
-                // ② 已就绪时「lib-sec-板块名-rN」key 跨分类同名，卡片节点原位复用、
-                //    位置不变不重新上报 → stamp 冻结在上次切换前，scroll-reveal 的
-                //    时间戳守卫（t.stamp >= stepStamp）把活着的合法首行卡误判为尸体，
-                //    连滚 3 步超调 2~3 行才落点（实测日志：单次 DOWN 滚 ~1300px）。
-                // 改为一律显式定向：有内容 → 直接落首个非空板块首卡；无内容 → 消费
-                // 按键并挂起，板块到账后由下述 effect 定向落下。
-                val firstLibraryPage = sectionPages.indexOfFirst { it.second?.items?.isNotEmpty() == true }
-                val firstLibrarySection = sectionPages.getOrNull(firstLibraryPage)?.second
-                val libFirstCard = firstLibrarySection?.items?.firstOrNull()
-                /** chip DOWN 定向：滚到首板块标题（首行随之入视口）→ 落首卡（重试覆盖组合时延） */
-                fun dropToLibFirstCard() {
-                    if (libFirstCard == null) return
-                    pageScope.launch {
-                        runCatching { vodListState.scrollToItem(3) }   // 0 hero / 1 history / 2 chips / 3 三页片库
-                        sectionPagerState.animateScrollToPage(firstLibraryPage)
-                        requestLibraryFocus(firstLibraryPage, 0, 0)
-                    }
-                }
-                // 2026-09-22 跳行修复（用户报障「最近观看 DOWN 跳过标签栏直达最近热门」）：
-                // 历史竖版卡高 352 → 几何层容差 176px，chips 与首板块卡片 gap 差 ~164px
-                // 被并成同层，x 中心决胜直落卡片。与 hero/chips 的 DOWN 同口径：显式
-                // 定向到当前选中分类 chip（requestFocus 命中 active 项不触发 hover 切换）。
-                fun historyDownToChip() {
-                    chipScope.launch {
-                        repeat(20) {
-                            if (runCatching { selectedCatChipFocus.requestFocus() }.isSuccess) return@launch
-                            runCatching { vodListState.scrollBy(180f) }   // chips 行通常已组合，兜底露出
-                            delay(60)
+                val moveCategory: (Int) -> Unit = { delta ->
+                    val next = HomeLibraryUiPolicy.moveCategorySelection(catSel, delta, categories.size)
+                    if (next != catSel) {
+                        catSel = next
+                        categoryWheelTurn += delta
+                        categories.getOrNull(next)?.first?.takeIf { it.isNotBlank() }?.let { id ->
+                            Graph.appScope.launch { runCatching { Graph.settings.rememberVodLastCat(id) } }
                         }
                     }
                 }
-                // 板块未就绪时 chip DOWN 被消费并挂起；到账后定向落下（焦点仍在分类行 + 10s 内才落）
-                LaunchedEffect(libFirstCard, pendingLibDown) {
-                    if (!pendingLibDown) return@LaunchedEffect
-                    if (libFirstCard == null) return@LaunchedEffect
-                    pendingLibDown = false
-                    if (!chipRowHasFocus) return@LaunchedEffect
-                    if (android.os.SystemClock.uptimeMillis() - pendingLibDownAt > 10_000L) return@LaunchedEffect
-                    dropToLibFirstCard()
+                fun exitCategoryWheel() {
+                    pageScope.launch {
+                        val targetIndex = if (history.isNotEmpty()) 1 else 0
+                        val target = if (history.isNotEmpty()) firstHistoryFocus else heroPlayFocus
+                        runCatching { vodListState.animateScrollToItem(targetIndex) }
+                        repeat(24) {
+                            if (runCatching { target.requestFocus() }.isSuccess) return@launch
+                            withFrameNanos { }
+                        }
+                    }
                 }
-                // 整页单 LazyColumn：hero 海报带（随内容滚动）→ 最近观看 → 分类与三页片库。
+                // 整页单 LazyColumn：首屏 hero + 最近观看，其后为固定三页片库。
                 // v1.13：方向导航统一 OtvNav 引擎——容器仅声明滚动挂靠（未组合行的滚动找回）
                 val vodScroll = remember(vodListState) { lazyNavContainer(vodListState) }
                 ProvideNavScrolls(vertical = vodScroll) {
@@ -461,8 +469,8 @@ fun VodScreen(nav: NavController) {
                 ) {
                     item(key = "hero") {
                         VodHeroBand(
-                            nav, heroesTop, s, heroIdxTop, heroPlayFocus, tabFocus,
-                            selectedCatChipFocus = selectedCatChipFocus,
+                            nav, heroesTop, s, heroIdxTop, heroPlayFocus,
+                            focusCategoryWheel = ::requestCategoryWheelFocus,
                             firstHistoryFocus = firstHistoryFocus,
                             hasHistory = history.isNotEmpty(),
                             watchedIds = watchedIds,
@@ -497,146 +505,18 @@ fun VodScreen(nav: NavController) {
                                             HistoryCard(nav, history[i], s, cardReg,
                                                 focusRequester = if (i == 0) firstHistoryFocus else null,
                                                 upToTab = contentUpToTab,
-                                                downToChip = { historyDownToChip() })
+                                                downToChip = { requestCategoryWheelFocus() })
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                    // 片库 lib-section
-                    // v1.10（2026-08-31 低端机优化）：原实现把 chips+全部板块塞进单个
-                    // LazyColumn item（非 lazy Column），切页/滚动要一次性组合全部卡片
-                    // （3 板块 × ~14 卡 + 兜底网格），低端 GPU 上明显卡顿，且巨 item
-                    // 重组时焦点节点成批重建 = 光标乱跑的温床。
-                    // 现扁平化为逐行 item：视口外行不组合，视觉间距 1:1 保留
-                    // （chips top40 / 板块标题 top26/44+bottom18 / 行距34 / 底 padding80）。
-                    item(key = "lib-chips") {
-                        Column(Modifier.padding(start = 80f.sx(s), end = 80f.sx(s), top = 40f.sx(s))) {
-                // 片库分类 chips（原版 .chip h64 px30 r32 字29；「全部›」px34；active 白50%底黑字）
-                val chipRowState = rememberLazyListState()
-                val chipScroll = remember(chipRowState) { lazyNavContainer(chipRowState) }
-                ProvideNavScrolls(horizontal = chipScroll) {
-                    LazyRow(
-                        state = chipRowState,
-                        horizontalArrangement = Arrangement.spacedBy(18f.sx(s)),
-                        contentPadding = PaddingValues(end = 40f.sx(s)),
-                    ) {
-                    // 方案 §11.1：分类 chip 用稳定的分类 id 做 key，不用 index。
-                    // 分类表是异步到货的（首页先渲染缓存、随后被服务端数据替换），
-                    // 用 index 会让「当前选中项」跟着位置漂移，表现为选中高亮跳到别的分类。
-                    items(categories.size, key = { i ->
-                        val id = categories[i].first
-                        if (id.isBlank()) "chip-all" else "chip-$id"
-                    }) { i ->
-                        val (id, name) = categories[i]
-                        val active = i == catSel
-                        val isAllChip = id.isBlank()
-                        var chipFocused by remember { mutableStateOf(false) }
-                        // 需求①：光标选中即点击——切换分类 / 进「全部」页（OK 键与 hover 共用）
-                        val activateChip: () -> Unit = {
-                            if (isAllChip) {
-                                nav.navigate("all")
-                            } else {
-                                catSel = i
-                                Graph.appScope.launch {
-                                    runCatching { Graph.settings.rememberVodLastCat(id) }
-                                }
-                            }
-                        }
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .then(
-                                    if (active) Modifier.focusRequester(selectedCatChipFocus)
-                                    else Modifier
-                                )
-                                .dpadFocusable(
-                                    scaleFocused = 1.05f, focusedBg = OtvColors.White,
-                                    focusedBgRadius = 32f.sx(s),
-                                    onFocusedChange = { gained ->
-                                        chipFocused = gained
-                                        if (gained) {
-                                            chipRowGen++
-                                            val fromInside = chipRowHasFocus
-                                            chipRowHasFocus = true
-                                            if (!fromInside && !active) {
-                                                // 需求②：行外进入落在非选中 chip → 重定向回上次选中项，
-                                                // 不触发切换（否则几何落焦会误切到落点 chip）
-                                                chipScope.launch {
-                                                    repeat(20) {
-                                                        delay(50)
-                                                        if (runCatching { selectedCatChipFocus.requestFocus() }.isSuccess) return@launch
-                                                    }
-                                                }
-                                            } else if (fromInside && !active) {
-                                                // 需求①：行内移动 hover-select（原版移动即切语义）。
-                                                // v1.20（用户需求 全部#9）：「全部›」不 hover 触发——
-                                                // 选中即跳页会打断浏览，必须 OK 手动点击进入
-                                                if (!isAllChip) activateChip()
-                                            }
-                                        } else {
-                                            val gen = ++chipRowGen
-                                            chipScope.launch {
-                                                delay(150)
-                                                if (chipRowGen == gen) chipRowHasFocus = false
-                                            }
-                                        }
-                                    },
-                                    // hover-select 由 onFocusedChange 按「行内/行外进入」区分处理，
-                                    // 不走引擎 autoSelect（其落焦即点击会让行外进入误切分类）
-                                    // 2026-09-05：无最近观看时分类行=内容顶行，UP 由 contentUpToTab
-                                    // 定向回 tab（有历史时不拦截——几何搜索自然落到最近观看卡片）
-                                    navOverride = { dir ->
-                                        when {
-                                            dir == NAV_UP && history.isEmpty() -> contentUpToTab()
-                                            // 2026-09-19 跳行修复：chip DOWN 一律显式定向/挂起
-                                            //（根因与判定见上方 libFirstCard 注释），不走引擎几何
-                                            dir == NAV_DOWN -> {
-                                                if (libFirstCard != null) dropToLibFirstCard()
-                                                else {
-                                                    pendingLibDownAt = android.os.SystemClock.uptimeMillis()
-                                                    pendingLibDown = true
-                                                }
-                                                true
-                                            }
-                                            else -> false
-                                        }
-                                    },
-                                    autoSelect = false,
-                                ) {
-                                    activateChip()
-                                }
-                                .background(
-                                    // 需求 我的#6：聚焦才白底黑字；已选分类不再常显白底（避免焦点
-                                    // 在「全部」上时前一个分类看起来像被选中），改用文字提亮示意
-                                    if (chipFocused) OtvColors.White else OtvColors.ChipBg,
-                                    RoundedCornerShape(32f.sx(s)),
-                                )
-                                .height(64f.sx(s))
-                                .padding(horizontal = if (isAllChip) 34f.sx(s) else 30f.sx(s)),
-                        ) {
-                            Text(
-                                name,
-                                color = if (chipFocused) OtvColors.Bg else if (active) OtvColors.White else OtvColors.White.copy(alpha = 0.6f),
-                                fontSize = 29f.sxs(s), fontWeight = FontWeight.Medium,
-                            )
-                        }
-                    }
-                }
-                } // ProvideNavScrolls(chipScroll)
-                        } // lib-chips padding
-                    }
-                if (showLibLoading) {
-                    // 需求④：板块数据就绪前的轻量占位（不可聚焦、高度稳定，不参与结构顶替）
-                    item(key = "lib-loading") {
-                        Text(
-                            "— 片库板块加载中 …",
-                            color = OtvColors.White50, fontSize = 26f.sxs(s),
-                            modifier = Modifier.padding(start = 86f.sx(s), top = 40f.sx(s)),
-                        )
-                    }
-                } else {
+                    // Keep the old list index stable for saved-page and focus restoration.
+                    // The category wheel is now a fixed overlay shown only while this library item is visible.
+                    item(key = "lib-wheel-anchor") { Spacer(Modifier.height(1f.sx(s))) }
+                // Keep the full-height pager mounted during category loading. A short loading
+                // item would clamp the outer list upward and dispose the focused wheel.
                     item(key = "lib-vertical-three-pages") {
                         VerticalPager(
                             state = sectionPagerState,
@@ -656,6 +536,7 @@ fun VodScreen(nav: NavController) {
                             LibrarySectionPage(
                                 nav = nav,
                                 title = title,
+                                loading = showLibLoading,
                                 items = section?.items.orEmpty(),
                                 sectionName = section?.name ?: title,
                                 page = page,
@@ -663,6 +544,7 @@ fun VodScreen(nav: NavController) {
                                 s = s,
                                 cardReg = cardReg,
                                 rowStates = sectionRowStates[page],
+                                categoryWheelFocus = categoryWheelFocus,
                                 onRowFocus = { row, column -> requestLibraryFocus(page, row, column) },
                                 onPageMove = ::moveLibraryPage,
                                 onCardFocusChanged = { row, column, gained ->
@@ -686,10 +568,37 @@ fun VodScreen(nav: NavController) {
                             )
                         }
                     }
-                }
                 item(key = "lib-pad") { Spacer(Modifier.height(80f.sx(s))) }
                 } // LazyColumn
                 } // ProvideNavScrolls(vodScroll)
+                if (libraryWheelVisible) {
+                    LibraryCategoryWheel(
+                        categories = categories,
+                        selectedIndex = catSel,
+                        selectedTurn = categoryWheelTurn,
+                        scale = s,
+                        focusRequester = categoryWheelFocus,
+                        onMove = moveCategory,
+                        onActivate = {
+                            if (categories.getOrNull(catSel)?.first.isNullOrBlank()) {
+                                nav.navigate("all")
+                            } else {
+                                requestLibraryFocus(sectionPagerState.settledPage, focusRequests.row, focusRequests.column)
+                            }
+                        },
+                        onEnterLibrary = {
+                            if (!categories.getOrNull(catSel)?.first.isNullOrBlank()) {
+                                requestLibraryFocus(sectionPagerState.settledPage, focusRequests.row, focusRequests.column)
+                            }
+                        },
+                        onExitLibrary = ::exitCategoryWheel,
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .padding(start = 28f.sx(s))
+                            .width(220f.sx(s))
+                            .height(410f.sx(s)),
+                    )
+                }
             }
         }
         // TabBar 悬浮：固定海报直接透出，仅保留顶黑渐变保证可读性
@@ -727,8 +636,7 @@ private fun VodHeroBand(
     s: Float,
     idx: Int,
     playFocus: FocusRequester,
-    tabFocus: FocusRequester,
-    selectedCatChipFocus: FocusRequester,
+    focusCategoryWheel: () -> Unit,
     firstHistoryFocus: FocusRequester,
     hasHistory: Boolean,
     /** 有观看记录的影片 id：hero 主按钮据此显示「继续播放」（用户 2026-09-17 要求） */
@@ -879,25 +787,19 @@ private fun VodHeroBand(
                             when (dir) {
                                 NAV_LEFT -> if (heroes.size > 1) { onPrev(); true } else false
                                 NAV_RIGHT -> if (heroes.size > 1) { onNext(); true } else false
-                                // v1.17：DOWN 定向到「当前选中分类」chip——几何搜索会落在
-                                // 第一个 chip（电影）上，hover-select 立即切回电影并覆盖上次
-                                // 分类记忆（实测根因）；定向到选中项后 hover-select 无害。
-                                // 光标导航#3（2026-09-03）：有最近观看时 DOWN 先落最近观看
-                                // 首卡（用户报障：hero 跳过最近观看直达 chips）；无历史再落 chip。
-                                // 目标行可能尚未组合：先滚一步露出，再请求焦点。不能先 requestFocus——
-                                // LazyColumn 预组合的零尺寸节点也可能让 requestFocus「成功」，随后
-                                // 焦点稳定器会把无效焦点恢复回 hero，用户就必须再按一次 DOWN。
+                                // 影视首屏顺序：hero → 最近观看 → 片库分类滚轮。
                                 NAV_DOWN -> {
-                                    val downTarget = if (hasHistory) firstHistoryFocus else selectedCatChipFocus
-                                    heroScope.launch {
-                                        // 480px 让 352px 设计高的首卡完整进入视口；只滚 300px
-                                        // 在较矮的电视窗口仍会留下裁边，焦点节点会被过滤为无效。
-                                        runCatching { listState.scrollBy(480f) }
-                                        repeat(8) {
-                                            delay(60)
-                                            if (runCatching { downTarget.requestFocus() }.isSuccess) return@launch
-                                            runCatching { listState.scrollBy(300f) }
+                                    if (hasHistory) {
+                                        heroScope.launch {
+                                            runCatching { listState.scrollBy(480f) }
+                                            repeat(8) {
+                                                delay(60)
+                                                if (runCatching { firstHistoryFocus.requestFocus() }.isSuccess) return@launch
+                                                runCatching { listState.scrollBy(300f) }
+                                            }
                                         }
+                                    } else {
+                                        focusCategoryWheel()
                                     }
                                     true
                                 }
@@ -954,6 +856,7 @@ private fun VodHeroBand(
 private fun LibrarySectionPage(
     nav: NavController,
     title: String,
+    loading: Boolean,
     items: List<VodItem>,
     sectionName: String,
     page: Int,
@@ -961,6 +864,7 @@ private fun LibrarySectionPage(
     s: Float,
     cardReg: FocusRegistry,
     rowStates: List<androidx.compose.foundation.lazy.LazyListState>,
+    categoryWheelFocus: FocusRequester,
     onRowFocus: (row: Int, column: Int) -> Unit,
     onPageMove: (page: Int, row: Int, column: Int) -> Unit,
     onCardFocusChanged: (row: Int, column: Int, gained: Boolean) -> Unit,
@@ -977,16 +881,15 @@ private fun LibrarySectionPage(
         verticalArrangement = Arrangement.spacedBy(18f.sx(s)),
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 80f.sx(s)),
+            modifier = Modifier.fillMaxWidth().padding(start = 320f.sx(s), end = 80f.sx(s)),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(title, color = OtvColors.White.copy(alpha = 0.92f), fontSize = 38f.sxs(s), fontWeight = FontWeight.Bold)
-            Text("${page + 1} / $pageCount", color = OtvColors.White50, fontSize = 22f.sxs(s))
         }
         if (items.isEmpty()) {
             Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                Text("暂无${title}内容", color = OtvColors.White50, fontSize = 26f.sxs(s))
+                Text(if (loading) "正在加载…" else "暂无${title}内容", color = OtvColors.White50, fontSize = 26f.sxs(s))
             }
         } else {
             repeat(2) { row ->
@@ -998,7 +901,7 @@ private fun LibrarySectionPage(
                         state = state,
                         modifier = Modifier.fillMaxWidth().height(402f.sx(s)),
                         horizontalArrangement = Arrangement.spacedBy(20f.sx(s)),
-                        contentPadding = PaddingValues(horizontal = 80f.sx(s)),
+                        contentPadding = PaddingValues(start = 320f.sx(s), end = 80f.sx(s)),
                     ) {
                         items(rowItems.size, key = { column -> "lib:$sectionName:${rowItems[column].id}" }) { column ->
                             val item = rowItems[column]
@@ -1029,6 +932,10 @@ private fun LibrarySectionPage(
                                         }
                                         direction == NAV_UP && row == 0 && page > 0 -> {
                                             onPageMove(page - 1, 1, column)
+                                            true
+                                        }
+                                        direction == NAV_LEFT && column == 0 -> {
+                                            runCatching { categoryWheelFocus.requestFocus() }
                                             true
                                         }
                                         direction == NAV_UP && row == 1 && page > 0 -> {
