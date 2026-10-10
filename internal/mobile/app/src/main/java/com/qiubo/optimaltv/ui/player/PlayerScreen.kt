@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -170,8 +171,9 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
         }
     }
 
-    // 需求12⑥⑦（2026-09-07 竖屏播放器重构）：竖屏=顶部 16:9 视频区（原有全部
-    // 浮层/手势/面板限制在视频区内）+ 下方常驻操作区（标题/进度/播放/全屏）；
+    // 需求12⑥⑦（2026-09-07 竖屏播放器重构）：竖屏=顶部 16:9 视频区（常规浮层/手势
+    // 限制在视频区内）+ 下方常驻操作区（标题/进度/播放/全屏）；错误兜底和更多面板
+    // 放在根 Box 上，避免被视频画幅或竖屏常驻区裁切。
     // 全屏按钮=请求横屏（App 本身沉浸全屏 = 系统级全屏播放），退出本页恢复方向跟随
     val portrait = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
         android.content.res.Configuration.ORIENTATION_PORTRAIT
@@ -179,11 +181,8 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
         onDispose { activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_USER }
     }
 
-    androidx.compose.foundation.layout.Column(
-        Modifier
-            .fillMaxSize()
-            .background(Color.Black),
-    ) {
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    androidx.compose.foundation.layout.Column(Modifier.fillMaxSize()) {
     Box(
         Modifier
             .fillMaxWidth()
@@ -362,17 +361,6 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
             AppleLoading(modifier = Modifier.align(Alignment.Center), size = 56.dp)
         }
 
-        // 错误兜底（防线三，与 TV 版同文案同视觉）
-        ui.fatalMsg?.let { msg ->
-            ErrorWidget(
-                message = msg,
-                onRetry = { vm.retry() },
-                onBack = { nav.popBackStack() },
-                onMore = { vm.setPanel(Panel.MORE) },
-                showMore = !ui.isLive,
-            )
-        }
-
         if (ui.isLive) {
             // ---- 足球直播（需求 足球#14）：无任何菜单、无比分板；唯一控件=信号源选择条 ----
             LiveSourcePicker(ui, vm, Modifier.align(Alignment.BottomCenter), onTick = { tick++ })
@@ -382,20 +370,6 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                 ui = ui,
                 vm = vm,
                 onTick = { tick++ },
-            )
-        }
-
-        // 面板：更多（影片信息+选集[仅非电影]+换源+倍速+画幅；右侧悬浮栏，TV 版 1:1）
-        if (ui.panel == Panel.MORE) {
-            MorePanel(
-                ui = ui,
-                vm = vm,
-                onDismiss = { vm.setPanel(Panel.NONE) },
-                // v1.19：VM 内直切换集（不走路由堆叠 VM/引擎实例，见 switchEpisode）
-                onPickEpisode = { i ->
-                    vm.setPanel(Panel.NONE)
-                    vm.switchEpisode(i)
-                },
             )
         }
 
@@ -419,6 +393,33 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
         PortraitPlayerPanel(ui = ui, vm = vm)
     }
     } // Column
+
+    // 错误兜底占据全屏可用区域；竖屏若留在顶部 16:9 视频 Box 内，按钮会被压到
+    // 只剩背景。错误内容自身可滚动，因此短横屏也能到达重试/返回/线路操作。
+    ui.fatalMsg?.let { msg ->
+        ErrorWidget(
+            message = msg,
+            onRetry = { vm.retry() },
+            onBack = { nav.popBackStack() },
+            onMore = { vm.setPanel(Panel.MORE) },
+            showMore = !ui.isLive,
+        )
+    }
+
+    // 更多面板同样覆盖整个可用屏幕，错误态下线路入口不受竖屏视频框高度限制。
+    if (ui.panel == Panel.MORE) {
+        MorePanel(
+            ui = ui,
+            vm = vm,
+            onDismiss = { vm.setPanel(Panel.NONE) },
+            // v1.19：VM 内直切换集（不走路由堆叠 VM/引擎实例，见 switchEpisode）
+            onPickEpisode = { i ->
+                vm.setPanel(Panel.NONE)
+                vm.switchEpisode(i)
+            },
+        )
+    }
+    }
 }
 
 /** Isolate the animated scrim from PlayerScreen so its 450ms fade doesn't recompose the player. */
@@ -1063,25 +1064,27 @@ private fun PlayPauseIcon(playing: Boolean, iconColor: Color, iconSize: Dp) {
 }
 
 @Composable
-private fun ErrorWidget(
+internal fun ErrorWidget(
     message: String,
     onRetry: () -> Unit,
     onBack: () -> Unit,
     onMore: () -> Unit,
     showMore: Boolean,
 ) {
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Color(0xCC000000)),
+    BoxWithConstraints(
+        Modifier.fillMaxSize().background(Color(0xCC000000)),
         contentAlignment = Alignment.Center,
     ) {
+        val cardShape = RoundedCornerShape(20.dp)
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(18.dp),
             modifier = Modifier
                 .fillMaxWidth(0.92f)
-                .background(Color(0xFF1C1C22), RoundedCornerShape(20.dp))
+                .heightIn(max = maxHeight - 32.dp)
+                .clip(cardShape)
+                .background(Color(0xFF1C1C22))
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp),
         ) {
             Text("无法播放", style = MaterialTheme.typography.titleLarge, color = TextPrimary)
