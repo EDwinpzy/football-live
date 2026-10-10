@@ -879,7 +879,9 @@ private fun LibrarySectionPage(
     }
     Column(
         modifier = modifier.fillMaxSize().background(OtvColors.Bg).padding(top = 26f.sx(s), bottom = 16f.sx(s)),
-        verticalArrangement = Arrangement.spacedBy(18f.sx(s)),
+        // Center the complete title + two-row block in the available page height;
+        // top-aligning it leaves a visibly heavier blank area under the posters on TV.
+        verticalArrangement = Arrangement.spacedBy(18f.sx(s), Alignment.CenterVertically),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(start = 320f.sx(s), end = 80f.sx(s)),
