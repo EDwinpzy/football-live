@@ -28,13 +28,17 @@ fun ApkUpdateUi() {
     val offer by ApkUpdateManager.offer.collectAsStateWithLifecycle()
     val state by ApkUpdateManager.state.collectAsStateWithLifecycle()
     val current = offer ?: return
+    // Once the user starts downloading, keep the progress dialog attached to that
+    // user-selected operation. Before that, every prompt (including a legacy
+    // REQUIRED offer) can be dismissed or deferred.
+    val canDefer = state !is ApkUpdateState.Downloading && state != ApkUpdateState.Installing
     val primaryLabel = when (state) {
         ApkUpdateState.PermissionRequired -> "打开安装权限"
         is ApkUpdateState.Error -> "重试"
         else -> "立即更新"
     }
     AlertDialog(
-        onDismissRequest = { if (!current.required) ApkUpdateManager.declineUpdate() },
+        onDismissRequest = { if (canDefer) ApkUpdateManager.declineUpdate() },
         title = { Text(current.manifest.title) },
         text = {
             Column {
@@ -79,7 +83,7 @@ fun ApkUpdateUi() {
                 }
             }) { Text(primaryLabel) }
         },
-        dismissButton = if (!current.required) {
+        dismissButton = if (canDefer) {
             { TextButton(onClick = { ApkUpdateManager.declineUpdate() }) { Text("稍后更新") } }
         } else null,
     )

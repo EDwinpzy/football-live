@@ -59,14 +59,22 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
         )
         self.assertIn("repeat(2) { row ->", pager, "每个 TV 页面必须始终绘制两行")
         self.assertIn("LazyRow(", pager, "每行应连续横向滚动")
-        self.assertIn("items(rowItems.size", pager, "横向行不应被切成子分页")
+        self.assertIn("count = alignedColumnCount", pager,
+                      "两行应使用相同列数，保持横向滚动范围一致")
+        self.assertIn("alignment-spacer:", pager,
+                      "奇数条目录的短行需要不可聚焦的占位列")
+        self.assertIn("rowStates[targetRow].scrollBy(delta)", pager,
+                      "遥控焦点或横滑滚动一行时应同步另一行")
         self.assertIn("items.filterIndexed { index, _ -> index % 2 == 0 }", pager)
         self.assertIn("items.filterIndexed { index, _ -> index % 2 == 1 }", pager)
         self.assertIn("direction == NAV_DOWN && row == 1", pager, "第二行向下应进入下一页")
         self.assertNotIn('Text("上一页"', pager)
         self.assertNotIn('Text("下一页"', pager)
         self.assertNotIn("targetPageForSwipe", pager, "左右滑动只滚动卡片行，不切页面")
-        self.assertNotIn("NAV_LEFT", pager, "左右键由横向列表滚动，不切 TV 页面")
+        self.assertIn("direction == NAV_LEFT && column == 0", pager,
+                      "第一列左键仍可返回固定分类栏")
+        self.assertNotIn("direction == NAV_LEFT && page", pager,
+                         "左键不应切换 TV 片库页")
         self.assertNotIn("NAV_RIGHT", pager, "左右键由横向列表滚动，不切 TV 页面")
 
         renderer = _source_block(

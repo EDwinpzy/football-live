@@ -56,11 +56,9 @@ object ApkPartPolicy {
 object ApkUpdatePolicy {
     fun decide(localVersionCode: Long, manifest: ApkUpdateManifest): ApkUpdateDecision {
         if (manifest.versionCode <= localVersionCode) return ApkUpdateDecision.NONE
-        return if (manifest.forceUpdate || localVersionCode < manifest.minSupportedVersionCode) {
-            ApkUpdateDecision.REQUIRED
-        } else {
-            ApkUpdateDecision.OPTIONAL
-        }
+        // Keep forceUpdate/minSupportedVersionCode for compatibility with older manifests,
+        // but never block the current app behind an update prompt.
+        return ApkUpdateDecision.OPTIONAL
     }
 
     /**
@@ -71,9 +69,5 @@ object ApkUpdatePolicy {
         decision: ApkUpdateDecision,
         dismissed: Boolean,
         manual: Boolean,
-    ): Boolean = when (decision) {
-        ApkUpdateDecision.NONE -> false
-        ApkUpdateDecision.REQUIRED -> true
-        ApkUpdateDecision.OPTIONAL -> manual || !dismissed
-    }
+    ): Boolean = decision != ApkUpdateDecision.NONE && (manual || !dismissed)
 }

@@ -18,11 +18,21 @@ class ApkUpdatePolicyTest {
     }
 
     @Test
-    fun versionBelowMinimumProducesRequiredUpdate() {
+    fun versionBelowMinimumStillProducesOptionalUpdate() {
         val manifest = manifest(versionCode = 35, minSupportedVersionCode = 35)
 
         assertEquals(
-            ApkUpdateDecision.REQUIRED,
+            ApkUpdateDecision.OPTIONAL,
+            ApkUpdatePolicy.decide(localVersionCode = 34, manifest = manifest),
+        )
+    }
+
+    @Test
+    fun minimumVersionHigherThanReleaseDoesNotMakeUpdateMandatoryOrHideIt() {
+        val manifest = manifest(versionCode = 35, minSupportedVersionCode = 99, forceUpdate = true)
+
+        assertEquals(
+            ApkUpdateDecision.OPTIONAL,
             ApkUpdatePolicy.decide(localVersionCode = 34, manifest = manifest),
         )
     }
@@ -38,11 +48,11 @@ class ApkUpdatePolicyTest {
     }
 
     @Test
-    fun forcedManifestProducesRequiredUpdateWhenNewer() {
+    fun forcedManifestStillProducesOptionalUpdateWhenNewer() {
         val manifest = manifest(versionCode = 35, minSupportedVersionCode = 30, forceUpdate = true)
 
         assertEquals(
-            ApkUpdateDecision.REQUIRED,
+            ApkUpdateDecision.OPTIONAL,
             ApkUpdatePolicy.decide(localVersionCode = 34, manifest = manifest),
         )
     }
@@ -112,10 +122,15 @@ class ApkUpdatePolicyTest {
     }
 
     @Test
-    fun requiredUpdateIgnoresDismissedVersion() {
-        assertTrue(
+    fun legacyRequiredDecisionCanBeDismissed() {
+        assertFalse(
             ApkUpdatePolicy.shouldPrompt(
                 ApkUpdateDecision.REQUIRED, dismissed = true, manual = false,
+            ),
+        )
+        assertTrue(
+            ApkUpdatePolicy.shouldPrompt(
+                ApkUpdateDecision.REQUIRED, dismissed = true, manual = true,
             ),
         )
     }

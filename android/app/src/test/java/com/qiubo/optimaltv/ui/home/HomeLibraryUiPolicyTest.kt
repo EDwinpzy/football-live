@@ -47,10 +47,16 @@ class HomeLibraryUiPolicyTest {
     }
 
     @Test
-    fun `TV分类滚轮首尾循环并突出中心选项`() {
-        assertEquals(4, HomeLibraryUiPolicy.moveCategorySelection(0, -1, 5))
-        assertEquals(0, HomeLibraryUiPolicy.moveCategorySelection(4, 1, 5))
-        assertEquals(4, HomeLibraryUiPolicy.categoryWheelIndex(-1, 5))
+    fun `TV分类滚轮首尾停止并突出中心选项`() {
+        assertEquals(0, HomeLibraryUiPolicy.moveCategorySelection(0, -1, 5))
+        assertEquals(1, HomeLibraryUiPolicy.moveCategorySelection(0, 1, 5))
+        assertEquals(3, HomeLibraryUiPolicy.moveCategorySelection(4, -1, 5))
+        assertEquals(4, HomeLibraryUiPolicy.moveCategorySelection(4, 1, 5))
+        assertNull(HomeLibraryUiPolicy.categoryWheelIndex(-1, 5))
+        assertEquals(0, HomeLibraryUiPolicy.categoryWheelIndex(0, 5))
+        assertEquals(4, HomeLibraryUiPolicy.categoryWheelIndex(4, 5))
+        assertNull(HomeLibraryUiPolicy.categoryWheelIndex(5, 5))
+        assertNull(HomeLibraryUiPolicy.categoryWheelIndex(0, 0))
         assertEquals(1.30f, HomeLibraryUiPolicy.categoryWheelScale(0f), 0.001f)
         assertTrue(HomeLibraryUiPolicy.categoryWheelScale(0f) > HomeLibraryUiPolicy.categoryWheelScale(1f))
         assertTrue(HomeLibraryUiPolicy.categoryWheelAlpha(0f) > HomeLibraryUiPolicy.categoryWheelAlpha(1f))

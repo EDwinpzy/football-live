@@ -164,7 +164,6 @@ object ApkUpdateManager {
 
     fun declineUpdate() {
         val current = _offer.value ?: return
-        if (current.required) return
         appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putLong(DISMISSED_VERSION, current.manifest.versionCode)

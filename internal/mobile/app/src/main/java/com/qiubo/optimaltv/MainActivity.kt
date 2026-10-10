@@ -52,27 +52,6 @@ object DebugNavBus {
     @Volatile var pendingRoute: String? = null
 }
 
-/** v1.18 强制更新阻断屏（与 TV 版同款）：黑底 + 字标 + 版本/阶段 + 细转圈 */
-@Composable
-private fun ForceUpdateScreen(state: com.qiubo.optimaltv.hotupdate.ForceState) {
-    val b = state as? com.qiubo.optimaltv.hotupdate.ForceState.Blocking ?: return
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Image(
-                painter = painterResource(com.qiubo.optimaltv.R.drawable.my_tv_logo),
-                contentDescription = "My TV",
-                modifier = Modifier.size(110.dp),
-            )
-            Spacer(Modifier.height(36.dp))
-            Text("强制更新 v" + b.version, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(12.dp))
-            Text(b.phase, color = Color(0xFF9A9AA2), fontSize = 14.sp)
-            Spacer(Modifier.height(28.dp))
-            com.qiubo.optimaltv.ui.components.AppleLoading()
-        }
-    }
-}
-
 /** v1.17 品牌启动屏（内容加载好后再进入 app）：黑底 + My TV 标 + 细转圈 */
 @Composable
 private fun StartupSplash() {
@@ -142,12 +121,10 @@ class MainActivity : ComponentActivity() {
             OptimalTvTheme {
                 // v1.17 启动门闸：四个标签内容源预热完成（或 45s 兜底）前渲染品牌启动屏
                 val ready by AppStartup.ready.collectAsStateWithLifecycle()
-                // v1.19 移植热更新（与 TV 版同款）：强制更新阻断态全屏遮罩；
-                // check 未 settled 前不闪主界面（HOTUPDATE_ENABLED=false 时零行为）
-                val huForce by com.qiubo.optimaltv.hotupdate.HotUpdateManager.force.collectAsStateWithLifecycle()
+                // 热更只做后台静默下载；远端强更标记不会覆盖首页或阻断进入。
+                // 首次元数据检查完成后再显示主界面，下载过程不参与启动门闸。
                 val huSettled by com.qiubo.optimaltv.hotupdate.HotUpdateManager.settled.collectAsStateWithLifecycle()
                 when {
-                    huForce != null -> ForceUpdateScreen(huForce!!)
                     !com.qiubo.optimaltv.BuildConfig.HOTUPDATE_ENABLED || huSettled -> if (ready) AppRoot() else StartupSplash()
                     else -> StartupSplash()
                 }

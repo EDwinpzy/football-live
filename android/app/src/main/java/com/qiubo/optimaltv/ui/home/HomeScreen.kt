@@ -36,9 +36,11 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -90,6 +92,7 @@ import com.qiubo.optimaltv.ui.theme.sxs
 import androidx.compose.foundation.layout.size
 import com.qiubo.optimaltv.ui.theme.sx
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import java.net.URLEncoder
@@ -101,7 +104,9 @@ import java.net.URLEncoder
  * 之后 = 最近观看 + 片库（分类 chips + 网格）。
  * hero 左右键手动切换（播放钮上），不自动轮播（需求 #15）。
  */
-private const val VOD_BAND = 700f
+/** 首屏预算约 1000 设计 px：顶部海报带 + 最近观看标题/海报/片名，可完整容纳于 16:9 TV。 */
+private const val VOD_BAND = 500f
+private const val VOD_HERO_CONTENT_TOP = 180f
 
 /**
  * hero 各文字块的高度上限（设计值 + 4px 余量）：title 64 / meta 54 / desc 74。
@@ -116,8 +121,8 @@ private const val VOD_HERO_DESC_MAX = 78f
 /** hero 文字列总上限（= 68 + 8 + 58 + 10 + 78 = 222），总闸，兜住任何单块漏网 */
 private const val VOD_HERO_TEXT_MAX = 222f
 
-/** hero 播放钮距海报带底部（设计钮框 y 576..640，带高 700 → 底部留 60） */
-private const val VOD_HERO_BTN_BOTTOM = 60f
+/** hero 播放钮贴近较矮的首屏海报带底部，为下方「最近观看」留出完整空间。 */
+private const val VOD_HERO_BTN_BOTTOM = 18f
 
 /** 影视首页的 TV 分类与三页片库规则。 */
 internal object HomeLibraryUiPolicy {
@@ -125,10 +130,10 @@ internal object HomeLibraryUiPolicy {
     const val CATEGORY_WHEEL_SELECTED_SCALE = 1.30f
 
     fun moveCategorySelection(index: Int, delta: Int, count: Int): Int =
-        if (count <= 0) 0 else Math.floorMod(index + delta, count)
+        if (count <= 0) 0 else (index + delta).coerceIn(0, count - 1)
 
-    fun categoryWheelIndex(position: Int, count: Int): Int =
-        if (count <= 0) 0 else Math.floorMod(position, count)
+    fun categoryWheelIndex(position: Int, count: Int): Int? =
+        position.takeIf { count > 0 && it in 0 until count }
 
     fun categoryWheelScale(distance: Float): Float =
         (CATEGORY_WHEEL_SELECTED_SCALE - kotlin.math.abs(distance) * 0.28f).coerceAtLeast(0.72f)
@@ -270,7 +275,7 @@ fun VodScreen(nav: NavController) {
                         }
                     }
                 }
-                // 分类 tab 固定三块，以好好看频道页的当前分类三栏目为主；「全部 ›」独立跳转 all 页。
+                // 分类 tab 固定三块，以好好看频道页的当前分类三栏目为主；选中「全部 ›」直接进入 all 页。
                 val selCatId = categories.getOrNull(catSel)?.first.orEmpty()
                 var sectionLoading by remember(selCatId) { mutableStateOf(true) }
                 /* 分类 id 现为 `douban:movie` 形态；用与 libBlocks 同一套解析，
@@ -410,6 +415,11 @@ fun VodScreen(nav: NavController) {
                         )
                     }
                 }
+                fun openAllCatalog() {
+                    pageScope.launch {
+                        nav.navigate("all") { launchSingleTop = true }
+                    }
+                }
                 LaunchedEffect(sectionPagerState.settledPage) {
                     if (focusRequests.focusedKey != null || focusRequests.awaitingPageFocus) {
                         requestLibraryFocus(sectionPagerState.settledPage, focusRequests.row, focusRequests.column)
@@ -440,9 +450,12 @@ fun VodScreen(nav: NavController) {
                     val next = HomeLibraryUiPolicy.moveCategorySelection(catSel, delta, categories.size)
                     if (next != catSel) {
                         catSel = next
-                        categoryWheelTurn += delta
-                        categories.getOrNull(next)?.first?.takeIf { it.isNotBlank() }?.let { id ->
-                            Graph.appScope.launch { runCatching { Graph.settings.rememberVodLastCat(id) } }
+                        categoryWheelTurn = next
+                        val categoryId = categories.getOrNull(next)?.first
+                        if (categoryId.isNullOrBlank()) {
+                            openAllCatalog()
+                        } else {
+                            Graph.appScope.launch { runCatching { Graph.settings.rememberVodLastCat(categoryId) } }
                         }
                     }
                 }
@@ -582,13 +595,15 @@ fun VodScreen(nav: NavController) {
                         onMove = moveCategory,
                         onActivate = {
                             if (categories.getOrNull(catSel)?.first.isNullOrBlank()) {
-                                nav.navigate("all")
+                                openAllCatalog()
                             } else {
                                 requestLibraryFocus(sectionPagerState.settledPage, focusRequests.row, focusRequests.column)
                             }
                         },
                         onEnterLibrary = {
-                            if (!categories.getOrNull(catSel)?.first.isNullOrBlank()) {
+                            if (categories.getOrNull(catSel)?.first.isNullOrBlank()) {
+                                openAllCatalog()
+                            } else {
                                 requestLibraryFocus(sectionPagerState.settledPage, focusRequests.row, focusRequests.column)
                             }
                         },
@@ -706,7 +721,7 @@ private fun VodHeroBand(
             Column(
                 Modifier
                     .align(Alignment.TopStart)
-                    .padding(start = 91f.sx(s), top = 340f.sx(s))
+                    .padding(start = 91f.sx(s), top = VOD_HERO_CONTENT_TOP.sx(s))
                     .width(760f.sx(s))
                     // 2026-09-19：文字列总闸（设计内容高 210）——单块见各自 heightIn
                     .heightIn(max = VOD_HERO_TEXT_MAX.sx(s)),
@@ -770,7 +785,7 @@ private fun VodHeroBand(
                 }
             }
             // vod-actions：btn-vod 白50%底黑字 h64 px40 r32 字26 Bold；聚焦纯白（focusedBg）+scale1.02
-            // 2026-09-19 修复：钮从文字列尾部移到海报带底固定位（设计钮框 y576..640，距带底 60）。
+            // 首屏压缩后仍锚定在海报带底部，避免和上移后的简介重叠。
             // 起因：用户报障「奥德赛」——meta 10 段 + 简介更长时文字列被撑高，钮被顶出海报带、
             // 整颗不可见（截图实测钮落在带外）。现在钮不参与文字流测量，简介再长也只让 desc
             // 收敛行数（VOD_HERO_TEXT_MAX 封顶），钮位置与设计稿逐像素一致。
@@ -877,6 +892,28 @@ private fun LibrarySectionPage(
             items.filterIndexed { index, _ -> index % 2 == 1 },
         )
     }
+    val alignedColumnCount = rows.maxOfOrNull { it.size } ?: 0
+    val rowItemPitchPx = with(LocalDensity.current) { 252f.sx(s).toPx() }
+    LaunchedEffect(rowStates, alignedColumnCount, rowItemPitchPx) {
+        fun positions() = rowStates.map { it.firstVisibleItemIndex * rowItemPitchPx + it.firstVisibleItemScrollOffset }
+        var lastPositions = positions()
+        snapshotFlow { positions() }.collect { currentPositions ->
+            val changedRows = currentPositions.indices.filter { currentPositions[it] != lastPositions[it] }
+            if (changedRows.size == 1) {
+                val sourceRow = changedRows.single()
+                val targetRow = 1 - sourceRow
+                val delta = currentPositions[sourceRow] - lastPositions[sourceRow]
+                if (delta != 0f && alignedColumnCount > 1) {
+                    rowStates[targetRow].scrollBy(delta)
+                    lastPositions = positions()
+                } else {
+                    lastPositions = currentPositions
+                }
+            } else {
+                lastPositions = currentPositions
+            }
+        }
+    }
     Column(
         modifier = modifier.fillMaxSize().background(OtvColors.Bg).padding(top = 26f.sx(s), bottom = 16f.sx(s)),
         // Center the complete title + two-row block in the available page height;
@@ -906,49 +943,61 @@ private fun LibrarySectionPage(
                         horizontalArrangement = Arrangement.spacedBy(20f.sx(s)),
                         contentPadding = PaddingValues(start = 320f.sx(s), end = 80f.sx(s)),
                     ) {
-                        items(rowItems.size, key = { column -> "lib:$sectionName:${rowItems[column].id}" }) { column ->
-                            val item = rowItems[column]
-                            LibCard(
-                                nav = nav,
-                                item = item,
-                                s = s,
-                                cardReg = cardReg,
-                                focusKey = "lib:$sectionName:${item.id}",
-                                onCardFocusChanged = { gained -> onCardFocusChanged(row, column, gained) },
-                                navOverride = { direction ->
-                                    when {
-                                        direction == NAV_DOWN && row == 0 -> {
-                                            if (rows[1].getOrNull(column) != null) {
-                                                onRowFocus(1, column)
-                                            } else if (page + 1 < pageCount) {
-                                                onPageMove(page + 1, 0, column)
+                        items(
+                            count = alignedColumnCount,
+                            key = { column ->
+                                rowItems.getOrNull(column)?.let { "lib:$sectionName:${it.id}" }
+                                    ?: "lib:$sectionName:alignment-spacer:$row:$column"
+                            },
+                        ) { column ->
+                            val item = rowItems.getOrNull(column)
+                            if (item == null) {
+                                // Odd catalog sizes leave one row shorter. Match its scroll range
+                                // without creating a focusable card, so both poster rows stay aligned.
+                                Spacer(Modifier.width(232f.sx(s)).height(402f.sx(s)))
+                            } else {
+                                LibCard(
+                                    nav = nav,
+                                    item = item,
+                                    s = s,
+                                    cardReg = cardReg,
+                                    focusKey = "lib:$sectionName:${item.id}",
+                                    onCardFocusChanged = { gained -> onCardFocusChanged(row, column, gained) },
+                                    navOverride = { direction ->
+                                        when {
+                                            direction == NAV_DOWN && row == 0 -> {
+                                                if (rows[1].getOrNull(column) != null) {
+                                                    onRowFocus(1, column)
+                                                } else if (page + 1 < pageCount) {
+                                                    onPageMove(page + 1, 0, column)
+                                                }
+                                                true
                                             }
-                                            true
+                                            direction == NAV_DOWN && row == 1 -> {
+                                                if (page + 1 < pageCount) onPageMove(page + 1, 0, column)
+                                                true
+                                            }
+                                            direction == NAV_UP && row == 1 && rows[0].getOrNull(column) != null -> {
+                                                onRowFocus(0, column)
+                                                true
+                                            }
+                                            direction == NAV_UP && row == 0 && page > 0 -> {
+                                                onPageMove(page - 1, 1, column)
+                                                true
+                                            }
+                                            direction == NAV_LEFT && column == 0 -> {
+                                                runCatching { categoryWheelFocus.requestFocus() }
+                                                true
+                                            }
+                                            direction == NAV_UP && row == 1 && page > 0 -> {
+                                                onPageMove(page - 1, 1, column)
+                                                true
+                                            }
+                                            else -> false
                                         }
-                                        direction == NAV_DOWN && row == 1 -> {
-                                            if (page + 1 < pageCount) onPageMove(page + 1, 0, column)
-                                            true
-                                        }
-                                        direction == NAV_UP && row == 1 && rows[0].getOrNull(column) != null -> {
-                                            onRowFocus(0, column)
-                                            true
-                                        }
-                                        direction == NAV_UP && row == 0 && page > 0 -> {
-                                            onPageMove(page - 1, 1, column)
-                                            true
-                                        }
-                                        direction == NAV_LEFT && column == 0 -> {
-                                            runCatching { categoryWheelFocus.requestFocus() }
-                                            true
-                                        }
-                                        direction == NAV_UP && row == 1 && page > 0 -> {
-                                            onPageMove(page - 1, 1, column)
-                                            true
-                                        }
-                                        else -> false
-                                    }
-                                },
-                            )
+                                    },
+                                )
+                            }
                         }
                     }
                 }

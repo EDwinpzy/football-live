@@ -56,11 +56,9 @@ object ApkPartPolicy {
 object ApkUpdatePolicy {
     fun decide(localVersionCode: Long, manifest: ApkUpdateManifest): ApkUpdateDecision {
         if (manifest.versionCode <= localVersionCode) return ApkUpdateDecision.NONE
-        return if (manifest.forceUpdate || localVersionCode < manifest.minSupportedVersionCode) {
-            ApkUpdateDecision.REQUIRED
-        } else {
-            ApkUpdateDecision.OPTIONAL
-        }
+        // Remote rollout flags may recommend an update, but must never turn it into
+        // an entry-blocking requirement. Users can defer every available APK update.
+        return ApkUpdateDecision.OPTIONAL
     }
 
     /**
@@ -73,7 +71,9 @@ object ApkUpdatePolicy {
         manual: Boolean,
     ): Boolean = when (decision) {
         ApkUpdateDecision.NONE -> false
-        ApkUpdateDecision.REQUIRED -> true
+        // Treat REQUIRED as optional too, so legacy callers/state cannot force a
+        // dismissed prompt back onto the user during startup.
+        ApkUpdateDecision.REQUIRED,
         ApkUpdateDecision.OPTIONAL -> manual || !dismissed
     }
 }

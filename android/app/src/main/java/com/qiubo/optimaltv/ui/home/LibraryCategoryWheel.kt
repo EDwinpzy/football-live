@@ -35,8 +35,8 @@ import com.qiubo.optimaltv.ui.theme.sx
 import com.qiubo.optimaltv.ui.theme.sxs
 
 /**
- * TV 分类滚轮：单一遥控器焦点节点，上下键循环分类，左右键进出片库。
- * 每个虚拟选项带稳定 key，首尾循环时只从窗口边缘进出，不会整列反向跳位。
+ * TV 分类滚轮：单一遥控器焦点节点，上下键选择分类，左右键进出片库。
+ * 首尾之外留空，不循环显示另一端的分类。
  */
 @Composable
 internal fun LibraryCategoryWheel(
@@ -83,7 +83,7 @@ internal fun LibraryCategoryWheel(
     ) {
         repeat(7) { slot ->
             val virtualPosition = selectedTurn + slot - 3
-            val optionIndex = HomeLibraryUiPolicy.categoryWheelIndex(virtualPosition, categories.size)
+            val optionIndex = HomeLibraryUiPolicy.categoryWheelIndex(virtualPosition, categories.size) ?: return@repeat
             val title = categories[optionIndex].second
             val active = virtualPosition == selectedTurn && optionIndex == selectedIndex
             key(virtualPosition) {

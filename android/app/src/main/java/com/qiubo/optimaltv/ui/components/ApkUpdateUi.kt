@@ -46,6 +46,7 @@ fun ApkUpdateUi() {
     val state by ApkUpdateManager.state.collectAsStateWithLifecycle()
     val s = rememberUiScale()
     val requester = remember { FocusRequester() }
+    val canDefer = state !is ApkUpdateState.Downloading && state != ApkUpdateState.Installing
 
     AnimatedVisibility(visible = offer != null, enter = fadeIn(), exit = fadeOut()) {
         val current = offer ?: return@AnimatedVisibility
@@ -89,7 +90,7 @@ fun ApkUpdateUi() {
                 ApkUpdateStatus(state, s)
                 Spacer(Modifier.height(34f.sx(s)))
                 Row(horizontalArrangement = Arrangement.spacedBy(26f.sx(s))) {
-                    if (!current.required) {
+                    if (canDefer) {
                         ApkUpdateKey("稍后更新", s, primary = false, navGroup = APKUPDATE_DIALOG_GROUP) { ApkUpdateManager.declineUpdate() }
                     }
                     val primaryLabel = when (state) {

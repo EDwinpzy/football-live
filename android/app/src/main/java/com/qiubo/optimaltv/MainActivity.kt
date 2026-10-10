@@ -21,7 +21,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -72,27 +71,6 @@ private fun StartupSplash() {
     }
 }
 
-/** v1.18 强制更新阻断屏：黑底 + 字标 + 版本/阶段 + 细转圈，下载完成后自动重启生效 */
-@Composable
-private fun ForceUpdateScreen(state: com.qiubo.optimaltv.hotupdate.ForceState) {
-    val b = state as? com.qiubo.optimaltv.hotupdate.ForceState.Blocking ?: return
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Image(
-                painter = painterResource(com.qiubo.optimaltv.R.drawable.my_tv_logo),
-                contentDescription = "My TV",
-                modifier = Modifier.size(width = 220.dp, height = 220.dp),
-            )
-            Spacer(Modifier.height(40.dp))
-            Text("强制更新 v" + b.version, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(12.dp))
-            Text(b.phase, color = Color(0xFF9A9AA2), fontSize = 14.sp)
-            Spacer(Modifier.height(28.dp))
-            com.qiubo.optimaltv.ui.components.AppleLoading()
-        }
-    }
-}
-
 /** 单 Activity（方案 §3.1 UI 层）：Compose NavHost 路由（Tab 对齐原版：足球/影视/我的/搜索） */
 class MainActivity : ComponentActivity() {
 
@@ -138,11 +116,9 @@ class MainActivity : ComponentActivity() {
                 // v1.17/v1.18 启动门闸：四个标签内容源 + 影视各分类 tab 页数据与封面
                 // 预热完成（或 90s 兜底超时）前渲染品牌启动屏
                 val ready by AppStartup.ready.collectAsStateWithLifecycle()
-                // v1.18 公测版强制更新门闸：阻断态全屏遮罩；检查未 settled 前不闪主界面
-                val huForce by com.qiubo.optimaltv.hotupdate.HotUpdateManager.force.collectAsStateWithLifecycle()
+                // 热更新在后台静默处理；无论服务端 force 标记如何，都不阻断使用。
                 val huSettled by com.qiubo.optimaltv.hotupdate.HotUpdateManager.settled.collectAsStateWithLifecycle()
                 when {
-                    huForce != null -> ForceUpdateScreen(huForce!!)
                     !com.qiubo.optimaltv.BuildConfig.HOTUPDATE_ENABLED || huSettled -> if (ready) AppRoot() else StartupSplash()
                     else -> StartupSplash()
                 }

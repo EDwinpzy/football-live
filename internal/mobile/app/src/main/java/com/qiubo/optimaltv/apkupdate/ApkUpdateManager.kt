@@ -60,9 +60,7 @@ sealed interface ApkCheckState {
 data class ApkUpdateOffer(
     val manifest: ApkUpdateManifest,
     val decision: ApkUpdateDecision,
-) {
-    val required: Boolean get() = decision == ApkUpdateDecision.REQUIRED
-}
+)
 
 /**
  * APK 应用内更新：检查清单、下载校验 APK，并调起 Android 系统安装器。
@@ -149,7 +147,6 @@ object ApkUpdateManager {
 
     fun declineUpdate() {
         val current = _offer.value ?: return
-        if (current.required) return
         appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putLong(DISMISSED_VERSION, current.manifest.versionCode)
@@ -317,7 +314,6 @@ object ApkUpdateManager {
             ),
         ).also {
             require(it.versionCode > 0) { "APK versionCode 无效" }
-            require(it.versionCode >= it.minSupportedVersionCode) { "最低支持版本不能高于发布版本" }
             require(it.packageName.isNotBlank()) { "packageName 为空" }
         }
     }
