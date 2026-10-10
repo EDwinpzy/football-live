@@ -448,11 +448,12 @@ fun VodScreen(nav: NavController) {
                 }
                 fun exitCategoryWheel() {
                     pageScope.launch {
-                        val targetIndex = if (history.isNotEmpty()) 1 else 0
-                        val target = if (history.isNotEmpty()) firstHistoryFocus else heroPlayFocus
-                        runCatching { vodListState.animateScrollToItem(targetIndex) }
+                        // Return to the first VOD page with its hero at the top. Scrolling
+                        // straight to the history row made the hero disappear and looked like
+                        // the home page had shifted after pressing Left on the category wheel.
+                        runCatching { vodListState.animateScrollToItem(0) }
                         repeat(24) {
-                            if (runCatching { target.requestFocus() }.isSuccess) return@launch
+                            if (runCatching { heroPlayFocus.requestFocus() }.isSuccess) return@launch
                             withFrameNanos { }
                         }
                     }
