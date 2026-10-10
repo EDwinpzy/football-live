@@ -2,7 +2,7 @@
 
 一款面向电视大屏、手机和平板的原生影视应用，并提供 Windows 桌面版、网页版和原生 iOS 自用版。
 Android 使用 Kotlin + Jetpack Compose + Media3，tvOS 深色风格；Python 后端内嵌进 app（Chaquopy），
-设备端自给自足。iOS 使用 SwiftUI + AVPlayer，连接现有云端服务。商业化 = 卡密付费。
+设备端自给自足。iOS 使用 SwiftUI + AVPlayer，连接现有云端服务。卡密会员可主动激活，所有版本播放均不要求卡密。
 
 ## 文档只有两份
 
@@ -32,7 +32,7 @@ Android 使用 Kotlin + Jetpack Compose + Media3，tvOS 深色风格；Python �
 - IPTV 电视：400+ 频道分组选台 + 足球直播广场
 - 播放三级回退：Media3 → 中继 HLS → libVLC，自动换线 + 长跑稳定性治理
 - DLNA 投屏（仅移动版）
-- 卡密付费：一码 2 台设备，24 小时网络宽限
+- 卡密会员：可主动激活，一码 2 台设备；播放无需激活
 - 热更新：改后端与网页资源不发 APK
 - 网页版：云端影视 + IPTV，与 APK 同构
 - Windows 版：独立 EXE，WebView2 窗口 + 本机 Python 后端，内置前端、影视快照与 HLS 播放脚本
