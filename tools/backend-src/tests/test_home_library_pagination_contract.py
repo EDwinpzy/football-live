@@ -65,6 +65,10 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
                       "奇数条目录的短行需要不可聚焦的占位列")
         self.assertIn("rowStates[targetRow].scrollBy(delta)", pager,
                       "遥控焦点或横滑滚动一行时应同步另一行")
+        self.assertIn("Modifier.fillMaxWidth().padding(start = 320f.sx(s)).height(402f.sx(s))", pager,
+                      "左侧分类滚轮留白必须固定在横向滚动视口外，滑动海报不能覆盖滚轮")
+        self.assertIn("contentPadding = PaddingValues(end = 80f.sx(s))", pager,
+                      "LazyRow 的内容内边距不能承载固定滚轮留白")
         self.assertIn("items.filterIndexed { index, _ -> index % 2 == 0 }", pager)
         self.assertIn("items.filterIndexed { index, _ -> index % 2 == 1 }", pager)
         self.assertIn("direction == NAV_DOWN && row == 1", pager, "第二行向下应进入下一页")
@@ -99,6 +103,11 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
                       "应等翻页动画结束后再恢复焦点")
         self.assertIn("visibleItemsInfo.none { it.index == targetColumn }", self.tv_home,
                       "目标卡片已可见时不应再次启动横向滚动动画")
+        self.assertIn(
+            'it.key == "lib-vertical-three-pages" && it.offset <= 0',
+            self.tv_home,
+            "分类滚轮应在片库到达视口顶部后显示，首页隐藏且横向滚动时持续显示",
+        )
 
         back_handler = _source_block(self.tv_home, "BackHandler {", "val showLibLoading")
         self.assertIn("sectionPagerState.currentPage > 0", back_handler)

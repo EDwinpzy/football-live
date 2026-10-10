@@ -220,7 +220,14 @@ fun VodScreen(nav: NavController) {
     val backScope = androidx.compose.runtime.rememberCoroutineScope()
     var tabFocused by remember { mutableStateOf(false) }
     val libraryWheelVisible by remember {
-        derivedStateOf { vodListState.firstVisibleItemIndex >= 3 }
+        derivedStateOf {
+            // Keep the wheel attached to the library viewport while its rows scroll horizontally.
+            // Requiring the pager to reach the top also keeps it off the homepage while only
+            // the bottom edge of the library item is visible below the hero/history section.
+            vodListState.layoutInfo.visibleItemsInfo.any {
+                it.key == "lib-vertical-three-pages" && it.offset <= 0
+            }
+        }
     }
     val libraryKeepsChromeHidden by remember {
         derivedStateOf { vodListState.firstVisibleItemIndex >= 3 && !tabFocused }
@@ -939,9 +946,12 @@ private fun LibrarySectionPage(
                 ProvideNavScrolls(horizontal = rowScroll) {
                     LazyRow(
                         state = state,
-                        modifier = Modifier.fillMaxWidth().height(402f.sx(s)),
+                        // Keep the category-wheel gutter outside the horizontally scrolling
+                        // content. LazyRow contentPadding scrolls away with its items, letting
+                        // posters slide underneath the fixed wheel after a swipe.
+                        modifier = Modifier.fillMaxWidth().padding(start = 320f.sx(s)).height(402f.sx(s)),
                         horizontalArrangement = Arrangement.spacedBy(20f.sx(s)),
-                        contentPadding = PaddingValues(start = 320f.sx(s), end = 80f.sx(s)),
+                        contentPadding = PaddingValues(end = 80f.sx(s)),
                     ) {
                         items(
                             count = alignedColumnCount,
