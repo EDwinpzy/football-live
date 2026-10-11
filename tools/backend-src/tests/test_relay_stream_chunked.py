@@ -14,6 +14,7 @@ import urllib.parse
 import socket
 import sys
 import threading
+import time
 import unittest
 
 BACKEND = pathlib.Path(__file__).resolve().parents[1]
@@ -73,6 +74,42 @@ class _FakeUpstream(threading.Thread):
                     "Content-Length: %d\r\n\r\n" % self.body_len
                 ).encode()
                 conn.sendall(head + body)
+        finally:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            conn.close()
+            self.sock.close()
+
+
+class _FakePlaylistUpstream(threading.Thread):
+    """One-shot HLS playlist server for Range-on-playlist client behavior."""
+
+    def __init__(self, body):
+        super().__init__(daemon=True)
+        self.body = body
+        self.sock = socket.socket()
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(1)
+        self.port = self.sock.getsockname()[1]
+
+    def run(self):
+        conn, _ = self.sock.accept()
+        try:
+            conn.settimeout(5)
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                data = conn.recv(4096)
+                if not data:
+                    return
+                buf += data
+            head = (
+                "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n"
+                "Content-Length: %d\r\n\r\n" % len(self.body)
+            ).encode()
+            conn.sendall(head + self.body)
         finally:
             try:
                 conn.shutdown(socket.SHUT_RDWR)
@@ -143,6 +180,11 @@ class RelayStreamChunkedTest(unittest.TestCase):
         body = resp.read()
         self.assertEqual(len(body), 200_000)
         conn.close()
+        # The client can finish reading the advertised Content-Length just before the
+        # handler resumes the generator and records its completed-body cache entry.
+        deadline = time.monotonic() + 1.0
+        while url not in proxy.RELAY_CACHE and time.monotonic() < deadline:
+            time.sleep(0.01)
         self.assertIn(url, proxy.RELAY_CACHE)
 
     def test_upstream_abort_still_fails_for_retry(self):
@@ -186,6 +228,24 @@ class RelayStreamChunkedTest(unittest.TestCase):
         self.assertIsNone(resp.getheader("Transfer-Encoding"))
         self.assertIsNotNone(resp.getheader("Content-Length"))
         resp.read()
+        conn.close()
+
+    def test_range_request_to_hls_playlist_still_returns_rewritten_manifest(self):
+        """部分 HLS clients Range 请求子清单；它仍须完整重写后按 manifest 返回。"""
+        playlist = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nseg-1.ts?token=1\n"
+        up = _FakePlaylistUpstream(playlist)
+        up.start()
+        url = "http://127.0.0.1:%d/live/child.m3u8" % up.port
+        conn, resp = self._fetch(
+            "/api/relay?u=" + urllib.parse.quote(url, safe=""),
+            headers={"Range": "bytes=0-"},
+        )
+        self.assertEqual(resp.status, 200)
+        body = resp.read()
+        self.assertIn("mpegurl", (resp.getheader("Content-Type") or "").lower())
+        self.assertEqual(resp.getheader("Content-Length"), str(len(body)))
+        self.assertIn(b"#EXTM3U", body)
+        self.assertIn(b"relay?u=", body)
         conn.close()
 
     def test_relay_stream_marks_chunked_only_for_chunked_upstream(self):

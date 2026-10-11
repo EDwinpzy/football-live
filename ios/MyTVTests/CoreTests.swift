@@ -358,6 +358,33 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(query?.first(where: { $0.name == "fresh" })?.value, "1")
     }
 
+    func testFootballMatchRecognizesCompletedStatusVariants() {
+        let completedMatches = ["finished", "ended", "close", " Finished "].map { status in
+            FootballMatch(
+                id: status,
+                title: "甲队 vs 乙队",
+                home: "甲队",
+                away: "乙队",
+                league: "联赛",
+                time: "20:00",
+                status: status
+            )
+        }
+        XCTAssertTrue(completedMatches.allSatisfy(\.isFinished))
+
+        let upcoming = FootballMatch(
+            id: "upcoming",
+            title: "甲队 vs 乙队",
+            home: "甲队",
+            away: "乙队",
+            league: "联赛",
+            time: "20:00",
+            status: "upcoming"
+        )
+        XCTAssertFalse(upcoming.isFinished)
+        XCTAssertEqual((completedMatches + [upcoming]).filter { !$0.isFinished }.map(\.id), ["upcoming"])
+    }
+
     func testFootballRenewsSelectedSourceByMatchAndPreservesItsReferer() async throws {
         let requests = RequestRecorder()
         StubURLProtocol.install { request in
@@ -388,7 +415,9 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(relayComponents.queryItems?.first(where: { $0.name == "ref" })?.value, "https://embed.example.test/watch?id=1&source=88z_7")
         XCTAssertEqual(relayComponents.queryItems?.first(where: { $0.name == "u" })?.value, "https://stream.example.test/live/index.m3u8?token=a+b&x=1")
         XCTAssertTrue(relayComponents.percentEncodedQuery?.contains("a%2Bb%26x%3D1") == true)
-        XCTAssertTrue(relayComponents.percentEncodedQuery?.contains("ref=https%3A%2F%2Fembed.example.test%2Fwatch%3Fid%3D1%26source%3D88z_7") == true)
+        let relayItems = relayComponents.queryItems ?? []
+        XCTAssertEqual(relayItems.count, 2)
+        XCTAssertEqual(Set(relayItems.map(\.name)), Set(["u", "ref"]))
     }
 
     func testRelayDoesNotWrapItsOwnURLTwice() throws {

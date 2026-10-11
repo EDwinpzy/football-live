@@ -242,7 +242,7 @@ struct FootballView: View {
         do {
             let loaded = try await client.matches()
             try Task.checkCancellation()
-            matches = loaded
+            matches = loaded.filter { !$0.isFinished }
             isLoading = false
         } catch is CancellationError {
             return

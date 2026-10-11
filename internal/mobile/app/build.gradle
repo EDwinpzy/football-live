@@ -132,8 +132,8 @@ android {
     //   versionCode = 主版本×100 + 次版本×10 → V1.0=100、V1.1=110、V1.2=120、V2.0=200
     // 必须严格递增：客户端只比较 versionCode，系统安装也不允许降级覆盖。V1.0 取 100
     // 而非 10，是为了高于重置前的 42，已装 1.4x 的设备仍能收到 V1.0 的更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 263)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "2.6.3")
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 264)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "2.6.4")
         // 与 TV 版一致的三 ABI（Chaquopy/libVLC so 需要）；移动版无 cpp 拼音解码器
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
 
@@ -218,7 +218,10 @@ android {
     packagingOptions {
         resources { excludes += ['META-INF/{AL2.0,LGPL2.1}'] }
         // libVLC 三 ABI so 压缩打包（与 TV 版同策略）
-        jniLibs { useLegacyPackaging = true }
+        jniLibs {
+            useLegacyPackaging = true
+            keepDebugSymbols += ['**/libmihomo.so']
+        }
     }
 }
 
@@ -243,6 +246,10 @@ afterEvaluate {
 }
 
 dependencies {
+    // 足球专用 VPN/代理能力由 Android TV 与移动版共用同一实现。
+    // 依赖 Android Library 后，Gradle 会自动合并 vpn-core 的 AndroidManifest.xml。
+    implementation project(':vpn-core')
+
     def composeBom = platform('androidx.compose:compose-bom:2024.06.00')
     implementation composeBom
     implementation 'androidx.compose.ui:ui'

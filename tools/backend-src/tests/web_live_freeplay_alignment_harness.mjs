@@ -64,6 +64,43 @@ assert.deepEqual(resolved, ["live"], "live playback resolution starts without a 
 playerContext.openPlayer({ kind: "vod", vid: "vod-1", title: "测试点播", urls: [] });
 assert.deepEqual(resolved, ["live", "vod"], "VOD playback also starts without a license gate");
 
+const visibilityStart = app.indexOf("function isFinishedLiveMatch");
+const visibilityEnd = app.indexOf("\nfunction renderLive()", visibilityStart);
+assert.ok(visibilityStart >= 0 && visibilityEnd > visibilityStart, "finished-match filter is present");
+const visibilityContext = vm.createContext({
+  live: { league: "all", data: { matches: [
+    { match_id: "finished", status: "finished" },
+    { match_id: "legacy-ended", status: " ended " },
+    { match_id: "legacy-close", status: "CLOSE" },
+    { match_id: "live", status: "live" },
+    { match_id: "upcoming", status: "upcoming" },
+  ] } },
+  matchLeagueFilter: () => true,
+});
+vm.runInContext(app.slice(visibilityStart, visibilityEnd), visibilityContext);
+assert.deepEqual(Array.from(visibilityContext.liveMatches(), m => m.match_id), ["live", "upcoming"],
+  "finished, ended, and close matches are hidden while live and upcoming matches remain");
+
+const heroStart = app.indexOf("function renderLiveHero()");
+const heroEnd = app.indexOf("\nfunction teamNameFont", heroStart);
+assert.ok(heroStart >= 0 && heroEnd > heroStart, "live hero renderer is present");
+const heroNodes = new Map();
+const hero$ = selector => {
+  if (!heroNodes.has(selector)) heroNodes.set(selector, new NodeStub());
+  return heroNodes.get(selector);
+};
+hero$("#liveHero").hidden = false;
+hero$("#liveScoreRow").innerHTML = "old match";
+hero$("#liveStatus").innerHTML = "old status";
+hero$("#liveDots").innerHTML = "old dots";
+hero$("#liveCta").onclick = () => {};
+const heroContext = vm.createContext({ live: { heroList: [], heroId: "finished" }, $: hero$ });
+vm.runInContext(app.slice(heroStart, heroEnd), heroContext);
+heroContext.renderLiveHero();
+assert.equal(hero$("#liveHero").hidden, true, "empty visible-match list hides the stale hero");
+assert.equal(hero$("#liveScoreRow").innerHTML, "", "stale finished score is cleared");
+assert.equal(hero$("#liveCta").onclick, null, "stale finished play action is cleared");
+
 const tvStart = app.indexOf("function playTvChannel(gi, ci, silent)");
 const tvEnd = app.indexOf("\nfunction stopTvPlayback", tvStart);
 assert.ok(tvStart >= 0 && tvEnd > tvStart, "TV channel playback function is present");

@@ -157,9 +157,10 @@ class LiveViewModel : ViewModel() {
         val cal = java.util.Calendar.getInstance(); cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
         val tomorrow = fmt.format(cal.time)
         fun isMyTeam(m: MatchItem) = m.home.contains("国际米兰") || m.away.contains("国际米兰")
-        val tt = all.filter { it.date == today || it.date == tomorrow }
+        val visible = visibleLiveScheduleMatches(all)
+        val tt = visible.filter { it.date == today || it.date == tomorrow }
             .sortedWith(compareByDescending<MatchItem> { if (isMyTeam(it)) 1 else 0 }.thenByDescending { LiveViewModelImportance.of(it) })
-        val others = all.filter { it.date != today && it.date != tomorrow }
+        val others = visible.filter { it.date != today && it.date != tomorrow }
             .sortedWith(compareByDescending<MatchItem> { if (isMyTeam(it)) 1 else 0 }.thenByDescending { LiveViewModelImportance.of(it) })
         return (tt + others).take(6)
     }
@@ -332,7 +333,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                 // lambda 里逐次重算，本页任何状态变化（hint/tab 焦点/hero/筛选）都全量
                 // 重跑过滤+建组+两次日期格式化；LazyListScope 非组合域不能 remember
                 val groups = remember(ui.matches, leagueFilter) {
-                    val filtered = ui.matches.filter { matchLeagueFilter(it, leagueFilter) }
+                    val filtered = visibleLiveScheduleMatches(ui.matches, leagueFilter)
                     buildMap<String, List<MatchItem>> {
                         val fmt = SimpleDateFormat("MM-dd", Locale.CHINA)
                         put(fmt.format(Date()), emptyList<MatchItem>())
@@ -796,6 +797,10 @@ fun matchLeagueFilter(m: MatchItem, key: String): Boolean = when (key) {
     "中超" -> m.league.contains("中超") || m.league.contains("足协杯")
     else -> m.league.contains(key)
 }
+
+/** 直播赛程列表只显示未开赛或进行中的赛事；完场赛事留给战报页。 */
+fun visibleLiveScheduleMatches(matches: List<MatchItem>, leagueFilter: String = "all"): List<MatchItem> =
+    matches.filter { !it.isFinished && matchLeagueFilter(it, leagueFilter) }
 
 fun dateLabel(date: String): String {
     val fmt = SimpleDateFormat("MM-dd", Locale.CHINA)

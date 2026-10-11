@@ -1,5 +1,6 @@
 package com.qiubo.optimaltv.data.repo
 
+import com.qiubo.optimaltv.BuildConfig
 import com.qiubo.optimaltv.OtvLog
 import com.qiubo.optimaltv.data.model.LiveStreamSource
 import com.qiubo.optimaltv.data.model.MatchChannel
@@ -8,6 +9,7 @@ import com.qiubo.optimaltv.data.model.NewsItem
 import com.qiubo.optimaltv.data.model.ResultItem
 import com.qiubo.optimaltv.data.model.VideoItem
 import com.qiubo.optimaltv.data.prefs.SettingsStore
+import com.qiubo.optimaltv.vpn.FootballVpnProxyCore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -32,8 +34,9 @@ class LiveRepository(
 
     companion object {
         /** 直播源由服务端提供对应 Referer，供中继播放清单及分片。 */
-        fun relayUrl(base: String, raw: String, referer: String = "https://www.88zhibo.tv/"): String =
-            "$base/api/relay?u=" + URLEncoder.encode(raw, "UTF-8") + "&ref=" + URLEncoder.encode(referer, "UTF-8")
+        fun relayUrl(base: String, raw: String, referer: String = "https://www.88zhibo.tv/", footballVpn: Boolean = false): String =
+            "$base/api/relay?u=" + URLEncoder.encode(raw, "UTF-8") + "&ref=" + URLEncoder.encode(referer, "UTF-8") +
+                if (footballVpn) "&football_vpn=1" else ""
 
         private const val TAG = "OTV"
 
@@ -319,13 +322,15 @@ class LiveRepository(
     suspend fun liveStreamSources(matchId: String, fresh: Boolean = true): List<LiveStreamSource> =
         withContext(Dispatchers.IO) {
             runCatching {
+                FootballVpnProxyCore.refreshSubscriptions(appContext, BuildConfig.HOTUPDATE_ENDPOINT)
+                check(FootballVpnProxyCore.ensureReady(appContext)) { "football_vpn_unavailable" }
                 val base = baseUrl()
-                val o = getSlow(base, LiveStreamRequestPath.build(matchId, "all", fresh))
+                val o = getSlow(base, LiveStreamRequestPath.build(matchId, "all", fresh, footballVpn = true))
                 LiveStreamPayloadParser.available(o).map { payload ->
                     LiveStreamSource(
                         source = payload.source,
                         name = payload.name,
-                        playbackUrl = relayUrl(base, payload.url, payload.referer),
+                        playbackUrl = relayUrl(base, payload.url, payload.referer, footballVpn = true),
                         referer = payload.referer,
                     )
                 }
@@ -344,9 +349,11 @@ class LiveRepository(
     ): LiveStreamSource? = withContext(Dispatchers.IO) {
         if (source.isBlank()) return@withContext null
         runCatching {
+            FootballVpnProxyCore.refreshSubscriptions(appContext, BuildConfig.HOTUPDATE_ENDPOINT)
+            check(FootballVpnProxyCore.ensureReady(appContext)) { "football_vpn_unavailable" }
             val base = baseUrl()
             val payload = LiveStreamPayloadParser.renewed(
-                getSlow(base, LiveStreamRequestPath.build(matchId, source, fresh)),
+                getSlow(base, LiveStreamRequestPath.build(matchId, source, fresh, footballVpn = true)),
                 requestedSource = source,
                 fallbackName = fallbackName,
                 fallbackReferer = fallbackReferer,
@@ -354,7 +361,7 @@ class LiveRepository(
             LiveStreamSource(
                 source = payload.source,
                 name = payload.name,
-                playbackUrl = relayUrl(base, payload.url, payload.referer),
+                playbackUrl = relayUrl(base, payload.url, payload.referer, footballVpn = true),
                 referer = payload.referer,
             )
         }.onFailure { android.util.Log.w(TAG, "renew stream $source 失败: ${it.message}") }.getOrNull()
@@ -366,6 +373,7 @@ class LiveRepository(
      *  网络异常保守视为「活」（防误切；死地址随后由卡顿触发 kick 续签兜底）。 */
     suspend fun playlistAlive(relayUrl: String): Boolean = withContext(Dispatchers.IO) {
         if (relayUrl.isBlank()) return@withContext false
+        if (!FootballVpnProxyCore.ensureReady(appContext)) return@withContext false
         runCatching {
             val fast = okHttp.newBuilder()
                 .callTimeout(8, java.util.concurrent.TimeUnit.SECONDS)

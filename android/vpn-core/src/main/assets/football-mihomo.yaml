@@ -1,0 +1,66 @@
+# Android football-only proxy configuration. Subscription URLs are intentionally bundled by user request.
+allow-lan: false
+bind-address: 127.0.0.1
+ipv6: false
+mode: rule
+log-level: warning
+unified-delay: true
+tcp-concurrent: true
+find-process-mode: off
+proxy-providers:
+  subscription_1:
+    type: http
+    url: "https://dasho.xn--cp3a08l.com/api/v1/pq/894be660f6a6e76a6b4c08f7c4f69e27"
+    path: ./providers/subscription_1.yaml
+    interval: 86400
+    proxy: DIRECT
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 1800
+      timeout: 5000
+      lazy: true
+  subscription_2:
+    type: http
+    url: "https://yfjc.xyz/api/v1/client/subscribe?token=49cf2f9976db55702c28da2ce3e1b284"
+    path: ./providers/subscription_2.yaml
+    interval: 86400
+    proxy: DIRECT
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 1800
+      timeout: 5000
+      lazy: true
+  subscription_3:
+    type: http
+    url: "https://api.fwcloud.xyz/link/LfmIxiV4oGAXtdG2?clash=1"
+    path: ./providers/subscription_3.yaml
+    interval: 86400
+    proxy: DIRECT
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 1800
+      timeout: 5000
+      lazy: true
+proxy-groups:
+  - name: FOOTBALL-NODES
+    type: fallback
+    use:
+      - subscription_1
+      - subscription_2
+      - subscription_3
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    timeout: 5000
+    max-failed-times: 2
+rules:
+  - MATCH,FOOTBALL-NODES
+listeners:
+  - name: android-football-only
+    type: mixed
+    listen: 127.0.0.1
+    port: 17890
+    udp: false
+    proxy: FOOTBALL-NODES

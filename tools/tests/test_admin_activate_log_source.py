@@ -94,6 +94,31 @@ class AdminActivateLogSourceTests(unittest.TestCase):
             out = self.admin.h_vod_source_test({"title": "x", "episode": 1})
         self.assertIn("latency_ms", out)
 
+    def test_football_vpn_config_uses_expected_rpcs(self):
+        expected = {"ret": 0, "version": 1, "updatedAt": "2026-10-11T00:00:00Z",
+                    "subscriptions": ["https://one.example/sub", "https://two.example/sub",
+                                      "https://three.example/sub"]}
+        with mock.patch.object(self.admin, "rpc", return_value=expected) as rpc:
+            self.assertEqual(self.admin.h_football_vpn_config_get({}), expected)
+            rpc.assert_called_once_with("football_vpn_config_get", {})
+
+        urls = expected["subscriptions"]
+        with mock.patch.object(self.admin, "rpc", return_value=expected) as rpc:
+            self.assertEqual(self.admin.h_football_vpn_config_save({"subscriptions": urls}), expected)
+            rpc.assert_called_once_with("football_vpn_config_save", {"p_subscriptions": urls})
+
+    def test_football_vpn_config_rejects_invalid_sets_without_calling_rpc(self):
+        invalid_sets = (
+            ["https://one.example/sub", "https://two.example/sub"],
+            ["https://one.example/sub", "https://two.example/sub", "http://three.example/sub"],
+            ["https://one.example/sub", "https://two.example/sub", "https://127.0.0.1/sub"],
+        )
+        for subscriptions in invalid_sets:
+            with self.subTest(subscriptions=subscriptions), mock.patch.object(self.admin, "rpc") as rpc:
+                out = self.admin.h_football_vpn_config_save({"subscriptions": subscriptions})
+                self.assertIn("error", out)
+                rpc.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

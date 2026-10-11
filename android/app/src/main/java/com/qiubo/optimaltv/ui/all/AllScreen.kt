@@ -19,7 +19,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -54,6 +54,8 @@ import com.qiubo.optimaltv.ui.components.ProvideNavScrolls
 import com.qiubo.optimaltv.ui.components.ReturnFocus
 import com.qiubo.optimaltv.ui.components.dpadFocusable
 import com.qiubo.optimaltv.ui.components.lazyGridNavContainer
+import com.qiubo.optimaltv.ui.components.NAV_LEFT
+import com.qiubo.optimaltv.ui.components.NAV_UP
 import com.qiubo.optimaltv.ui.theme.OtvColors
 import com.qiubo.optimaltv.ui.theme.rememberUiScale
 import com.qiubo.optimaltv.ui.theme.sx
@@ -69,16 +71,28 @@ import java.net.URLEncoder
  * - 筛选选项按所选类别拉取（需求 我的#8，旧版固定电影频道选项导致结果与源站不一致）；
  *   类型/地区/语言/年份行首均加「全部」（需求 我的#9）；类别行无「全部」（需求⑯）
  * - chips 聚焦才白底黑字；已选项不再常显白底（需求 我的#6）
- * - 海报墙 7 列（232×352 r12 + remark 角标 + ★评分）+ 触底自动加载
+ * - 独立页海报墙 7 列；首页嵌入时收为 5 列 + 触底自动加载
  */
 @Composable
-fun AllScreen(nav: NavController) {
+fun AllScreen(
+    nav: NavController,
+    embedded: Boolean = false,
+    active: Boolean = true,
+    modifier: Modifier = Modifier,
+    initialFilterFocus: FocusRequester? = null,
+    restoreItemId: String? = null,
+    onUpFromFirstRow: (Int) -> Unit = {},
+    onLeftFromFirstColumn: () -> Unit = {},
+) {
     val s = rememberUiScale()
     val firstChipFocus = remember { FocusRequester() }
     // v1.16：上次选中类别 chip 的落焦句柄（进页初始焦点 = 选中的类别，不再回「全部」）
-    val catChipFocus = remember { FocusRequester() }
+    val internalCatChipFocus = remember { FocusRequester() }
+    val catChipFocus = initialFilterFocus ?: internalCatChipFocus
     // 返回落焦（需求 影视#6-2）：从详情页返回时回到上次聚焦的影片卡
-    val returnKey = remember { ReturnFocus.take("all") }
+    val returnKey = remember(embedded, restoreItemId) {
+        if (embedded) restoreItemId else ReturnFocus.take("all")
+    }
     val cardReg = remember { FocusRegistry() }
     // 首帧落焦：有返回记录 → 卡片；否则 → 类别行选中 chip
     var didInitialFocus by remember { mutableStateOf(false) }
@@ -92,7 +106,8 @@ fun AllScreen(nav: NavController) {
     var rating by remember { mutableStateOf("") }
     var by by remember { mutableStateOf("hot") }
     var catLoaded by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(embedded, active) {
+        if (embedded || !active) return@LaunchedEffect
         if (didInitialFocus) return@LaunchedEffect
         didInitialFocus = true
         val key = returnKey
@@ -133,8 +148,8 @@ fun AllScreen(nav: NavController) {
     val scope = rememberCoroutineScope()
     var reqSeq by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(cat, type, area, year, rating, by, catLoaded) {
-        if (!catLoaded) return@LaunchedEffect
+    LaunchedEffect(cat, type, area, year, rating, by, catLoaded, active, embedded) {
+        if (!catLoaded || (embedded && !active)) return@LaunchedEffect
         val seq = ++reqSeq
         loading = true
         val r = Graph.repo.showPage(
@@ -150,7 +165,7 @@ fun AllScreen(nav: NavController) {
     }
 
     fun loadMore() {
-        if (loading || !hasMore) return
+        if (loading || !hasMore || (embedded && !active)) return
         loading = true
         val seq = reqSeq
         val next = page + 1
@@ -175,7 +190,8 @@ fun AllScreen(nav: NavController) {
 
     // 触底自动加载
     val gridState = rememberLazyGridState()
-    LaunchedEffect(gridState, hasMore) {
+    LaunchedEffect(gridState, hasMore, active, embedded) {
+        if (embedded && !active) return@LaunchedEffect
         snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
             .distinctUntilChanged()
             .collect { last ->
@@ -192,7 +208,7 @@ fun AllScreen(nav: NavController) {
         scope.launch { gridState.scrollToItem(0) }
     }
     val backScope = rememberCoroutineScope()
-    BackHandler {
+    BackHandler(enabled = !embedded) {
         if (filterFocused) {
             nav.popBackStack()
         } else {
@@ -201,12 +217,12 @@ fun AllScreen(nav: NavController) {
         }
     }
 
-    Box(Modifier.fillMaxSize().background(OtvColors.Bg)) {
+    Box(modifier.fillMaxSize().background(OtvColors.Bg)) {
         val gridScroll = remember(gridState) { lazyGridNavContainer(gridState) }
         ProvideNavScrolls(vertical = gridScroll) {
         LazyVerticalGrid(
             state = gridState,
-            columns = GridCells.Fixed(7),
+            columns = GridCells.Fixed(if (embedded) 5 else 7),
             horizontalArrangement = Arrangement.spacedBy(20f.sx(s)),
             verticalArrangement = Arrangement.spacedBy(24f.sx(s)),
             modifier = Modifier
@@ -282,8 +298,19 @@ fun AllScreen(nav: NavController) {
                     )
                 }
             }
-            items(items, key = { it.id }) { item ->
-                VcardCard(nav, item, s, cardReg)
+            itemsIndexed(items, key = { _, item -> item.id }) { index, item ->
+                VcardCard(
+                    nav = nav,
+                    item = item,
+                    s = s,
+                    cardReg = cardReg,
+                    returnScreen = if (embedded) "vod" else "all",
+                    focusKey = if (embedded) "lib:全部:${item.id}" else item.id,
+                    itemIndex = index,
+                    gridColumnCount = if (embedded) 5 else 7,
+                    onUpFromFirstRow = { onUpFromFirstRow(index % (if (embedded) 5 else 7)) },
+                    onLeftFromFirstColumn = onLeftFromFirstColumn,
+                )
             }
             if (loading) {
                 item(span = { GridItemSpan(maxLineSpan) }, key = "loading") {
@@ -315,6 +342,19 @@ fun AllScreen(nav: NavController) {
         } // ProvideNavScrolls(gridScroll)
         // 需求追加：本页不渲染顶部标签栏（足球/影视/我的/搜索）——内容占满全屏；
         // 方向键本来就进不了纯展示 tab，删除后无行为差异
+    }
+
+    LaunchedEffect(embedded, restoreItemId, items, active, upstreamAvailable) {
+        if (!embedded || !active || restoreItemId.isNullOrBlank()) return@LaunchedEffect
+        val itemIndex = items.indexOfFirst { it.id == restoreItemId }
+        if (itemIndex < 0) return@LaunchedEffect
+        val gridIndex = 1 + (if (upstreamAvailable) 0 else 1) + itemIndex
+        gridState.scrollToItem(gridIndex)
+        repeat(40) {
+            if (runCatching { cardReg.fr("lib:全部:$restoreItemId").requestFocus() }.isSuccess) return@LaunchedEffect
+            kotlinx.coroutines.delay(50)
+        }
+        runCatching { catChipFocus.requestFocus() }
     }
 }
 
@@ -405,14 +445,33 @@ private fun VcardCard(
     item: VodItem,
     s: Float,
     cardReg: FocusRegistry? = null,
+    returnScreen: String = "all",
+    focusKey: String = item.id,
+    itemIndex: Int = 0,
+    gridColumnCount: Int = 7,
+    onUpFromFirstRow: () -> Unit = {},
+    onLeftFromFirstColumn: () -> Unit = {},
 ) {
     Column(Modifier.width(232f.sx(s))) {
         Box(
             Modifier
                 .dpadFocusable(
                     scaleFocused = 1.05f,
-                    onFocusedChange = { if (it) ReturnFocus.mark("all", item.id) },
-                    externalFocusRequester = cardReg?.fr(item.id),
+                    onFocusedChange = { if (it) ReturnFocus.mark(returnScreen, focusKey) },
+                    externalFocusRequester = cardReg?.fr(focusKey),
+                    navOverride = { direction ->
+                        when {
+                            direction == NAV_UP && itemIndex < gridColumnCount -> {
+                                onUpFromFirstRow()
+                                true
+                            }
+                            direction == NAV_LEFT && itemIndex % gridColumnCount == 0 -> {
+                                onLeftFromFirstColumn()
+                                true
+                            }
+                            else -> false
+                        }
+                    },
                 ) {
                     nav.navigate("detail/" + URLEncoder.encode(item.id, "UTF-8"))
                 }

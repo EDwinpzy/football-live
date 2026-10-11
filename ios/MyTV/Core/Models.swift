@@ -182,6 +182,11 @@ public struct FootballMatch: Identifiable, Codable, Hashable {
     public var score: String
     public var minute: String
 
+    public var isFinished: Bool {
+        let normalizedStatus = status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return ["finished", "ended", "close"].contains(normalizedStatus)
+    }
+
     public init(
         id: String,
         title: String,

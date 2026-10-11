@@ -4,12 +4,13 @@ import org.json.JSONObject
 import java.net.URLEncoder
 
 internal object LiveStreamRequestPath {
-    fun build(matchId: String, source: String, fresh: Boolean): String = buildString {
+    fun build(matchId: String, source: String, fresh: Boolean, footballVpn: Boolean = false): String = buildString {
         append("/api/stream/")
         append(URLEncoder.encode(matchId, "UTF-8"))
         append("?src=")
         append(URLEncoder.encode(source, "UTF-8"))
         if (fresh) append("&fresh=1")
+        if (footballVpn) append("&football_vpn=1")
     }
 }
 

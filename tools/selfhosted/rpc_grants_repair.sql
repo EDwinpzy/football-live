@@ -39,6 +39,117 @@ BEGIN
 END
 $assert_publish_lock_ready$;
 
+-- Football VPN subscriptions are public read-only configuration for the Android
+-- football proxy. Keep the latest versioned value in the existing IPTV config
+-- table so both the public BusinessApi and the authenticated admin RPC share
+-- one source of truth. This repair runs on every schema rollout, including
+-- databases whose original migrations are already recorded.
+CREATE OR REPLACE FUNCTION public.football_vpn_config_get()
+RETURNS json
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path TO public
+AS $$
+DECLARE
+    v_config jsonb;
+BEGIN
+    SELECT value::jsonb
+    INTO v_config
+    FROM public.iptv_config
+    WHERE key = 'football_vpn_config';
+
+    IF NOT FOUND THEN
+        RETURN json_build_object(
+            'ret', 0,
+            'version', 0,
+            'updatedAt', NULL,
+            'subscriptions', json_build_array(
+                'https://dasho.xn--cp3a08l.com/api/v1/pq/894be660f6a6e76a6b4c08f7c4f69e27',
+                'https://yfjc.xyz/api/v1/client/subscribe?token=49cf2f9976db55702c28da2ce3e1b284',
+                'https://api.fwcloud.xyz/link/LfmIxiV4oGAXtdG2?clash=1'
+            )
+        );
+    END IF;
+
+    RETURN json_build_object(
+        'ret', 0,
+        'version', COALESCE((v_config ->> 'version')::integer, 0),
+        'updatedAt', v_config -> 'updatedAt',
+        'subscriptions', v_config -> 'subscriptions'
+    );
+END
+$$;
+
+CREATE OR REPLACE FUNCTION public.football_vpn_config_save(p_subscriptions jsonb)
+RETURNS json
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO public
+AS $$
+DECLARE
+    v_subscriptions jsonb;
+    v_config jsonb;
+BEGIN
+    IF coalesce(auth.uid(), '') <> '2094843486709620737' THEN
+        RAISE EXCEPTION 'forbidden';
+    END IF;
+
+    IF p_subscriptions IS NULL
+       OR jsonb_typeof(p_subscriptions) IS DISTINCT FROM 'array' THEN
+        RAISE EXCEPTION 'bad_subscriptions';
+    END IF;
+
+    IF jsonb_array_length(p_subscriptions) <> 3 THEN
+        RAISE EXCEPTION 'bad_subscriptions';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(p_subscriptions) AS subscription(value)
+        WHERE jsonb_typeof(subscription.value) IS DISTINCT FROM 'string'
+           OR (subscription.value #>> '{}') !~* '^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?([/?#][^[:space:]]*)?$'
+    ) THEN
+        RAISE EXCEPTION 'bad_subscriptions';
+    END IF;
+
+    SELECT jsonb_agg(to_jsonb(btrim(subscription.value #>> '{}')) ORDER BY subscription.ordinality)
+    INTO v_subscriptions
+    FROM jsonb_array_elements(p_subscriptions) WITH ORDINALITY AS subscription(value, ordinality);
+
+    INSERT INTO public.iptv_config AS current_config (key, value, updated_at)
+    VALUES (
+        'football_vpn_config',
+        jsonb_build_object(
+            'version', 1,
+            'updatedAt', statement_timestamp(),
+            'subscriptions', v_subscriptions
+        )::text,
+        statement_timestamp()
+    )
+    ON CONFLICT (key) DO UPDATE
+    SET value = jsonb_build_object(
+            'version', greatest(coalesce((current_config.value::jsonb ->> 'version')::integer, 0), 0) + 1,
+            'updatedAt', statement_timestamp(),
+            'subscriptions', v_subscriptions
+        )::text,
+        updated_at = statement_timestamp()
+    RETURNING value::jsonb INTO v_config;
+
+    RETURN json_build_object(
+        'ret', 0,
+        'version', (v_config ->> 'version')::integer,
+        'updatedAt', v_config -> 'updatedAt',
+        'subscriptions', v_config -> 'subscriptions'
+    );
+END
+$$;
+
+REVOKE ALL ON FUNCTION public.football_vpn_config_get() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.football_vpn_config_save(jsonb) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.football_vpn_config_get() TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.football_vpn_config_save(jsonb) TO authenticated;
+
 grant execute on function
   public.admin_licenses(text, text, text, integer, integer),
   public.admin_licenses(text, text, text, integer, integer, text, text),

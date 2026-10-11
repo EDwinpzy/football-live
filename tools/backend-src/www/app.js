@@ -970,7 +970,7 @@ async function initLive() {
   live.clock = setInterval(() => {
     let changed = false;
     for (const m of (live.data && live.data.matches) || []) {
-      if (m.status === "finished") continue;
+      if (isFinishedLiveMatch(m)) continue;
       const start = matchStartMillis(m); if (start == null) continue;
       const elapsed = Math.floor((Date.now() - start) / 60000); if (elapsed < 0) continue;
       const next = elapsed >= 110 ? "finished" : "live";
@@ -1010,9 +1010,14 @@ async function refreshLive(silent) {
   } finally { live.refreshing = false; }
 }
 
+function isFinishedLiveMatch(m) {
+  const status = String((m && m.status) || "").trim().toLowerCase();
+  return status === "finished" || status === "ended" || status === "close";
+}
 function liveMatches() {
   const ms = (live.data && live.data.matches) || [];
-  return live.league === "all" ? ms : ms.filter(m => matchLeagueFilter(m, live.league));
+  const visible = ms.filter(m => !isFinishedLiveMatch(m));
+  return live.league === "all" ? visible : visible.filter(m => matchLeagueFilter(m, live.league));
 }
 
 function renderLive() {
@@ -1131,7 +1136,15 @@ function gameCard(m) {
    （App LiveHeroBand：start80/top170 宽760；ScoreRow h96×2；CTA top500 268×94） */
 function renderLiveHero() {
   const m = live.heroList.find(x => x.match_id === live.heroId) || live.heroList[0];
-  if (!m) return;
+  if (!m) {
+    $("#liveHero").hidden = true;
+    $("#liveScoreRow").innerHTML = "";
+    $("#liveStatus").innerHTML = "";
+    $("#liveDots").innerHTML = "";
+    $("#liveCta").onclick = null;
+    return;
+  }
+  $("#liveHero").hidden = false;
   heroSwap($("#liveHero"), BASE + "/assets/football/fb-" + String((live.posterIdx % 36) + 1).padStart(2, "0") + ".jpg");
   refade($("#liveHero").querySelector(".live-hero-content"));
   const scoreRow = (team, pts) => `<div class="score-team">

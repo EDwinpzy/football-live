@@ -617,6 +617,7 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
   <div class="rail-grp">Sources</div>
   <button data-tab="iptv"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.75" y="2.75" width="12.5" height="8.5" rx="1.5"/><path d="M8 11.25V13.5M5.5 13.5h5"/></svg>电视源</button>
   <button data-tab="vod-sources"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5h12v8H2z"/><path d="m6.5 7 3 1.5-3 1.5zM5 2.5l3 2 3-2"/></svg>影视源</button>
+  <button data-tab="football-vpn"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.75 13 3.5v3.8c0 3.05-1.95 5.55-5 6.95-3.05-1.4-5-3.9-5-6.95V3.5z"/><path d="m5.5 7.75 1.6 1.6 3.4-3.5"/></svg>足球代理</button>
   <div class="rail-foot" id="verbs-note">私钥签发 · license_importer 最小权限入库<br>登录会话 12h</div>
 </nav>
 
@@ -944,6 +945,35 @@ table.pool tr:not(.miss):hover td{background:rgba(79,209,224,.075)}
   </div>
 </section>
 
+<!-- ============ 足球代理订阅 ============ -->
+<section id="tab-football-vpn" style="display:none">
+  <div class="w-head">
+    <h1>足球代理订阅</h1><span class="sub">编辑 Android 足球代理使用的三条订阅；足球分流规则固定在 App 内</span>
+  </div>
+  <div class="formfoot" style="max-width:960px;margin-bottom:16px">
+    <span class="tag" id="football-vpn-version">配置版本加载中…</span>
+    <span class="hint" id="football-vpn-updated-at">更新时间：读取中…</span>
+  </div>
+  <div class="panel" style="max-width:960px;margin-top:0">
+    <div class="formgrid" style="grid-template-columns:1fr">
+      <label class="f wide">订阅 1
+        <input id="football-vpn-sub-1" class="mono" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://…">
+      </label>
+      <label class="f wide">订阅 2
+        <input id="football-vpn-sub-2" class="mono" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://…">
+      </label>
+      <label class="f wide">订阅 3
+        <input id="football-vpn-sub-3" class="mono" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://…">
+      </label>
+      <div class="wide formfoot" style="border:0;background:none;padding:2px 0 0">
+        <button type="button" class="act" id="btn-football-vpn-save" onclick="saveFootballVpnConfig()">保存并更新</button>
+        <button type="button" class="ghost" onclick="loadFootballVpnConfig()">重新加载</button>
+        <span class="hint" id="football-vpn-status" role="status" aria-live="polite">尚未加载</span>
+      </div>
+    </div>
+  </div>
+</section>
+
 </main>
 
 <!-- ============ 右：运行状态栏（常驻） ============ -->
@@ -1195,6 +1225,50 @@ async function api(path, body) {
     if (r.status === 401) { showLogin(); return {error: "未登录（请先登录）"}; }
     return await r.json();
   } catch (e) { return {error: "管理服务不可达: " + e.message}; }
+}
+function footballVpnStatus(message, state = "") {
+  const el = document.getElementById("football-vpn-status");
+  el.textContent = message;
+  el.className = state ? `hint st ${state}` : "hint";
+}
+function renderFootballVpnMeta(config) {
+  const version = Number(config.version) || 0;
+  const updatedAt = config.updatedAt || config.updated_at || "尚未保存";
+  document.getElementById("football-vpn-version").textContent = `当前版本 v${version}`;
+  document.getElementById("football-vpn-updated-at").textContent = "更新时间：" + updatedAt;
+}
+async function loadFootballVpnConfig() {
+  footballVpnStatus("正在读取配置…");
+  const d = await api("football_vpn_config_get", {});
+  const config = Array.isArray(d) ? d[0] : d;
+  if (d.error || !config || (config.ret != null && config.ret !== 0)
+      || !Array.isArray(config.subscriptions) || config.subscriptions.length !== 3) {
+    footballVpnStatus(d.error || config?.msg || "配置响应格式错误", "bad");
+    return;
+  }
+  config.subscriptions.forEach((url, i) => {
+    document.getElementById(`football-vpn-sub-${i + 1}`).value = typeof url === "string" ? url : "";
+  });
+  renderFootballVpnMeta(config);
+  footballVpnStatus("配置已加载", "ok");
+}
+async function saveFootballVpnConfig() {
+  const button = document.getElementById("btn-football-vpn-save");
+  const subscriptions = [1, 2, 3].map(i => document.getElementById(`football-vpn-sub-${i}`).value.trim());
+  button.disabled = true;
+  button.textContent = "保存中…";
+  footballVpnStatus("正在保存三条订阅…");
+  const d = await api("football_vpn_config_save", {subscriptions});
+  button.disabled = false;
+  button.textContent = "保存并更新";
+  const result = Array.isArray(d) ? d[0] : d;
+  if (d.error || !result || (result.ret != null && result.ret !== 0) || result.error) {
+    footballVpnStatus(d.error || result?.msg || result?.error || "保存失败", "bad");
+    return;
+  }
+  renderFootballVpnMeta(result);
+  footballVpnStatus(`保存成功，当前版本 v${Number(result.version) || 0}`, "ok");
+  toast("足球代理订阅已更新");
 }
 function showLogin() {
   document.getElementById("login-veil").style.display = "";
@@ -2852,7 +2926,7 @@ document.querySelectorAll("[data-release-tab]").forEach(b => b.onclick = () => s
 /* ---- tab 切换 ---- */
 document.querySelectorAll("nav.verbs button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav.verbs button").forEach(x => x.classList.toggle("on", x === b));
-  ["overview","licenses","logs","gen","release","ann","iptv","vod-sources"].forEach(t =>
+  ["overview","licenses","logs","gen","release","ann","iptv","vod-sources","football-vpn"].forEach(t =>
     document.getElementById("tab-" + t).style.display = t === b.dataset.tab ? "" : "none");
   if (b.dataset.tab === "overview") { loadStats(); loadHealth(); loadOvLedger(); loadOvTimeline(); }
   if (b.dataset.tab === "licenses") loadList();
@@ -2861,6 +2935,7 @@ document.querySelectorAll("nav.verbs button").forEach(b => b.onclick = () => {
   if (b.dataset.tab === "ann") loadAnn();
   if (b.dataset.tab === "iptv") { loadIptv(); loadIptvVersions(); loadIptvLogs(); iptvGroupLoad(); }
   if (b.dataset.tab === "vod-sources") loadVodSources();
+  if (b.dataset.tab === "football-vpn") loadFootballVpnConfig();
 });
 document.getElementById("btn-search").onclick = () => { page = 0; loadList(); };
 document.getElementById("q").onkeydown = e => { if (e.key === "Enter") { page = 0; loadList(); } };
@@ -2878,7 +2953,7 @@ loadOvTimeline();
 vodLatLoad();
 /* hash 深链：旧的 #hu / #apk 仍然兼容，并统一落到版本发布菜单 */
 const h = location.hash.slice(1);
-if (["overview","licenses","logs","gen","release","ann","iptv","vod-sources"].includes(h) && h !== "overview")
+if (["overview","licenses","logs","gen","release","ann","iptv","vod-sources","football-vpn"].includes(h) && h !== "overview")
   document.querySelector(`nav.verbs button[data-tab="${h}"]`).click();
 else if (h === "hu" || h === "apk") {
   document.querySelector('nav.verbs button[data-tab="release"]').click();

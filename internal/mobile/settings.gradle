@@ -14,3 +14,5 @@ dependencyResolutionManagement {
 }
 rootProject.name = "optimal-tv"
 include ':app'
+include ':vpn-core'
+project(':vpn-core').projectDir = file('../../android/vpn-core')

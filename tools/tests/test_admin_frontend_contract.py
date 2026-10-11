@@ -28,7 +28,7 @@ BASE_SQL = (ROOT / "tools" / "selfhosted" / "base_schema.sql").read_text(encodin
 SOURCE = HTML_PATH.read_text(encoding="utf-8")
 SERVER = SERVER_PATH.read_text(encoding="utf-8")
 
-TOP_TABS = ["overview", "licenses", "logs", "gen", "release", "ann", "iptv", "vod-sources"]
+TOP_TABS = ["overview", "licenses", "logs", "gen", "release", "ann", "iptv", "vod-sources", "football-vpn"]
 
 
 def _block(text: str, pattern: str, group: int = 1, flags: int = re.S) -> str:
@@ -325,6 +325,33 @@ def test_iptv_save_accepts_plain_url_array():
     assert "urls:" in SOURCE
     body = _block(SERVER, r"def h_iptv_save\(d: dict\) -> dict:(.*?)\n\ndef ")
     assert 'd.get("urls")' in body
+
+
+def test_football_vpn_admin_routes_validate_and_call_config_rpcs():
+    get_body = _block(SERVER, r"def h_football_vpn_config_get\(_d: dict\) -> dict:(.*?)\n\ndef ")
+    save_body = _block(SERVER, r"def h_football_vpn_config_save\(d: dict\) -> dict:(.*?)\n\ndef ")
+    assert 'rpc("football_vpn_config_get", {})' in get_body
+    assert 'd.get("subscriptions")' in save_body
+    assert "len(raw_urls) != 3" in save_body
+    assert 'parsed.scheme.lower() != "https"' in save_body
+    assert "vod_sources._validate_public_url(url)" in save_body
+    assert save_body.index("vod_sources._validate_public_url(url)") < save_body.index('rpc("football_vpn_config_save"')
+    assert '"p_subscriptions": urls' in save_body
+    assert '"/api/football_vpn_config_get": h_football_vpn_config_get' in SERVER
+    assert '"/api/football_vpn_config_save": h_football_vpn_config_save' in SERVER
+
+
+def test_football_vpn_tab_loads_saves_and_shows_version_status():
+    for element_id in (
+        "tab-football-vpn", "football-vpn-sub-1", "football-vpn-sub-2",
+        "football-vpn-sub-3", "football-vpn-version", "football-vpn-updated-at",
+        "football-vpn-status", "btn-football-vpn-save",
+    ):
+        assert f'id="{element_id}"' in SOURCE
+    assert 'api("football_vpn_config_get", {})' in SOURCE
+    assert 'api("football_vpn_config_save", {subscriptions})' in SOURCE
+    assert "if (b.dataset.tab === \"football-vpn\") loadFootballVpnConfig();" in SOURCE
+    assert "config.updatedAt || config.updated_at" in SOURCE
 
 
 def test_vod_source_test_frontend_and_backend_agree_on_latency_field():

@@ -2,7 +2,6 @@ package com.qiubo.optimaltv.ui.home
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HomeLibraryUiPolicyTest {
@@ -42,25 +41,22 @@ class HomeLibraryUiPolicyTest {
     }
 
     @Test
-    fun `影视片库固定为热门更新豆瓣高分三页`() {
-        assertEquals(listOf("最近热门", "最近更新", "豆瓣高分"), HomeLibraryUiPolicy.PAGE_TITLES)
+    fun `影视片库在三栏后保留内嵌全部页`() {
+        assertEquals(listOf("最近热门", "最近更新", "豆瓣高分"), HomeLibraryUiPolicy.SECTION_PAGE_TITLES)
+        assertEquals(listOf("最近热门", "最近更新", "豆瓣高分", "全部"), HomeLibraryUiPolicy.PAGE_TITLES)
+        assertEquals(3, HomeLibraryUiPolicy.ALL_PAGE_INDEX)
     }
 
     @Test
-    fun `TV分类滚轮首尾停止并突出中心选项`() {
-        assertEquals(0, HomeLibraryUiPolicy.moveCategorySelection(0, -1, 5))
-        assertEquals(1, HomeLibraryUiPolicy.moveCategorySelection(0, 1, 5))
-        assertEquals(3, HomeLibraryUiPolicy.moveCategorySelection(4, -1, 5))
-        assertEquals(4, HomeLibraryUiPolicy.moveCategorySelection(4, 1, 5))
-        assertNull(HomeLibraryUiPolicy.categoryWheelIndex(-1, 5))
-        assertEquals(0, HomeLibraryUiPolicy.categoryWheelIndex(0, 5))
-        assertEquals(4, HomeLibraryUiPolicy.categoryWheelIndex(4, 5))
-        assertNull(HomeLibraryUiPolicy.categoryWheelIndex(5, 5))
-        assertNull(HomeLibraryUiPolicy.categoryWheelIndex(0, 0))
-        assertEquals(1.30f, HomeLibraryUiPolicy.categoryWheelScale(0f), 0.001f)
-        assertTrue(HomeLibraryUiPolicy.categoryWheelScale(0f) > HomeLibraryUiPolicy.categoryWheelScale(1f))
-        assertTrue(HomeLibraryUiPolicy.categoryWheelAlpha(0f) > HomeLibraryUiPolicy.categoryWheelAlpha(1f))
-        assertTrue(HomeLibraryUiPolicy.categoryWheelAlpha(1f) > HomeLibraryUiPolicy.categoryWheelAlpha(2f))
+    fun `TV分类平铺网格在行列边界停止且支持末行`() {
+        assertEquals(1, HomeLibraryUiPolicy.categoryGridTargetIndex(0, com.qiubo.optimaltv.ui.components.NAV_RIGHT, 7))
+        assertEquals(2, HomeLibraryUiPolicy.categoryGridTargetIndex(0, com.qiubo.optimaltv.ui.components.NAV_DOWN, 7))
+        assertNull(HomeLibraryUiPolicy.categoryGridTargetIndex(0, com.qiubo.optimaltv.ui.components.NAV_LEFT, 7))
+        assertNull(HomeLibraryUiPolicy.categoryGridTargetIndex(0, com.qiubo.optimaltv.ui.components.NAV_UP, 7))
+        assertEquals(5, HomeLibraryUiPolicy.categoryGridTargetIndex(3, com.qiubo.optimaltv.ui.components.NAV_DOWN, 7))
+        assertNull(HomeLibraryUiPolicy.categoryGridTargetIndex(6, com.qiubo.optimaltv.ui.components.NAV_RIGHT, 7))
+        assertNull(HomeLibraryUiPolicy.categoryGridTargetIndex(6, com.qiubo.optimaltv.ui.components.NAV_DOWN, 7))
+        assertNull(HomeLibraryUiPolicy.categoryGridTargetIndex(0, com.qiubo.optimaltv.ui.components.NAV_RIGHT, 0))
     }
 
     @Test

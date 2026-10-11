@@ -72,6 +72,7 @@ import com.qiubo.optimaltv.data.model.VodItem
 import com.qiubo.optimaltv.data.model.formatTime
 import com.qiubo.optimaltv.data.repo.VodRepository
 import com.qiubo.optimaltv.data.source.HhkanSource
+import com.qiubo.optimaltv.ui.all.AllScreen
 import com.qiubo.optimaltv.ui.components.FocusRegistry
 import com.qiubo.optimaltv.ui.components.InitialFocusEffect
 import com.qiubo.optimaltv.ui.components.MainTabBar
@@ -126,20 +127,22 @@ private const val VOD_HERO_BTN_BOTTOM = 18f
 
 /** 影视首页的 TV 分类与三页片库规则。 */
 internal object HomeLibraryUiPolicy {
-    val PAGE_TITLES = listOf("最近热门", "最近更新", "豆瓣高分")
-    const val CATEGORY_WHEEL_SELECTED_SCALE = 1.30f
+    val SECTION_PAGE_TITLES = listOf("最近热门", "最近更新", "豆瓣高分")
+    const val ALL_PAGE_TITLE = "全部"
+    const val ALL_PAGE_INDEX = 3
+    val PAGE_TITLES = SECTION_PAGE_TITLES + ALL_PAGE_TITLE
 
-    fun moveCategorySelection(index: Int, delta: Int, count: Int): Int =
-        if (count <= 0) 0 else (index + delta).coerceIn(0, count - 1)
-
-    fun categoryWheelIndex(position: Int, count: Int): Int? =
-        position.takeIf { count > 0 && it in 0 until count }
-
-    fun categoryWheelScale(distance: Float): Float =
-        (CATEGORY_WHEEL_SELECTED_SCALE - kotlin.math.abs(distance) * 0.28f).coerceAtLeast(0.72f)
-
-    fun categoryWheelAlpha(distance: Float): Float =
-        (1f - kotlin.math.abs(distance) * 0.27f).coerceIn(0f, 1f)
+    fun categoryGridTargetIndex(index: Int, direction: Int, count: Int, columns: Int = 2): Int? {
+        if (count <= 0 || columns <= 0 || index !in 0 until count) return null
+        val target = when (direction) {
+            NAV_LEFT -> if (index % columns > 0) index - 1 else return null
+            NAV_RIGHT -> if (index % columns < columns - 1) index + 1 else return null
+            NAV_UP -> index - columns
+            NAV_DOWN -> index + columns
+            else -> return null
+        }
+        return target.takeIf { it in 0 until count }
+    }
 
     fun sourceSectionName(page: Int, available: List<String>): String? {
         val aliases = when (page) {
@@ -219,9 +222,9 @@ fun VodScreen(nav: NavController) {
     val vodListState = rememberLazyListState()
     val backScope = androidx.compose.runtime.rememberCoroutineScope()
     var tabFocused by remember { mutableStateOf(false) }
-    val libraryWheelVisible by remember {
+    val libraryCategoryTilesVisible by remember {
         derivedStateOf {
-            // Keep the wheel attached to the library viewport while its rows scroll horizontally.
+            // Keep category tiles attached to the library viewport while its rows scroll horizontally.
             // Requiring the pager to reach the top also keeps it off the homepage while only
             // the bottom edge of the library item is visible below the hero/history section.
             vodListState.layoutInfo.visibleItemsInfo.any {
@@ -267,24 +270,30 @@ fun VodScreen(nav: NavController) {
             else -> {
                 // 片库状态提升到组合作用域（LazyColumn builder 非组合上下文，remember/LaunchedEffect 不可写在其内）
                 val categories = remember(cat) {
-                    HomeLibraryUiPolicy.orderedCategories(cat.categories.map { it.id to it.name }) + ("" to "全部 ›")
+                    HomeLibraryUiPolicy.orderedCategories(cat.categories.map { it.id to it.name }) + ("" to "全部")
                 }
                 // 进页恢复上次选中的分类（按分类 ID 持久化），不回「电影」。
-                var catSel by remember(cat) { mutableIntStateOf(0) }
-                var categoryWheelTurn by remember(cat) { mutableIntStateOf(0) }
-                val categoryWheelFocus = remember { FocusRequester() }
-                LaunchedEffect(cat) {
+                val returningFromAllCard = returnKey?.startsWith("lib:全部:") == true
+                var catSel by remember(cat, returningFromAllCard) {
+                    mutableIntStateOf(if (returningFromAllCard) categories.lastIndex else 0)
+                }
+                val categoryFocusRequesters = remember(categories) { List(categories.size) { FocusRequester() } }
+                val allPageFilterFocus = remember { FocusRequester() }
+                LaunchedEffect(cat, returningFromAllCard) {
+                    if (returningFromAllCard) {
+                        catSel = categories.lastIndex
+                        return@LaunchedEffect
+                    }
                     val saved = runCatching { Graph.settings.vodLastCat() }.getOrNull()
                     if (!saved.isNullOrBlank()) {
                         categories.indexOfFirst { it.first == saved }.takeIf { it >= 0 }?.let {
                             catSel = it
-                            categoryWheelTurn = it
                         }
                     }
                 }
-                // 分类 tab 固定三块，以好好看频道页的当前分类三栏目为主；选中「全部 ›」直接进入 all 页。
+                // 右侧固定展示三块栏目；“全部”作为第四页嵌入当前页面，不再跳转新路由。
                 val selCatId = categories.getOrNull(catSel)?.first.orEmpty()
-                var sectionLoading by remember(selCatId) { mutableStateOf(true) }
+                var sectionLoading by remember(selCatId) { mutableStateOf(selCatId.isNotBlank()) }
                 /* 分类 id 现为 `douban:movie` 形态；用与 libBlocks 同一套解析，
                    否则恒为 null → 三栏恒空（影视 tab 一直「暂无内容」）。 */
                 val selCid = com.qiubo.optimaltv.data.repo.VodRepository.categoryCid(selCatId)
@@ -307,33 +316,36 @@ fun VodScreen(nav: NavController) {
                 val sectionPages = remember(sections) {
                     val available = sections.map { it.name }
                     HomeLibraryUiPolicy.PAGE_TITLES.mapIndexed { index, title ->
-                        val sourceName = HomeLibraryUiPolicy.sourceSectionName(index, available)
+                        val sourceName = if (index < HomeLibraryUiPolicy.SECTION_PAGE_TITLES.size) {
+                            HomeLibraryUiPolicy.sourceSectionName(index, available)
+                        } else null
                         title to sections.firstOrNull { it.name == sourceName }
                     }
                 }
                 val returnPage = remember(returnKey, sectionPages) {
                     sectionPages.indexOfFirst { (_, section) ->
                         section?.items?.any { "lib:${section.name}:${it.id}" == returnKey } == true
-                    }.takeIf { it >= 0 } ?: 0
+                    }.takeIf { it >= 0 }
+                        ?: if (returningFromAllCard) HomeLibraryUiPolicy.ALL_PAGE_INDEX else 0
                 }
                 val sectionPagerState = rememberPagerState(
                     initialPage = returnPage,
                     pageCount = { HomeLibraryUiPolicy.PAGE_TITLES.size },
                 )
                 // Each title owns two persistent horizontal rows. Switching catalog categories resets them.
-                val sectionRowStates = List(HomeLibraryUiPolicy.PAGE_TITLES.size) {
+                val sectionRowStates = List(HomeLibraryUiPolicy.SECTION_PAGE_TITLES.size) {
                     List(2) { rememberLazyListState() }
                 }
                 val pageScope = androidx.compose.runtime.rememberCoroutineScope()
                 val focusRequests = remember { LibraryFocusRequests() }
 
-                fun requestCategoryWheelFocus() {
+                fun requestCategoryTilesFocus() {
                     pageScope.launch {
                         if (vodListState.firstVisibleItemIndex < 3) {
                             runCatching { vodListState.animateScrollToItem(3) }
                         }
                         repeat(24) {
-                            if (runCatching { categoryWheelFocus.requestFocus() }.isSuccess) return@launch
+                            if (runCatching { categoryFocusRequesters.getOrNull(catSel)?.requestFocus() }.isSuccess) return@launch
                             withFrameNanos { }
                         }
                     }
@@ -345,10 +357,16 @@ fun VodScreen(nav: NavController) {
                     focusRequests.awaitingPageFocus = false
                     focusRequests.row = 0
                     focusRequests.column = 0
-                    sectionPagerState.scrollToPage(0)
+                    sectionPagerState.scrollToPage(
+                        if (selCid == null) HomeLibraryUiPolicy.ALL_PAGE_INDEX else 0,
+                    )
                     sectionRowStates.flatten().forEach { it.scrollToItem(0) }
                 }
                 LaunchedEffect(returnKey, sectionPages) {
+                    if (returningFromAllCard) {
+                        sectionPagerState.scrollToPage(HomeLibraryUiPolicy.ALL_PAGE_INDEX)
+                        return@LaunchedEffect
+                    }
                     val targetPage = sectionPages.indexOfFirst { (_, section) ->
                         section?.items?.any { "lib:${section.name}:${it.id}" == returnKey } == true
                     }
@@ -359,6 +377,12 @@ fun VodScreen(nav: NavController) {
                     if (restoredFocus || (catalogState.catalog == null && history.isEmpty())) return@LaunchedEffect
                     val targetPage = sectionPages.indexOfFirst { (_, section) ->
                         section?.items?.any { "lib:${section.name}:${it.id}" == key } == true
+                    }
+                    if (key.startsWith("lib:全部:")) {
+                        restoredFocus = true
+                        runCatching { vodListState.scrollToItem(3) }
+                        sectionPagerState.scrollToPage(HomeLibraryUiPolicy.ALL_PAGE_INDEX)
+                        return@LaunchedEffect
                     }
                     if (key.startsWith("lib:") && targetPage < 0) return@LaunchedEffect
                     restoredFocus = true
@@ -380,7 +404,7 @@ fun VodScreen(nav: NavController) {
                 }
 
                 fun requestLibraryFocus(page: Int, row: Int, column: Int) {
-                    if (sectionPagerState.isScrollInProgress || page != sectionPagerState.settledPage) return
+                    if (page !in sectionRowStates.indices || sectionPagerState.isScrollInProgress || page != sectionPagerState.settledPage) return
                     val section = sectionPages.getOrNull(page)?.second ?: return
                     val index = HomeLibraryUiPolicy.targetIndex(section.items.size, row, column) ?: return
                     val targetRow = index % 2
@@ -422,14 +446,25 @@ fun VodScreen(nav: NavController) {
                         )
                     }
                 }
-                fun openAllCatalog() {
+                fun requestAllPageFilterFocus() {
                     pageScope.launch {
-                        nav.navigate("all") { launchSingleTop = true }
+                        repeat(36) {
+                            if (sectionPagerState.settledPage != HomeLibraryUiPolicy.ALL_PAGE_INDEX) return@launch
+                            if (runCatching { allPageFilterFocus.requestFocus() }.isSuccess) {
+                                focusRequests.awaitingPageFocus = false
+                                return@launch
+                            }
+                            withFrameNanos { }
+                        }
                     }
                 }
                 LaunchedEffect(sectionPagerState.settledPage) {
                     if (focusRequests.focusedKey != null || focusRequests.awaitingPageFocus) {
-                        requestLibraryFocus(sectionPagerState.settledPage, focusRequests.row, focusRequests.column)
+                        if (sectionPagerState.settledPage == HomeLibraryUiPolicy.ALL_PAGE_INDEX) {
+                            requestAllPageFilterFocus()
+                        } else {
+                            requestLibraryFocus(sectionPagerState.settledPage, focusRequests.row, focusRequests.column)
+                        }
                     }
                 }
                 BackHandler {
@@ -453,24 +488,33 @@ fun VodScreen(nav: NavController) {
                 }
                 val showLibLoading = sectionLoading && sections.isEmpty()
 
-                val moveCategory: (Int) -> Unit = { delta ->
-                    val next = HomeLibraryUiPolicy.moveCategorySelection(catSel, delta, categories.size)
-                    if (next != catSel) {
-                        catSel = next
-                        categoryWheelTurn = next
-                        val categoryId = categories.getOrNull(next)?.first
-                        if (categoryId.isNullOrBlank()) {
-                            openAllCatalog()
-                        } else {
+                val selectCategory: (Int) -> Unit = { index ->
+                    if (index in categories.indices && index != catSel) {
+                        catSel = index
+                        categories[index].first.takeIf(String::isNotBlank)?.let { categoryId ->
                             Graph.appScope.launch { runCatching { Graph.settings.rememberVodLastCat(categoryId) } }
                         }
                     }
                 }
-                fun exitCategoryWheel() {
+                fun enterSelectedCategory() {
+                    if (selCatId.isBlank()) {
+                        if (sectionPagerState.settledPage == HomeLibraryUiPolicy.ALL_PAGE_INDEX) {
+                            requestAllPageFilterFocus()
+                        } else {
+                            focusRequests.awaitingPageFocus = true
+                            focusRequests.row = 0
+                            focusRequests.column = 0
+                            pageScope.launch { sectionPagerState.animateScrollToPage(HomeLibraryUiPolicy.ALL_PAGE_INDEX) }
+                        }
+                    } else {
+                        requestLibraryFocus(sectionPagerState.settledPage, focusRequests.row, focusRequests.column)
+                    }
+                }
+                fun exitCategoryTiles() {
                     pageScope.launch {
                         // Return to the first VOD page with its hero at the top. Scrolling
                         // straight to the history row made the hero disappear and looked like
-                        // the home page had shifted after pressing Left on the category wheel.
+                        // the home page had shifted after pressing Left on the category tiles.
                         runCatching { vodListState.animateScrollToItem(0) }
                         repeat(24) {
                             if (runCatching { heroPlayFocus.requestFocus() }.isSuccess) return@launch
@@ -478,7 +522,7 @@ fun VodScreen(nav: NavController) {
                         }
                     }
                 }
-                // 整页单 LazyColumn：首屏 hero + 最近观看，其后为固定三页片库。
+                // 整页单 LazyColumn：首屏 hero + 最近观看，其后为片库栏目和内嵌全部页。
                 // v1.13：方向导航统一 OtvNav 引擎——容器仅声明滚动挂靠（未组合行的滚动找回）
                 val vodScroll = remember(vodListState) { lazyNavContainer(vodListState) }
                 ProvideNavScrolls(vertical = vodScroll) {
@@ -491,7 +535,7 @@ fun VodScreen(nav: NavController) {
                     item(key = "hero") {
                         VodHeroBand(
                             nav, heroesTop, s, heroIdxTop, heroPlayFocus,
-                            focusCategoryWheel = ::requestCategoryWheelFocus,
+                            focusCategoryTiles = ::requestCategoryTilesFocus,
                             firstHistoryFocus = firstHistoryFocus,
                             hasHistory = history.isNotEmpty(),
                             watchedIds = watchedIds,
@@ -526,16 +570,15 @@ fun VodScreen(nav: NavController) {
                                             HistoryCard(nav, history[i], s, cardReg,
                                                 focusRequester = if (i == 0) firstHistoryFocus else null,
                                                 upToTab = contentUpToTab,
-                                                downToChip = { requestCategoryWheelFocus() })
+                                                downToChip = { requestCategoryTilesFocus() })
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                    // Keep the old list index stable for saved-page and focus restoration.
-                    // The category wheel is now a fixed overlay shown only while this library item is visible.
-                    item(key = "lib-wheel-anchor") { Spacer(Modifier.height(1f.sx(s))) }
+                    // Keep a short anchor before the full-height catalog pager.
+                    item(key = "lib-category-anchor") { Spacer(Modifier.height(1f.sx(s))) }
                 // Keep the full-height pager mounted during category loading. A short loading
                 // item would clamp the outer list upward and dispose the focused wheel.
                     item(key = "lib-vertical-three-pages") {
@@ -554,71 +597,76 @@ fun VodScreen(nav: NavController) {
                             ),
                         ) { page ->
                             val (title, section) = sectionPages[page]
-                            LibrarySectionPage(
-                                nav = nav,
-                                title = title,
-                                loading = showLibLoading,
-                                items = section?.items.orEmpty(),
-                                sectionName = section?.name ?: title,
-                                page = page,
-                                pageCount = HomeLibraryUiPolicy.PAGE_TITLES.size,
-                                s = s,
-                                cardReg = cardReg,
-                                rowStates = sectionRowStates[page],
-                                categoryWheelFocus = categoryWheelFocus,
-                                onRowFocus = { row, column -> requestLibraryFocus(page, row, column) },
-                                onPageMove = ::moveLibraryPage,
-                                onCardFocusChanged = { row, column, gained ->
-                                    val item = section?.items?.getOrNull(column * 2 + row)
-                                    val key = item?.let { "lib:${section?.name ?: title}:${it.id}" }
-                                    if (gained) {
-                                        focusRequests.focusedKey = key
-                                        focusRequests.job?.cancel()
-                                        if (page == sectionPagerState.settledPage && !sectionPagerState.isScrollInProgress) {
-                                            focusRequests.awaitingPageFocus = false
+                            if (page == HomeLibraryUiPolicy.ALL_PAGE_INDEX) {
+                                AllScreen(
+                                    nav = nav,
+                                    embedded = true,
+                                    active = sectionPagerState.settledPage == page,
+                                    modifier = Modifier.padding(start = 300f.sx(s)),
+                                    initialFilterFocus = allPageFilterFocus,
+                                    restoreItemId = returnKey
+                                        ?.takeIf { it.startsWith("lib:全部:") }
+                                        ?.removePrefix("lib:全部:"),
+                                    onUpFromFirstRow = { column ->
+                                        moveLibraryPage(page - 1, 1, column)
+                                    },
+                                    onLeftFromFirstColumn = {
+                                        runCatching { categoryFocusRequesters.getOrNull(catSel)?.requestFocus() }
+                                    },
+                                )
+                            } else {
+                                LibrarySectionPage(
+                                    nav = nav,
+                                    title = title,
+                                    loading = showLibLoading,
+                                    items = section?.items.orEmpty(),
+                                    sectionName = section?.name ?: title,
+                                    page = page,
+                                    pageCount = HomeLibraryUiPolicy.PAGE_TITLES.size,
+                                    s = s,
+                                    cardReg = cardReg,
+                                    rowStates = sectionRowStates[page],
+                                    categoryFocus = categoryFocusRequesters.getOrNull(catSel),
+                                    onRowFocus = { row, column -> requestLibraryFocus(page, row, column) },
+                                    onPageMove = ::moveLibraryPage,
+                                    onCardFocusChanged = { row, column, gained ->
+                                        val item = section?.items?.getOrNull(column * 2 + row)
+                                        val key = item?.let { "lib:${section?.name ?: title}:${it.id}" }
+                                        if (gained) {
+                                            focusRequests.focusedKey = key
+                                            focusRequests.job?.cancel()
+                                            if (page == sectionPagerState.settledPage && !sectionPagerState.isScrollInProgress) {
+                                                focusRequests.awaitingPageFocus = false
+                                            }
+                                        } else if (focusRequests.focusedKey == key) {
+                                            focusRequests.focusedKey = null
                                         }
-                                    } else if (focusRequests.focusedKey == key) {
-                                        focusRequests.focusedKey = null
-                                    }
-                                    if (gained) {
-                                        focusRequests.row = row
-                                        focusRequests.column = column
-                                    }
-                                },
-                                modifier = Modifier,
-                            )
+                                        if (gained) {
+                                            focusRequests.row = row
+                                            focusRequests.column = column
+                                        }
+                                    },
+                                    modifier = Modifier,
+                                )
+                            }
                         }
                     }
                 item(key = "lib-pad") { Spacer(Modifier.height(80f.sx(s))) }
                 } // LazyColumn
                 } // ProvideNavScrolls(vodScroll)
-                if (libraryWheelVisible) {
-                    LibraryCategoryWheel(
+                if (libraryCategoryTilesVisible) {
+                    LibraryCategoryTiles(
                         categories = categories,
                         selectedIndex = catSel,
-                        selectedTurn = categoryWheelTurn,
                         scale = s,
-                        focusRequester = categoryWheelFocus,
-                        onMove = moveCategory,
-                        onActivate = {
-                            if (categories.getOrNull(catSel)?.first.isNullOrBlank()) {
-                                openAllCatalog()
-                            } else {
-                                requestLibraryFocus(sectionPagerState.settledPage, focusRequests.row, focusRequests.column)
-                            }
-                        },
-                        onEnterLibrary = {
-                            if (categories.getOrNull(catSel)?.first.isNullOrBlank()) {
-                                openAllCatalog()
-                            } else {
-                                requestLibraryFocus(sectionPagerState.settledPage, focusRequests.row, focusRequests.column)
-                            }
-                        },
-                        onExitLibrary = ::exitCategoryWheel,
+                        focusRequesters = categoryFocusRequesters,
+                        onSelect = selectCategory,
+                        onEnterContent = ::enterSelectedCategory,
+                        onExitToHero = ::exitCategoryTiles,
                         modifier = Modifier
                             .align(Alignment.CenterStart)
                             .padding(start = 28f.sx(s))
-                            .width(220f.sx(s))
+                            .width(260f.sx(s))
                             .height(410f.sx(s)),
                     )
                 }
@@ -659,7 +707,7 @@ private fun VodHeroBand(
     s: Float,
     idx: Int,
     playFocus: FocusRequester,
-    focusCategoryWheel: () -> Unit,
+    focusCategoryTiles: () -> Unit,
     firstHistoryFocus: FocusRequester,
     hasHistory: Boolean,
     /** 有观看记录的影片 id：hero 主按钮据此显示「继续播放」（用户 2026-09-17 要求） */
@@ -822,7 +870,7 @@ private fun VodHeroBand(
                                             }
                                         }
                                     } else {
-                                        focusCategoryWheel()
+                                        focusCategoryTiles()
                                     }
                                     true
                                 }
@@ -887,7 +935,7 @@ private fun LibrarySectionPage(
     s: Float,
     cardReg: FocusRegistry,
     rowStates: List<androidx.compose.foundation.lazy.LazyListState>,
-    categoryWheelFocus: FocusRequester,
+    categoryFocus: FocusRequester?,
     onRowFocus: (row: Int, column: Int) -> Unit,
     onPageMove: (page: Int, row: Int, column: Int) -> Unit,
     onCardFocusChanged: (row: Int, column: Int, gained: Boolean) -> Unit,
@@ -996,7 +1044,7 @@ private fun LibrarySectionPage(
                                                 true
                                             }
                                             direction == NAV_LEFT && column == 0 -> {
-                                                runCatching { categoryWheelFocus.requestFocus() }
+                                                runCatching { categoryFocus?.requestFocus() }
                                                 true
                                             }
                                             direction == NAV_UP && row == 1 && page > 0 -> {

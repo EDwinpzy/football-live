@@ -1129,6 +1129,39 @@ def h_ann_publish(d: dict) -> dict:
         "p_title": title, "p_content": content, "p_status": status})
 
 
+# ---------------- 足球代理订阅配置 ----------------
+
+def h_football_vpn_config_get(_d: dict) -> dict:
+    """读取当前 Android 足球代理订阅配置。"""
+    return rpc("football_vpn_config_get", {})
+
+
+def h_football_vpn_config_save(d: dict) -> dict:
+    """整组校验三条订阅后再保存，配置分流规则仍由 App 固定管理。"""
+    raw_urls = d.get("subscriptions")
+    if not isinstance(raw_urls, list) or len(raw_urls) != 3:
+        return {"error": "必须提供恰好 3 个 HTTPS 订阅地址"}
+
+    urls = []
+    for raw_url in raw_urls:
+        if not isinstance(raw_url, str):
+            return {"error": "订阅地址必须是 HTTPS URL"}
+        url = raw_url.strip()
+        if not url or len(url) > 4096 or any(char.isspace() for char in url):
+            return {"error": "订阅地址不能为空且不能超过 4096 个字符"}
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.scheme.lower() != "https" or not parsed.hostname:
+                return {"error": "仅允许有效的 HTTPS 订阅地址"}
+            _ = parsed.port  # 拒绝非数字或超范围端口
+            vod_sources._validate_public_url(url)
+        except (ValueError, AttributeError) as exc:
+            return {"error": str(exc) or "订阅地址不合法"}
+        urls.append(url)
+
+    return rpc("football_vpn_config_save", {"p_subscriptions": urls})
+
+
 # ---------------- v1.20 电视源动态管理（后台#8） ----------------
 
 IPTV_KEY_LATEST = "iptv/iptv-latest.m3u"
@@ -2101,6 +2134,9 @@ ROUTES = {
     "/api/vod_source_rollback": h_vod_source_rollback,
     "/api/vod_source_probe_device": h_vod_source_probe_device,
     "/api/vod_source_health_run": h_vod_source_health_run,
+    # 足球代理订阅（VPN 分流规则固定在 App 内）
+    "/api/football_vpn_config_get": h_football_vpn_config_get,
+    "/api/football_vpn_config_save": h_football_vpn_config_save,
     # v1.20 电视源管理
     "/api/iptv_list": h_iptv_list,
     "/api/iptv_save": h_iptv_save,

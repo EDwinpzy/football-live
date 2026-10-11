@@ -27,6 +27,7 @@ import vod_resolver
 import time
 import time as _time  # 模块级别名：resolve_team_icon 等用 _time，与 _tdb_search_team 内局部导入一致
 import threading
+import contextvars
 import concurrent.futures
 import http.client
 import base64
@@ -49,7 +50,37 @@ except ImportError:
     HAS_URLLIB3 = False
 
 SOURCE_URL = "https://www.88zhibo.tv/"
+FOOTBALL_PROXY_URL = "http://127.0.0.1:17890"
+_UPSTREAM_PROXY_URL = contextvars.ContextVar("otv_upstream_proxy_url", default=None)
+_PROXY_CLIENT_LOCK = threading.Lock()
+_PROXY_CLIENTS = {}
+_PROXY_OPENERS = {}
 WWW_ROOT = Path(__file__).parent / "www"
+
+
+def _active_upstream_proxy():
+    return _UPSTREAM_PROXY_URL.get()
+
+
+def _relay_cache_key(url):
+    proxy_url = _active_upstream_proxy()
+    return (url, proxy_url) if proxy_url else url
+
+
+def _http_client_for(proxy_url):
+    if not HAS_URLLIB3:
+        return None
+    if not proxy_url:
+        return _http
+    with _PROXY_CLIENT_LOCK:
+        client = _PROXY_CLIENTS.get(proxy_url)
+        if client is None:
+            client = urllib3.ProxyManager(
+                proxy_url, maxsize=16, retries=0,
+                timeout=urllib3.Timeout(connect=5, read=15),
+            )
+            _PROXY_CLIENTS[proxy_url] = client
+        return client
 
 # ---- 网页静态资源缓存合同（内容寻址资源 immutable）----
 # tools/build_web_assets.py 生成的 manifest.json 里的 cacheControl 才是
@@ -1279,11 +1310,16 @@ def fetch_url(url, referer=None, timeout=20):
     if referer:
         headers["Referer"] = referer
     if HAS_URLLIB3:
-        resp = _http.request("GET", url, headers=headers, timeout=urllib3.Timeout(connect=5, read=timeout))
+        resp = _http_client_for(_active_upstream_proxy()).request(
+            "GET", url, headers=headers,
+            timeout=urllib3.Timeout(connect=5, read=timeout),
+        )
         return resp.data.decode("utf-8", errors="ignore")
     else:
         req = urlreq.Request(url, headers=headers)
-        with urlreq.urlopen(req, timeout=timeout) as resp:
+        proxy_url = _active_upstream_proxy()
+        opener = _url_opener(proxy_url) if proxy_url else None
+        with (opener.open(req, timeout=timeout) if opener else urlreq.urlopen(req, timeout=timeout)) as resp:
             return resp.read().decode("utf-8", errors="ignore")
 
 
@@ -1718,7 +1754,7 @@ def resolve_88zhibo_stream(match_id, src="a2", fresh=False, source_links=None):
     if not str(match_id).isdigit():
         return {"url": None, "error": "invalid_match_id"}, False
     now = time.time()
-    key = "%s-%s" % (src, match_id)
+    key = "%s-%s-%s" % (src, match_id, "vpn" if _active_upstream_proxy() else "direct")
     with _stream_lock:
         cached = STREAM_CACHE.get(key)
         if not fresh and cached and cached["ts"] > 0 and now - cached["ts"] < STREAM_SUCCESS_TTL:
@@ -1783,6 +1819,7 @@ def resolve_88zhibo_streams(match_id, fresh=False):
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         futures = {
             pool.submit(
+                contextvars.copy_context().run,
                 resolve_88zhibo_stream,
                 str(match_id), item["src"], fresh, links,
             ): item
@@ -2002,16 +2039,19 @@ def _prefetch_segments(segs, ref):
     """把一批上游分片 URL 提交后台预取入 RELAY_CACHE（去重：已缓存/在途跳过）。"""
     now = time.time()
     for su in segs:
+        cache_key = _relay_cache_key(su)
         with _relay_lock:
-            hit = RELAY_CACHE.get(su)
+            hit = RELAY_CACHE.get(cache_key)
             if hit and now - hit[0] < RELAY_CACHE_TTL:
                 continue
         with _prefetch_lock:
-            if su in _prefetch_inflight:
+            if cache_key in _prefetch_inflight:
                 continue
-            _prefetch_inflight.add(su)
+            _prefetch_inflight.add(cache_key)
 
-        def task(su=su, ref=ref):
+        context = contextvars.copy_context()
+
+        def task(su=su, ref=ref, cache_key=cache_key, context=context):
             try:
                 # v1.14：预取复用 relay_url 主路径——自带 SSRF 防线（入口 host 校验）、
                 # 双 Referer 策略、防盗链垃圾体守卫，≤8MB 响应自动写入 RELAY_CACHE。
@@ -2019,12 +2059,12 @@ def _prefetch_segments(segs, ref):
                 # NameError 被 except 吞掉 → **设备上预取从未生效**（供给=单连接 ~1×，
                 # 点播缓冲爬不上去 = 「20 分钟后频繁卡顿」的另一半根因；桌面调试有
                 # urllib3 所以从未暴露）。
-                relay_url(su, ref)
+                context.run(relay_url, su, ref)
             except Exception:
                 pass  # 预取失败静默：hls.js 正常请求路径仍可用
             finally:
                 with _prefetch_lock:
-                    _prefetch_inflight.discard(su)
+                    _prefetch_inflight.discard(cache_key)
 
         if _prefetch_pool:
             _prefetch_pool.submit(task)
@@ -2036,8 +2076,12 @@ def _prefetch_after(u, ref):
     """预取 u 在其所属清单中的后 PREFETCH_AHEAD 片（找不到清单则忽略）。"""
     try:
         segs = None
+        proxy_url = _active_upstream_proxy()
         with _MANIFEST_LOCK:
-            for mu, (lst, ts) in MANIFEST_SEGS.items():
+            for manifest_key, (lst, ts) in MANIFEST_SEGS.items():
+                manifest_proxy = manifest_key[1] if isinstance(manifest_key, tuple) else None
+                if manifest_proxy != proxy_url:
+                    continue
                 if u in lst:
                     segs = lst
                     break
@@ -2053,7 +2097,7 @@ def _remember_manifest(u, raw_segs, ref):
     """记录媒体清单的分片顺序表，并预热头 2 片（加速首帧）。"""
     try:
         with _MANIFEST_LOCK:
-            MANIFEST_SEGS[u] = (raw_segs, time.time())
+            MANIFEST_SEGS[_relay_cache_key(u)] = (raw_segs, time.time())
             if len(MANIFEST_SEGS) > MANIFEST_SEGS_MAX:
                 oldest = min(MANIFEST_SEGS.items(), key=lambda kv: kv[1][1])[0]
                 MANIFEST_SEGS.pop(oldest, None)
@@ -2234,6 +2278,18 @@ _no_redirect_opener = urlreq.build_opener(_NoRedirectHandler)
 _REDIRECT_CODES = (301, 302, 303, 307, 308)
 
 
+def _url_opener(proxy_url, no_redirect=False):
+    handlers = [urlreq.ProxyHandler({"http": proxy_url, "https": proxy_url})]
+    if no_redirect:
+        handlers.append(_NoRedirectHandler())
+    with _PROXY_CLIENT_LOCK:
+        opener = _PROXY_OPENERS.get((proxy_url, no_redirect))
+        if opener is None:
+            opener = urlreq.build_opener(*handlers)
+            _PROXY_OPENERS[(proxy_url, no_redirect)] = opener
+        return opener
+
+
 def _open_upstream(u, headers, read_timeout, preload=True, connect_timeout=5):
     """打开上游 GET 连接，返回 (resp, final_url)。
 
@@ -2245,11 +2301,14 @@ def _open_upstream(u, headers, read_timeout, preload=True, connect_timeout=5):
     - 返回的 resp 与原两分支同型（urllib3: preload 后 .data 可用；
       urlreq: .read() 取体），status 属性两分支一致。"""
     cur, hops = u, 0
+    proxy_url = _active_upstream_proxy()
     while True:
         if HAS_URLLIB3:
-            resp = _http.request("GET", cur, headers=headers,
-                                 timeout=urllib3.Timeout(connect=connect_timeout, read=read_timeout),
-                                 preload_content=preload, redirect=False)
+            resp = _http_client_for(proxy_url).request(
+                "GET", cur, headers=headers,
+                timeout=urllib3.Timeout(connect=connect_timeout, read=read_timeout),
+                preload_content=preload, redirect=False,
+            )
             if resp.status in _REDIRECT_CODES:
                 loc = resp.headers.get("Location") or ""
                 resp.release_conn()
@@ -2258,7 +2317,8 @@ def _open_upstream(u, headers, read_timeout, preload=True, connect_timeout=5):
         else:
             req = urlreq.Request(cur, headers=headers)
             try:
-                resp = _no_redirect_opener.open(req, timeout=read_timeout)
+                opener = _url_opener(proxy_url, no_redirect=True) if proxy_url else _no_redirect_opener
+                resp = opener.open(req, timeout=read_timeout)
                 return resp, cur
             except urlreq.HTTPError as e:
                 if e.code not in _REDIRECT_CODES:
@@ -2459,9 +2519,10 @@ def relay_url(u, ref=None):
 
     # 分片短缓存（仅 .ts 等非 m3u8 内容）
     is_manifest = "m3u8" in u.lower()
+    cache_key = _relay_cache_key(u)
     if not is_manifest:
         with _relay_lock:
-            hit = RELAY_CACHE.get(u)
+            hit = RELAY_CACHE.get(cache_key)
             if hit and time.time() - hit[0] < RELAY_CACHE_TTL:
                 return hit[1], hit[2], hit[3], None, hit[4]
 
@@ -2515,7 +2576,8 @@ def relay_url(u, ref=None):
             # → 同目录 /api/relay；绝对路径 /api/relay 在「网关子路径部署」（网页版
             # https://…/web/）下会被浏览器解析到网关根而 404。设备端（根部署）
             # 解析结果与原绝对路径完全一致（ExoPlayer/hls.js 均按规范相对解析）。
-            return "relay?u=" + q + "&ref=" + rq
+            football_vpn = "&football_vpn=1" if _active_upstream_proxy() else ""
+            return "relay?u=" + q + "&ref=" + rq + football_vpn
 
         out = []
         raw_segs = []
@@ -2552,7 +2614,7 @@ def relay_url(u, ref=None):
         # 否则内存缓存会吞掉整部影片。
         with _relay_lock:
             if len(data) <= 8 * 1024 * 1024:
-                RELAY_CACHE[u] = (time.time(), 200, ctype or "application/octet-stream", data, is_m3u8)
+                RELAY_CACHE[cache_key] = (time.time(), 200, ctype or "application/octet-stream", data, is_m3u8)
                 _trim_relay()
     return 200, ctype or "application/octet-stream", data, None, is_m3u8
 
@@ -2686,7 +2748,7 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
             # 仅完整收完的分片入缓存（中断/部分数据不得入缓存，防毒化）
             if buf is not None and known_len >= 0 and len(buf) == known_len:
                 with _relay_lock:
-                    RELAY_CACHE[u] = (time.time(), 200, ctype or "application/octet-stream", bytes(buf), False)
+                    RELAY_CACHE[_relay_cache_key(u)] = (time.time(), 200, ctype or "application/octet-stream", bytes(buf), False)
                     _trim_relay()
 
     # extra（Content-Range/Accept-Ranges）已在打开上游连接时构建
@@ -4545,8 +4607,22 @@ class Handler(SimpleHTTPRequestHandler):
         return True
 
     def do_GET(self):
-        self._static_response = False
         parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        football_route = (
+            parsed.path.startswith("/api/stream/") or
+            parsed.path == "/api/relay" or
+            parsed.path.startswith("/api/relayts/")
+        )
+        enabled = football_route and (qs.get("football_vpn") or ["0"])[0] == "1"
+        token = _UPSTREAM_PROXY_URL.set(FOOTBALL_PROXY_URL if enabled else None)
+        try:
+            self._do_get_with_upstream_proxy(parsed)
+        finally:
+            _UPSTREAM_PROXY_URL.reset(token)
+
+    def _do_get_with_upstream_proxy(self, parsed):
+        self._static_response = False
         if self._apk_update_manifest(parsed):
             return
         if parsed.path.startswith("/vod/") or parsed.path in ("/api/search", "/api/ime/hotwords"):
@@ -4614,11 +4690,17 @@ class Handler(SimpleHTTPRequestHandler):
             is_m3u8_url = "m3u8" in u.lower()
             # ---- 媒体/直链（非 m3u8）：流式转发（Range 透传 seek，不全量缓冲）----
             # 命中短缓存（小分片）直接返回；大文件/带 Range 走 relay_stream 边收边发
-            if rng or not is_m3u8_url:
+            # HLS clients (notably FFmpeg / some native players) can send Range on
+            # child playlists too. A playlist must still go through relay_url so it
+            # gets rewritten and returned with a complete manifest body; treating
+            # that Range as a media request made players parse the short m3u8 body
+            # as a TS segment and fail before the first frame.
+            if not is_m3u8_url:
                 if not rng:
                     served_body = None
+                    cache_key = _relay_cache_key(u)
                     with _relay_lock:
-                        hit = RELAY_CACHE.get(u)
+                        hit = RELAY_CACHE.get(cache_key)
                         if hit and time.time() - hit[0] < RELAY_CACHE_TTL:
                             served_body = hit[3]
                     if served_body is not None:
