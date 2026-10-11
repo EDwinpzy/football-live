@@ -3373,6 +3373,7 @@ const pv = { hls: null, video: null, ctx: null, sources: [], srcIds: [], srcName
   recoveryGen: 0, recoveryAttempts: 0, recovering: false, loadGen: 0, playerSession: 0,
   playController: null, detailController: null, detailRequest: null,
   vodSources: [], vodLineIdx: 0, vodSourceStatus: "idle", vodSourceMessage: "", panelOpen: false,
+  routeLinesExpanded: false,
   loadPending: false };
 /* PlayerViewModel.SPEED_STEPS */
 const SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
@@ -3401,6 +3402,7 @@ function openPlayer(ctx) {
   pv.vodSourceMessage = ctx.kind === "vod"
     ? (sources.length ? "正在更新可用信号源…" : "正在加载可用信号源…") : "";
   pv.panelOpen = ctx.kind === "vod" && !!state.portrait;
+  pv.routeLinesExpanded = false;
   pv.loadPending = ctx.kind === "vod";
   $("#pPlayer").hidden = false; document.body.style.overflow = "hidden";
   $("#pError").hidden = true; $("#bufSpin").hidden = false;
@@ -4230,9 +4232,15 @@ function setPlayerSourcePanel(open) {
   pv.panelOpen = state.portrait ? true : !!open;
   if (pv.panelOpen) renderMorePanel();
   syncPlayerSourcePanel();
+  if (pv.panelOpen) syncPlayerRouteDisclosure();
 }
 $("#mpToggle").addEventListener("click", () => setPlayerSourcePanel(true));
 $("#mpClose").addEventListener("click", () => setPlayerSourcePanel(false));
+$("#mpLinesToggle").addEventListener("click", () => {
+  pv.routeLinesExpanded = !pv.routeLinesExpanded;
+  syncPlayerRouteDisclosure();
+});
+addEventListener("resize", syncPlayerRouteDisclosure);
 $("#mpSourceRetry").addEventListener("click", () => refreshPlayerEpisodes({ force: true }));
 function armHide() {
   clearTimeout(pv.hideTimer);
@@ -4446,10 +4454,15 @@ function renderMorePanel() {
         title="${esc(selected ? "再次点击重试当前信号源" : `切换到${name}`)}">${esc(name)}</button>`;
     }).join("");
     $$("#mpLines .lchip").forEach(ch => ch.addEventListener("click", () => selectVodLine(+ch.dataset.i)));
+    syncPlayerRouteDisclosure();
   } else {
     $("#mpSourceState").textContent = "";
     $("#mpSourceState").dataset.state = "";
     $("#mpLines").innerHTML = "";
+    pv.routeLinesExpanded = false;
+    $("#mpLines").classList.remove("expanded");
+    $("#mpLinesToggle").hidden = true;
+    $("#mpLinesToggle").setAttribute("aria-expanded", "false");
   }
   /* 选集（电影不显示） */
   const isMovie = c.epCount <= 1 && !/电视剧|连续剧|网剧|短剧|动漫|综艺|美剧|英剧|韩剧|日剧|泰剧/.test(playerDetail && playerDetail.meta || "");
@@ -4497,6 +4510,33 @@ function renderMorePanel() {
   if (state.portrait && c.kind === "vod") pv.panelOpen = true;
   if (state.portrait) $("#morePanel").hidden = false;
   if (c.kind === "vod") syncPlayerSourcePanel();
+}
+function syncPlayerRouteDisclosure() {
+  const routes = $("#mpLines"), toggle = $("#mpLinesToggle");
+  if (!routes || !toggle) return;
+  const buttons = Array.from(routes.querySelectorAll(".lchip"));
+  buttons.forEach(button => { button.hidden = false; });
+  /* 面板被 hidden 时测量值全为 0；等打开或 resize 后再按真实宽度排版。 */
+  routes.classList.add("expanded");
+  const routeWidth = routes.getBoundingClientRect().width;
+  if (!routeWidth) {
+    routes.classList.toggle("expanded", !!pv.routeLinesExpanded);
+    return;
+  }
+  const rowTops = [], buttonRows = [];
+  buttons.forEach(button => {
+    const top = button.offsetTop;
+    let row = rowTops.findIndex(existing => Math.abs(existing - top) <= 1);
+    if (row < 0) { row = rowTops.length; rowTops.push(top); }
+    buttonRows.push(row);
+  });
+  const hasMore = rowTops.length > 2;
+  const expanded = hasMore && !!pv.routeLinesExpanded;
+  routes.classList.toggle("expanded", expanded);
+  if (!expanded) buttons.forEach((button, index) => { button.hidden = buttonRows[index] >= 2; });
+  toggle.hidden = !hasMore;
+  toggle.textContent = expanded ? "收起" : "展开";
+  toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
 }
 if ("mediaSession" in navigator) {
   navigator.mediaSession.setActionHandler("play", () => pv.video && pv.video.play());

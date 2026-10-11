@@ -26,6 +26,8 @@ class WebPlayerSourcesTest(unittest.TestCase):
         self.assertIn('id="mpSourceState"', html)
         self.assertIn('id="mpSourceRetry"', html)
         self.assertIn('id="mpClose"', html)
+        self.assertIn('class="hscroll mp-chips mp-routes" id="mpLines"', html)
+        self.assertIn('id="mpLinesToggle" class="mp-route-toggle"', html)
 
 
 if __name__ == "__main__":

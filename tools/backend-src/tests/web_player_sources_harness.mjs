@@ -116,6 +116,9 @@ class FakeNode {
     this.textContent = "";
     this.innerHTML = "";
     this.value = "";
+    this.rectWidth = 0;
+    this.offsetTop = 0;
+    this.chips = [];
     this.style = { setProperty() {} };
     this.dataset = {};
     this.listeners = new Map();
@@ -145,7 +148,8 @@ class FakeNode {
   removeEventListener() {}
   dispatch(name, event = {}) { for (const fn of this.listeners.get(name) || []) fn(event); }
   querySelector() { return new FakeNode(); }
-  querySelectorAll() { return []; }
+  querySelectorAll(selector) { return selector === ".lchip" ? this.chips : []; }
+  getBoundingClientRect() { return { width: this.rectWidth, top: this.rectTop }; }
   setAttribute(name, value) { this.attributes.set(name, value); }
   removeAttribute(name) { this.attributes.delete(name); if (name === "src") this.src = ""; }
   getAttribute(name) { return this.attributes.get(name) || null; }
@@ -177,6 +181,7 @@ function makeRuntime(detailFactory = async () => ({
   title: "测试片", poster_url: "", sources: lines(),
 })) {
   const nodes = new Map();
+  const windowListeners = new Map();
   const fetches = [];
   const attached = [];
   const requests = [];
@@ -198,7 +203,7 @@ function makeRuntime(detailFactory = async () => ({
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     state: { portrait: false },
     BASE: "/web",
-    addEventListener() {},
+    addEventListener: (name, callback) => windowListeners.set(name, callback),
     store: { get: (_key, fallback) => fallback, set() {}, remove() {} },
     $,
     $$: () => [],
@@ -262,7 +267,7 @@ function makeRuntime(detailFactory = async () => ({
       status: pv.vodSourceStatus, message: pv.vodSourceMessage, panelOpen: pv.panelOpen,
     });
   `, context);
-  return { context, nodes, fetches, attached, requests, $ };
+  return { context, nodes, fetches, attached, requests, $, windowListeners };
 }
 
 const flush = async () => {
@@ -274,7 +279,7 @@ const flush = async () => {
 console.log("== landscape VOD source panel, retry and latest request wins ==");
 {
   const runtime = makeRuntime();
-  const { context: c, $, requests, attached, fetches } = runtime;
+  const { context: c, $, requests, attached, fetches, windowListeners } = runtime;
   c.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", cover: "", epIdx: 1,
     epName: "第2集", epCount: 2, lineIndex: 0, sourceKey: "id:line-a",
     playRef: { pid: "a", vid: 1 }, sources: lines(), resume: 0 });
@@ -285,11 +290,38 @@ console.log("== landscape VOD source panel, retry and latest request wins ==");
   assert.equal($("#mpLinesSec").hidden, false, "the one-or-more-source section is available");
   assert.match($("#mpLines").innerHTML, /源 A/);
   assert.match($("#mpLines").innerHTML, /源 B/);
+  const routeChips = Array.from({ length: 7 }, (_, index) => {
+    const chip = new FakeNode();
+    chip.rectWidth = 80;
+    chip.offsetTop = index < 3 ? 100 : index < 5 ? 140 : 180;
+    return chip;
+  });
+  $("#mpLines").chips = routeChips;
+  $("#mpLines").rectWidth = 560;
+  assert.equal($("#morePanel").hidden, true, "the route panel starts closed before layout measurement");
+  assert.equal($("#mpLinesToggle").hidden, true, "a hidden player panel defers route measurement");
   assert.ok(fetches.some(row => row.url.endsWith("/vod/detail/1?refresh=1")));
 
   $("#mpToggle").dispatch("click");
-  assert.equal($("#morePanel").hidden, false, "source panel opens from its visible entry");
-  assert.equal($("#mpToggle").hidden, true);
+  assert.equal($("#morePanel").hidden, false, "opening the panel remeasures routes after it becomes visible");
+  assert.equal($("#mpLinesToggle").hidden, false, "more than two rows exposes the route disclosure control");
+  assert.equal($("#mpLinesToggle").textContent, "展开", "route choices start collapsed");
+  assert.deepEqual(routeChips.map(chip => chip.hidden), [false, false, false, false, false, true, true],
+    "only the first two actual layout rows remain visible and keyboard reachable");
+  $("#mpLinesToggle").dispatch("click");
+  assert.equal($("#mpLines").classes.has("expanded"), true, "expanding shows the remaining source rows");
+  assert.equal($("#mpLinesToggle").textContent, "收起");
+  assert.ok(routeChips.every(chip => !chip.hidden), "expanded routes all become visible again");
+  $("#mpLinesToggle").dispatch("click");
+  assert.equal($("#mpLines").classes.has("expanded"), false, "the route list can be collapsed again");
+  assert.ok(routeChips.slice(5).every(chip => chip.hidden), "collapsing removes overflow rows from focus order");
+  routeChips.forEach(chip => { chip.offsetTop = chip.offsetTop < 140 ? 100 : 140; });
+  windowListeners.get("resize")();
+  assert.equal($("#mpLinesToggle").hidden, true, "resize to two rows hides the disclosure control");
+  assert.ok(routeChips.every(chip => !chip.hidden), "resize to two rows restores every route chip");
+  routeChips.forEach(chip => { chip.offsetTop = 100; });
+  windowListeners.get("resize")();
+  assert.equal($("#mpLinesToggle").hidden, true, "a single route row also hides the disclosure control");
 
   const oldSignal = c.__pv.playController.signal;
   c.__pv.video.duration = 600;

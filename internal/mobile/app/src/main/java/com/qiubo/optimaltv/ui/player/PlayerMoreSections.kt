@@ -4,6 +4,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -39,8 +43,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFontFamilyResolver
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
@@ -132,34 +141,15 @@ internal fun PlayerMoreSections(
         }
         if (ui.lines.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
-            ) {
-                ui.lines.forEachIndexed { idx, line ->
-                    val focusModifier = if (autoFocusSource && idx == sourceFocusIndex) {
-                        Modifier.focusRequester(sourceFocusRequester)
-                    } else Modifier
-                    Box(
-                        modifier = Modifier
-                            .then(focusModifier)
-                            .clip(RoundedCornerShape(10.dp))
-                            .tapCard { onSwitchLine(idx) }
-                            .background(
-                                if (idx == ui.activeLine) AccentBlue else Color(0x24FFFFFF),
-                                RoundedCornerShape(10.dp),
-                            )
-                            .padding(horizontal = 14.dp, vertical = 9.dp),
-                    ) {
-                        Text(
-                            if (idx == ui.activeLine) "${line.label} · 当前" else line.label,
-                            color = Color.White,
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                        )
-                    }
-                }
-            }
+            SourceLineSelector(
+                title = ui.title,
+                labels = ui.lines.mapIndexed { idx, line ->
+                    if (idx == ui.activeLine) "${line.label} · 当前" else line.label
+                },
+                activeLine = sourceFocusIndex,
+                onSwitchLine = onSwitchLine,
+                focusRequester = sourceFocusRequester.takeIf { autoFocusSource },
+            )
             Spacer(Modifier.height(8.dp))
             SourceAction("重载当前线路", onClick = { onSwitchLine(ui.activeLine) })
         } else if (ui.sourceStatus != PlayerSourceStatus.LOADING) {
@@ -173,29 +163,13 @@ internal fun PlayerMoreSections(
         Spacer(Modifier.height(18.dp))
     } else if (ui.lines.size > 1) {
         SectionLabel("换源线路")
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-        ) {
-            ui.lines.forEachIndexed { idx, line ->
-                val focusModifier = if (autoFocusSource && idx == sourceFocusIndex) {
-                    Modifier.focusRequester(sourceFocusRequester)
-                } else Modifier
-                Box(
-                    modifier = Modifier
-                        .then(focusModifier)
-                        .clip(RoundedCornerShape(10.dp))
-                        .tapCard { onSwitchLine(idx) }
-                        .background(
-                            if (idx == ui.activeLine) AccentBlue else Color(0x24FFFFFF),
-                            RoundedCornerShape(10.dp),
-                        )
-                        .padding(horizontal = 14.dp, vertical = 9.dp),
-                ) {
-                    Text(line.label, color = Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1)
-                }
-            }
-        }
+        SourceLineSelector(
+            title = ui.title,
+            labels = ui.lines.map { it.label },
+            activeLine = sourceFocusIndex,
+            onSwitchLine = onSwitchLine,
+            focusRequester = sourceFocusRequester.takeIf { autoFocusSource },
+        )
         Spacer(Modifier.height(18.dp))
     }
     if (ui.desc.isNotBlank()) {
@@ -381,6 +355,94 @@ internal fun PlayerMoreSections(
         }
     }
     Spacer(Modifier.height(28.dp))
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SourceLineSelector(
+    title: String,
+    labels: List<String>,
+    activeLine: Int,
+    onSwitchLine: (Int) -> Unit,
+    focusRequester: FocusRequester?,
+) {
+    var expanded by remember(title) { mutableStateOf(false) }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val availableWidthPx = constraints.maxWidth
+        val density = LocalDensity.current
+        val layoutDirection = LocalLayoutDirection.current
+        val fontFamilyResolver = LocalFontFamilyResolver.current
+        val textMeasurer = remember(fontFamilyResolver, density, layoutDirection) {
+            TextMeasurer(fontFamilyResolver, density, layoutDirection)
+        }
+        val labelStyle = MaterialTheme.typography.labelMedium
+        val horizontalPaddingPx = with(density) { 2 * 14.dp.roundToPx() }
+        val rowSpacingPx = with(density) { 10.dp.roundToPx() }
+        val contentMaxWidth = if (availableWidthPx == Constraints.Infinity) {
+            Constraints.Infinity
+        } else {
+            (availableWidthPx - horizontalPaddingPx).coerceAtLeast(0)
+        }
+        val chipWidths = remember(labels, labelStyle, textMeasurer, availableWidthPx) {
+            labels.map { label ->
+                val textWidth = textMeasurer.measure(
+                    text = label,
+                    style = labelStyle,
+                    overflow = TextOverflow.Clip,
+                    softWrap = true,
+                    maxLines = 1,
+                    constraints = Constraints(maxWidth = contentMaxWidth),
+                ).size.width
+                (textWidth + horizontalPaddingPx).coerceAtMost(availableWidthPx)
+            }
+        }
+        val collapsedCount = remember(chipWidths, availableWidthPx, rowSpacingPx) {
+            SourceSelectorLayoutPolicy.visiblePrefixCount(
+                chipWidthsPx = chipWidths,
+                availableWidthPx = availableWidthPx,
+                spacingPx = rowSpacingPx,
+            )
+        }
+        val visibleCount = if (expanded) labels.size else collapsedCount
+        val activeLineVisible = expanded || activeLine < visibleCount
+
+        Column(Modifier.fillMaxWidth()) {
+            if (labels.size > collapsedCount) {
+                val moreFocusModifier = if (focusRequester != null && !expanded && !activeLineVisible) {
+                    Modifier.focusRequester(focusRequester)
+                } else Modifier
+                SourceAction(
+                    label = if (expanded) "收起线路" else "展开线路（+${labels.size - visibleCount}）",
+                    onClick = { expanded = !expanded },
+                    modifier = moreFocusModifier,
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                labels.take(visibleCount).forEachIndexed { idx, label ->
+                    val sourceFocusModifier = if (focusRequester != null && idx == activeLine && activeLineVisible) {
+                        Modifier.focusRequester(focusRequester)
+                    } else Modifier
+                    Box(
+                        modifier = Modifier
+                            .then(sourceFocusModifier)
+                            .clip(RoundedCornerShape(10.dp))
+                            .tapCard { onSwitchLine(idx) }
+                            .background(
+                                if (idx == activeLine) AccentBlue else Color(0x24FFFFFF),
+                                RoundedCornerShape(10.dp),
+                            )
+                            .padding(horizontal = 14.dp, vertical = 9.dp),
+                    ) {
+                        Text(label, color = Color.White, style = labelStyle, maxLines = 1)
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable

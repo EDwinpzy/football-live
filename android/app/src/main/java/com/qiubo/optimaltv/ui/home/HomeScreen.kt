@@ -650,7 +650,6 @@ fun VodScreen(nav: NavController) {
                         focusRequesters = categoryFocusRequesters,
                         onSelect = selectCategory,
                         onEnterContent = ::enterSelectedCategory,
-                        onExitToHero = ::exitCategoryTiles,
                         modifier = Modifier
                             .align(Alignment.CenterStart)
                             .padding(start = 28f.sx(s))

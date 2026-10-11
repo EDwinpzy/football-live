@@ -70,10 +70,14 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFontFamilyResolver
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -898,22 +902,81 @@ private fun VodSignalSourceSection(ui: PlayerUiState, vm: PlayerViewModel, panel
         }
     } else {
         val focusLine = ui.activeLine.takeIf { it in ui.lines.indices } ?: 0
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            ui.lines.forEachIndexed { idx, line ->
-                Box(
-                    modifier = Modifier
-                        .then(if (idx == focusLine) Modifier.focusRequester(panelFocus) else Modifier)
-                        .dpadFocusable(navGroup = PANEL_NAV_GROUP) { vm.switchLine(idx) }
-                        .background(
-                            if (idx == ui.activeLine) AccentBlue else Color(0x24FFFFFF),
-                            RoundedCornerShape(10.dp),
+        var expanded by remember(ui.title, ui.lines) { mutableStateOf(false) }
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val availableWidthPx = constraints.maxWidth
+            val density = LocalDensity.current
+            val layoutDirection = LocalLayoutDirection.current
+            val fontFamilyResolver = LocalFontFamilyResolver.current
+            val textMeasurer = remember(fontFamilyResolver, density, layoutDirection) {
+                TextMeasurer(fontFamilyResolver, density, layoutDirection)
+            }
+            val labelStyle = MaterialTheme.typography.labelMedium
+            val horizontalPaddingPx = with(density) { 2 * 14.dp.roundToPx() }
+            val rowSpacingPx = with(density) { 10.dp.roundToPx() }
+            val contentMaxWidth = if (availableWidthPx == Constraints.Infinity) {
+                Constraints.Infinity
+            } else {
+                (availableWidthPx - horizontalPaddingPx).coerceAtLeast(0)
+            }
+            val chipWidths = remember(ui.lines, labelStyle, textMeasurer, availableWidthPx) {
+                ui.lines.map { line ->
+                    val textWidth = textMeasurer.measure(
+                        text = line.label,
+                        style = labelStyle,
+                        overflow = TextOverflow.Clip,
+                        softWrap = true,
+                        maxLines = 1,
+                        constraints = Constraints(maxWidth = contentMaxWidth),
+                    ).size.width
+                    (textWidth + horizontalPaddingPx).coerceAtMost(availableWidthPx)
+                }
+            }
+            val collapsedCount = remember(chipWidths, availableWidthPx, rowSpacingPx) {
+                SourceSelectorLayoutPolicy.visiblePrefixCount(
+                    chipWidthsPx = chipWidths,
+                    availableWidthPx = availableWidthPx,
+                    spacingPx = rowSpacingPx,
+                )
+            }
+            val visibleCount = if (expanded) ui.lines.size else collapsedCount
+            val activeLineVisible = expanded || focusLine < visibleCount
+
+            Column(Modifier.fillMaxWidth()) {
+                if (ui.lines.size > collapsedCount) {
+                    Box(
+                        modifier = Modifier
+                            .then(if (!expanded && !activeLineVisible) Modifier.focusRequester(panelFocus) else Modifier)
+                            .dpadFocusable(navGroup = PANEL_NAV_GROUP) { expanded = !expanded }
+                            .background(Color(0x24FFFFFF), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 14.dp, vertical = 9.dp),
+                    ) {
+                        Text(
+                            if (expanded) "收起线路" else "展开线路（+${ui.lines.size - visibleCount}）",
+                            color = Color.White,
+                            style = labelStyle,
                         )
-                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text(line.label, color = Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    ui.lines.take(visibleCount).forEachIndexed { idx, line ->
+                        Box(
+                            modifier = Modifier
+                                .then(if (idx == focusLine && activeLineVisible) Modifier.focusRequester(panelFocus) else Modifier)
+                                .dpadFocusable(navGroup = PANEL_NAV_GROUP) { vm.switchLine(idx) }
+                                .background(
+                                    if (idx == ui.activeLine) AccentBlue else Color(0x24FFFFFF),
+                                    RoundedCornerShape(10.dp),
+                                )
+                                .padding(horizontal = 14.dp, vertical = 9.dp),
+                        ) {
+                            Text(line.label, color = Color.White, style = labelStyle, maxLines = 1)
+                        }
+                    }
                 }
             }
         }

@@ -36,7 +36,6 @@ internal fun LibraryCategoryTiles(
     focusRequesters: List<FocusRequester>,
     onSelect: (Int) -> Unit,
     onEnterContent: () -> Unit,
-    onExitToHero: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (categories.isEmpty()) return
@@ -64,10 +63,9 @@ internal fun LibraryCategoryTiles(
                                 true
                             } else {
                                 when (direction) {
-                                    NAV_LEFT -> {
-                                        onExitToHero()
-                                        true
-                                    }
+                                    // The category rail stays anchored to the library page when
+                                    // Left is pressed at its boundary; do not jump back to the hero.
+                                    NAV_LEFT -> true
                                     NAV_RIGHT -> {
                                         onEnterContent()
                                         true
@@ -90,7 +88,7 @@ internal fun LibraryCategoryTiles(
                 Text(
                     text = category.second,
                     color = if (selected) OtvColors.White else OtvColors.White.copy(alpha = 0.96f),
-                    fontSize = 28f.sxs(scale),
+                    fontSize = (if (selected) 32f else 28f).sxs(scale),
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                     textAlign = TextAlign.Center,
                     maxLines = 1,
