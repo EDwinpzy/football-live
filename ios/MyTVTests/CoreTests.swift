@@ -385,6 +385,35 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual((completedMatches + [upcoming]).filter { !$0.isFinished }.map(\.id), ["upcoming"])
     }
 
+    func testFootballFreshMatchUsesBeijingDateAndLeavesFinishDecisionToBackend() async throws {
+        let requests = RequestRecorder()
+        StubURLProtocol.install { request in
+            requests.append(request)
+            let body = #"{"count":1,"matches":[{"match_id":"year-boundary","home":"甲队","away":"乙队","league":"英超","date":"12-31","date_full":"2026-12-31","time":"23:50","status":"upcoming"}]}"#
+            return (200, Data(body.utf8))
+        }
+        let client = makeClient()
+        let matches = try await client.matches(fresh: true)
+        let match = try XCTUnwrap(matches.first)
+        let kickoff = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-12-31T23:50:00+08:00"))
+
+        XCTAssertEqual(match.kickoffAt, kickoff)
+        XCTAssertEqual(match.projected(at: kickoff.addingTimeInterval(149 * 60)).status, "live")
+        XCTAssertEqual(match.projected(at: kickoff.addingTimeInterval(150 * 60)).status, "upcoming")
+
+        var sourceLive = match
+        sourceLive.status = "live"
+        XCTAssertEqual(sourceLive.projected(at: kickoff.addingTimeInterval(180 * 60)).status, "live")
+        var postponed = match
+        postponed.status = "postponed"
+        XCTAssertEqual(postponed.projected(at: kickoff.addingTimeInterval(240 * 60)).status, "postponed")
+        XCTAssertEqual(postponed.displayStatus, "延期")
+
+        let request = try XCTUnwrap(requests.all.first)
+        let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(query?.first(where: { $0.name == "fresh" })?.value, "1")
+    }
+
     func testFootballRenewsSelectedSourceByMatchAndPreservesItsReferer() async throws {
         let requests = RequestRecorder()
         StubURLProtocol.install { request in

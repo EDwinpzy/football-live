@@ -198,8 +198,9 @@ public struct BackendClient {
         }
     }
 
-    public func matches() async throws -> [FootballMatch] {
-        let data = try await get(segments: ["api", "matches"], query: [])
+    public func matches(fresh: Bool = false) async throws -> [FootballMatch] {
+        let query = fresh ? [URLQueryItem(name: "fresh", value: "1")] : []
+        let data = try await get(segments: ["api", "matches"], query: query)
         let object = try jsonObject(data)
         guard let rawMatches = object["matches"] as? [[String: Any]] else {
             throw BackendError.malformedPayload("比赛列表格式不正确。")
@@ -515,6 +516,7 @@ public struct BackendClient {
         let away = Self.string(raw["away"])
         guard !id.isEmpty, !home.isEmpty, !away.isEmpty else { return nil }
         let date = Self.string(raw["date"])
+        let dateFull = Self.string(raw["date_full"])
         let clock = Self.string(raw["time"])
         let time = [date, clock].filter { !$0.isEmpty }.joined(separator: " ")
         let title = Self.string(raw["title"]).ifBlank("\(home) vs \(away)")
@@ -531,8 +533,18 @@ public struct BackendClient {
             time: time,
             status: Self.string(raw["status"]),
             score: score,
-            minute: Self.string(raw["minute"])
+            minute: Self.string(raw["minute"]),
+            kickoffAt: Self.kickoffDate(dateFull: dateFull, clock: clock)
         )
+    }
+
+    private static func kickoffDate(dateFull: String, clock: String) -> Date? {
+        guard !dateFull.isEmpty, !clock.isEmpty else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter.date(from: "\(dateFull) \(clock)")
     }
 
     private static func validStreamURL(_ raw: String) -> URL? {

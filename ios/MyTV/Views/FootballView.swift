@@ -2,6 +2,7 @@ import SwiftUI
 
 struct FootballView: View {
     @EnvironmentObject private var settings: AppSettings
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var matches: [FootballMatch] = []
     @State private var isLoading = true
@@ -12,6 +13,7 @@ struct FootballView: View {
     @State private var isLoadingPlayableStreams = false
     @State private var playableStreamsError: String?
     @State private var sourceRetryToken = 0
+    @State private var isRefreshingMatches = false
 
     var body: some View {
         Group {
@@ -47,7 +49,19 @@ struct FootballView: View {
         .background(MyTVStyle.background)
         .navigationTitle("足球")
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: retryToken) { await loadMatches() }
+        .task(id: retryToken) {
+            await loadMatches()
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 15_000_000_000) }
+                catch { return }
+                guard scenePhase == .active else { continue }
+                await loadMatches(silent: true)
+            }
+        }
+        .onChange(of: scenePhase) { phase in
+            guard phase == .active else { return }
+            Task { await loadMatches(silent: true) }
+        }
         .sheet(item: $selectedMatch) { match in
             sourcePicker(for: match)
                 .presentationDetents([.medium, .large])
@@ -63,7 +77,7 @@ struct FootballView: View {
                     .foregroundStyle(MyTVStyle.secondaryText)
                     .lineLimit(1)
                 Spacer()
-                Text(match.status.isEmpty ? match.time : match.status + (match.minute.isEmpty ? "" : " · \(match.minute)"))
+                Text(match.status.isEmpty ? match.time : match.displayStatus + (match.minute.isEmpty ? "" : " · \(match.minute)"))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(match.status.localizedCaseInsensitiveContains("live") || match.status.contains("进行")
                                      ? MyTVStyle.accent : MyTVStyle.secondaryText)
@@ -230,25 +244,31 @@ struct FootballView: View {
     }
 
     @MainActor
-    private func loadMatches() async {
+    private func loadMatches(silent: Bool = false) async {
+        guard !isRefreshingMatches else { return }
+        isRefreshingMatches = true
+        defer { isRefreshingMatches = false }
         guard let client = settings.client else {
             matches = []
             isLoading = false
             errorMessage = "请先在设置中填写有效的 HTTPS 服务地址。"
             return
         }
-        isLoading = true
-        errorMessage = nil
+        if !silent {
+            isLoading = true
+            errorMessage = nil
+        }
         do {
-            let loaded = try await client.matches()
+            let loaded = try await client.matches(fresh: true)
             try Task.checkCancellation()
-            matches = loaded.filter { !$0.isFinished }
+            matches = loaded.map { $0.projected() }.filter { !$0.isFinished }
+            errorMessage = nil
             isLoading = false
         } catch is CancellationError {
             return
         } catch {
             guard !Task.isCancelled else { return }
-            errorMessage = userFacingNetworkMessage(error)
+            if matches.isEmpty || !silent { errorMessage = userFacingNetworkMessage(error) }
             isLoading = false
         }
     }
