@@ -225,8 +225,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
         }
     }
 
-    // 需求①：比赛信息实时刷新——页面在前台期间每 20s 检查一次，距上次成功
-    // 每约 10 秒静默拉取；失败后按请求完成时间计间隔，离开本页自动停止。
+    // 页面前台每秒检查刷新条件；成功或失败后约 10 秒再拉取，离开本页自动停止。
     LaunchedEffect(Unit) {
         while (true) {
             delay(1_000)

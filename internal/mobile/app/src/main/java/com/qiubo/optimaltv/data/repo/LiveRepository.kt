@@ -10,6 +10,7 @@ import com.qiubo.optimaltv.data.model.ResultItem
 import com.qiubo.optimaltv.data.model.VideoItem
 import com.qiubo.optimaltv.data.prefs.SettingsStore
 import com.qiubo.optimaltv.vpn.FootballVpnProxyCore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -17,7 +18,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.net.URLEncoder
-import kotlinx.coroutines.CancellationException
 
 internal data class MatchFetchResult<T>(val value: T, val usedFootballProxy: Boolean)
 
