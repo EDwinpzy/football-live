@@ -577,7 +577,9 @@ def fetch_source():
                 "Referer": host,
                 "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
             })
-            with urlreq.urlopen(req, timeout=20) as resp:
+            proxy_url = _active_upstream_proxy()
+            open_source = _url_opener(proxy_url).open if proxy_url else urlreq.urlopen
+            with open_source(req, timeout=20) as resp:
                 body = resp.read().decode("utf-8", errors="ignore")
             _active_source["i"] = i
             _active_source["url"] = url
@@ -1204,14 +1206,9 @@ def _refresh_matches_bg():
         html = fetch_source()
         payload = _build_matches_payload(parse_matches(html))
     except Exception as e:
-        # 直源全挂（家宽被 yoozb 系拉黑）→ 云端兜底；云端响应已含 7m 比分合并
-        try:
-            payload = _cloud_get_json("/api/matches")
-            if not payload.get("matches"):
-                raise RuntimeError("云端比赛兜底为空")
-            payload["source"] = "%s|cloud-relay" % payload.get("source", "")
-        except Exception as e2:
-            error = "%s; cloud: %s" % (str(e)[:120], str(e2)[:80])
+        # 旧 CloudBase 赛程接口已退役。返回失败供 Android 切换足球代理，
+        # 避免在无效备用接口上再次等待超时。
+        error = str(e)[:200] or "比赛列表刷新失败"
     with _cache_lock:
         if payload is not None:
             _cache.update(ts=time.time(), data=payload, raw_error=None)
@@ -1242,13 +1239,15 @@ def build_api(wait_for_fresh=False):
             should_wait = True
         if stale is not None and not wait_for_fresh:
             if start_background:
-                threading.Thread(target=_refresh_matches_bg, daemon=True).start()
+                threading.Thread(target=contextvars.copy_context().run,
+                                 args=(_refresh_matches_bg,), daemon=True).start()
             return _project_matches_payload(stale), True
 
     if run_inline:
         _refresh_matches_bg()
     elif start_background:
-        threading.Thread(target=_refresh_matches_bg, daemon=True).start()
+        threading.Thread(target=contextvars.copy_context().run,
+                         args=(_refresh_matches_bg,), daemon=True).start()
         if not wait_for_fresh:
             with _cache_lock:
                 return _project_matches_payload(_cache["data"]), True
@@ -4691,6 +4690,7 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
         football_route = (
+            parsed.path == "/api/matches" or
             parsed.path.startswith("/api/stream/") or
             parsed.path == "/api/relay" or
             parsed.path.startswith("/api/relayts/")

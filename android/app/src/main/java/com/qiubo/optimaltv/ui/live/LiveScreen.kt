@@ -100,12 +100,19 @@ internal fun snapshotFallbackState(current: LiveUiState, snapshot: List<MatchIte
     )
 }
 
+internal fun liveMatchFailureState(current: LiveUiState, message: String): LiveUiState =
+    if (current.matches.isEmpty()) current.copy(loading = false, error = message)
+    else current.copy(loading = false, error = null)
+
+internal fun liveRefreshDue(lastAttemptAt: Long, now: Long): Boolean =
+    lastAttemptAt <= 0L || now - lastAttemptAt >= 9_500L
+
 class LiveViewModel : ViewModel() {
     private val _ui = MutableStateFlow(LiveUiState())
     val ui: StateFlow<LiveUiState> = _ui.asStateFlow()
 
-    /** 上次成功刷新时间 / 刷新进行中标记（需求①：轮询去重，慢抓取期间不叠加请求） */
-    private var lastRefreshAt = 0L
+    /** 上次尝试时间 / 刷新进行中标记，失败后仍隔 10 秒自动重试，避免每秒重打上游。 */
+    private var lastRefreshAttemptAt = 0L
     @Volatile private var refreshing = false
 
     init {
@@ -136,17 +143,13 @@ class LiveViewModel : ViewModel() {
                 val matches = Graph.live.matches(force = true)
                 val leagues = matches.map { it.league }.filter { it.isNotBlank() }.distinct()
                 com.qiubo.optimaltv.OtvLog.i("matches 加载成功 ${matches.size} 场")
-                lastRefreshAt = System.currentTimeMillis()
                 _ui.value = LiveUiState(loading = false, matches = matches, leagues = leagues)
             } catch (e: Exception) {
                 com.qiubo.optimaltv.OtvLog.e("matches 加载失败: ${e.message}")
-                // 静默刷新失败保留旧列表不打断页面；仅首次加载才落错误态
-                if (!silent && _ui.value.matches.isEmpty()) {
-                    _ui.value = _ui.value.copy(loading = false, error = e.message ?: "加载失败")
-                } else if (!silent) {
-                    _ui.value = _ui.value.copy(loading = false)
-                }
+                // 初次请求即使由静默轮询触发，空页面也要结束 loading 并显示错误；已有数据则保留。
+                _ui.value = liveMatchFailureState(_ui.value, e.message ?: "加载失败")
             } finally {
+                lastRefreshAttemptAt = System.currentTimeMillis()
                 refreshing = false
             }
         }
@@ -154,7 +157,7 @@ class LiveViewModel : ViewModel() {
 
     /** 前台每 10 秒静默刷新；后端同时按本机时间投影缓存状态，开球不再等待源站缓存。 */
     fun refreshIfStale() {
-        if (System.currentTimeMillis() - lastRefreshAt >= 9_500) refresh(silent = true)
+        if (liveRefreshDue(lastRefreshAttemptAt, System.currentTimeMillis())) refresh(silent = true)
     }
 
     fun projectClock(nowMillis: Long = System.currentTimeMillis()) {
@@ -234,7 +237,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
     }
 
     // 需求①：比赛信息实时刷新——页面在前台期间每 20s 检查一次，距上次成功
-    // 刷新 >60s 即静默拉取（开赛/比分变化约 1 分钟内上屏）；离开本页自动停止
+    // 每约 10 秒静默拉取；失败后按请求完成时间计间隔，离开本页自动停止。
     LaunchedEffect(Unit) {
         while (true) {
             delay(1_000)

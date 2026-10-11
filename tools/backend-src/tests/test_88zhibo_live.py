@@ -27,6 +27,38 @@ def _source_response(links):
 
 
 class ZhiBo88LiveTest(unittest.TestCase):
+    def test_schedule_proxy_flag_is_scoped_to_football_request(self):
+        handler = object.__new__(proxy.Handler)
+        observed = []
+        def receive(parsed):
+            observed.append((parsed.path, proxy._active_upstream_proxy()))
+        with mock.patch.object(proxy.Handler, "_do_get_with_upstream_proxy", side_effect=receive):
+            for path in ("/api/matches?fresh=1&football_vpn=1", "/vod/home?football_vpn=1", "/api/matches?fresh=1"):
+                handler.path = path
+                handler.do_GET()
+        self.assertEqual([
+            ("/api/matches", proxy.FOOTBALL_PROXY_URL),
+            ("/vod/home", None),
+            ("/api/matches", None),
+        ], observed)
+        self.assertIsNone(proxy._active_upstream_proxy())
+
+    def test_schedule_fetch_uses_football_proxy_when_requested(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = "足球赛程".encode("utf-8")
+        opener = mock.Mock()
+        opener.open.return_value = response
+        token = proxy._UPSTREAM_PROXY_URL.set(proxy.FOOTBALL_PROXY_URL)
+        try:
+            with mock.patch.object(proxy, "_url_opener", return_value=opener) as factory, \
+                    mock.patch.object(proxy.urlreq, "urlopen") as direct:
+                self.assertEqual("足球赛程", proxy.fetch_source())
+                factory.assert_called_once_with(proxy.FOOTBALL_PROXY_URL)
+                opener.open.assert_called_once()
+                direct.assert_not_called()
+        finally:
+            proxy._UPSTREAM_PROXY_URL.reset(token)
+
     def test_parse_filters_non_football_keeps_four_routes_in_order_with_nested_li(self):
         page = """
         <li class="live-list-group-time">2026-10-11</li>

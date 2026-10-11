@@ -17,6 +17,56 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.net.URLEncoder
+import kotlinx.coroutines.CancellationException
+
+internal data class MatchFetchResult<T>(val value: T, val usedFootballProxy: Boolean)
+
+internal suspend fun <T> fetchMatchesWithFootballProxyFallback(
+    directRequest: suspend () -> T,
+    startFootballProxy: suspend () -> Unit,
+    proxyRequest: suspend () -> T,
+    preferFootballProxy: Boolean = false,
+): MatchFetchResult<T> {
+    fun message(error: Exception) = error.message?.takeIf { it.isNotBlank() }?.take(180)
+        ?: error.javaClass.simpleName
+
+    suspend fun fetchProxy(): T {
+        startFootballProxy()
+        return proxyRequest()
+    }
+
+    if (preferFootballProxy) {
+        try {
+            return MatchFetchResult(fetchProxy(), usedFootballProxy = true)
+        } catch (proxyError: Exception) {
+            if (proxyError is CancellationException) throw proxyError
+            try {
+                return MatchFetchResult(directRequest(), usedFootballProxy = false)
+            } catch (directError: Exception) {
+                if (directError is CancellationException) throw directError
+                throw IllegalStateException(
+                    "足球代理优先请求失败（${message(proxyError)}）；直连回退失败（${message(directError)}）",
+                    directError,
+                )
+            }
+        }
+    }
+
+    try {
+        return MatchFetchResult(directRequest(), usedFootballProxy = false)
+    } catch (directError: Exception) {
+        if (directError is CancellationException) throw directError
+        try {
+            return MatchFetchResult(fetchProxy(), usedFootballProxy = true)
+        } catch (proxyError: Exception) {
+            if (proxyError is CancellationException) throw proxyError
+            throw IllegalStateException(
+                "赛程直连失败（${message(directError)}）；足球代理重试失败（${message(proxyError)}）",
+                proxyError,
+            )
+        }
+    }
+}
 
 /**
  * 足球直播仓库（1:1 复刻原版 web 数据链路，同一后端）：
@@ -37,6 +87,16 @@ class LiveRepository(
         fun relayUrl(base: String, raw: String, referer: String = "https://www.88zhibo.tv/", footballVpn: Boolean = false): String =
             "$base/api/relay?u=" + URLEncoder.encode(raw, "UTF-8") + "&ref=" + URLEncoder.encode(referer, "UTF-8") +
                 if (footballVpn) "&football_vpn=1" else ""
+
+        internal fun matchesRequestPath(footballVpn: Boolean): String =
+            "/api/matches?fresh=1" + if (footballVpn) "&football_vpn=1" else ""
+
+        internal fun matchesArray(response: JSONObject): org.json.JSONArray {
+            val error = if (response.isNull("error")) "" else response.optString("error").trim()
+            check(error.isEmpty() || error == "null") { "赛程接口返回错误：$error" }
+            return response.optJSONArray("matches")
+                ?: throw IllegalStateException("赛程接口未返回比赛列表")
+        }
 
         private const val TAG = "OTV"
 
@@ -75,11 +135,20 @@ class LiveRepository(
     }
 
     private var matchesCache: Pair<Long, List<MatchItem>>? = null
+    @Volatile private var preferFootballProxyForMatches = false
 
     /** 冷抓接口（/hhkan/search 站点实时抓取）专用：75s 读超时——后端 _fetch 会在
      *  镜像域间切换重试（每域最长 25s×挑战求解），45s 会把「慢而能成」的搜索截成空结果（需求 搜索#2） */
     private val slowHttp by lazy {
         okHttp.newBuilder().readTimeout(75, java.util.concurrent.TimeUnit.SECONDS).build()
+    }
+
+    /** fresh 赛程可能经过源站与云端兜底；为完整直连和 VPN 两次抓取留出时间。 */
+    private val matchesHttp by lazy {
+        okHttp.newBuilder()
+            .readTimeout(100, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
     }
 
     private suspend fun getSlow(base: String, path: String): JSONObject = withContext(Dispatchers.IO) {
@@ -101,6 +170,20 @@ class LiveRepository(
         okHttp.newCall(req).execute().use { resp ->
             require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
             JSONObject(resp.body?.string().orEmpty())
+        }
+    }
+
+    private suspend fun getMatches(base: String, footballVpn: Boolean): org.json.JSONArray = withContext(Dispatchers.IO) {
+        val path = matchesRequestPath(footballVpn)
+        val req = Request.Builder()
+            .url(base.trimEnd('/') + path)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
+            .build()
+        matchesHttp.newCall(req).execute().use { resp ->
+            require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
+            val body = resp.body?.string().orEmpty()
+            require(body.isNotBlank()) { "赛程接口返回空响应" }
+            matchesArray(JSONObject(body))
         }
     }
 
@@ -190,16 +273,21 @@ class LiveRepository(
     /** 比赛列表（前台轮询使用 fresh=1；服务端过期缓存会先完成单飞刷新） */
     suspend fun matches(force: Boolean = false): List<MatchItem> = withContext(Dispatchers.IO) {
         matchesCache?.takeIf { !force && System.currentTimeMillis() - it.first < 30_000 }?.second?.let { return@withContext it }
-        waitBackendReady(baseUrl())
-        // 内置后端冷抓比赛数据可能较慢，首次拉取可能超时：失败则 sleep 重试几次再抛
-        var jarr: org.json.JSONArray? = null
-        var lastErr: Exception? = null
-        for (i in 0..3) {
-            try { jarr = get(baseUrl(), "/api/matches?fresh=1").getJSONArray("matches"); break }
-            catch (e: Exception) { lastErr = e; kotlinx.coroutines.delay(4000) }
-        }
-        if (jarr == null) throw lastErr ?: RuntimeException("matches 拉取失败")
-        val arr = jarr
+        val base = baseUrl()
+        waitBackendReady(base)
+        val fetched = fetchMatchesWithFootballProxyFallback(
+            directRequest = { getMatches(base, footballVpn = false) },
+            startFootballProxy = {
+                if (!preferFootballProxyForMatches) {
+                    FootballVpnProxyCore.refreshSubscriptions(appContext, BuildConfig.HOTUPDATE_ENDPOINT)
+                }
+                check(FootballVpnProxyCore.ensureReady(appContext)) { "足球代理无法启动或未就绪" }
+            },
+            proxyRequest = { getMatches(base, footballVpn = true) },
+            preferFootballProxy = preferFootballProxyForMatches,
+        )
+        preferFootballProxyForMatches = fetched.usedFootballProxy
+        val arr = fetched.value
         val (today, tomorrow) = todayTomorrowKeys()
         // optString 对 JSON null 会返回字面量 "null"（需求 足球#1「null'」根因之一）——统一消毒
         fun os(o: org.json.JSONObject, k: String): String =

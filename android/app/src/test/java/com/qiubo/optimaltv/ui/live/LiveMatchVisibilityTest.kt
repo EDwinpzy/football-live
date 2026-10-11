@@ -2,7 +2,9 @@ package com.qiubo.optimaltv.ui.live
 
 import com.qiubo.optimaltv.data.model.MatchItem
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Calendar
 import java.util.TimeZone
@@ -68,5 +70,30 @@ class LiveMatchVisibilityTest {
 
         assertNull(snapshotFallbackState(fresh, cached))
         assertEquals(cached, snapshotFallbackState(LiveUiState(), cached)?.matches)
+    }
+
+    @Test
+    fun firstSilentLoadFailureLeavesLoadingStateAndShowsTheError() {
+        val failed = liveMatchFailureState(LiveUiState(), "赛程接口不可用")
+
+        assertFalse(failed.loading)
+        assertTrue(failed.matches.isEmpty())
+        assertEquals("赛程接口不可用", failed.error)
+    }
+
+    @Test
+    fun refreshFailureKeepsPreviouslyLoadedMatches() {
+        val previous = MatchItem("live", "甲队", "乙队", league = "英超")
+        val failed = liveMatchFailureState(LiveUiState(loading = false, matches = listOf(previous)), "断网")
+
+        assertFalse(failed.loading)
+        assertEquals(listOf(previous), failed.matches)
+        assertNull(failed.error)
+    }
+
+    @Test
+    fun failedFetchIsRetriedTenSecondsAfterItsCompletion() {
+        assertFalse(liveRefreshDue(lastAttemptAt = 1_000L, now = 10_499L))
+        assertTrue(liveRefreshDue(lastAttemptAt = 1_000L, now = 10_500L))
     }
 }
