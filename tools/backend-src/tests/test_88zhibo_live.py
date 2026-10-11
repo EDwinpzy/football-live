@@ -58,6 +58,50 @@ class ZhiBo88LiveTest(unittest.TestCase):
             [channel["name"] for channel in matches[0]["channels"]],
         )
 
+    def test_source_labels_keep_postponed_and_cancelled_matches_out_of_clock_projection(self):
+        page = '''
+        <li class="live-list-group-time">2026-10-11</li>
+        <li class="group-game-item" data-id="880201">
+          <span class="game-type">英超</span><span class="team-name">甲队</span><span class="team-name">乙队</span>
+          <span class="category-game-time">20:00</span><a href="/live/880201/play">延期</a>
+        </li>
+        <li class="group-game-item" data-id="880202">
+          <span class="game-type">英超</span><span class="team-name">丙队</span><span class="team-name">丁队</span>
+          <span class="category-game-time">20:00</span><a href="/live/880202/play">待定</a>
+        </li>
+        <li class="group-game-item" data-id="880203">
+          <span class="game-type">英超</span><span class="team-name">戊队</span><span class="team-name">己队</span>
+          <span class="category-game-time">20:00</span><a href="/live/880203/play">已取消</a>
+        </li>
+        <li class="group-game-item" data-id="880204">
+          <span class="game-type">英超</span><span class="team-name">庚队</span><span class="team-name">辛队</span>
+          <span class="category-game-time">20:00</span><a href="/live/880204/play">直播中</a>
+        </li>
+        '''
+
+        with mock.patch.object(proxy, "_now_cn", return_value=datetime(2026, 10, 11, 22, 30)):
+            matches = proxy.parse_matches(page)
+
+        by_id = {item["match_id"]: item for item in matches}
+        self.assertEqual("postponed", by_id["880201"]["status"])
+        self.assertEqual("pending", by_id["880202"]["status"])
+        self.assertEqual("cancelled", by_id["880203"]["status"])
+        self.assertEqual("finished", by_id["880204"]["status"])
+
+    def test_7m_void_state_is_authoritative_and_mapped_to_a_visible_hold_status(self):
+        match = {
+            "home": "甲队", "away": "乙队", "date": "10-11", "date_full": "2026-10-11",
+            "status": "live", "minute": "85",
+        }
+        state_table = {
+            ("甲队", "乙队"): {"state": 13, "hs": "", "as": "", "start": "2026,10,11,20,0,0"},
+        }
+        with mock.patch.object(proxy, "_fetch_7m_scores", return_value=state_table):
+            proxy.merge_7m_scores({"matches": [match]})
+
+        self.assertEqual("postponed", match["status"])
+        self.assertTrue(match["_status_authoritative"])
+
     def test_source_wrapper_decodes_and_rejects_malformed_data(self):
         links = [{"name": "线路A2", "url": "https://media.example/live/a2.m3u8"}]
         self.assertEqual(links, proxy._decode_88zhibo_source_links(_source_response(links)))

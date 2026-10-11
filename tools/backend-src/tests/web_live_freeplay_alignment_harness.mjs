@@ -81,6 +81,41 @@ vm.runInContext(app.slice(visibilityStart, visibilityEnd), visibilityContext);
 assert.deepEqual(Array.from(visibilityContext.liveMatches(), m => m.match_id), ["live", "upcoming"],
   "finished, ended, and close matches are hidden while live and upcoming matches remain");
 
+const clockStart = app.indexOf("function matchStartMillis(m)");
+const clockEnd = app.indexOf("/* App heroList", clockStart);
+assert.ok(clockStart >= 0 && clockEnd > clockStart, "football clock helpers are present");
+const clockContext = vm.createContext({
+  isFinishedLiveMatch: m => ["finished", "ended", "close"].includes(String(m.status || "").trim().toLowerCase()),
+});
+vm.runInContext(app.slice(clockStart, clockEnd), clockContext);
+const kickoff = Date.parse("2026-12-31T23:50:00+08:00");
+const previousTimeZone = process.env.TZ;
+try {
+  process.env.TZ = "America/Los_Angeles";
+  assert.equal(clockContext.matchStartMillis({ date_full: "2026-12-31", date: "12-31", time: "23:50" }), kickoff,
+    "a full Beijing kickoff date is independent of the device time zone");
+} finally {
+  if (previousTimeZone === undefined) delete process.env.TZ;
+  else process.env.TZ = previousTimeZone;
+}
+const acrossNewYear = { date_full: "2026-12-31", date: "12-31", time: "23:50", status: "upcoming", minute: "" };
+const duringRegularMatch = clockContext.projectLiveMatchClock(acrossNewYear, Date.parse("2027-01-01T00:10:00+08:00"));
+assert.equal(duringRegularMatch.status, "live", "an upcoming match starts after the year boundary");
+assert.equal(duringRegularMatch.minute, "20", "the minute projection uses the exact cross-day elapsed time");
+const regularAtFinishGrace = clockContext.projectLiveMatchClock(acrossNewYear, kickoff + 150 * 60000);
+assert.equal(regularAtFinishGrace.status, "upcoming", "the browser never creates a finished state");
+const sourceLivePastGrace = { ...acrossNewYear, status: "live" };
+assert.equal(clockContext.projectLiveMatchClock(sourceLivePastGrace, kickoff + 180 * 60000).status, "live",
+  "a client clock never ends a source-live match");
+const sourceLiveBeforeKickoff = { ...acrossNewYear, status: "live" };
+assert.equal(clockContext.projectLiveMatchClock(sourceLiveBeforeKickoff, kickoff - 60000).status, "upcoming",
+  "a false source-live label before kickoff is corrected");
+const postponed = { ...acrossNewYear, status: "postponed" };
+assert.equal(clockContext.projectLiveMatchClock(postponed, kickoff + 240 * 60000).status, "postponed",
+  "a postponed match is not projected to live or finished");
+assert.equal(clockContext.liveMatchDisplayStatus(postponed), "延期");
+assert.match(app, /BASE \+ "\/api\/matches\?fresh=1"/, "web refreshes through the backend fresh-match endpoint");
+
 const heroStart = app.indexOf("function renderLiveHero()");
 const heroEnd = app.indexOf("\nfunction teamNameFont", heroStart);
 assert.ok(heroStart >= 0 && heroEnd > heroStart, "live hero renderer is present");

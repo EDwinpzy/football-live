@@ -36,11 +36,16 @@ object ImportantTeamPolicy {
 }
 
 object MatchClockPolicy {
+    private val extraTimeLeague = Regex("杯|淘汰|决赛|半决赛|世界杯|欧洲杯|亚洲杯|美洲杯|欧冠|欧联|欧协|世俱杯|友谊赛")
+
     fun project(match: MatchItem, startMillis: Long?, nowMillis: Long): MatchItem {
-        if (match.isFinished || startMillis == null) return match
+        if (match.isFinished || match.isClockHeld || startMillis == null) return match
         val elapsed = ((nowMillis - startMillis) / 60_000L).toInt()
-        if (elapsed < 0) return match
-        if (elapsed >= 110) return match.copy(status = "finished")
+        if (elapsed < 0) return if (match.isLive) match.copy(status = "upcoming", minute = "") else match
+        // The backend owns terminal-state decisions, including authoritative 7m
+        // results. A device clock may only move an upcoming fixture to live.
+        val finishGrace = if (extraTimeLeague.containsMatchIn(match.league)) 210 else 150
+        if (!match.isUpcoming || elapsed >= finishGrace) return match
         val played = when { elapsed <= 45 -> elapsed; elapsed <= 60 -> 45; else -> elapsed - 15 }
         return match.copy(status = "live", minute = played.coerceIn(0, 90).toString())
     }

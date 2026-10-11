@@ -84,7 +84,7 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
         renderer = _source_block(
             self.tv_home,
             'item(key = "lib-vertical-three-pages")',
-            'item(key = "lib-pad")',
+            'if (libraryCategoryTilesVisible)',
         )
         self.assertIn("VerticalPager(", renderer)
         self.assertIn("beyondBoundsPageCount = 1", renderer,
@@ -104,7 +104,7 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
         self.assertIn("visibleItemsInfo.none { it.index == targetColumn }", self.tv_home,
                       "目标卡片已可见时不应再次启动横向滚动动画")
         self.assertIn(
-            'it.key == "lib-vertical-three-pages" && it.offset <= 0',
+            'vodListState.firstVisibleItemIndex == 1',
             self.tv_home,
             "分类滚轮应在片库到达视口顶部后显示，首页隐藏且横向滚动时持续显示",
         )
@@ -113,6 +113,21 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
         self.assertIn("sectionPagerState.currentPage > 0", back_handler)
         self.assertIn("moveLibraryPage(sectionPagerState.currentPage - 1", back_handler,
                       "返回键应能回到上一页")
+
+    def test_tv_home_and_history_share_one_snapped_viewport(self):
+        home_page = _source_block(self.tv_home, 'item(key = "home-page")',
+                                  'item(key = "lib-vertical-three-pages")')
+        self.assertIn("Column(Modifier.fillParentMaxHeight().fillMaxWidth())", home_page)
+        self.assertIn("VodHeroBand(", home_page)
+        self.assertIn('"最近观看"', home_page)
+        self.assertIn("HistoryCard(", home_page)
+        self.assertIn("flingBehavior = rememberSnapFlingBehavior(vodListState)", self.tv_home)
+        self.assertNotIn('item(key = "history")', self.tv_home)
+        self.assertNotIn('item(key = "lib-category-anchor")', self.tv_home)
+        self.assertNotIn('item(key = "lib-pad")', self.tv_home)
+        self.assertNotIn("ProvideNavScrolls(vertical = vodScroll)", self.tv_home)
+        hero = _source_block(self.tv_home, "private fun VodHeroBand(", "private fun LibrarySectionPage(")
+        self.assertNotIn("listState.scrollBy(", hero)
 
     def test_mobile_page_is_two_rows_of_current_column_count(self):
         pager = _source_block(

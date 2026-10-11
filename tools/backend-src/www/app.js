@@ -920,8 +920,8 @@ function mainstreamFilter(list) {
   return list;
 }
 function fmtMD(offsetDays) {
-  const d = new Date(Date.now() + offsetDays * 86400000);
-  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const d = new Date(Date.now() + offsetDays * 86400000 + 8 * 3600000);
+  return `${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
 /* App dateLabel：今日比赛 / 明日比赛 / 9月6日 比赛 */
@@ -938,15 +938,54 @@ function matchTimeLabel(m) {
   const dl = dm ? `${+dm[1]}月${+dm[2]}日` : (m.date || "");
   return [m.league, dl, m.time || ""].filter(x => x).join(" ");
 }
-/* App matchStartMillis：date「MM-dd」+ time「HH:mm」→ 毫秒；跨年自动 +1 年 */
+/* 以源站完整北京时间日期为准；旧缓存仅在跨年邻近窗口内补年份。 */
 function matchStartMillis(m) {
-  const dm = (m.date || "").trim().match(/^(\d{2})-(\d{2})$/); if (!dm) return null;
+  const full = (m.date_full || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const dm = (m.date || "").trim().match(/^(\d{2})-(\d{2})$/);
+  if (!full && !dm) return null;
   const tm = (m.time || "").trim().match(/^(\d{1,2}):(\d{2})/); if (!tm) return null;
-  const cal = new Date();
-  cal.setMonth(+dm[1] - 1, +dm[2]);
-  cal.setHours(+tm[1], +tm[2], 0, 0);
-  if (cal.getTime() < Date.now() - 12 * 3600000) cal.setFullYear(cal.getFullYear() + 1);
-  return cal.getTime();
+  const toMillis = (year, month, day) => Date.parse(
+    `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(+tm[1]).padStart(2, "0")}:${tm[2]}:00+08:00`
+  );
+  if (full) return toMillis(+full[1], +full[2], +full[3]);
+  const now = Date.now();
+  const beijingYear = new Date(now + 8 * 3600000).getUTCFullYear();
+  const candidates = [beijingYear - 1, beijingYear, beijingYear + 1]
+    .map(year => toMillis(year, +dm[1], +dm[2]));
+  const nearby = candidates.filter(ts => Math.abs(ts - now) <= 31 * 86400000);
+  return nearby.length ? nearby.reduce((a, b) => Math.abs(a - now) <= Math.abs(b - now) ? a : b)
+    : toMillis(beijingYear, +dm[1], +dm[2]);
+}
+function isClockHeldLiveMatch(m) {
+  const status = String((m && m.status) || "").trim().toLowerCase();
+  return ["postponed", "delayed", "pending", "cancelled", "canceled", "abandoned",
+    "延期", "推迟", "待定", "取消", "腰斩"].includes(status);
+}
+function liveMatchDisplayStatus(m) {
+  const status = String((m && m.status) || "").trim().toLowerCase();
+  if (["postponed", "delayed", "延期", "推迟"].includes(status)) return "延期";
+  if (["pending", "待定"].includes(status)) return "待定";
+  if (["cancelled", "canceled", "取消"].includes(status)) return "取消";
+  if (["abandoned", "腰斩"].includes(status)) return "腰斩";
+  if (status === "live") return "直播中";
+  if (isFinishedLiveMatch(m)) return "完场";
+  return "未开赛";
+}
+function projectLiveMatchClock(m, nowMillis = Date.now()) {
+  if (!m || isFinishedLiveMatch(m) || isClockHeldLiveMatch(m)) return m;
+  const status = String(m.status || "").trim().toLowerCase();
+  if (status !== "live" && status !== "upcoming") return m;
+  const start = matchStartMillis(m);
+  if (start == null) return m;
+  const elapsed = Math.floor((nowMillis - start) / 60000);
+  if (elapsed < 0) return status === "live" ? { ...m, status: "upcoming", minute: "" } : m;
+  // The backend owns completion. The browser clock only promotes an upcoming
+  // fixture during its plausible match window; it never creates a final state.
+  const extendedTimeMatch = /杯|淘汰|决赛|半决赛|世界杯|欧洲杯|亚洲杯|美洲杯|欧冠|欧联|欧协|世俱杯|友谊赛/.test(m.league || "");
+  const finishGrace = extendedTimeMatch ? 210 : 150;
+  if (status !== "upcoming" || elapsed >= finishGrace) return m;
+  const played = elapsed <= 45 ? elapsed : elapsed <= 60 ? 45 : elapsed - 15;
+  return { ...m, status: "live", minute: String(Math.max(0, Math.min(90, played))) };
 }
 /* App heroList：国际米兰优先 → 今日/明日 → 重要度；前 6 */
 function isMyTeam(m) { return (m.home || "").includes("国际米兰") || (m.away || "").includes("国际米兰"); }
@@ -966,16 +1005,16 @@ async function initLive() {
      （后端 40s 保热 + 30s 缓存 → 开赛约 1 分钟内上屏；旧 20s/60s 要等 2-5 分钟） */
   clearInterval(live.poll);
   live.poll = setInterval(() => refreshLive(true), 10000);
+  window.addEventListener("focus", () => refreshLive(true));
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && live.loaded) refreshLive(true);
+  });
   clearInterval(live.clock);
   live.clock = setInterval(() => {
     let changed = false;
     for (const m of (live.data && live.data.matches) || []) {
-      if (isFinishedLiveMatch(m)) continue;
-      const start = matchStartMillis(m); if (start == null) continue;
-      const elapsed = Math.floor((Date.now() - start) / 60000); if (elapsed < 0) continue;
-      const next = elapsed >= 110 ? "finished" : "live";
-      if (m.status !== next) { m.status = next; changed = true; }
-      if (next === "live") m.minute = String(Math.max(0, Math.min(90, elapsed <= 45 ? elapsed : elapsed <= 60 ? 45 : elapsed - 15)));
+      const projected = projectLiveMatchClock(m);
+      if (projected !== m) { Object.assign(m, projected); changed = true; }
     }
     if (changed) renderLive();
   }, 1000);
@@ -987,13 +1026,13 @@ async function refreshLive(silent) {
     /* App：失败 4s 重试 ×4（后端冷抓 20s+） */
     let data = null, lastErr = null;
     for (let i = 0; i < 4; i++) {
-      try { data = await fetchJSON(BASE + "/api/matches", { timeout: 45000 }); break; }
+      try { data = await fetchJSON(BASE + "/api/matches?fresh=1", { timeout: 45000 }); break; }
       catch (e) { lastErr = e; await new Promise(r => setTimeout(r, 4000)); }
     }
     if (!data) throw lastErr || new Error("拉取失败");
     let ms = (data.matches || []).map(o => ({
       match_id: os(o.match_id), home: os(o.home), away: os(o.away),
-      league: os(o.league), date: os(o.date), time: os(o.time),
+      league: os(o.league), date: os(o.date), date_full: os(o.date_full), time: os(o.time),
       status: os(o.status), minute: os(o.minute),
       /* App MatchItem：比分读 score.h / score.a（与后端 {home,away} 键位保持同源语义） */
       hs: os((o.score || {}).h), as: os((o.score || {}).a),
@@ -1120,9 +1159,11 @@ function gameCard(m) {
   if (liveNow) {
     mid += `<div class="live-badge">LIVE</div>`;
     if (m.minute) mid += `<div style="font-size:26px;font-weight:600;color:#fff">${esc(m.minute)}'</div>`;
+  } else if (isClockHeldLiveMatch(m)) {
+    mid += `<div style="font-size:30px;font-weight:700;color:rgba(255,255,255,.6)">${esc(liveMatchDisplayStatus(m))}</div>`;
   }
-  if (hasScore) mid += `<div style="font-size:34px;font-weight:700;color:#fff">${esc(m.hs)} - ${esc(m.as)}</div>`;
-  else if (!liveNow) mid += `<div style="font-size:30px;font-weight:700;color:rgba(255,255,255,.6)">VS</div>`;
+  if (!isClockHeldLiveMatch(m) && hasScore) mid += `<div style="font-size:34px;font-weight:700;color:#fff">${esc(m.hs)} - ${esc(m.as)}</div>`;
+  else if (!liveNow && !isClockHeldLiveMatch(m)) mid += `<div style="font-size:30px;font-weight:700;color:rgba(255,255,255,.6)">VS</div>`;
   /* 2026-09-05：未开赛/完场卡片显示开赛时间（直播中已有 LIVE 徽章/分钟数） */
   if (!liveNow && m.time) mid += `<div style="font-size:20px;font-weight:500;color:rgba(255,255,255,.5)">${esc(m.time)}</div>`;
   return `<div class="gcard" data-mid="${esc(m.match_id)}">
@@ -1161,7 +1202,7 @@ function renderLiveHero() {
   /* App sb-meta：直播中 = LIVE 徽章 + 「league  minute'」（双空格 join）；否则 状态 + matchTimeLabel */
   const status = m.status === "live"
     ? `<span class="live-badge">LIVE</span><span class="ls-league">${esc([m.league, m.minute ? m.minute + "'" : m.time].filter(x => x).join("  "))}</span>`
-    : `<span class="ls-time">${m.status === "upcoming" ? "未开赛" : "完场"}</span><span class="ls-time">${esc(matchTimeLabel(m))}</span>`;
+    : `<span class="ls-time">${esc(liveMatchDisplayStatus(m))}</span><span class="ls-time">${esc(matchTimeLabel(m))}</span>`;
   $("#liveStatus").innerHTML = status;
   $("#liveDots").innerHTML = live.heroList.map((x, i) => `<i class="${x.match_id === live.heroId ? "on" : ""}"></i>`).join("");
   $$("#liveDots i").forEach((d, i) => d.addEventListener("click", () => {
@@ -1174,6 +1215,7 @@ function teamNameFont(n) { return (n || "").length > 10 ? 42 : (n || "").length 
 /* App playMatch 门控：已结束提示；未开赛且距开赛 >10 分钟拦截 */
 function playLiveMatch(m) {
   if (m.status === "finished") { hint("比赛已结束"); return; }  /* v1.23：后端完场值是 finished，旧版误查 ended 从未生效 */
+  if (isClockHeldLiveMatch(m)) { hint(liveMatchDisplayStatus(m)); return; }
   if (m.status !== "live") {
     const start = matchStartMillis(m);
     if (start != null && Date.now() < start - 10 * 60000) { hint("比赛未开始"); return; }

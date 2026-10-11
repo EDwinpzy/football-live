@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -100,9 +101,8 @@ import java.net.URLEncoder
 
 /**
  * 影视页（原版 view-vod，2026-08-28 重排）：
- * 整页单 LazyColumn（需求 影视#1/#5：hero 海报带随内容滚动，下方最近观看/片库可上下滚动）——
- * 首项 = hero 海报带（VOD_BAND 高：海报顶到屏幕最顶不留白 + 半透明白雾）；
- * 之后 = 最近观看 + 片库（分类 chips + 网格）。
+ * 外层两页吸附：第一页完整容纳 hero 海报带与最近观看，第二页承载片库分页。
+ * 焦点切换只在整页之间滚动，避免停在首屏与片库的交界处。
  * hero 左右键手动切换（播放钮上），不自动轮播（需求 #15）。
  */
 /** 首屏预算约 1000 设计 px：顶部海报带 + 最近观看标题/海报/片名，可完整容纳于 16:9 TV。 */
@@ -132,7 +132,7 @@ internal object HomeLibraryUiPolicy {
     const val ALL_PAGE_INDEX = 3
     val PAGE_TITLES = SECTION_PAGE_TITLES + ALL_PAGE_TITLE
 
-    fun categoryGridTargetIndex(index: Int, direction: Int, count: Int, columns: Int = 2): Int? {
+    fun categoryGridTargetIndex(index: Int, direction: Int, count: Int, columns: Int = 1): Int? {
         if (count <= 0 || columns <= 0 || index !in 0 until count) return null
         val target = when (direction) {
             NAV_LEFT -> if (index % columns > 0) index - 1 else return null
@@ -224,16 +224,12 @@ fun VodScreen(nav: NavController) {
     var tabFocused by remember { mutableStateOf(false) }
     val libraryCategoryTilesVisible by remember {
         derivedStateOf {
-            // Keep category tiles attached to the library viewport while its rows scroll horizontally.
-            // Requiring the pager to reach the top also keeps it off the homepage while only
-            // the bottom edge of the library item is visible below the hero/history section.
-            vodListState.layoutInfo.visibleItemsInfo.any {
-                it.key == "lib-vertical-three-pages" && it.offset <= 0
-            }
+            vodListState.firstVisibleItemIndex == 1 &&
+                vodListState.firstVisibleItemScrollOffset == 0 && !vodListState.isScrollInProgress
         }
     }
     val libraryKeepsChromeHidden by remember {
-        derivedStateOf { vodListState.firstVisibleItemIndex >= 3 && !tabFocused }
+        derivedStateOf { vodListState.firstVisibleItemIndex >= 1 && !tabFocused }
     }
     var hint by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(hint) { if (hint != null) { kotlinx.coroutines.delay(2500); hint = null } }
@@ -341,9 +337,7 @@ fun VodScreen(nav: NavController) {
 
                 fun requestCategoryTilesFocus() {
                     pageScope.launch {
-                        if (vodListState.firstVisibleItemIndex < 3) {
-                            runCatching { vodListState.animateScrollToItem(3) }
-                        }
+                        vodListState.animateScrollToItem(1)
                         repeat(24) {
                             if (runCatching { categoryFocusRequesters.getOrNull(catSel)?.requestFocus() }.isSuccess) return@launch
                             withFrameNanos { }
@@ -380,7 +374,7 @@ fun VodScreen(nav: NavController) {
                     }
                     if (key.startsWith("lib:全部:")) {
                         restoredFocus = true
-                        runCatching { vodListState.scrollToItem(3) }
+                        runCatching { vodListState.scrollToItem(1) }
                         sectionPagerState.scrollToPage(HomeLibraryUiPolicy.ALL_PAGE_INDEX)
                         return@LaunchedEffect
                     }
@@ -391,7 +385,7 @@ fun VodScreen(nav: NavController) {
                         val itemIndex = section.items.indexOfFirst { "lib:${section.name}:${it.id}" == key }
                         val row = itemIndex % 2
                         val column = itemIndex / 2
-                        runCatching { vodListState.scrollToItem(3) }
+                        runCatching { vodListState.scrollToItem(1) }
                         sectionPagerState.scrollToPage(targetPage)
                         sectionRowStates[targetPage][row].scrollToItem(column)
                     }
@@ -522,65 +516,60 @@ fun VodScreen(nav: NavController) {
                         }
                     }
                 }
-                // 整页单 LazyColumn：首屏 hero + 最近观看，其后为片库栏目和内嵌全部页。
-                // v1.13：方向导航统一 OtvNav 引擎——容器仅声明滚动挂靠（未组合行的滚动找回）
-                val vodScroll = remember(vodListState) { lazyNavContainer(vodListState) }
-                ProvideNavScrolls(vertical = vodScroll) {
+                // Each item fills the viewport. Do not attach a pixel-scrolling focus container:
+                // its ensureVisible correction can otherwise leave two pages partly visible.
                 LazyColumn(
                     state = vodListState,
+                    flingBehavior = rememberSnapFlingBehavior(vodListState),
                     modifier = Modifier
                         .fillMaxSize()
                         .background(OtvColors.Bg),
                 ) {
-                    item(key = "hero") {
-                        VodHeroBand(
-                            nav, heroesTop, s, heroIdxTop, heroPlayFocus,
-                            focusCategoryTiles = ::requestCategoryTilesFocus,
-                            firstHistoryFocus = firstHistoryFocus,
-                            hasHistory = history.isNotEmpty(),
-                            watchedIds = watchedIds,
-                            listState = vodListState,
-                            onPrev = { heroIdxTop = (heroIdxTop - 1 + heroesTop.size.coerceAtLeast(1)) % heroesTop.size.coerceAtLeast(1) },
-                            onNext = { heroIdxTop = (heroIdxTop + 1) % heroesTop.size.coerceAtLeast(1) },
-                        )
-                    }
-                    // 最近观看（需求 影视#7：竖版卡=片库同款 232×352，片名在卡下；需求 影视#10 点卡直进播放）
-                    item(key = "history") {
-                        Column(Modifier.padding(top = 24f.sx(s))) {
-                            Text(
-                                "最近观看", color = OtvColors.White, fontSize = 34f.sxs(s), fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(start = 86f.sx(s)),
+                    item(key = "home-page") {
+                        Column(Modifier.fillParentMaxHeight().fillMaxWidth()) {
+                            VodHeroBand(
+                                nav, heroesTop, s, heroIdxTop, heroPlayFocus,
+                                focusCategoryTiles = ::requestCategoryTilesFocus,
+                                firstHistoryFocus = firstHistoryFocus,
+                                hasHistory = history.isNotEmpty(),
+                                watchedIds = watchedIds,
+                                listState = vodListState,
+                                onPrev = { heroIdxTop = (heroIdxTop - 1 + heroesTop.size.coerceAtLeast(1)) % heroesTop.size.coerceAtLeast(1) },
+                                onNext = { heroIdxTop = (heroIdxTop + 1) % heroesTop.size.coerceAtLeast(1) },
                             )
-                            Spacer(Modifier.height(20f.sx(s)))
-                            if (history.isEmpty()) {
+                            // 最近观看与 hero 属于同一整页。
+                            Column(Modifier.padding(top = 24f.sx(s))) {
                                 Text(
-                                    "最近还没有观看记录", color = OtvColors.White50, fontSize = 26f.sxs(s),
+                                    "最近观看", color = OtvColors.White, fontSize = 34f.sxs(s), fontWeight = FontWeight.Bold,
                                     modifier = Modifier.padding(start = 86f.sx(s)),
                                 )
-                            } else {
-                                val histRowState = rememberLazyListState()
-                                val histScroll = remember(histRowState) { lazyNavContainer(histRowState) }
-                                ProvideNavScrolls(horizontal = histScroll) {
-                                    LazyRow(
-                                        state = histRowState,
-                                        horizontalArrangement = Arrangement.spacedBy(20f.sx(s)),
-                                        contentPadding = PaddingValues(horizontal = 86f.sx(s)),
-                                    ) {
-                                        items(history.size, key = { i -> history[i].vodId }) { i ->
-                                            HistoryCard(nav, history[i], s, cardReg,
-                                                focusRequester = if (i == 0) firstHistoryFocus else null,
-                                                upToTab = contentUpToTab,
-                                                downToChip = { requestCategoryTilesFocus() })
+                                Spacer(Modifier.height(20f.sx(s)))
+                                if (history.isEmpty()) {
+                                    Text(
+                                        "最近还没有观看记录", color = OtvColors.White50, fontSize = 26f.sxs(s),
+                                        modifier = Modifier.padding(start = 86f.sx(s)),
+                                    )
+                                } else {
+                                    val histRowState = rememberLazyListState()
+                                    val histScroll = remember(histRowState) { lazyNavContainer(histRowState) }
+                                    ProvideNavScrolls(horizontal = histScroll) {
+                                        LazyRow(
+                                            state = histRowState,
+                                            horizontalArrangement = Arrangement.spacedBy(20f.sx(s)),
+                                            contentPadding = PaddingValues(horizontal = 86f.sx(s)),
+                                        ) {
+                                            items(history.size, key = { i -> history[i].vodId }) { i ->
+                                                HistoryCard(nav, history[i], s, cardReg,
+                                                    focusRequester = if (i == 0) firstHistoryFocus else null,
+                                                    upToTab = contentUpToTab,
+                                                    downToChip = { requestCategoryTilesFocus() })
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                    // Keep a short anchor before the full-height catalog pager.
-                    item(key = "lib-category-anchor") { Spacer(Modifier.height(1f.sx(s))) }
-                // Keep the full-height pager mounted during category loading. A short loading
-                // item would clamp the outer list upward and dispose the focused wheel.
                     item(key = "lib-vertical-three-pages") {
                         VerticalPager(
                             state = sectionPagerState,
@@ -629,6 +618,7 @@ fun VodScreen(nav: NavController) {
                                     categoryFocus = categoryFocusRequesters.getOrNull(catSel),
                                     onRowFocus = { row, column -> requestLibraryFocus(page, row, column) },
                                     onPageMove = ::moveLibraryPage,
+                                    onExitToHome = ::exitCategoryTiles,
                                     onCardFocusChanged = { row, column, gained ->
                                         val item = section?.items?.getOrNull(column * 2 + row)
                                         val key = item?.let { "lib:${section?.name ?: title}:${it.id}" }
@@ -651,9 +641,7 @@ fun VodScreen(nav: NavController) {
                             }
                         }
                     }
-                item(key = "lib-pad") { Spacer(Modifier.height(80f.sx(s))) }
                 } // LazyColumn
-                } // ProvideNavScrolls(vodScroll)
                 if (libraryCategoryTilesVisible) {
                     LibraryCategoryTiles(
                         categories = categories,
@@ -666,8 +654,8 @@ fun VodScreen(nav: NavController) {
                         modifier = Modifier
                             .align(Alignment.CenterStart)
                             .padding(start = 28f.sx(s))
-                            .width(260f.sx(s))
-                            .height(410f.sx(s)),
+                            .width(220f.sx(s))
+                            .height((categories.size * 80f).sx(s)),
                     )
                 }
             }
@@ -858,15 +846,13 @@ private fun VodHeroBand(
                             when (dir) {
                                 NAV_LEFT -> if (heroes.size > 1) { onPrev(); true } else false
                                 NAV_RIGHT -> if (heroes.size > 1) { onNext(); true } else false
-                                // 影视首屏顺序：hero → 最近观看 → 片库分类滚轮。
+                                // 最近观看已经在同一首屏中，只移动焦点，不滚动首屏。
                                 NAV_DOWN -> {
                                     if (hasHistory) {
                                         heroScope.launch {
-                                            runCatching { listState.scrollBy(480f) }
-                                            repeat(8) {
-                                                delay(60)
+                                            repeat(24) {
                                                 if (runCatching { firstHistoryFocus.requestFocus() }.isSuccess) return@launch
-                                                runCatching { listState.scrollBy(300f) }
+                                                withFrameNanos { }
                                             }
                                         }
                                     } else {
@@ -938,6 +924,7 @@ private fun LibrarySectionPage(
     categoryFocus: FocusRequester?,
     onRowFocus: (row: Int, column: Int) -> Unit,
     onPageMove: (page: Int, row: Int, column: Int) -> Unit,
+    onExitToHome: () -> Unit,
     onCardFocusChanged: (row: Int, column: Int, gained: Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1041,6 +1028,10 @@ private fun LibrarySectionPage(
                                             }
                                             direction == NAV_UP && row == 0 && page > 0 -> {
                                                 onPageMove(page - 1, 1, column)
+                                                true
+                                            }
+                                            direction == NAV_UP && row == 0 && page == 0 -> {
+                                                onExitToHome()
                                                 true
                                             }
                                             direction == NAV_LEFT && column == 0 -> {

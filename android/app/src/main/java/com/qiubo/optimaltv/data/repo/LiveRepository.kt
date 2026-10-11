@@ -179,15 +179,15 @@ class LiveRepository(
     }
 
     private fun todayTomorrowKeys(): Pair<String, String> {
-        val fmt = java.text.SimpleDateFormat("MM-dd", java.util.Locale.CHINA)
-        val cal = java.util.Calendar.getInstance()
+        val zone = java.util.TimeZone.getTimeZone("Asia/Shanghai")
+        val fmt = java.text.SimpleDateFormat("MM-dd", java.util.Locale.CHINA).apply { timeZone = zone }
+        val cal = java.util.Calendar.getInstance(zone)
         val today = fmt.format(cal.time)
         cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
         return today to fmt.format(cal.time)
     }
 
-    /** 比赛列表（v1.23：30s 缓存对齐后端 CACHE_TTL——前端 15s/25s 轮询下 60s 本地
-     *  缓存会把开赛上屏延迟吞回去；只保留足球 + 今日/明日，失败抛异常由 UI 显示错误态） */
+    /** 比赛列表（前台轮询使用 fresh=1；服务端过期缓存会先完成单飞刷新） */
     suspend fun matches(force: Boolean = false): List<MatchItem> = withContext(Dispatchers.IO) {
         matchesCache?.takeIf { !force && System.currentTimeMillis() - it.first < 30_000 }?.second?.let { return@withContext it }
         waitBackendReady(baseUrl())
@@ -195,7 +195,7 @@ class LiveRepository(
         var jarr: org.json.JSONArray? = null
         var lastErr: Exception? = null
         for (i in 0..3) {
-            try { jarr = get(baseUrl(), "/api/matches").getJSONArray("matches"); break }
+            try { jarr = get(baseUrl(), "/api/matches?fresh=1").getJSONArray("matches"); break }
             catch (e: Exception) { lastErr = e; kotlinx.coroutines.delay(4000) }
         }
         if (jarr == null) throw lastErr ?: RuntimeException("matches 拉取失败")
@@ -225,6 +225,7 @@ class LiveRepository(
                 league = os(o, "league"),
                 leagueColor = os(o, "league_color"),
                 date = os(o, "date"),
+                dateFull = os(o, "date_full"),
                 time = os(o, "time"),
                 status = os(o, "status"),
                 minute = os(o, "minute"),
@@ -239,9 +240,11 @@ class LiveRepository(
         // ① 常规 = 主流赛事 × 今日/明日；② 空则回退「全部主流赛事不限日期」（国际比赛日/
         //    赛程真空期页面不再死空）；③ 仍空（白名单全不命中）才回退全部足球比赛兜底。
         val mainstream = list.filter { isMainstreamMatch(it) }
+        fun matchDay(value: String): String = Regex("^(?:\\d{4}-)?(\\d{2}-\\d{2})$")
+            .find(value.trim())?.groupValues?.get(1).orEmpty()
         val finalList = when {
-            mainstream.any { it.date == today || it.date == tomorrow } ->
-                list.filter { isMainstreamMatch(it) && (it.date == today || it.date == tomorrow) }
+            mainstream.any { matchDay(it.date) == today || matchDay(it.date) == tomorrow } ->
+                list.filter { isMainstreamMatch(it) && (matchDay(it.date) == today || matchDay(it.date) == tomorrow) }
             mainstream.isNotEmpty() -> {
                 OtvLog.w("matches 今日/明日无主流赛事 → 回退全量主流 ${mainstream.size} 场（不限日期）")
                 mainstream

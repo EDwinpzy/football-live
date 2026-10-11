@@ -90,6 +90,16 @@ data class LiveUiState(
     val leagues: List<String> = emptyList(),
 )
 
+internal fun snapshotFallbackState(current: LiveUiState, snapshot: List<MatchItem>): LiveUiState? {
+    if (snapshot.isEmpty() || current.matches.isNotEmpty() || (!current.loading && current.error == null)) return null
+    return current.copy(
+        loading = false,
+        error = null,
+        matches = snapshot,
+        leagues = snapshot.map { it.league }.filter { it.isNotBlank() }.distinct(),
+    )
+}
+
 class LiveViewModel : ViewModel() {
     private val _ui = MutableStateFlow(LiveUiState())
     val ui: StateFlow<LiveUiState> = _ui.asStateFlow()
@@ -104,11 +114,14 @@ class LiveViewModel : ViewModel() {
         // v1.19 流畅度：快照读盘+JSON 解析挪 IO（旧版在 VM 构造=组合期主线程同步执行）
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             runCatching { Graph.live.matchesFromSnapshot() }.getOrNull()?.let { cached ->
-                _ui.value = LiveUiState(
-                    loading = false, matches = cached,
-                    leagues = cached.map { it.league }.filter { it.isNotBlank() }.distinct(),
-                )
-                com.qiubo.optimaltv.OtvLog.i("matches 快照恢复上屏 ${cached.size} 场（后台刷新中）")
+                while (true) {
+                    val current = _ui.value
+                    val restored = snapshotFallbackState(current, cached) ?: break
+                    if (_ui.compareAndSet(current, restored)) {
+                        com.qiubo.optimaltv.OtvLog.i("matches 快照恢复上屏 ${cached.size} 场（后台刷新中）")
+                        break
+                    }
+                }
             }
         }
         refresh()
@@ -152,15 +165,16 @@ class LiveViewModel : ViewModel() {
 
     /** hero 榜（原版 renderLiveHero：今日/明日优先，重要度排序，前 6） */
     fun heroList(all: List<MatchItem>): List<MatchItem> {
-        val fmt = SimpleDateFormat("MM-dd", Locale.CHINA)
+        val zone = java.util.TimeZone.getTimeZone("Asia/Shanghai")
+        val fmt = SimpleDateFormat("MM-dd", Locale.CHINA).apply { timeZone = zone }
         val today = fmt.format(Date())
-        val cal = java.util.Calendar.getInstance(); cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
+        val cal = java.util.Calendar.getInstance(zone); cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
         val tomorrow = fmt.format(cal.time)
         fun isMyTeam(m: MatchItem) = m.home.contains("国际米兰") || m.away.contains("国际米兰")
         val visible = visibleLiveScheduleMatches(all)
-        val tt = visible.filter { it.date == today || it.date == tomorrow }
+        val tt = visible.filter { matchDateMonthDay(it.date) == today || matchDateMonthDay(it.date) == tomorrow }
             .sortedWith(compareByDescending<MatchItem> { if (isMyTeam(it)) 1 else 0 }.thenByDescending { LiveViewModelImportance.of(it) })
-        val others = visible.filter { it.date != today && it.date != tomorrow }
+        val others = visible.filter { matchDateMonthDay(it.date) != today && matchDateMonthDay(it.date) != tomorrow }
             .sortedWith(compareByDescending<MatchItem> { if (isMyTeam(it)) 1 else 0 }.thenByDescending { LiveViewModelImportance.of(it) })
         return (tt + others).take(6)
     }
@@ -238,6 +252,10 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
         // 判定从未生效——完场卡还能点进播放页再吃「未开播」报错（状态不准观感来源之一）
         if (m.isFinished) {
             hint = "比赛已结束"
+            return
+        }
+        if (m.isClockHeld) {
+            hint = m.displayStatus
             return
         }
         if (!m.isLive) {
@@ -335,9 +353,10 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                 val groups = remember(ui.matches, leagueFilter) {
                     val filtered = visibleLiveScheduleMatches(ui.matches, leagueFilter)
                     buildMap<String, List<MatchItem>> {
-                        val fmt = SimpleDateFormat("MM-dd", Locale.CHINA)
+            val zone = java.util.TimeZone.getTimeZone("Asia/Shanghai")
+            val fmt = SimpleDateFormat("MM-dd", Locale.CHINA).apply { timeZone = zone }
                         put(fmt.format(Date()), emptyList<MatchItem>())
-                        val cal = java.util.Calendar.getInstance(); cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
+            val cal = java.util.Calendar.getInstance(zone); cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
                         put(fmt.format(cal.time), emptyList<MatchItem>())
                         filtered.forEach { m -> put(m.date.ifBlank { "未知" }, (get(m.date.ifBlank { "未知" }) ?: emptyList()) + m) }
                     }
@@ -622,7 +641,7 @@ private fun LiveHeroBand(
                             )
                         } else {
                             Text(
-                                if (animatedHero.isFinished) "完场" else "未开赛",
+                                animatedHero.displayStatus,
                                 color = OtvColors.White.copy(alpha = 0.85f), fontSize = 28f.sxs(s), fontWeight = FontWeight.SemiBold,
                             )
                             Spacer(Modifier.width(14f.sx(s)))
@@ -802,17 +821,31 @@ fun matchLeagueFilter(m: MatchItem, key: String): Boolean = when (key) {
 fun visibleLiveScheduleMatches(matches: List<MatchItem>, leagueFilter: String = "all"): List<MatchItem> =
     matches.filter { !it.isFinished && matchLeagueFilter(it, leagueFilter) }
 
+private val MATCH_DATE_FULL_RE = Regex("^(\\d{4})-(\\d{2})-(\\d{2})$")
+private val MATCH_DATE_SHORT_RE = Regex("^(\\d{2})-(\\d{2})$")
+
+fun matchDateMonthDay(value: String): String {
+    val full = MATCH_DATE_FULL_RE.find(value.trim())
+    if (full != null) return "${full.groupValues[2]}-${full.groupValues[3]}"
+    return MATCH_DATE_SHORT_RE.find(value.trim())?.value.orEmpty()
+}
+
+private fun matchDateDisplay(value: String): String {
+    val full = MATCH_DATE_FULL_RE.find(value.trim())
+    val monthDay = full?.let { "${it.groupValues[2]}-${it.groupValues[3]}" } ?: value.trim()
+    val short = MATCH_DATE_SHORT_RE.find(monthDay) ?: return value
+    return "${short.groupValues[1].toInt()}月${short.groupValues[2].toInt()}日"
+}
+
 fun dateLabel(date: String): String {
-    val fmt = SimpleDateFormat("MM-dd", Locale.CHINA)
+    val zone = java.util.TimeZone.getTimeZone("Asia/Shanghai")
+    val fmt = SimpleDateFormat("MM-dd", Locale.CHINA).apply { timeZone = zone }
     val today = fmt.format(Date())
-    val cal = java.util.Calendar.getInstance(); cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
+    val cal = java.util.Calendar.getInstance(zone); cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
     val tomorrow = fmt.format(cal.time)
-    return when (date) {
+    return when (matchDateMonthDay(date)) {
         today -> "今日比赛"; tomorrow -> "明日比赛"
-        else -> {
-            val m = Regex("^(\\d{2})-(\\d{2})$").find(date)
-            if (m != null) "${m.groupValues[1].toInt()}月${m.groupValues[2].toInt()}日 比赛" else "比赛"
-        }
+        else -> matchDateDisplay(date).takeIf(String::isNotBlank)?.plus(" 比赛") ?: "比赛"
     }
 }
 
@@ -883,6 +916,8 @@ private fun GameCard(
                         } else {
                             Text("完场", color = OtvColors.White60, fontSize = 30f.sxs(s), lineHeight = 32f.sxs(s), fontWeight = FontWeight.Bold)
                         }
+                    } else if (m.isClockHeld) {
+                        Text(m.displayStatus, color = OtvColors.White60, fontSize = 30f.sxs(s), lineHeight = 32f.sxs(s), fontWeight = FontWeight.Bold)
                     } else if (m.hasScore) {
                         Text(
                             "${m.homeScore} - ${m.awayScore}",
@@ -907,26 +942,35 @@ fun matchTimeLabel(m: MatchItem): String {
     if (m.isLive) return if (m.minute.isNotBlank()) "${m.minute}'" else m.time
     val t = m.time.ifBlank { "" }
     val league = m.league.ifBlank { "" }
-    val dateFmt = Regex("^(\\d{2})-(\\d{2})$").find(m.date)
-    val dateLabel = if (dateFmt != null) "${dateFmt.groupValues[1].toInt()}月${dateFmt.groupValues[2].toInt()}日" else m.date
+    val dateLabel = matchDateDisplay(m.date)
     return listOf(league, dateLabel, t).filter { it.isNotBlank() }.joinToString(" ")
 }
 
-/** 开赛时间戳（需求 足球#4）：date「MM-dd」+ time「HH:mm」→ 毫秒；跨年（12月末对1月初）自动 +1 年；无法解析返回 null */
-fun matchStartMillis(m: MatchItem): Long? {
-    val dm = Regex("^(\\d{2})-(\\d{2})$").find(m.date.trim()) ?: return null
+/** 按北京时间解析开赛时刻；完整日期来自后端，旧 MM-dd 快照仅在跨年邻近窗口内纠正年份。 */
+fun matchStartMillis(m: MatchItem, nowMillis: Long = System.currentTimeMillis()): Long? {
+    val exactDate = m.dateFull.ifBlank { m.date }.trim()
+    val fullDate = MATCH_DATE_FULL_RE.find(exactDate)
+    val shortDate = MATCH_DATE_SHORT_RE.find(exactDate)
+    if (fullDate == null && shortDate == null) return null
     val tm = Regex("^(\\d{1,2}):(\\d{2})").find(m.time.trim()) ?: return null
-    val cal = java.util.Calendar.getInstance()
-    cal.set(java.util.Calendar.MONTH, dm.groupValues[1].toInt() - 1)
-    cal.set(java.util.Calendar.DAY_OF_MONTH, dm.groupValues[2].toInt())
-    cal.set(java.util.Calendar.HOUR_OF_DAY, tm.groupValues[1].toInt())
-    cal.set(java.util.Calendar.MINUTE, tm.groupValues[2].toInt())
-    cal.set(java.util.Calendar.SECOND, 0)
-    cal.set(java.util.Calendar.MILLISECOND, 0)
-    if (cal.timeInMillis < System.currentTimeMillis() - 12 * 3_600_000L) {
-        cal.add(java.util.Calendar.YEAR, 1)
+    val zone = java.util.TimeZone.getTimeZone("Asia/Shanghai")
+    fun makeMillis(year: Int, month: Int, day: Int): Long? = runCatching {
+        java.util.Calendar.getInstance(zone, Locale.CHINA).apply {
+            clear()
+            set(year, month - 1, day, tm.groupValues[1].toInt(), tm.groupValues[2].toInt(), 0)
+        }.timeInMillis
+    }.getOrNull()
+    if (fullDate != null) {
+        return makeMillis(fullDate.groupValues[1].toInt(), fullDate.groupValues[2].toInt(), fullDate.groupValues[3].toInt())
     }
-    return cal.timeInMillis
+    val month = shortDate!!.groupValues[1].toInt()
+    val day = shortDate.groupValues[2].toInt()
+    val nowCal = java.util.Calendar.getInstance(zone, Locale.CHINA).apply { timeInMillis = nowMillis }
+    val candidates = (nowCal.get(java.util.Calendar.YEAR) - 1..nowCal.get(java.util.Calendar.YEAR) + 1)
+        .mapNotNull { makeMillis(it, month, day) }
+    val nearby = candidates.filter { kotlin.math.abs(it - nowMillis) <= 31L * 24 * 60 * 60 * 1000 }
+    return nearby.minByOrNull { kotlin.math.abs(it - nowMillis) }
+        ?: makeMillis(nowCal.get(java.util.Calendar.YEAR), month, day)
 }
 
 /** 队标+队名（原版 gc-team-wrap：72 队标 + 动态队名，加载失败首字兜底）

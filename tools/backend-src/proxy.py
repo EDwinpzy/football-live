@@ -200,15 +200,26 @@ APK_UPDATE_OBJECT_BASE = os.environ.get(
     "https://appletv-d5ge1bth794873f76.api.tcloudbasegateway.com/v1/storages/object/hotupdate",
 ).rstrip("/")
 _HHKAN_CHANNELS = {1: "电影", 2: "电视剧", 3: "动漫", 4: "综艺", 6: "短剧"}
-CACHE_TTL = 30  # 秒（v1.23 实时性：60→30——开赛/比分变化上屏延迟减半；
-#                配合 _matches_keepwarm_thread 保热，前端每次拉取都是 ≤40s 新数据）
+CACHE_TTL = 15  # 过期列表由 fresh=1 请求等待单飞刷新；避免把旧状态继续当成成功结果。
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
 _cache = {"ts": 0, "data": None, "raw_error": None, "refreshing": False}
+_cache_refresh_event = threading.Event()
+_cache_refresh_event.set()
 
 _cache_lock = threading.Lock()   # build_api 缓存读写锁：防多线程并发抓源站（弱网下重复慢请求）
+
+
+_MATCH_CLOCK_HOLD_STATES = {
+    "postponed", "delayed", "pending", "cancelled", "canceled", "abandoned",
+    "延期", "推迟", "待定", "取消", "腰斩",
+}
+
+
+def _match_status_holds_clock(status):
+    return str(status or "").strip().lower() in _MATCH_CLOCK_HOLD_STATES
 
 
 def project_match_state(item, now=None):
@@ -218,24 +229,75 @@ def project_match_state(item, now=None):
     Finished matches are terminal and are never reopened by clock projection.
     """
     out = dict(item)
-    if out.get("status") == "finished":
+    status = str(out.get("status", "")).strip().lower()
+    if (status in ("finished", "ended", "close") or _match_status_holds_clock(status)
+            or out.get("_status_authoritative")):
         return out
     now = now or _now_cn()
     try:
-        month, day = [int(x) for x in str(out.get("date", "")).split("-")]
+        full_date = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", str(out.get("date_full", "")).strip())
+        if full_date:
+            year, month, day = [int(x) for x in full_date.groups()]
+        else:
+            month, day = [int(x) for x in str(out.get("date", "")).split("-")]
+            # Legacy snapshots have no year. Schedules only span a few days, so
+            # use a nearby year only around New Year; an old snapshot must never
+            # turn into a fixture in the next year merely because it is >12h old.
+            candidates = [datetime(y, month, day, 0, 0) for y in (now.year - 1, now.year, now.year + 1)]
+            nearby = [candidate for candidate in candidates
+                      if abs((candidate.date() - now.date()).days) <= 31]
+            year = min(nearby, key=lambda candidate: abs((candidate.date() - now.date()).days)).year if nearby else now.year
         hour, minute = [int(x) for x in str(out.get("time", "")).split(":")]
-        start = datetime(now.year, month, day, hour, minute)
+        start = datetime(year, month, day, hour, minute)
     except (TypeError, ValueError):
         return out
     elapsed = int((now - start).total_seconds() // 60)
     if elapsed < 0:
+        # 88zhibo often labels not-yet-started games "直播中". Kickoff time is
+        # the reliable signal before the game starts.
+        if status == "live":
+            out["status"] = "upcoming"
+            out["minute"] = ""
         return out
-    if elapsed >= 110:
+    if elapsed >= _match_finish_grace_minutes(out):
         out["status"] = "finished"
+        out["minute"] = ""
         return out
     out["status"] = "live"
     played = elapsed if elapsed <= 45 else 45 if elapsed <= 60 else elapsed - 15
     out["minute"] = str(max(0, min(90, played)))
+    return out
+
+
+_KNOCKOUT_MATCH_RE = re.compile(
+    r"杯|淘汰|决赛|半决赛|世界杯|欧洲杯|亚洲杯|美洲杯|欧冠|欧联|欧协|世俱杯|友谊赛",
+    re.I,
+)
+
+
+def _match_finish_grace_minutes(item):
+    """Conservative fallback only when the source has not supplied a final state.
+
+    League matches get room for stoppage time and half-time. Cup/tournament games
+    also get room for extra time and penalties. 7m final/live states remain
+    authoritative and bypass this clock projection.
+    """
+    return 210 if _KNOCKOUT_MATCH_RE.search(str(item.get("league", ""))) else 150
+
+
+def _project_matches_payload(payload, now=None, strip_internal=True):
+    """Reproject status on every API read, even while schedule data is cached."""
+    out = dict(payload)
+    now = now or _now_cn()
+    matches = []
+    for item in payload.get("matches", []):
+        projected = project_match_state(item, now)
+        if strip_internal:
+            projected.pop("_status_authoritative", None)
+        matches.append(projected)
+    out["matches"] = matches
+    out["count"] = len(matches)
+    out["live_count"] = sum(1 for item in matches if item.get("status") == "live")
     return out
 
 # 测试可替换；生产环境首次访问影视 API 时再初始化，避免启动阶段触网。
@@ -673,9 +735,11 @@ def _parse_88zhibo_matches(page):
     """解析 88zhibo 首页比赛列表；源站同页包含 NBA/CBA，剔除篮球等非足球项目。"""
     matches = []
     current_date = None
+    current_date_full = None
     for classes, row in _88z_list_rows(page):
         if "live-list-group-time" in classes:
             date_match = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", _88z_text(row))
+            current_date_full = "-".join(date_match.groups()) if date_match else None
             current_date = "%s-%s" % (date_match.group(2), date_match.group(3)) if date_match else None
             continue
         if "group-game-item" not in classes:
@@ -709,14 +773,24 @@ def _parse_88zhibo_matches(page):
         time_match = re.search(r"\b(\d{1,2}:\d{2})\b", raw_time)
         match_time = time_match.group(1) if time_match else ""
         status_label = _88z_text(play_match.group(3)) if play_match else ""
-        if any(word in status_label for word in ("已结束", "完场", "回看")):
+        if re.search(r"已结束|完场|完赛|比赛结束|已完赛|回看|赛后|\bFT\b", status_label, re.I):
             status = "finished"
-        elif "直播" in status_label:
+        elif re.search(r"取消", status_label):
+            status = "cancelled"
+        elif re.search(r"腰斩", status_label):
+            status = "abandoned"
+        elif re.search(r"延期|推迟", status_label):
+            status = "postponed"
+        elif re.search(r"待定", status_label):
+            status = "pending"
+        elif any(word in status_label for word in ("直播", "进行", "半场", "加时", "点球")):
             status = "live"
         else:
             status = "upcoming"
 
-        date = current_date or "%02d-%02d" % (_now_cn().month, _now_cn().day)
+        now = _now_cn()
+        date = current_date or "%02d-%02d" % (now.month, now.day)
+        date_full = current_date_full or now.strftime("%Y-%m-%d")
         channels = [
             {"src": src, "id": match_id, "name": _88Z_SOURCE_LABELS[src]}
             for src in _88Z_VISIBLE_STREAM_SRCS
@@ -726,6 +800,7 @@ def _parse_88zhibo_matches(page):
             "league_color": "#5E5E5E",
             "time": match_time,
             "date": date,
+            "date_full": date_full,
             "home": teams[0],
             "away": teams[1],
             "status": status,
@@ -766,14 +841,16 @@ def parse_matches(html):
         html, re.S)
     rows = []
     cur_date = None
+    cur_date_full = None
     for whole, pid, raw in items:
         if 'list-divider' in whole:
             dm = re.search(r'>([^<]*)</li>', whole)
             if dm:
                 m = re.search(r'(\d{4})年(\d{2})月(\d{2})日', dm.group(1))
                 cur_date = "%s-%s" % (m.group(2), m.group(3)) if m else None
+                cur_date_full = "-".join(m.groups()) if m else None
         elif pid:
-            rows.append((cur_date, pid, raw))
+            rows.append((cur_date, cur_date_full, pid, raw))
 
     # 2. 区块 → 提取频道（plu/bb/qqlive 等多路信号）与 matchId
     block_map = {}
@@ -822,7 +899,7 @@ def parse_matches(html):
     now_min = now.hour * 60 + now.minute
 
     matches = []
-    for cur_date, pid, raw in rows:
+    for cur_date, cur_date_full, pid, raw in rows:
         # 1. 时间 span（class='live'/'close'，含直播分钟）先单独提取并移除
         tm = re.search(r"<span class=['\"](live|close)['\"]>\s*(.*?)\s*</span>", raw)
         span_state = ""
@@ -887,25 +964,8 @@ def parse_matches(html):
                 #（v1.23 同上去掉 -10 偏移）
                 mm = re.search(r'(\d+)', time_str or "")
                 minute = str(max(int(mm.group(1)), 0)) if mm else None
-        elif time_str:
-            tmh = re.match(r'(\d{1,2}):(\d{2})', time_str)
-            if tmh and cur_date:
-                t = int(tmh.group(1)) * 60 + int(tmh.group(2))
-                k = dkey(cur_date)
-                if k < today_key:
-                    status = "finished"          # 日期已过 → 完场
-                elif k == today_key:
-                    elapsed = now_min - t
-                    if elapsed >= 110:
-                        status = "finished"      # 开赛超 110 分钟 → 完场
-                    elif elapsed >= 0:
-                        status = "live"          # 开赛未超 110 分钟 → 直播中
-                        # 考虑中场休息 15 分钟（v1.23：同上去掉显示 -10 偏移）
-                        if elapsed <= 45: prog = elapsed            # 上半场
-                        elif elapsed <= 60: prog = 45               # 中场休息，停在 45'
-                        else: prog = elapsed - 15                   # 下半场
-                        minute = str(max(min(prog, 90), 0))
-                # k > today_key → 明日 → 保持未开始
+        # 时间本身由 project_match_state 统一投影；这里不把跨日或 110 分钟
+        # 直接当成完场，避免旧解析器抢先写入不可逆的 finished 状态。
 
         # 6. 比分: 直播行若含 "1:0" / "1 - 0" 形式则提取（数据源当前不提供，预留字段）
         score = None
@@ -919,6 +979,7 @@ def parse_matches(html):
             "league_color": color,
             "time": time_str,
             "date": cur_date,
+            "date_full": cur_date_full,
             "home": home,
             "away": away,
             "status": status,
@@ -930,6 +991,8 @@ def parse_matches(html):
             "channels": channel_map.get(pid, []),
             "page_id": pid,
         })
+
+    matches = [project_match_state(item) for item in matches]
 
     # 排序: 直播中在前，未开始次之，完场最后；同状态按时间
     rank = {"live": 0, "upcoming": 1, "finished": 2}
@@ -950,7 +1013,6 @@ def _build_matches_payload(matches):
         if m["league"] not in seen:
             seen[m["league"]] = m["league_color"]
             leagues.append({"name": m["league"], "color": m["league_color"]})
-    matches = [project_match_state(m) for m in matches]
     payload = {
         "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source": _active_source["url"],
@@ -960,7 +1022,7 @@ def _build_matches_payload(matches):
         "matches": matches,
     }
     merge_7m_scores(payload)
-    return payload
+    return _project_matches_payload(payload, strip_internal=False)
 
 
 # ===== 7m 即时比分接入（yoozb 源不提供比分；7m 国内可达，含联赛/队名/状态/比分）=====
@@ -975,6 +1037,7 @@ LIVE7M_LIVE_URL = "http://js-live.7m.com.cn/livedts/csxl.js"
 _7M_STATE_LIVE = {1, 2, 3, 5, 7, 8, 9, 11}
 _7M_STATE_DONE = {4, 10, 12, 16}
 _7M_STATE_VOID = {6, 13, 14, 15}
+_7M_VOID_STATUS = {6: "cancelled", 13: "postponed", 14: "abandoned", 15: "pending"}
 
 # 队名别名归一（两家数据源叫法差异）
 _7M_TEAM_ALIAS = {
@@ -1097,12 +1160,19 @@ def merge_7m_scores(payload):
             if rec.get("start"):
                 try:
                     p = [int(x) for x in rec["start"].split(",")[:3]]
-                    if "%02d-%02d" % (p[1], p[2]) != m.get("date"):
+                    rec_date = "%04d-%02d-%02d" % (p[0], p[1], p[2])
+                    expected_date = m.get("date_full")
+                    if expected_date and rec_date != expected_date:
+                        continue
+                    if not expected_date and "%02d-%02d" % (p[1], p[2]) != m.get("date"):
                         continue
                 except (ValueError, IndexError):
                     pass
             st = rec["state"]
             if st in _7M_STATE_VOID:
+                m["status"] = _7M_VOID_STATUS.get(st, "postponed")
+                m["minute"] = ""
+                m["_status_authoritative"] = True
                 continue
             try:
                 score = {"home": int(rec["hs"]), "away": int(rec["as"])}
@@ -1111,11 +1181,13 @@ def merge_7m_scores(payload):
             if st in _7M_STATE_LIVE:
                 m["status"] = "live"
                 m["minute"] = _7m_minute(st, rec.get("start", ""))
+                m["_status_authoritative"] = True
                 if score:
                     m["score"] = score
             elif st in _7M_STATE_DONE:
                 m["status"] = "finished"
                 m["minute"] = ""
+                m["_status_authoritative"] = True
                 if score:
                     m["score"] = score
     except Exception:
@@ -1126,6 +1198,8 @@ def _refresh_matches_bg():
     """后台刷新比赛数据（stale-while-revalidate）。
     注意：绝不持有 _cache_lock 执行抓取（锁不可重入，锁内做网络 IO 会阻塞
     全部并发读缓存请求——参考 relay 死锁教训）；只在最后回写时短暂加锁。"""
+    payload = None
+    error = None
     try:
         html = fetch_source()
         payload = _build_matches_payload(parse_matches(html))
@@ -1137,52 +1211,59 @@ def _refresh_matches_bg():
                 raise RuntimeError("云端比赛兜底为空")
             payload["source"] = "%s|cloud-relay" % payload.get("source", "")
         except Exception as e2:
-            with _cache_lock:
-                _cache["raw_error"] = "%s; cloud: %s" % (str(e)[:120], str(e2)[:80])
-                _cache["refreshing"] = False
-            return
+            error = "%s; cloud: %s" % (str(e)[:120], str(e2)[:80])
     with _cache_lock:
-        _cache.update(ts=time.time(), data=payload, raw_error=None, refreshing=False)
+        if payload is not None:
+            _cache.update(ts=time.time(), data=payload, raw_error=None)
+        else:
+            _cache["raw_error"] = error or "比赛列表刷新失败"
+        _cache["refreshing"] = False
+    _cache_refresh_event.set()
 
 
-def build_api():
-    """组装 /api/matches 响应（带缓存 + stale-while-revalidate）。
-    - 缓存新鲜（<TTL）：直接命中。
-    - 缓存过期但有旧数据：立即返回旧数据（上游抓取 7-15s，同步等待会超前端
-      9s 超时 → 假数据兜底空态），后台单飞线程刷新；并发请求只触发一次刷新。
-    - 冷启动无缓存：锁内单飞同步抓取（原行为，首个请求承担冷启动延迟），
-      其余线程复用结果；抓取失败有旧缓存则降级返回旧数据。"""
+def build_api(wait_for_fresh=False):
+    """组装 /api/matches；普通调用保持 SWR，fresh=1 等待单飞刷新结果。"""
     now = time.time()
+    run_inline = False
+    start_background = False
+    should_wait = False
     with _cache_lock:
         if _cache["data"] and now - _cache["ts"] < CACHE_TTL:
-            return _cache["data"], True
+            return _project_matches_payload(_cache["data"]), True
         stale = _cache["data"]
-        if stale is not None:
-            # SWR：过期旧数据先回，锁外后台刷新（单飞）
-            if not _cache["refreshing"]:
-                _cache["refreshing"] = True
+        if not _cache["refreshing"]:
+            _cache["refreshing"] = True
+            _cache_refresh_event.clear()
+            if stale is None or wait_for_fresh:
+                run_inline = True
+            else:
+                start_background = True
+        elif wait_for_fresh or stale is None:
+            should_wait = True
+        if stale is not None and not wait_for_fresh:
+            if start_background:
                 threading.Thread(target=_refresh_matches_bg, daemon=True).start()
-            return stale, True
-        try:
-            html = fetch_source()
-            payload = _build_matches_payload(parse_matches(html))
-            _cache.update(ts=now, data=payload, raw_error=None)
-            return payload, False
-        except Exception as e:
-            # 冷启动直源全挂 → 云端兜底（云响应已含比分合并），成功同样落缓存
-            try:
-                payload = _cloud_get_json("/api/matches")
-                if not payload.get("matches"):
-                    raise RuntimeError("云端比赛兜底为空")
-                payload["source"] = "%s|cloud-relay" % payload.get("source", "")
-                _cache.update(ts=time.time(), data=payload, raw_error=None)
-                return payload, False
-            except Exception as e2:
-                print("matches cloud-relay fail: %s: %s" % (type(e2).__name__, str(e2)[:200]))
-            _cache["raw_error"] = str(e)
-            if _cache["data"]:
-                return _cache["data"], True  # 有旧缓存则降级返回
-            return {"error": str(e), "matches": [], "count": 0}, False
+            return _project_matches_payload(stale), True
+
+    if run_inline:
+        _refresh_matches_bg()
+    elif start_background:
+        threading.Thread(target=_refresh_matches_bg, daemon=True).start()
+        if not wait_for_fresh:
+            with _cache_lock:
+                return _project_matches_payload(_cache["data"]), True
+    if should_wait or wait_for_fresh:
+        _cache_refresh_event.wait(timeout=35)
+
+    with _cache_lock:
+        data = _cache["data"]
+        # A completed refresh replaces the payload. Wall-clock ticks can be equal
+        # for quick requests (or move backwards), so timestamps cannot prove it.
+        updated = data is not None and data is not stale
+        if data is not None:
+            return _project_matches_payload(data), not updated
+        error = _cache.get("raw_error") or "比赛列表刷新失败"
+    return {"error": error, "matches": [], "count": 0}, False
 
 
 def _matches_keepwarm():
@@ -4629,7 +4710,9 @@ class Handler(SimpleHTTPRequestHandler):
             self._vod_api(parsed)
             return
         if parsed.path == "/api/matches":
-            data, cached = build_api()
+            qs = parse_qs(parsed.query)
+            wait_for_fresh = (qs.get("fresh") or ["0"])[0].lower() in ("1", "true", "yes")
+            data, cached = build_api(wait_for_fresh=wait_for_fresh)
             body = json.dumps(data, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")

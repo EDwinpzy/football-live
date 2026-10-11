@@ -135,9 +135,25 @@ data class MatchItem(
     val homeScore: String = "",   // score.h，空 = 无比分
     val awayScore: String = "",
     val channels: List<MatchChannel> = emptyList(),   // 站点比赛元数据；不作为播放器可用线路列表
+    val dateFull: String = "",   // YYYY-MM-DD 北京时间日期，用于精确开赛时间计算
 ) {
     /** 上游旧快照曾写 ended；统一由模型归一，避免卡片/点击链路各自判断出不同状态。 */
     val isLive: Boolean get() = status.trim().equals("live", ignoreCase = true)
+    val isUpcoming: Boolean get() = status.trim().equals("upcoming", ignoreCase = true)
+    val isClockHeld: Boolean get() = status.trim().lowercase() in setOf(
+        "postponed", "delayed", "pending", "cancelled", "canceled", "abandoned",
+        "延期", "推迟", "待定", "取消", "腰斩",
+    )
+    val displayStatus: String get() = when (status.trim().lowercase()) {
+        "live" -> "直播中"
+        "upcoming" -> "未开赛"
+        "finished", "ended", "close", "ft", "完场", "完赛", "已结束", "已完赛", "赛后" -> "完场"
+        "postponed", "delayed", "延期", "推迟" -> "延期"
+        "pending", "待定" -> "待定"
+        "cancelled", "canceled", "取消" -> "取消"
+        "abandoned", "腰斩" -> "腰斩"
+        else -> status
+    }
     val isFinished: Boolean get() = status.trim().equals("finished", ignoreCase = true) ||
         status.trim().equals("ended", ignoreCase = true) ||
         status.trim().equals("close", ignoreCase = true)

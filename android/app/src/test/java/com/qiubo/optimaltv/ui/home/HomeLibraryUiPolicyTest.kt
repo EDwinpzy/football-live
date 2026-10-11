@@ -48,12 +48,13 @@ class HomeLibraryUiPolicyTest {
     }
 
     @Test
-    fun `TV分类平铺网格在行列边界停止且支持末行`() {
-        assertEquals(1, HomeLibraryUiPolicy.categoryGridTargetIndex(0, com.qiubo.optimaltv.ui.components.NAV_RIGHT, 7))
-        assertEquals(2, HomeLibraryUiPolicy.categoryGridTargetIndex(0, com.qiubo.optimaltv.ui.components.NAV_DOWN, 7))
+    fun `TV分类单列上下逐项移动且左右交给页面导航`() {
+        assertNull(HomeLibraryUiPolicy.categoryGridTargetIndex(0, com.qiubo.optimaltv.ui.components.NAV_RIGHT, 7))
+        assertEquals(1, HomeLibraryUiPolicy.categoryGridTargetIndex(0, com.qiubo.optimaltv.ui.components.NAV_DOWN, 7))
         assertNull(HomeLibraryUiPolicy.categoryGridTargetIndex(0, com.qiubo.optimaltv.ui.components.NAV_LEFT, 7))
         assertNull(HomeLibraryUiPolicy.categoryGridTargetIndex(0, com.qiubo.optimaltv.ui.components.NAV_UP, 7))
-        assertEquals(5, HomeLibraryUiPolicy.categoryGridTargetIndex(3, com.qiubo.optimaltv.ui.components.NAV_DOWN, 7))
+        assertEquals(4, HomeLibraryUiPolicy.categoryGridTargetIndex(3, com.qiubo.optimaltv.ui.components.NAV_DOWN, 7))
+        assertEquals(2, HomeLibraryUiPolicy.categoryGridTargetIndex(3, com.qiubo.optimaltv.ui.components.NAV_UP, 7))
         assertNull(HomeLibraryUiPolicy.categoryGridTargetIndex(6, com.qiubo.optimaltv.ui.components.NAV_RIGHT, 7))
         assertNull(HomeLibraryUiPolicy.categoryGridTargetIndex(6, com.qiubo.optimaltv.ui.components.NAV_DOWN, 7))
         assertNull(HomeLibraryUiPolicy.categoryGridTargetIndex(0, com.qiubo.optimaltv.ui.components.NAV_RIGHT, 0))
