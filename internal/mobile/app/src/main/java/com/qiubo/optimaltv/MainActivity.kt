@@ -88,6 +88,26 @@ private fun StartupSplash() {
  */
 class MainActivity : ComponentActivity() {
 
+    @Suppress("DEPRECATION")
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            // Android 11 can clear the controller behavior when KEEP_SCREEN_ON changes.
+            // Use the legacy sticky flag on API 30, matching the AndroidX workaround.
+            androidx.core.view.WindowInsetsControllerCompat(window, window.decorView).apply {
+                if (android.os.Build.VERSION.SDK_INT == android.os.Build.VERSION_CODES.R) {
+                    val decor = window.decorView
+                    decor.systemUiVisibility = (decor.systemUiVisibility and
+                        android.view.View.SYSTEM_UI_FLAG_IMMERSIVE.inv()) or
+                        android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                } else {
+                    systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                }
+                hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
+
     /** 2026-09-05 用户需求：遥控器/键盘「确定」键与触屏同权——电视页播放态据此弹出
      *  选台竖条与投屏胶囊（盒子/投影仪用户无触屏，此前无法唤出选台侧边栏） */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
@@ -106,10 +126,6 @@ class MainActivity : ComponentActivity() {
         consumeDebugNav(intent)
         // v1.18 沉浸式全屏（与 TV 版同款）：设计稿按整屏 1920×1080 布局，系统栏不隐藏会把底部内容挤出屏
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
-        androidx.core.view.WindowInsetsControllerCompat(window, window.decorView).apply {
-            hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
-            systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
         // 需求⑪（2026-09-07）：公告走系统通知——Android 13+ 需运行时申请通知权限
         if (android.os.Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=

@@ -327,7 +327,15 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                             vm.endSpeedBoost()
                         }
                     },
-            )
+            ) {
+                if (ui.isLive && ui.sourceResolving && ui.lines.isEmpty()) {
+                    Text(
+                        "正在检测可用线路…",
+                        color = Color.White.copy(alpha = 0.7f),
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+                }
+            }
 
             // 手势反馈浮层：滑动快进预览 / 亮度 / 音量
             GestureIndicator(
@@ -384,7 +392,7 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
     }
 
     // 需求12⑥⑦：竖屏操作区（视频下方常驻；横屏全屏播放时不渲染）
-    if (portrait && ui.fatalMsg == null) {
+    if (portrait && !ui.isLive && ui.fatalMsg == null) {
         PortraitPlayerPanel(ui = ui, vm = vm)
     }
     } // Column
@@ -754,6 +762,9 @@ internal fun LiveSourcePicker(
             color = Color(0x99FFFFFF), fontSize = 20f.sxs(ps),
             modifier = Modifier.padding(bottom = 12f.sx(ps)),
         )
+        if (ui.sourceResolving && ui.lines.isEmpty()) {
+            Text("正在检测可用线路…", color = Color.White, fontSize = 20f.sxs(ps))
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(14f.sx(ps))) {
             ui.lines.forEachIndexed { idx, line ->
                 val active = idx == ui.activeLine
