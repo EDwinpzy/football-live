@@ -116,9 +116,11 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
         )
 
         back_handler = _source_block(self.tv_home, "BackHandler {", "val showLibLoading")
-        self.assertIn("sectionPagerState.currentPage > 0", back_handler)
-        self.assertIn("moveLibraryPage(sectionPagerState.currentPage - 1", back_handler,
-                      "返回键应能回到上一页")
+        self.assertIn("HomeLibraryUiPolicy.shouldReturnToCategoryMenuOnBack", back_handler)
+        self.assertIn("categoryFocusRequesters.getOrNull(catSel)", back_handler,
+                      "内容区返回应恢复当前左侧分类焦点")
+        self.assertNotIn("moveLibraryPage(", back_handler,
+                         "返回左侧菜单时应保持右侧当前页")
 
     def test_tv_home_and_history_share_one_snapped_viewport(self):
         home_page = _source_block(self.tv_home, 'item(key = "home-page")',
