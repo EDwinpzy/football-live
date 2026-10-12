@@ -25,8 +25,24 @@ class LocalSearchClientContractTest(unittest.TestCase):
         search_block = source[
             source.index("var remote by remember"):source.index("var localHits by remember")]
         self.assertNotIn("if (!hasChinese)", search_block)
-        self.assertIn("delay(450)", search_block)
+        self.assertIn("delay(250)", search_block)
         self.assertIn("Graph.live.searchRemote(searchable", search_block)
+
+    def test_mobile_search_uses_the_same_short_debounce(self):
+        source = self.read("internal/mobile/app/src/main/java/com/qiubo/optimaltv/ui/search/SearchScreen.kt")
+        search_block = source[
+            source.index("var remote by remember"):source.index("var localHits by remember")]
+        self.assertIn("delay(250)", search_block)
+
+    def test_query_changes_clear_previous_query_results(self):
+        for relative in (
+            "android/app/src/main/java/com/qiubo/optimaltv/ui/search/SearchScreen.kt",
+            "internal/mobile/app/src/main/java/com/qiubo/optimaltv/ui/search/SearchScreen.kt",
+        ):
+            source = self.read(relative)
+            self.assertIn("var remote by remember(searchable)", source)
+            self.assertIn("var lastSearched by remember(searchable)", source)
+            self.assertIn("var localHits by remember(query)", source)
 
     def test_web_search_uses_local_api_without_retry_storm(self):
         source = self.read("tools/backend-src/www/app.js")

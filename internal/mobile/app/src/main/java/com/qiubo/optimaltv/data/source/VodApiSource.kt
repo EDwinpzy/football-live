@@ -12,7 +12,25 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.net.URLEncoder
+
+/** The backend confirmed that this cached Douban source/episode reference no longer exists. */
+internal class VodPlayReferenceUnavailableException : IOException("播放线路不可用")
+
+/** Run one normal play lookup, then allow exactly one detail-refresh lookup for a stale Douban ref. */
+internal object StalePlayReferenceRecoveryPolicy {
+    fun <T> resolve(
+        isDouban: Boolean,
+        forceRefresh: Boolean,
+        request: (forceRefresh: Boolean) -> T,
+    ): T = try {
+        request(forceRefresh)
+    } catch (stale: VodPlayReferenceUnavailableException) {
+        if (!isDouban || forceRefresh) throw stale
+        request(true)
+    }
+}
 
 /**
  * 云端 Resolver 的一条候选线路引用（不含任何播放地址）。
@@ -279,6 +297,23 @@ class VodApiSource(
             }
         }
 
+        /** Same JSON contract as [fetchJson], with a typed signal for the recoverable stale-play 400. */
+        private fun fetchPlayJson(base: String, path: String, client: OkHttpClient): JSONObject {
+            val request = Request.Builder().url(base.trimEnd('/') + path)
+                .header("User-Agent", "MyTV Android").build()
+            client.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val error = runCatching { JSONObject(body).optString("error") }.getOrDefault("")
+                    if (response.code == 400 && error == "播放线路不可用") {
+                        throw VodPlayReferenceUnavailableException()
+                    }
+                    throw IOException("HTTP ${response.code} $path")
+                }
+                return JSONObject(body)
+            }
+        }
+
         private fun strings(array: JSONArray?): List<String> =
             (0 until (array?.length() ?: 0)).mapNotNull { array?.optString(it)?.takeIf(String::isNotBlank) }
 
@@ -494,7 +529,7 @@ class VodApiSource(
             val selectedLineId = mapped?.lineId ?: lineId
             val selectedEpisode = mapped?.episode ?: episode
             val path = "/vod/play/${id.removePrefix("douban:")}/${URLEncoder.encode(selectedLineId, "UTF-8")}/${selectedEpisode.toIntOrNull() ?: 0}"
-            val json = fetchJson(base, path, client)
+            val json = fetchPlayJson(base, path, client)
             val urls = listOfNotNull(json.optString("url").takeIf(String::isNotBlank))
             return VodPlayFetchResult(urls, selectedLineId, selectedEpisode)
         }

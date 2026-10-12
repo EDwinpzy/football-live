@@ -12,6 +12,8 @@ import com.qiubo.optimaltv.data.prefs.SettingsStore
 import com.qiubo.optimaltv.vpn.FootballVpnProxyCore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -156,9 +158,30 @@ class LiveRepository(
             .url(base.trimEnd('/') + path)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
             .build()
-        slowHttp.newCall(req).execute().use { resp ->
+        liveHttpResponse(slowHttp, req).use { resp ->
             require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
             JSONObject(resp.body?.string().orEmpty())
+        }
+    }
+
+    /** 搜索输入变化时，取消旧 OkHttp 调用，避免过期查询继续占用 IO 和后端请求槽位。 */
+    private suspend fun getSearch(base: String, path: String): JSONObject = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url(base.trimEnd('/') + path)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
+            .build()
+        val call = slowHttp.newCall(req)
+        val job = currentCoroutineContext()[Job]
+        val cancellation = job?.invokeOnCompletion { cause ->
+            if (cause is CancellationException) call.cancel()
+        }
+        try {
+            call.execute().use { resp ->
+                require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
+                JSONObject(resp.body?.string().orEmpty())
+            }
+        } finally {
+            cancellation?.dispose()
         }
     }
 
@@ -167,7 +190,7 @@ class LiveRepository(
             .url(base.trimEnd('/') + path)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
             .build()
-        okHttp.newCall(req).execute().use { resp ->
+        liveHttpResponse(okHttp, req).use { resp ->
             require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
             JSONObject(resp.body?.string().orEmpty())
         }
@@ -179,7 +202,7 @@ class LiveRepository(
             .url(base.trimEnd('/') + path)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
             .build()
-        matchesHttp.newCall(req).execute().use { resp ->
+        liveHttpResponse(matchesHttp, req).use { resp ->
             require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
             val body = resp.body?.string().orEmpty()
             require(body.isNotBlank()) { "赛程接口返回空响应" }
@@ -210,7 +233,7 @@ class LiveRepository(
         repeat(30) {
             runCatching {
                 val req = Request.Builder().url("$base/api/health").build()
-                okHttp.newCall(req).execute().use { if (it.isSuccessful) return }
+                liveHttpResponse(okHttp, req).use { if (it.isSuccessful) return }
             }
             kotlinx.coroutines.delay(500)
         }
@@ -412,11 +435,23 @@ class LiveRepository(
      */
     suspend fun liveStreamSources(matchId: String, fresh: Boolean = true): List<LiveStreamSource> =
         withContext(Dispatchers.IO) {
+            val selectionJob = currentCoroutineContext()[Job]
             runCatching {
                 FootballVpnProxyCore.refreshSubscriptions(appContext, BuildConfig.HOTUPDATE_ENDPOINT)
-                check(FootballVpnProxyCore.ensureReady(appContext)) { "football_vpn_unavailable" }
+                // Each match opening measures the current nodes before resolving any stream.
+                // Renewal requests retain the selected node to avoid disrupting playback.
+                selectionJob?.let { if (!it.isActive) throw CancellationException("stream request cancelled") }
+                check(
+                    FootballVpnProxyCore.prepareForMatch(
+                        context = appContext,
+                        selectionKey = matchId,
+                        isCancelled = { selectionJob?.isActive == false },
+                    ),
+                ) { "football_vpn_no_usable_node" }
+                selectionJob?.let { if (!it.isActive) throw CancellationException("stream request cancelled") }
                 val base = baseUrl()
                 val o = getSlow(base, LiveStreamRequestPath.build(matchId, "all", fresh, footballVpn = true))
+                selectionJob?.let { if (!it.isActive) throw CancellationException("stream request cancelled") }
                 LiveStreamPayloadParser.available(o).map { payload ->
                     LiveStreamSource(
                         source = payload.source,
@@ -425,7 +460,10 @@ class LiveRepository(
                         referer = payload.referer,
                     )
                 }
-            }.onFailure { android.util.Log.w(TAG, "stream $matchId all 线路解析失败: ${it.message}") }
+            }.onFailure {
+                if (it is CancellationException) throw it
+                android.util.Log.w(TAG, "stream $matchId all 线路解析失败: ${it.message}")
+            }
                 .getOrDefault(emptyList())
         }
 
@@ -470,7 +508,7 @@ class LiveRepository(
                 .callTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(java.util.concurrent.TimeUnit.SECONDS.toMillis(8), java.util.concurrent.TimeUnit.MILLISECONDS)
                 .build()
-            fast.newCall(Request.Builder().url(relayUrl).build()).execute().use { resp ->
+            liveHttpResponse(fast, Request.Builder().url(relayUrl).build()).use { resp ->
                 val alive = resp.code == 200
                 android.util.Log.i(TAG, "playlistAlive ${resp.code} → $alive")
                 alive
@@ -588,10 +626,10 @@ class LiveRepository(
 
     /** 设备本地豆瓣媒体库搜索。retryNonce 仅保留二进制兼容，搜索不会触网也无需重试。 */
     suspend fun searchRemote(query: String, retryNonce: Int = 0): List<com.qiubo.optimaltv.data.model.VodItem> = withContext(Dispatchers.IO) {
-        runCatching {
+        try {
             val base = baseUrl()
             val k = URLEncoder.encode(query.trim(), "UTF-8")
-            val arr = getSlow(base, "/api/search?q=$k&limit=60").optJSONArray("items")
+            val arr = getSearch(base, "/api/search?q=$k&limit=60").optJSONArray("items")
             (0 until (arr?.length() ?: 0)).mapNotNull { i ->
                 val o = arr?.optJSONObject(i) ?: return@mapNotNull null
                 val id = o.optString("douban_id").ifBlank { o.optString("id").removePrefix("douban:") }
@@ -606,7 +644,12 @@ class LiveRepository(
                     detailRef = id,
                 )
             }.filter { it.title.isNotBlank() }
-        }.getOrDefault(emptyList())
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            android.util.Log.w(TAG, "VOD search failed: ${error.message}")
+            emptyList()
+        }
     }
 
     /** 已知 hhkan vid 的线路解析（集锦直入播放器用） */

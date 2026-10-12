@@ -61,6 +61,18 @@ class HomeLibraryUiPolicyTest {
     }
 
     @Test
+    fun `进入影视片库默认电影且右侧栏目不进入其他分类`() {
+        val categories = listOf("douban:tv" to "电视剧", "douban:movie" to "电影")
+        assertEquals(1, HomeLibraryUiPolicy.defaultCategoryIndex(categories))
+        assertEquals(3, HomeLibraryUiPolicy.SECTION_PAGE_TITLES.size)
+        assertEquals("豆瓣高分", HomeLibraryUiPolicy.SECTION_PAGE_TITLES.last())
+        assertEquals(1, HomeLibraryUiPolicy.contentPageTarget(0, com.qiubo.optimaltv.ui.components.NAV_DOWN, 3))
+        assertEquals(2, HomeLibraryUiPolicy.contentPageTarget(1, com.qiubo.optimaltv.ui.components.NAV_DOWN, 3))
+        assertNull(HomeLibraryUiPolicy.contentPageTarget(2, com.qiubo.optimaltv.ui.components.NAV_DOWN, 3))
+        assertNull(HomeLibraryUiPolicy.contentPageTarget(0, com.qiubo.optimaltv.ui.components.NAV_UP, 3))
+    }
+
+    @Test
     fun `固定页面兼容后端栏目别名并容忍缺栏`() {
         assertEquals("最近热门", HomeLibraryUiPolicy.sourceSectionName(0, listOf("最近热门", "豆瓣高分")))
         assertEquals("近期热门", HomeLibraryUiPolicy.sourceSectionName(0, listOf("近期热门")))

@@ -385,6 +385,20 @@ class VodSourcesTest(unittest.TestCase):
         candidate = {"title": "电影甲", "year": "2004", "category": "movie", "season": 0}
         self.assertLess(vod_sources.match_score(subject, candidate), vod_sources.AUTO_MATCH_THRESHOLD)
 
+    def test_red_chamber_2010_search_prefers_new_edition_and_rejects_1987_source(self):
+        subject = {
+            "title": "红楼梦", "aliases": ["新版红楼梦", "The Dream of Red Mansions"],
+            "year": "2010", "category": "tv", "season": 0,
+        }
+        source_1987 = {"title": "红楼梦", "year": "1987", "category": "tv", "season": 0}
+        source_2010 = {"title": "新版红楼梦", "year": "2010", "category": "tv", "season": 0}
+
+        self.assertEqual(vod_sources._search_terms(subject)[:2], ["红楼梦", "新版红楼梦"])
+        self.assertGreaterEqual(
+            vod_sources.match_score(subject, source_2010), vod_sources.AUTO_MATCH_THRESHOLD)
+        self.assertLess(
+            vod_sources.match_score(subject, source_1987), vod_sources.AUTO_MATCH_THRESHOLD)
+
     def test_punctuation_difference_still_matches(self):
         subject = {"title": "蜘蛛侠：英雄无归", "year": "2021", "category": "movie", "season": 0}
         candidate = {"title": "蜘蛛侠英雄无归", "year": "2021", "category": "movie", "season": 0}
@@ -594,6 +608,21 @@ class VodSourcesTest(unittest.TestCase):
         self.assertTrue(result["alive"])
         self.assertEqual(result["height"], 1080)
         self.assertEqual(result["latency_ms"], 420)
+
+    def test_probe_percent_encodes_unicode_path_and_preserves_existing_query_escapes(self):
+        requested = []
+        result = vod_sources.probe_stream(
+            "https://v.example/video/第1集/index.m3u8?token=a%2Bb&name=红楼梦#ignored",
+            fetch=lambda url: requested.append(url) or {
+                "elapsed_ms": 90, "body": "#EXTM3U\n#EXTINF:6,\nsegment.ts",
+            },
+        )
+
+        self.assertTrue(result["alive"])
+        self.assertTrue(requested[0].isascii())
+        self.assertIn("token=a%2Bb", requested[0])
+        self.assertIn("name=%E7%BA%A2%E6%A5%BC%E6%A2%A6", requested[0])
+        self.assertNotIn("#ignored", requested[0])
 
     def test_probe_rejects_successful_html_error_page(self):
         result = vod_sources.probe_stream("https://v.example/master.m3u8", fetch=lambda _url: {

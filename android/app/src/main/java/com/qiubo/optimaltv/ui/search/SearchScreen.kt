@@ -102,6 +102,12 @@ import java.net.URLEncoder
 /** 搜索结果分类 tab（需求④）。「综艺」补齐：6 个，移动版竖屏每行 3 个刚好两整行。 */
 internal val RESULT_CATS = listOf("全部", "电影", "电视剧", "动漫", "综艺", "短剧")
 
+internal const val RESULT_FOCUS_RETRY_ATTEMPTS = 12
+
+/** Compose 的 requestFocus() 在当前 BOM 返回 Unit；用焦点事件确认后再结束重试。 */
+internal fun shouldRetryResultFocus(attempt: Int, focusObserved: Boolean): Boolean =
+    !focusObserved && attempt < RESULT_FOCUS_RETRY_ATTEMPTS - 1
+
 /** 详情 meta/集数 → 分类（源站频道 tag：欧美剧/国产剧等以「剧」结尾的类型 + 综艺/动漫/短剧直配） */
 private val TV_TAG_RE = Regex("欧美剧|国产剧|香港剧|台湾剧|韩国剧|日本剧|海外剧|泰剧|美剧|英剧|连续剧|电视剧|网剧")
 
@@ -308,25 +314,32 @@ fun SearchScreen(nav: NavController) {
             q.dropLast(trailing.length).trim() else q
         stripped.ifBlank { q }
     }
-    var remote by remember { mutableStateOf<List<VodItem>>(emptyList()) }
+    var remote by remember(searchable) { mutableStateOf<List<VodItem>>(emptyList()) }
     var remoteLoading by remember { mutableStateOf(false) }
-    var lastSearched by remember { mutableStateOf("") }
+    var lastSearched by remember(searchable) { mutableStateOf("") }
     LaunchedEffect(searchable) {
         if (searchable.isEmpty()) {
             remote = emptyList(); remoteLoading = false
             lastSearched = ""   // 清空后重输同一词也要重搜
             return@LaunchedEffect
         }
-        if (searchable == lastSearched) return@LaunchedEffect
-        delay(450)
-        if (!isActive) return@LaunchedEffect
-        lastSearched = searchable
-        remoteLoading = true
-        remote = Graph.live.searchRemote(searchable)
         remoteLoading = false
+        if (searchable == lastSearched) return@LaunchedEffect
+        delay(250)
+        if (!isActive) return@LaunchedEffect
+        remoteLoading = true
+        try {
+            val found = Graph.live.searchRemote(searchable)
+            if (isActive) {
+                remote = found
+                lastSearched = searchable
+            }
+        } finally {
+            if (isActive) remoteLoading = false
+        }
     }
     // 版本化 SQLite 搜索在 Repository 的 IO dispatcher 执行；种子目录回退扫描在 Default 执行。
-    var localHits by remember { mutableStateOf<List<VodItem>>(emptyList()) }
+    var localHits by remember(query) { mutableStateOf<List<VodItem>>(emptyList()) }
     LaunchedEffect(query) {
         localHits = if (query.isBlank()) emptyList()
         else Graph.repo.search(query)
@@ -372,20 +385,46 @@ fun SearchScreen(nav: NavController) {
         else results.filter { catMap[it.id] == selectedCat }
     }
     val resultsGridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+    var focusedResultId by remember { mutableStateOf<String?>(null) }
+
+    // 搜索词变化后始终从全部分类和首行结果开始；否则 rememberSaveable 的旧分类和
+    // 网格滚动位置会让首卡不在组合树里，分类栏 DOWN 发出的焦点请求就落空。
+    LaunchedEffect(query) {
+        selectedCat = "全部"
+        resultsGridState.scrollToItem(0)
+    }
+
+    suspend fun requestResultFocus(itemId: String, index: Int, requester: FocusRequester): Boolean {
+        if (index !in shown.indices) return false
+        resultsGridState.scrollToItem(index)
+        repeat(RESULT_FOCUS_RETRY_ATTEMPTS) { attempt ->
+            runCatching { requester.requestFocus() }
+            val focusObserved = focusedResultId == itemId
+            if (!shouldRetryResultFocus(attempt, focusObserved)) return focusObserved
+            delay(40)
+        }
+        return focusedResultId == itemId
+    }
+
+    val focusFirstResult: () -> Unit = {
+        val first = shown.firstOrNull()
+        if (first != null) scope.launch {
+            requestResultFocus(first.id, 0, firstResultFocus)
+        }
+    }
+
     // 返回落焦恢复（需求 影视#6-2）：结果到齐后回到上次聚焦的结果卡
     LaunchedEffect(shown) {
         val key = returnKey ?: return@LaunchedEffect
         if (restoredFocus || shown.isEmpty()) return@LaunchedEffect
+        val index = shown.indexOfFirst { it.id == key }
+        if (index < 0) return@LaunchedEffect
         restoredFocus = true
-        val target = if (key == shown.firstOrNull()?.id) firstResultFocus else cardReg.fr(key)
+        val target = if (index == 0) firstResultFocus else cardReg.fr(key)
         android.util.Log.d("OptimalTV", "search return-focus: key=$key firstId=${shown.firstOrNull()?.id}")
-        repeat(40) { attempt ->
-            val ok = runCatching { target.requestFocus() }.isSuccess
-            if (ok) {
-                android.util.Log.d("OptimalTV", "search return-focus OK attempt=$attempt")
-                return@LaunchedEffect
-            }
-            delay(100)
+        if (requestResultFocus(key, index, target)) {
+            android.util.Log.d("OptimalTV", "search return-focus OK")
+            return@LaunchedEffect
         }
         android.util.Log.d("OptimalTV", "search return-focus FAILED → keyboard")
         runCatching { keyboardFocus.requestFocus() }
@@ -449,7 +488,7 @@ fun SearchScreen(nav: NavController) {
         ?.let { focusCandidateIndex(it, delta) } }
     // 分类 tab UP → 候选词行（无候选回键盘）；DOWN → 结果首卡
     val tabUp: () -> Unit = { if (candidates.isNotEmpty()) focusFirstCandidate() else focusTarget(keyboardFocus) }
-    val tabDown: () -> Unit = { if (shown.isNotEmpty()) focusTarget(firstResultFocus) }
+    val tabDown: () -> Unit = { focusFirstResult() }
 
     // 返回键回上一页（标签栏仅键盘到顶 UP 定向可达，方向键不会误入）
     androidx.activity.compose.BackHandler { nav.popBackStack() }
@@ -669,6 +708,10 @@ fun SearchScreen(nav: NavController) {
                             ResultCard(
                                 nav, shown[i], s, cardReg,
                                 externalFocus = if (i == 0) firstResultFocus else null,
+                                onResultFocusChanged = { focused ->
+                                    if (focused) focusedResultId = shown[i].id
+                                    else if (focusedResultId == shown[i].id) focusedResultId = null
+                                },
                             )
                         }
                     }
@@ -687,13 +730,17 @@ private fun ResultCard(
     s: Float,
     cardReg: FocusRegistry? = null,
     externalFocus: FocusRequester? = null,
+    onResultFocusChanged: (Boolean) -> Unit = {},
 ) {
     Column(Modifier.width(232f.sx(s))) {
         Box(
             Modifier
                 .dpadFocusable(
                     scaleFocused = 1.05f,
-                    onFocusedChange = { if (it) ReturnFocus.mark("search", item.id) },
+                    onFocusedChange = {
+                        onResultFocusChanged(it)
+                        if (it) ReturnFocus.mark("search", item.id)
+                    },
                     externalFocusRequester = externalFocus ?: cardReg?.fr(item.id),
                 ) {
                     nav.navigate("detail/" + URLEncoder.encode(item.id, "UTF-8"))

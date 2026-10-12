@@ -68,6 +68,10 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.foundation.focusable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFontFamilyResolver
@@ -197,6 +201,12 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
     val rootFocus = remember { FocusRequester() }
     // 本页无标签栏：清空 topFocus，防 UP 到顶逃逸到已销毁屏的 tab 句柄
     LaunchedEffect(Unit) { com.qiubo.optimaltv.ui.components.OtvNav.topFocus = null }
+    // 足球错误态使用非模态提示；焦点保持在全屏键宿，OK/方向键仍能打开信号源列表。
+    LaunchedEffect(ui.isLive, ui.fatalMsg, ui.srcPickerVisible) {
+        if (ui.isLive && ui.fatalMsg != null && !ui.srcPickerVisible) {
+            runCatching { rootFocus.requestFocus() }
+        }
+    }
     Box(
         Modifier
             .fillMaxSize()
@@ -230,7 +240,7 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                     }
                     // 直播：OK 呼出信号源条（条已开时不拦截——交给聚焦 chip 完成切源）
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                        if (ui.isLive && ui.fatalMsg == null && !ui.srcPickerVisible) {
+                        if (ui.isLive && !ui.srcPickerVisible) {
                             vm.toggleSrcPicker(); tick++; true
                         } else false
                     }
@@ -238,11 +248,11 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                 }
             },
     ) {
-        // 视频渲染层：按画幅模式约束容器比例
+        // 直播视频层始终使用整个可视区域；影视继续遵循用户设置的画幅模式。
         Box(
             Modifier
                 .fillMaxSize()
-                .then(aspectConstraint(ui.aspectOrdinal)),
+                .then(if (ui.isLive) Modifier else aspectConstraint(ui.aspectOrdinal)),
             contentAlignment = Alignment.Center,
         ) {
             if (vm.hasEngine()) {
@@ -313,14 +323,18 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
 
         // 错误兜底（防线三）
         ui.fatalMsg?.let { msg ->
-            val errorFocus = remember { FocusRequester() }
-            InitialFocusEffect(errorFocus, "error-retry")
-            ErrorWidget(
-                message = msg,
-                onRetry = { vm.retry() },
-                onBack = { nav.popBackStack() },
-                focusRequester = errorFocus,
-            )
+            if (ui.isLive) {
+                LivePlaybackFailureHint(msg, Modifier.align(Alignment.TopCenter))
+            } else {
+                val errorFocus = remember { FocusRequester() }
+                InitialFocusEffect(errorFocus, "error-retry")
+                ErrorWidget(
+                    message = msg,
+                    onRetry = { vm.retry() },
+                    onBack = { nav.popBackStack() },
+                    focusRequester = errorFocus,
+                )
+            }
         }
 
         val ps = rememberUiScale()
@@ -389,8 +403,18 @@ private fun LiveSourcePicker(
     val ps = rememberUiScale()
     // 呼出时焦点落「当前源」chip（重试可能重建线路表，按 lines 重建句柄）
     val chipFocus = remember(ui.lines) { List(ui.lines.size) { FocusRequester() } }
-    LaunchedEffect(ui.srcPickerVisible, ui.activeLine, ui.lines) {
+    val retryFocus = remember(ui.lines) { FocusRequester() }
+    LaunchedEffect(ui.srcPickerVisible, ui.activeLine, ui.lines, ui.sourceResolving) {
         if (!ui.srcPickerVisible) return@LaunchedEffect
+        if (ui.lines.isEmpty()) {
+            if (ui.sourceResolving) return@LaunchedEffect
+            repeat(20) {
+                try { retryFocus.requestFocus(); return@LaunchedEffect } catch (_: IllegalStateException) {
+                    kotlinx.coroutines.delay(50)
+                }
+            }
+            return@LaunchedEffect
+        }
         repeat(20) {
             val fr = chipFocus.getOrNull(ui.activeLine) ?: return@LaunchedEffect
             try { fr.requestFocus(); return@LaunchedEffect } catch (_: IllegalStateException) {
@@ -416,37 +440,56 @@ private fun LiveSourcePicker(
             color = Color(0x99FFFFFF), fontSize = 20f.sxs(ps),
             modifier = Modifier.padding(bottom = 12f.sx(ps)),
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(14f.sx(ps))) {
-            ui.lines.forEachIndexed { idx, line ->
-                val active = idx == ui.activeLine
-                var chipFocused by remember { mutableStateOf(false) }
+        if (ui.lines.isEmpty()) {
+            if (ui.sourceResolving) {
+                Text("正在检测可用线路…", color = Color.White, fontSize = 20f.sxs(ps))
+            } else {
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .then(if (active) Modifier.focusRequester(chipFocus[idx]) else Modifier)
-                        .dpadFocusable(
-                            scaleFocused = 1.05f,
-                            focusedBg = Color.White,
-                            // 播放器控件不画描边环（需求 影视#7 同款约定）
-                            drawRing = false,
-                            onFocusedChange = {
-                                chipFocused = it
-                                if (it) onTick()   // 浏览中不触发 5s 自动隐藏
-                            },
-                        ) { vm.switchLine(idx); onTick() }
-                        .background(
-                            if (active) Color(0x59FFFFFF) else Color(0x24FFFFFF),
-                            RoundedCornerShape(12f.sx(ps)),
-                        )
+                        .focusRequester(retryFocus)
+                        .dpadFocusable(scaleFocused = 1.05f, focusedBg = Color.White, drawRing = false) {
+                            vm.retry(); onTick()
+                        }
+                        .background(Color(0x59FFFFFF), RoundedCornerShape(12f.sx(ps)))
                         .padding(horizontal = 24f.sx(ps), vertical = 12f.sx(ps)),
                 ) {
-                    Text(
-                        line.label,
-                        color = if (active || chipFocused) OtvColors.Bg else Color.White,
-                        fontSize = 25f.sxs(ps),
-                        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                        maxLines = 1,
-                    )
+                    Text("重新检测线路", color = Color.White, fontSize = 25f.sxs(ps), fontWeight = FontWeight.Bold)
+                }
+            }
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(14f.sx(ps))) {
+                ui.lines.forEachIndexed { idx, line ->
+                    val active = idx == ui.activeLine
+                    var chipFocused by remember { mutableStateOf(false) }
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .then(if (active) Modifier.focusRequester(chipFocus[idx]) else Modifier)
+                            .dpadFocusable(
+                                scaleFocused = 1.05f,
+                                focusedBg = Color.White,
+                                // 播放器控件不画描边环（需求 影视#7 同款约定）
+                                drawRing = false,
+                                onFocusedChange = {
+                                    chipFocused = it
+                                    if (it) onTick()   // 浏览中不触发 5s 自动隐藏
+                                },
+                            ) { vm.switchLine(idx); onTick() }
+                            .background(
+                                if (active) Color(0x59FFFFFF) else Color(0x24FFFFFF),
+                                RoundedCornerShape(12f.sx(ps)),
+                            )
+                            .padding(horizontal = 24f.sx(ps), vertical = 12f.sx(ps)),
+                    ) {
+                        Text(
+                            line.label,
+                            color = if (active || chipFocused) OtvColors.Bg else Color.White,
+                            fontSize = 25f.sxs(ps),
+                            fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                            maxLines = 1,
+                        )
+                    }
                 }
             }
         }
@@ -946,16 +989,19 @@ private fun VodSignalSourceSection(ui: PlayerUiState, vm: PlayerViewModel, panel
                 if (ui.lines.size > collapsedCount) {
                     Box(
                         modifier = Modifier
+                            .align(Alignment.End)
                             .then(if (!expanded && !activeLineVisible) Modifier.focusRequester(panelFocus) else Modifier)
                             .dpadFocusable(navGroup = PANEL_NAV_GROUP) { expanded = !expanded }
-                            .background(Color(0x24FFFFFF), RoundedCornerShape(10.dp))
-                            .padding(horizontal = 14.dp, vertical = 9.dp),
+                            .size(36.dp)
+                            .background(Color(0x24FFFFFF), CircleShape)
+                            .padding(9.dp)
+                            .semantics {
+                                contentDescription = if (expanded) "收起线路" else "展开线路"
+                                role = Role.Button
+                            },
+                        contentAlignment = Alignment.Center,
                     ) {
-                        Text(
-                            if (expanded) "收起线路" else "展开线路（+${ui.lines.size - visibleCount}）",
-                            color = Color.White,
-                            style = labelStyle,
-                        )
+                        RouteLinesChevron(expanded)
                     }
                     Spacer(Modifier.height(8.dp))
                 }
@@ -979,15 +1025,6 @@ private fun VodSignalSourceSection(ui: PlayerUiState, vm: PlayerViewModel, panel
                     }
                 }
             }
-        }
-        Spacer(Modifier.height(10.dp))
-        Box(
-            modifier = Modifier
-                .dpadFocusable(navGroup = PANEL_NAV_GROUP) { vm.switchLine(ui.activeLine) }
-                .background(Color(0x24FFFFFF), RoundedCornerShape(10.dp))
-                .padding(horizontal = 14.dp, vertical = 9.dp),
-        ) {
-            Text("重载当前信号源", color = Color.White, style = MaterialTheme.typography.labelMedium)
         }
     }
     Spacer(Modifier.height(12.dp))
@@ -1125,6 +1162,54 @@ private fun ErrorWidget(
                 ) { Text("返回", color = Color.White, style = MaterialTheme.typography.labelLarge) }
             }
         }
+    }
+}
+
+/** A passive live playback status hint; it must never take focus from the source selector. */
+@Composable
+private fun LivePlaybackFailureHint(message: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier
+            .padding(top = 24.dp)
+            .background(Color(0xB3111114), RoundedCornerShape(12.dp))
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text("当前线路无法播放", color = Color.White, style = MaterialTheme.typography.titleSmall)
+        Text(
+            message,
+            color = Color(0xCCFFFFFF),
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            "按 OK 或方向键打开线路列表重试",
+            color = Color(0xCCFFFFFF),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+@Composable
+private fun RouteLinesChevron(expanded: Boolean) {
+    Canvas(Modifier.fillMaxSize()) {
+        val half = size.minDimension * 0.24f
+        val centerX = size.width / 2f
+        val centerY = size.height / 2f
+        val path = Path().apply {
+            if (expanded) {
+                moveTo(centerX - half, centerY + half * 0.35f)
+                lineTo(centerX, centerY - half * 0.35f)
+                lineTo(centerX + half, centerY + half * 0.35f)
+            } else {
+                moveTo(centerX - half, centerY - half * 0.35f)
+                lineTo(centerX, centerY + half * 0.35f)
+                lineTo(centerX + half, centerY - half * 0.35f)
+            }
+        }
+        drawPath(path, Color.White, style = Stroke(width = size.minDimension * 0.12f))
     }
 }
 

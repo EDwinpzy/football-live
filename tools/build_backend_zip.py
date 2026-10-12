@@ -32,7 +32,7 @@ TMP_ZIP = os.path.join(ROOT, "tools", "python-backend-new.zip")
 SRC_DIR = os.path.join(ROOT, "tools", "backend-src")
 POSTER_DIR = r"D:\OneDrive\ZCode\football-posters"
 
-REPL = ["proxy.py", "hhkan.py", "hhkan_snapshot.py", "hhkan_snapshot.json",
+REPL = ["proxy.py", "vlc_hls.py", "hhkan.py", "hhkan_snapshot.py", "hhkan_snapshot.json",
         "team_backdrop.py", "scraper.py", "decrypt_stream.js",
         "douban_catalog.py", "douban_snapshot.json", "douban_filter_matrix.json",
         "media_index.py", "pinyin_map.json", "ime_hotwords.py", "vod_api.py",

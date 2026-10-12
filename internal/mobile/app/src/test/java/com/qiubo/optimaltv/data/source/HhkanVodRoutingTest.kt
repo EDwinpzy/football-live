@@ -10,6 +10,7 @@ import kotlin.concurrent.thread
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -26,6 +27,7 @@ class HhkanVodRoutingTest {
     private val responseSequences = ConcurrentHashMap<String, ConcurrentLinkedQueue<String>>()
     private val requests = ConcurrentHashMap<String, Int>()
     private val requestOrder = CopyOnWriteArrayList<String>()
+    private val responseStatus = ConcurrentHashMap<String, Int>()
     private var acceptThread: Thread? = null
 
     @Before
@@ -57,7 +59,9 @@ class HhkanVodRoutingTest {
             requestOrder += path
             val body = (responseSequences[path]?.poll() ?: responses[path] ?: "{}").toByteArray(Charsets.UTF_8)
             val output = it.getOutputStream()
-            output.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n".toByteArray(Charsets.US_ASCII))
+            val statusCode = responseStatus[path] ?: 200
+            val statusText = if (statusCode == 200) "OK" else "Bad Request"
+            output.write("HTTP/1.1 $statusCode $statusText\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n".toByteArray(Charsets.US_ASCII))
             output.write(body)
             output.flush()
         }
@@ -119,6 +123,87 @@ class HhkanVodRoutingTest {
         assertEquals(listOf("https://cdn.example/douban.m3u8"), urls)
         assertEquals(1, requests["/vod/detail/456"])
         assertEquals(1, requests["/vod/play/456/douban-source%3Acontent/0"])
+    }
+
+    @Test
+    fun doubanPlayMarksOnlyTheExplicitUnavailableReferenceResponseAsRecoverable() {
+        val path = "/vod/play/456/old-source%3Acontent/0"
+        responses[path] = """{"error":"播放线路不可用"}"""
+        responseStatus[path] = 400
+
+        val failure = runCatching {
+            VodApiSource.fetchPlayResult(
+                origin, okhttp3.OkHttpClient(), "douban:456", "old-source:content", "0",
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is VodPlayReferenceUnavailableException)
+        assertEquals(listOf(path), requestOrder.toList())
+    }
+
+    @Test
+    fun doubanPlayDoesNotTreatOtherHttpFailuresAsStaleReferences() {
+        val path = "/vod/play/456/old-source%3Acontent/0"
+        responses[path] = """{"error":"播放线路不可用"}"""
+        responseStatus[path] = 500
+        var calls = 0
+
+        val failure = runCatching {
+            StalePlayReferenceRecoveryPolicy.resolve(isDouban = true, forceRefresh = false) { refresh ->
+                calls++
+                VodApiSource.fetchPlayResult(
+                    origin, okhttp3.OkHttpClient(), "douban:456", "old-source:content", "0", fresh = refresh,
+                )
+            }
+        }.exceptionOrNull()
+
+        assertFalse(failure is VodPlayReferenceUnavailableException)
+        assertEquals(1, calls)
+        assertEquals(listOf(path), requestOrder.toList())
+    }
+
+    @Test
+    fun staleDoubanReferenceRefreshesOnceAndPlaysTheSameNamedSourceAndEpisode() {
+        val stalePath = "/vod/play/456/old-source%3Acontent/1"
+        val refreshPath = "/vod/detail/456?refresh=1"
+        val retryPath = "/vod/play/456/new-source%3Acontent/0"
+        responses[stalePath] = """{"error":"播放线路不可用"}"""
+        responseStatus[stalePath] = 400
+        responses[refreshPath] = """{"title":"豆瓣影片","sources":[{"name":"线路甲","id":"new-source:content","episodes":[{"name":"第2集"},{"name":"番外"},{"name":"第1集"}]}]}"""
+        responses[retryPath] = """{"url":"https://cdn.example/same-episode.m3u8"}"""
+        val previousDetail = HhkanSource.Companion.DetailInfo(
+            title = "豆瓣影片", year = "2026", desc = "", poster = "", rating = 0.0,
+            lines = listOf(
+                HhkanSource.Companion.LineDetail(
+                    "线路甲",
+                    listOf(
+                        Triple("第1集", "old-source:content", "0"),
+                        Triple("第2集", "old-source:content", "1"),
+                    ),
+                ),
+            ),
+        )
+
+        val result = StalePlayReferenceRecoveryPolicy.resolve(
+            isDouban = true,
+            forceRefresh = false,
+        ) { refresh ->
+            VodApiSource.fetchPlayResult(
+                origin,
+                okhttp3.OkHttpClient(),
+                "douban:456",
+                "old-source:content",
+                "1",
+                fresh = refresh,
+                sourceLabel = "线路甲",
+                previousDetail = previousDetail,
+            )
+        }
+
+        assertEquals(listOf("https://cdn.example/same-episode.m3u8"), result.urls)
+        assertEquals("new-source:content", result.lineId)
+        assertEquals("0", result.episode)
+        assertEquals(listOf(stalePath, refreshPath, retryPath), requestOrder.toList())
     }
 
     @Test

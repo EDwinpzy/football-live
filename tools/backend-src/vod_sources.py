@@ -1355,11 +1355,20 @@ def _probe_fetch(url):
             "status": status, "content_type": content_type, "final_url": final_url}
 
 
+def _ascii_http_url(url):
+    """Percent-encode Unicode URL components before urllib builds an HTTP request."""
+    parts = urllib.parse.urlsplit(str(url or ""))
+    path = urllib.parse.quote(parts.path, safe="/%:@!$&'()*+,;=-._~")
+    query = urllib.parse.quote(parts.query, safe="/?%:@!$&'()*+,;=-._~")
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, query, ""))
+
+
 def probe_stream(url, fetch=None):
     """Probe a playlist or direct-media response and derive advertised resolution."""
     if not str(url or "").startswith(("http://", "https://")):
         return {"alive": False, "latency_ms": None, "height": 0}
     try:
+        url = _ascii_http_url(url)
         result = (fetch or _probe_fetch)(url)
         status = result.get("status", 200)
         status = 200 if status is None else int(status)

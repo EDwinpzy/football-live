@@ -102,4 +102,83 @@ class FootballVpnProxyCoreTest {
         assertNotNull(saved)
         assertEquals("2026-10-11T01:02:03Z", saved!!.updatedAt)
     }
+
+    @Test
+    fun cachedRuntimeConfigAddsLoopbackControllerAndMigratesFallbackToSelectableGroup() {
+        val secret = "a".repeat(64)
+
+        val migrated = FootballVpnProxyCore.prepareRuntimeConfig(defaultYaml, secret)
+
+        assertNotNull(migrated)
+        assertTrue(migrated!!.contains("external-controller: 127.0.0.1:17891"))
+        assertTrue(migrated.contains("secret: \"$secret\""))
+        assertTrue(migrated.contains("name: FOOTBALL-NODES\n    type: select"))
+        assertFalse(migrated.contains("name: FOOTBALL-NODES\n            type: fallback"))
+        assertFalse(migrated.contains("            url: https://www.gstatic.com/generate_204"))
+        assertFalse(migrated.contains("            interval: 300"))
+        assertFalse(migrated.contains("            timeout: 5000"))
+        assertTrue(migrated.contains("- MATCH,FOOTBALL-NODES"))
+        assertTrue(migrated.contains("port: 17890"))
+    }
+
+    @Test
+    fun proxyCandidateParserKeepsOnlyConcreteMembersOfFootballGroup() {
+        val response = """
+            {"proxies": {
+              "FOOTBALL-NODES": {"type":"Selector","all":["节点 A","DIRECT","nested","REJECT","missing"]},
+              "节点 A": {"type":"Shadowsocks"},
+              "DIRECT": {"type":"Direct"},
+              "nested": {"type":"URLTest"},
+              "REJECT": {"type":"Reject"}
+            }}
+        """.trimIndent()
+
+        assertEquals(listOf("节点 A"), FootballVpnProxyCore.parseProxyCandidates(response))
+        assertNull(FootballVpnProxyCore.parseProxyCandidates("{}"))
+    }
+
+    @Test
+    fun delayParserAndSelectorRejectUnavailableAndChooseSmallestPositiveLatency() {
+        assertEquals(83, FootballVpnProxyCore.parseDelayResponse("""{"delay":83}"""))
+        assertNull(FootballVpnProxyCore.parseDelayResponse("""{"delay":0}"""))
+        assertNull(FootballVpnProxyCore.parseDelayResponse("""{"error":"timeout"}"""))
+
+        val fastest = FootballVpnProxyCore.selectLowestLatency(
+            listOf(
+                FootballVpnProxyCore.NodeLatency("slow", 420),
+                FootballVpnProxyCore.NodeLatency("failed", 0),
+                FootballVpnProxyCore.NodeLatency("fast", 83),
+            ),
+        )
+        assertEquals("fast", fastest?.name)
+        assertEquals(83, fastest?.delayMs)
+        assertNull(FootballVpnProxyCore.selectLowestLatency(listOf(FootballVpnProxyCore.NodeLatency("failed", 0))))
+    }
+
+    @Test
+    fun providerOnlyNodesAreMeasuredUsingProviderEndpoint() {
+        val proxies = """{"proxies":{"FOOTBALL-NODES":{"all":["node/a","DIRECT","group","missing"]}}}"""
+        val providers = """{"providers":{"sub one":{"proxies":[{"name":"node/a","type":"Shadowsocks"},{"name":"DIRECT","type":"Direct"},{"name":"group","type":"Selector"}]}}}"""
+        assertEquals(listOf("node/a"), FootballVpnProxyCore.parseProxyCandidates(proxies, providers))
+        assertEquals("/providers/proxies/sub%20one/node%2Fa/healthcheck", FootballVpnProxyCore.nodeDelayPath("node/a", "sub one"))
+        assertEquals("/proxies/node%2Fa/delay", FootballVpnProxyCore.nodeDelayPath("node/a", null))
+    }
+
+    @Test
+    fun matchProbeUrlRequiresHttpsHostAndDropsCredentialsAndFragment() {
+        assertEquals(
+            "https://www.88zhibo.tv/live?id=42",
+            FootballVpnProxyCore.normalizeProbeUrl("https://www.88zhibo.tv/live?id=42#player"),
+        )
+        assertNull(FootballVpnProxyCore.normalizeProbeUrl("http://www.88zhibo.tv/"))
+        assertNull(FootballVpnProxyCore.normalizeProbeUrl("https://user:pass@www.88zhibo.tv/"))
+    }
+
+    @Test
+    fun nodeSelectionStopsForCoroutineCancellationTaskInterruptionOrSupersededMatch() {
+        assertFalse(FootballVpnProxyCore.shouldCancelSelection(false, false, false))
+        assertTrue(FootballVpnProxyCore.shouldCancelSelection(true, false, false))
+        assertTrue(FootballVpnProxyCore.shouldCancelSelection(false, true, false))
+        assertTrue(FootballVpnProxyCore.shouldCancelSelection(false, false, true))
+    }
 }

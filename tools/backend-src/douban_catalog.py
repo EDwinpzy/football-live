@@ -798,16 +798,25 @@ class DoubanCatalog:
         """快照里预存的详情（云端出口到不了豆瓣，详情页只能靠它）。
 
         快照不可能给每条都补详情（每次发布都有限额），补不到的条目回落到快照
-        列表行——标题/封面/评分/主创还在，总比详情页整页空掉强。
+        列表行——标题/封面/评分/主创还在，总比详情页整页空掉强。实时搜索新发现
+        的作品也会先进入 media_index；详情上游不可达时用该行保留年份、分类和别名，
+        让后续片源匹配继续按正确作品身份执行。
         """
         key = str(douban_id)
         details = self.snapshot.get("details")
         value = details.get(key) if isinstance(details, dict) else None
         if not isinstance(value, dict) or not value.get("title"):
             value = self._snapshot_lookup().get(key)
+        source = "douban-snapshot"
+        if (not isinstance(value, dict) or not value.get("title")) and self.media_index:
+            try:
+                value = self.media_index.get(key)
+            except Exception:
+                value = None
+            source = "douban-index"
         if isinstance(value, dict) and value.get("title"):
             item = copy.deepcopy(value)
-            item["source"] = "douban-snapshot"
+            item["source"] = source
             return item
         return None
 
@@ -1598,9 +1607,28 @@ class DoubanCatalog:
 
         def produce():
             source = self.fetch("https://m.douban.com/rexxar/api/v2/subject/%s" % douban_id)
-            item = normalize_subject(source) if isinstance(source, dict) else parse_subject_html(source, douban_id)
+            stored = None
+            if self.media_index:
+                try:
+                    stored = self.media_index.get(douban_id)
+                except Exception:
+                    stored = None
+            # The detail API can omit its media type even when it has episode
+            # metadata. Preserve the type discovered from the search card for
+            # this same subject id instead of silently defaulting a TV series
+            # to a movie.
+            requested_category = (
+                stored.get("category") if isinstance(stored, dict) and
+                stored.get("category") in ("movie", "tv") else "movie"
+            )
+            item = normalize_subject(source, requested_category=requested_category) \
+                if isinstance(source, dict) else parse_subject_html(source, douban_id)
             if not item.get("title"):
                 raise ValueError("empty Douban detail")
+            if isinstance(stored, dict):
+                for field in ("year", "aliases", "original_title", "genres", "episodes_count"):
+                    if not item.get(field) and stored.get(field):
+                        item[field] = copy.deepcopy(stored[field])
             item["source"] = "douban"
             item["stale"] = False
             return item

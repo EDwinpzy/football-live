@@ -42,6 +42,12 @@ def _css_rule(source, selector):
 
 
 class HomeLibraryPaginationContractTest(unittest.TestCase):
+    def test_enter_library_mounts_pager_before_requesting_its_page(self):
+        source = (ANDROID / "ui/home/HomeScreen.kt").read_text(encoding="utf-8")
+        block = _source_block(source, "fun requestCategoryTilesFocus()", "LaunchedEffect(selCid)")
+        self.assertLess(block.index("vodListState.animateScrollToItem(1)"),
+                        block.index("sectionPagerState.scrollToPage(initialSectionPage)"))
+
     @classmethod
     def setUpClass(cls):
         cls.tv_home = (ANDROID / "ui/home/HomeScreen.kt").read_text(encoding="utf-8")
@@ -285,7 +291,9 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
         self.assertIn("direction == NAV_DOWN && row == 1", pager)
         self.assertIn("onRowFocus(1, column)", pager)
         self.assertIn("onRowFocus(0, column)", pager)
-        self.assertIn("onPageMove(page + 1, 0, column)", pager)
+        self.assertIn("HomeLibraryUiPolicy.contentPageTarget(page, NAV_DOWN, pageCount)", pager)
+        self.assertIn("pageCount = HomeLibraryUiPolicy.SECTION_PAGE_TITLES.size", self.tv_home,
+                      "右侧只能翻当前分类的三栏，不能翻进全部或下一分类")
         self.assertIn("onPageMove(page - 1, 1, column)", pager)
         focus_restore = _source_block(
             self.tv_home,

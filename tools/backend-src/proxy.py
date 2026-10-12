@@ -24,6 +24,7 @@ import vod_api
 import vod_sources
 import metadata_client
 import vod_resolver
+import vlc_hls
 import time
 import time as _time  # 模块级别名：resolve_team_icon 等用 _time，与 _tdb_search_team 内局部导入一致
 import threading
@@ -52,6 +53,7 @@ except ImportError:
 SOURCE_URL = "https://www.88zhibo.tv/"
 FOOTBALL_PROXY_URL = "http://127.0.0.1:17890"
 _UPSTREAM_PROXY_URL = contextvars.ContextVar("otv_upstream_proxy_url", default=None)
+_VLC_HLS_SESSION = contextvars.ContextVar("otv_vlc_hls_session", default=None)
 _PROXY_CLIENT_LOCK = threading.Lock()
 _PROXY_CLIENTS = {}
 _PROXY_OPENERS = {}
@@ -2380,7 +2382,10 @@ def _open_upstream(u, headers, read_timeout, preload=True, connect_timeout=5):
     - 301/302/303 保持 GET+原头（HLS 清单跳转无 POST 场景）；
     - 返回的 resp 与原两分支同型（urllib3: preload 后 .data 可用；
       urlreq: .read() 取体），status 属性两分支一致。"""
-    cur, hops = u, 0
+    # 片名/来源 URL 可能在 path 或 query 中包含中文。与 vod_sources 的
+    # 探测请求保持一致，先做 UTF-8 percent-encoding；每次拼好重定向目标后
+    # 也规范化，避免 relay 探测成功但实际播放在 urllib 请求构造时失败。
+    cur, hops = vod_sources._ascii_http_url(u), 0
     proxy_url = _active_upstream_proxy()
     while True:
         if HAS_URLLIB3:
@@ -2407,7 +2412,7 @@ def _open_upstream(u, headers, read_timeout, preload=True, connect_timeout=5):
                 e.close()
         if not loc:
             raise RuntimeError("redirect without Location: %s" % cur)
-        cur = urljoin(cur, loc)
+        cur = vod_sources._ascii_http_url(urljoin(cur, loc))
         hops += 1
         if hops > 3 or _blocked_internal_url(cur):
             raise RuntimeError("blocked redirect chain: %s -> %s" % (u, cur))
@@ -2644,6 +2649,11 @@ def relay_url(u, ref=None):
         # v1.21：重写基准用重定向后的最终地址（final）——IPTV 源站 82→81 签名跳转后
         # 分片绝对路径落在 81 端口，用原始 u 做 urljoin 会拼出错误主机端口
         base = final or u
+        vlc_session = _VLC_HLS_SESSION.get()
+        try:
+            text = vlc_hls.normalize(text, base, vlc_session)
+        except (ValueError, OverflowError):
+            return 502, "text/plain; charset=utf-8", b"invalid live media playlist", "invalid live media playlist", False
 
         def rw(uri):
             full = urljoin(base, uri)
@@ -2657,7 +2667,8 @@ def relay_url(u, ref=None):
             # https://…/web/）下会被浏览器解析到网关根而 404。设备端（根部署）
             # 解析结果与原绝对路径完全一致（ExoPlayer/hls.js 均按规范相对解析）。
             football_vpn = "&football_vpn=1" if _active_upstream_proxy() else ""
-            return "relay?u=" + q + "&ref=" + rq + football_vpn
+            vlc_query = "&vlc_session=" + vlc_session if vlc_session else ""
+            return "relay?u=" + q + "&ref=" + rq + football_vpn + vlc_query
 
         out = []
         raw_segs = []
@@ -4697,10 +4708,13 @@ class Handler(SimpleHTTPRequestHandler):
         )
         enabled = football_route and (qs.get("football_vpn") or ["0"])[0] == "1"
         token = _UPSTREAM_PROXY_URL.set(FOOTBALL_PROXY_URL if enabled else None)
+        vlc_session = (qs.get("vlc_session") or [""])[0]
+        vlc_token = _VLC_HLS_SESSION.set(vlc_session if re.fullmatch(r"[0-9a-f]{32}", vlc_session) else None)
         try:
             self._do_get_with_upstream_proxy(parsed)
         finally:
             _UPSTREAM_PROXY_URL.reset(token)
+            _VLC_HLS_SESSION.reset(vlc_token)
 
     def _do_get_with_upstream_proxy(self, parsed):
         self._static_response = False

@@ -4444,7 +4444,8 @@ function renderMorePanel() {
       ? "正在加载可用信号源…" : state === "empty" ? "暂未匹配到可用信号源" : "");
     $("#mpSourceState").textContent = statusText;
     $("#mpSourceState").dataset.state = state;
-    $("#mpSourceRetry").textContent = state === "loading" || state === "refreshing" ? "重新加载" : "刷新信号源";
+    $("#mpSourceRetry").hidden = state !== "error" && state !== "empty";
+    $("#mpSourceRetry").textContent = "重新检测信号源";
     $("#mpLines").innerHTML = pv.vodSources.map((source, i) => {
       const name = playerSourceName(source, i);
       const selected = i === pv.vodLineIdx;
@@ -4535,7 +4536,8 @@ function syncPlayerRouteDisclosure() {
   routes.classList.toggle("expanded", expanded);
   if (!expanded) buttons.forEach((button, index) => { button.hidden = buttonRows[index] >= 2; });
   toggle.hidden = !hasMore;
-  toggle.textContent = expanded ? "收起" : "展开";
+  toggle.textContent = expanded ? "⌃" : "⌄";
+  toggle.setAttribute("aria-label", expanded ? "收起信号源" : "展开信号源");
   toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
 }
 if ("mediaSession" in navigator) {

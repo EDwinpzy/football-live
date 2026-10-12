@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -46,6 +47,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -150,8 +155,6 @@ internal fun PlayerMoreSections(
                 onSwitchLine = onSwitchLine,
                 focusRequester = sourceFocusRequester.takeIf { autoFocusSource },
             )
-            Spacer(Modifier.height(8.dp))
-            SourceAction("重载当前线路", onClick = { onSwitchLine(ui.activeLine) })
         } else if (ui.sourceStatus != PlayerSourceStatus.LOADING) {
             Spacer(Modifier.height(8.dp))
             SourceAction(
@@ -411,12 +414,17 @@ private fun SourceLineSelector(
                 val moreFocusModifier = if (focusRequester != null && !expanded && !activeLineVisible) {
                     Modifier.focusRequester(focusRequester)
                 } else Modifier
-                SourceAction(
-                    label = if (expanded) "收起线路" else "展开线路（+${labels.size - visibleCount}）",
-                    onClick = { expanded = !expanded },
-                    modifier = moreFocusModifier,
-                )
-                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    SourceLineToggle(
+                        expanded = expanded,
+                        hiddenCount = labels.size - visibleCount,
+                        onClick = { expanded = !expanded },
+                        modifier = moreFocusModifier,
+                    )
+                }
             }
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -440,6 +448,43 @@ private fun SourceLineSelector(
                         Text(label, color = Color.White, style = labelStyle, maxLines = 1)
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SourceLineToggle(
+    expanded: Boolean,
+    hiddenCount: Int,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = modifier
+            .size(28.dp)
+            .clip(CircleShape)
+            .tapCard(onClick)
+            .background(Color(0x24FFFFFF), CircleShape)
+            .semantics(mergeDescendants = true) {
+                contentDescription = if (expanded) "收起线路" else "展开线路，另有 $hiddenCount 条"
+                role = Role.Button
+            },
+    ) {
+        Canvas(Modifier.size(16.dp)) {
+            val x0 = size.width * 0.24f
+            val x1 = size.width * 0.50f
+            val x2 = size.width * 0.76f
+            val yTop = size.height * 0.36f
+            val yBottom = size.height * 0.64f
+            val strokeWidth = 2.dp.toPx()
+            if (expanded) {
+                drawLine(Color.White, Offset(x0, yBottom), Offset(x1, yTop), strokeWidth, cap = StrokeCap.Round)
+                drawLine(Color.White, Offset(x1, yTop), Offset(x2, yBottom), strokeWidth, cap = StrokeCap.Round)
+            } else {
+                drawLine(Color.White, Offset(x0, yTop), Offset(x1, yBottom), strokeWidth, cap = StrokeCap.Round)
+                drawLine(Color.White, Offset(x1, yBottom), Offset(x2, yTop), strokeWidth, cap = StrokeCap.Round)
             }
         }
     }

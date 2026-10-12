@@ -11,6 +11,8 @@ import com.qiubo.optimaltv.data.prefs.SettingsStore
 import com.qiubo.optimaltv.data.source.ContentSource
 import com.qiubo.optimaltv.data.source.HhkanSource
 import com.qiubo.optimaltv.data.source.VodApiSource
+import com.qiubo.optimaltv.data.source.StalePlayReferenceRecoveryPolicy
+import com.qiubo.optimaltv.data.source.VodPlayReferenceUnavailableException
 import com.qiubo.optimaltv.data.source.HhkanSource.ChannelSection as HSec
 import com.qiubo.optimaltv.data.source.HhkanSource.Companion.DetailInfo
 import com.qiubo.optimaltv.data.source.SourceSnapshot
@@ -1580,50 +1582,63 @@ class VodRepository(
             if (parts.size != 3) return@withContext ""
             var playLineId = parts[1]
             var playEpisode = parts[2]
-            // Douban's /vod/play endpoint has no cache-bypass parameter. Refresh its detail
-            // first, then map the user's selected source and episode onto any refreshed IDs.
-            if (forceRefresh && line.vodId.startsWith("douban:")) {
-                val detail = try {
-                    runInterruptible(Dispatchers.IO) {
-                        VodApiSource.fetchDetail(base, detailClient, line.vodId, refresh = true)
-                    }
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (failure: Exception) {
-                    android.util.Log.w("OTV", "Douban detail refresh failed ref=${line.vodId}: ${failure.message}")
-                    throw SelectedSourceRefreshException("无法刷新所选信号源", failure)
-                }
-                if (detail.lines.isEmpty()) {
-                    throw SelectedSourceRefreshException("刷新后没有可用信号源")
-                }
-                val target = DoubanRefreshPlayReference.map(
-                    selectedLineId = parts[1],
-                    selectedLineName = line.label,
-                    selectedEpisode = parts[2],
-                    previous = detailInfoCache[parts[0]],
-                    refreshed = detail,
-                ) ?: throw SelectedSourceRefreshException("刷新后找不到所选信号源或集数")
-                // Keep the detail snapshot that produced the current UI lines/playRef. The
-                // UI still carries the old line ID and episode index; replacing its mapping
-                // baseline here would make a second retry interpret that old index against
-                // this refresh's reordered episodes and silently select the wrong episode.
-                playLineId = target.lineId
-                playEpisode = target.episode
-            }
+            val douban = line.vodId.startsWith("douban:")
+            var usedRefreshedReference = false
             val fetched = try {
                 runInterruptible(Dispatchers.IO) {
-                    VodApiSource.fetchPlay(base, okHttp, parts[0], playLineId, playEpisode, fresh = forceRefresh)
-                        .firstOrNull().orEmpty()
+                    StalePlayReferenceRecoveryPolicy.resolve(
+                        isDouban = douban,
+                        forceRefresh = forceRefresh,
+                    ) { refreshReference ->
+                        if (refreshReference && douban) {
+                            usedRefreshedReference = true
+                            // The user may have entered with a cached/cloud playRef from a
+                            // different source registry. Refresh only after the backend says
+                            // this exact reference is unavailable, then keep the same source
+                            // label and episode name/index; never choose a sibling line.
+                            val detail = VodApiSource.fetchDetail(
+                                base, detailClient, line.vodId, refresh = true,
+                            )
+                            if (detail.lines.isEmpty()) {
+                                throw SelectedSourceRefreshException("刷新后没有可用信号源")
+                            }
+                            val target = DoubanRefreshPlayReference.map(
+                                selectedLineId = parts[1],
+                                selectedLineName = line.label,
+                                selectedEpisode = parts[2],
+                                previous = detailInfoCache[parts[0]],
+                                refreshed = detail,
+                            ) ?: throw SelectedSourceRefreshException("刷新后找不到所选信号源或集数")
+                            // Keep the original UI snapshot as the mapping baseline for any
+                            // later retry of this same playRef.
+                            playLineId = target.lineId
+                            playEpisode = target.episode
+                        }
+                        VodApiSource.fetchPlay(
+                            base, okHttp, parts[0], playLineId, playEpisode, fresh = refreshReference,
+                        ).firstOrNull().orEmpty()
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
+            } catch (unavailable: SelectedSourceRefreshException) {
+                throw unavailable
+            } catch (stale: VodPlayReferenceUnavailableException) {
+                if (usedRefreshedReference) {
+                    throw SelectedSourceRefreshException("刷新后所选信号源仍不可用", stale)
+                }
+                android.util.Log.w("OTV", "play reference unavailable ref=${line.playRef}")
+                ""
             } catch (failure: Exception) {
+                if (usedRefreshedReference) {
+                    throw SelectedSourceRefreshException("无法刷新所选信号源", failure)
+                }
                 android.util.Log.w("OTV", "play URL resolve failed ref=${line.playRef}: ${failure.message}")
                 ""
             }.takeIf { it.isNotBlank() }
             if (fetched != null) {
                 playCache[line.playRef] = PlayEntry(fetched, now)
-                if (forceRefresh && line.vodId.startsWith("douban:")) {
+                if (usedRefreshedReference) {
                     refreshedPlayLineIds[line.playRef] = playLineId
                     if (refreshedPlayLineIds.size > 400) {
                         refreshedPlayLineIds.keys.firstOrNull()?.let(refreshedPlayLineIds::remove)

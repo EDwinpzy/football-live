@@ -305,12 +305,12 @@ console.log("== landscape VOD source panel, retry and latest request wins ==");
   $("#mpToggle").dispatch("click");
   assert.equal($("#morePanel").hidden, false, "opening the panel remeasures routes after it becomes visible");
   assert.equal($("#mpLinesToggle").hidden, false, "more than two rows exposes the route disclosure control");
-  assert.equal($("#mpLinesToggle").textContent, "展开", "route choices start collapsed");
+  assert.equal($("#mpLinesToggle").textContent, "⌄", "route choices start collapsed");
   assert.deepEqual(routeChips.map(chip => chip.hidden), [false, false, false, false, false, true, true],
     "only the first two actual layout rows remain visible and keyboard reachable");
   $("#mpLinesToggle").dispatch("click");
   assert.equal($("#mpLines").classes.has("expanded"), true, "expanding shows the remaining source rows");
-  assert.equal($("#mpLinesToggle").textContent, "收起");
+  assert.equal($("#mpLinesToggle").textContent, "⌃");
   assert.ok(routeChips.every(chip => !chip.hidden), "expanded routes all become visible again");
   $("#mpLinesToggle").dispatch("click");
   assert.equal($("#mpLines").classes.has("expanded"), false, "the route list can be collapsed again");

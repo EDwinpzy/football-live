@@ -87,6 +87,40 @@ class CatalogSearchDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["items"][0]["summary"], "央视版红楼梦")
         self.assertTrue(any("subject_suggest" in url for url in self.calls))
 
+    def test_uncached_2010_red_chamber_detail_keeps_its_edition_when_upstream_is_offline(self):
+        self.index.upsert_many([normalize_subject({
+            "id": "3014183", "title": "红楼梦", "original_title": "The Dream of Red Mansions",
+            "year": "2010", "category": "tv", "aliases": ["新版红楼梦"],
+            "genres": ["剧情"], "episodes_count": 50,
+        }, "tv")])
+
+        def offline(_url):
+            raise OSError("offline")
+
+        item = self.catalog(fetch=offline, snapshot={"details": {}}).detail("3014183")
+
+        self.assertEqual(item["year"], "2010")
+        self.assertEqual(item["category"], "tv")
+        self.assertEqual(item["aliases"], ["新版红楼梦"])
+        self.assertEqual(item["source"], "douban-snapshot")
+
+    def test_2010_red_chamber_detail_uses_search_type_when_detail_omits_media_type(self):
+        self.index.upsert_many([normalize_subject({
+            "id": "3014183", "title": "红楼梦", "year": "2010", "category": "tv",
+            "aliases": ["新版红楼梦"], "episodes_count": 50,
+        }, "tv")])
+        catalog = self.catalog(fetch=lambda _url: {
+            "id": "3014183", "title": "红楼梦", "year": "2010", "episodes_count": 50,
+        }, snapshot={"details": {}})
+
+        item = catalog.detail("3014183")
+
+        self.assertEqual(item["year"], "2010")
+        self.assertEqual(item["category"], "tv")
+        self.assertEqual(item["aliases"], ["新版红楼梦"])
+        self.assertEqual(item["episodes_count"], 50)
+        self.assertEqual(item["source"], "douban")
+
     def test_remote_failure_preserves_local_typo_matches_and_retries_after_cooldown(self):
         self.index.upsert_many([normalize_subject({"id": "35634451", "title": "声生不息"}, "tv")])
         def offline(url):

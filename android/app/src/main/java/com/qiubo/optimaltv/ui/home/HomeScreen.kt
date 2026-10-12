@@ -144,6 +144,21 @@ internal object HomeLibraryUiPolicy {
         return target.takeIf { it in 0 until count }
     }
 
+    fun defaultCategoryIndex(categories: List<Pair<String, String>>): Int =
+        categories.indexOfFirst {
+            it.first.removePrefix("douban:") == "movie" || it.second.trim() == "电影"
+        }
+            .takeIf { it >= 0 } ?: 0
+
+    fun contentPageTarget(page: Int, direction: Int, pageCount: Int): Int? {
+        val target = when (direction) {
+            NAV_UP -> page - 1
+            NAV_DOWN -> page + 1
+            else -> return null
+        }
+        return target.takeIf { page in 0 until pageCount && it in 0 until pageCount }
+    }
+
     fun sourceSectionName(page: Int, available: List<String>): String? {
         val aliases = when (page) {
             0 -> listOf("最近热门", "近期热门")
@@ -268,18 +283,23 @@ fun VodScreen(nav: NavController) {
                 val categories = remember(cat) {
                     HomeLibraryUiPolicy.orderedCategories(cat.categories.map { it.id to it.name }) + ("" to "全部")
                 }
-                // 进页恢复上次选中的分类（按分类 ID 持久化），不回「电影」。
+                // 普通进入影视页固定从电影开始；仅从片库卡片返回时恢复上次分类，
+                // 否则进第二整页会被上次选中的综艺/电视剧等抢占焦点。
                 val returningFromAllCard = returnKey?.startsWith("lib:全部:") == true
                 var catSel by remember(cat, returningFromAllCard) {
-                    mutableIntStateOf(if (returningFromAllCard) categories.lastIndex else 0)
+                    mutableIntStateOf(
+                        if (returningFromAllCard) categories.lastIndex
+                        else HomeLibraryUiPolicy.defaultCategoryIndex(categories),
+                    )
                 }
                 val categoryFocusRequesters = remember(categories) { List(categories.size) { FocusRequester() } }
                 val allPageFilterFocus = remember { FocusRequester() }
-                LaunchedEffect(cat, returningFromAllCard) {
+                LaunchedEffect(cat, returningFromAllCard, returnKey) {
                     if (returningFromAllCard) {
                         catSel = categories.lastIndex
                         return@LaunchedEffect
                     }
+                    if (returnKey?.startsWith("lib:") != true) return@LaunchedEffect
                     val saved = runCatching { Graph.settings.vodLastCat() }.getOrNull()
                     if (!saved.isNullOrBlank()) {
                         categories.indexOfFirst { it.first == saved }.takeIf { it >= 0 }?.let {
@@ -337,9 +357,18 @@ fun VodScreen(nav: NavController) {
 
                 fun requestCategoryTilesFocus() {
                     pageScope.launch {
+                        val defaultCategory = HomeLibraryUiPolicy.defaultCategoryIndex(categories)
+                        catSel = defaultCategory
+                        focusRequests.job?.cancel()
+                        focusRequests.focusedKey = null
+                        focusRequests.awaitingPageFocus = false
+                        val initialSectionPage = if (categories.getOrNull(defaultCategory)?.first.isNullOrBlank()) {
+                            HomeLibraryUiPolicy.ALL_PAGE_INDEX
+                        } else 0
                         vodListState.animateScrollToItem(1)
+                        sectionPagerState.scrollToPage(initialSectionPage)
                         repeat(24) {
-                            if (runCatching { categoryFocusRequesters.getOrNull(catSel)?.requestFocus() }.isSuccess) return@launch
+                            if (runCatching { categoryFocusRequesters.getOrNull(defaultCategory)?.requestFocus() }.isSuccess) return@launch
                             withFrameNanos { }
                         }
                     }
@@ -574,6 +603,7 @@ fun VodScreen(nav: NavController) {
                         VerticalPager(
                             state = sectionPagerState,
                             beyondBoundsPageCount = 1,
+                            userScrollEnabled = false,
                             modifier = Modifier.fillParentMaxHeight().fillMaxWidth(),
                             key = { page -> "vod-library-page-${HomeLibraryUiPolicy.PAGE_TITLES[page]}" },
                             flingBehavior = PagerDefaults.flingBehavior(
@@ -596,8 +626,8 @@ fun VodScreen(nav: NavController) {
                                     restoreItemId = returnKey
                                         ?.takeIf { it.startsWith("lib:全部:") }
                                         ?.removePrefix("lib:全部:"),
-                                    onUpFromFirstRow = { column ->
-                                        moveLibraryPage(page - 1, 1, column)
+                                    onUpFromFirstRow = { _ ->
+                                        runCatching { categoryFocusRequesters.getOrNull(catSel)?.requestFocus() }
                                     },
                                     onLeftFromFirstColumn = {
                                         runCatching { categoryFocusRequesters.getOrNull(catSel)?.requestFocus() }
@@ -611,7 +641,7 @@ fun VodScreen(nav: NavController) {
                                     items = section?.items.orEmpty(),
                                     sectionName = section?.name ?: title,
                                     page = page,
-                                    pageCount = HomeLibraryUiPolicy.PAGE_TITLES.size,
+                                    pageCount = HomeLibraryUiPolicy.SECTION_PAGE_TITLES.size,
                                     s = s,
                                     cardReg = cardReg,
                                     rowStates = sectionRowStates[page],
@@ -1012,13 +1042,15 @@ private fun LibrarySectionPage(
                                             direction == NAV_DOWN && row == 0 -> {
                                                 if (rows[1].getOrNull(column) != null) {
                                                     onRowFocus(1, column)
-                                                } else if (page + 1 < pageCount) {
-                                                    onPageMove(page + 1, 0, column)
+                                                } else {
+                                                    HomeLibraryUiPolicy.contentPageTarget(page, NAV_DOWN, pageCount)
+                                                        ?.let { onPageMove(it, 0, column) }
                                                 }
                                                 true
                                             }
                                             direction == NAV_DOWN && row == 1 -> {
-                                                if (page + 1 < pageCount) onPageMove(page + 1, 0, column)
+                                                HomeLibraryUiPolicy.contentPageTarget(page, NAV_DOWN, pageCount)
+                                                    ?.let { onPageMove(it, 0, column) }
                                                 true
                                             }
                                             direction == NAV_UP && row == 1 && rows[0].getOrNull(column) != null -> {

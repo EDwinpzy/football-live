@@ -5,6 +5,8 @@ import android.view.TextureView
 import android.view.View
 import com.qiubo.optimaltv.OtvLog
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -43,46 +45,119 @@ class VlcEngine(context: Context) : MediaEngine {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     /** VLC 的 stop/release 是阻塞调用，必须在工作线程串行执行（事件线程/主线程调用会死锁） */
     private val vlcOps = Executors.newSingleThreadExecutor { r -> Thread(r, "otv-vlc-ops").apply { isDaemon = true } }
+    private val released = AtomicBoolean(false)
     private val _ui = MutableStateFlow(EngineUiState())
     override val uiState: StateFlow<EngineUiState> = _ui.asStateFlow()
 
     /** v1.17 IPTV 大缓冲档：network-caching 1.5s → 6s（远端源抖动平滑） */
     @Volatile private var largeBuffer = false
 
-    // v1.19 并发修复：两字段在 vlcOps 单线程写、主线程 ticker/setLargeBufferPreferred 读，
-    // 无 @Volatile 时 JMM 无 happens-before——ticker 可能看到过期 null/半构造引用
+    // VLC player/libVLC 所有 JNI 操作都在 vlcOps 串行执行；volatile 只用于轻量的存活检查。
     @Volatile private var libvlc: LibVLC? = null
     @Volatile private var player: MediaPlayer? = null
     @Volatile private var currentUrl: String? = null
-    private var ticker: Job? = null
+    @Volatile private var ticker: Job? = null
     /** vout 只允许 attach 一次（2026-08-30 实测教训：直播结束追边重开时重复 attachViews
      *  抛 IllegalStateException「Can't set view when already attached」→ 重开失败卡 BUFFERING） */
     private var voutAttached = false
+    @Volatile private var activeVout: IVLCVout? = null
+    @Volatile private var surfaceCallback: IVLCVout.Callback? = null
+    /** Last native window size is keyed by Vout so a late callback from a released player can't
+     * suppress the initial size update for its replacement. */
+    private val voutWindowSizeLock = Any()
+    private var lastSizedVout: IVLCVout? = null
+    private var lastVoutWindowSize = 0L
 
-    override val renderView: View = TextureView(appCtx).apply {
-        // 渲染层不参与焦点（遥控焦点全部留给 Compose 控制层，与 Media3 引擎一致）
-        isFocusable = false
-        isFocusableInTouchMode = false
+    /** Queue every native-player operation on one worker. Once release starts, queued playback
+     * work is skipped; a callback arriving after shutdown is harmless. */
+    private fun enqueueVlcOp(operation: () -> Unit) {
+        if (released.get()) return
+        try {
+            vlcOps.execute {
+                if (!released.get()) operation()
+            }
+        } catch (_: RejectedExecutionException) {
+            if (!released.get()) OtvLog.w("vlc operation ignored: worker already shut down")
+        }
+    }
+
+    override val renderView: View = object : TextureView(appCtx) {
+        init {
+            // 渲染层不参与焦点（遥控焦点全部留给 Compose 控制层，与 Media3 引擎一致）
+            isFocusable = false
+            isFocusableInTouchMode = false
+        }
+
+        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+            super.onSizeChanged(w, h, oldw, oldh)
+            activeVout?.let { updateVoutWindowSize(it, w, h) }
+        }
+    }
+
+    /** VLC needs the actual surface dimensions in physical pixels; it does not infer them from
+     * TextureView layout params. The initial surface callback and every later relayout both call
+     * this, covering attach-before-measure, density changes, and display-size changes. */
+    private fun updateVoutWindowSize(vout: IVLCVout, widthPx: Int, heightPx: Int) {
+        val size = VlcRenderSize.fromViewSize(widthPx, heightPx) ?: return
+        val packed = size.packed
+        synchronized(voutWindowSizeLock) {
+            if (activeVout !== vout) return
+            if (lastSizedVout === vout && lastVoutWindowSize == packed) return
+            lastSizedVout = vout
+            lastVoutWindowSize = packed
+        }
+        enqueueVlcOp {
+            if (activeVout === vout && voutAttached) {
+                runCatching { vout.setWindowSize(size.widthPx, size.heightPx) }
+                    .onFailure {
+                        synchronized(voutWindowSizeLock) {
+                            if (lastSizedVout === vout && lastVoutWindowSize == packed) {
+                                lastSizedVout = null
+                                lastVoutWindowSize = 0L
+                            }
+                        }
+                        OtvLog.w("vlc setWindowSize failed: ${it.message}")
+                    }
+            }
+        }
+    }
+
+    private fun clearVoutWindowSize(vout: IVLCVout? = null) {
+        synchronized(voutWindowSizeLock) {
+            if (vout == null || lastSizedVout === vout) {
+                lastSizedVout = null
+                lastVoutWindowSize = 0L
+            }
+        }
     }
 
     override fun setLargeBufferPreferred(on: Boolean) {
+        if (released.get()) return
         if (largeBuffer == on) return
         largeBuffer = on
         // LibVLC 参数在实例创建时固定：已建实例则标记重建（下次 prepare 生效）
         if (libvlc != null) {
-            vlcOps.execute {
-                runCatching {
-                    player?.let { p ->
-                        p.setEventListener(null)
-                        p.stop()
-                        runCatching { p.detachViews() }
-                        p.release()
-                    }
-                    libvlc?.release()
+            enqueueVlcOp {
+                val oldVout = activeVout
+                val oldCallback = surfaceCallback
+                if (oldVout != null && oldCallback != null) {
+                    runCatching { oldVout.removeCallback(oldCallback) }
                 }
-                player = null
-                libvlc = null
+                activeVout = null
+                surfaceCallback = null
                 voutAttached = false
+                clearVoutWindowSize()
+                val oldPlayer = player
+                player = null
+                oldPlayer?.let { p ->
+                    runCatching { p.setEventListener(null) }
+                    runCatching { p.stop() }
+                    runCatching { p.detachViews() }
+                    runCatching { p.release() }
+                }
+                val oldLibVlc = libvlc
+                libvlc = null
+                runCatching { oldLibVlc?.release() }
             }
         }
     }
@@ -112,6 +187,7 @@ class VlcEngine(context: Context) : MediaEngine {
     }
 
     private val eventListener = MediaPlayer.EventListener { ev ->
+        if (released.get()) return@EventListener
         when (ev.type) {
             MediaPlayer.Event.Opening -> {
                 _ui.value = _ui.value.copy(state = EnginePlayState.BUFFERING, errorMsg = null)
@@ -154,27 +230,50 @@ class VlcEngine(context: Context) : MediaEngine {
     }
 
     private fun attachVout(p: MediaPlayer) {
+        if (released.get()) return
         if (voutAttached) return
         val vout = p.getVLCVout()
+        activeVout = vout
+        clearVoutWindowSize()
         vout.setVideoView(renderView as TextureView)
-        vout.addCallback(object : IVLCVout.Callback {
-            override fun onSurfacesCreated(vout: IVLCVout) {}
-            override fun onSurfacesDestroyed(vout: IVLCVout) {}
-        })
+        val callback = object : IVLCVout.Callback {
+            override fun onSurfacesCreated(vout: IVLCVout) {
+                if (released.get()) return
+                val view = renderView
+                updateVoutWindowSize(vout, view.width, view.height)
+            }
+
+            override fun onSurfacesDestroyed(vout: IVLCVout) {
+                if (released.get()) return
+                // A recreated surface needs its size sent again even when the view kept the same
+                // layout dimensions.
+                clearVoutWindowSize(vout)
+            }
+        }
+        surfaceCallback = callback
+        vout.addCallback(callback)
         vout.attachViews()
         voutAttached = true
+        val view = renderView
+        updateVoutWindowSize(vout, view.width, view.height)
     }
 
     private fun startTicker() {
+        if (released.get()) return
         ticker?.cancel()
         ticker = scope.launch {
             var beat = 0
-            while (isActive) {
-                player?.let { p ->
-                    val time = p.time.coerceAtLeast(0)
-                    val len = p.length
+            while (isActive && !released.get()) {
+                enqueueVlcOp {
+                    if (released.get()) return@enqueueVlcOp
+                    val p = player ?: return@enqueueVlcOp
+                    val (time, len) = runCatching { p.time to p.length }
+                        .getOrElse {
+                            OtvLog.w("vlc position read failed: ${it.message}")
+                            return@enqueueVlcOp
+                        }
                     _ui.value = _ui.value.copy(
-                        positionMs = time,
+                        positionMs = time.coerceAtLeast(0),
                         durationMs = if (len > 0) len else 0,
                         // VLC 不暴露正向缓冲；直播下恒报健康水位（续签热切换的保护条件）
                         bufferedAheadMs = if (_ui.value.isPlaying) 15_000L else _ui.value.bufferedAheadMs,
@@ -190,24 +289,36 @@ class VlcEngine(context: Context) : MediaEngine {
     }
 
     override fun prepare(request: PrepareRequest) {
+        if (released.get()) return
         currentUrl = request.url
         _ui.value = _ui.value.copy(
             state = EnginePlayState.BUFFERING, positionMs = 0, errorMsg = null,
             firstFrameRendered = false,   // 新媒体：首帧信号复位（首帧看门狗判定基准）
         )
-        vlcOps.execute {
-            runCatching {
+        enqueueVlcOp {
+            try {
                 val p = player ?: createPlayer()
                 p.setEventListener(eventListener)
                 p.stop()
-                p.media = buildMedia(request.url)
+                p.media = buildMedia(VlcRelaySession.playbackUrl(request.url))
                 attachVout(p)
                 // v1.19 断点续播修复：旧版丢弃 request.startMs——Media3 引擎有 seekTo(startMs)
                 // 而 VLC 没有，切 VLC 后点播续播/卡顿原位恢复全部从 0 重播。
                 // play() 前 setTime 在起播前定位（等效 Media3 的 seekTo(startPos)）
                 if (request.startMs > 0) p.time = request.startMs
+                if (released.get()) return@enqueueVlcOp
                 p.play()
-            }.onFailure { OtvLog.e("vlc prepare failed: ${it.message}") }
+            } catch (failure: Throwable) {
+                if (failure is VirtualMachineError || failure is ThreadDeath) throw failure
+                OtvLog.e("vlc prepare failed: ${failure.message}")
+                if (!released.get()) {
+                    _ui.value = _ui.value.copy(
+                        state = EnginePlayState.ERROR,
+                        isPlaying = false,
+                        errorMsg = "VLC_ERROR: 播放初始化失败",
+                    )
+                }
+            }
         }
         startTicker()
     }
@@ -233,44 +344,73 @@ class VlcEngine(context: Context) : MediaEngine {
     }
 
     override fun play() {
-        vlcOps.execute {
-            runCatching { player?.play() }
+        enqueueVlcOp {
+            val p = player ?: return@enqueueVlcOp
+            runCatching { p.play() }
             // 乐观镜像（见 Media3Engine.play）：快速连按时 UI 读镜像不再拿旧值
-            if (player != null) _ui.value = _ui.value.copy(isPlaying = true)
+            _ui.value = _ui.value.copy(isPlaying = true)
         }
     }
 
     override fun pause() {
-        vlcOps.execute {
-            runCatching { player?.pause() }
-            if (player != null) _ui.value = _ui.value.copy(isPlaying = false)
+        enqueueVlcOp {
+            val p = player ?: return@enqueueVlcOp
+            runCatching { p.pause() }
+            _ui.value = _ui.value.copy(isPlaying = false)
         }
     }
 
     override fun seekTo(ms: Long) {
-        vlcOps.execute { runCatching { player?.setTime(ms.coerceAtLeast(0)) } }
+        enqueueVlcOp { runCatching { player?.setTime(ms.coerceAtLeast(0)) } }
     }
 
     override fun setSpeed(v: Float) {
-        vlcOps.execute { runCatching { player?.setRate(v) } }
-        _ui.value = _ui.value.copy(speed = v)
+        if (released.get()) return
+        enqueueVlcOp {
+            runCatching { player?.setRate(v) }
+            _ui.value = _ui.value.copy(speed = v)
+        }
     }
 
     override fun release() {
+        if (!released.compareAndSet(false, true)) return
+        currentUrl = null
+        ticker?.cancel()
+        ticker = null
         scope.cancel()
-        vlcOps.execute {
-            runCatching {
-                player?.let { p ->
-                    p.setEventListener(null)
-                    p.stop()
-                    p.detachViews()
+        try {
+            // This is the final task in the serial queue. It runs after any JNI operation already
+            // in progress, then closes the per-engine worker so rebuilds do not leak a thread.
+            vlcOps.execute {
+                try {
+                    val oldVout = activeVout
+                    val oldCallback = surfaceCallback
+                    if (oldVout != null && oldCallback != null) {
+                        runCatching { oldVout.removeCallback(oldCallback) }
+                    }
+                    surfaceCallback = null
+                    activeVout = null
                     voutAttached = false
-                    p.release()
+                    clearVoutWindowSize()
+
+                    val oldPlayer = player
+                    player = null
+                    oldPlayer?.let { p ->
+                        runCatching { p.setEventListener(null) }
+                        runCatching { p.stop() }
+                        runCatching { p.detachViews() }
+                        runCatching { p.release() }
+                    }
+                    val oldLibVlc = libvlc
+                    libvlc = null
+                    runCatching { oldLibVlc?.release() }
+                } finally {
+                    vlcOps.shutdown()
                 }
-                player = null
-                libvlc?.release()
-                libvlc = null
             }
+        } catch (_: RejectedExecutionException) {
+            // The release task can only be rejected if the executor was already shut down.
+            vlcOps.shutdown()
         }
     }
 }

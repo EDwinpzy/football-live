@@ -163,25 +163,32 @@ fun SearchScreen(nav: NavController) {
     //   ② 纯字母不自动搜（逐键前缀必然触发限流）——输入法「搜索」键显式搜。
     var explicitSearch by remember { mutableIntStateOf(0) }
     val searchable = remember(query) { query.trim() }
-    var remote by remember { mutableStateOf<List<VodItem>>(emptyList()) }
+    var remote by remember(searchable) { mutableStateOf<List<VodItem>>(emptyList()) }
     var remoteLoading by remember { mutableStateOf(false) }
-    var lastSearched by remember { mutableStateOf("") }
+    var lastSearched by remember(searchable) { mutableStateOf("") }
     LaunchedEffect(searchable, explicitSearch) {
         if (searchable.isEmpty()) {
             remote = emptyList(); remoteLoading = false
             lastSearched = ""   // 清空后重输同一词也要重搜
             return@LaunchedEffect
         }
-        if (explicitSearch == 0 && searchable == lastSearched) return@LaunchedEffect
-        delay(450)
-        if (!isActive) return@LaunchedEffect
-        lastSearched = searchable
-        remoteLoading = true
-        remote = Graph.live.searchRemote(searchable)
         remoteLoading = false
+        if (explicitSearch == 0 && searchable == lastSearched) return@LaunchedEffect
+        delay(250)
+        if (!isActive) return@LaunchedEffect
+        remoteLoading = true
+        try {
+            val found = Graph.live.searchRemote(searchable)
+            if (isActive) {
+                remote = found
+                lastSearched = searchable
+            }
+        } finally {
+            if (isActive) remoteLoading = false
+        }
     }
     // 版本化 SQLite 搜索在 Repository 的 IO dispatcher 执行；种子目录回退扫描在 Default 执行。
-    var localHits by remember { mutableStateOf<List<VodItem>>(emptyList()) }
+    var localHits by remember(query) { mutableStateOf<List<VodItem>>(emptyList()) }
     LaunchedEffect(query) {
         localHits = if (query.isBlank()) emptyList()
         else Graph.repo.search(query)
@@ -208,6 +215,10 @@ fun SearchScreen(nav: NavController) {
 
     // 顶栏下潜：结果区离开绝对顶部即隐藏、回顶显示
     val resultsGridState = rememberLazyGridState()
+    LaunchedEffect(query) {
+        selectedCat = "全部"
+        resultsGridState.scrollToItem(0)
+    }
     val chromeGone by remember(resultsGridState) {
         derivedStateOf {
             isScrolledFromTop(

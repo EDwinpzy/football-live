@@ -209,7 +209,7 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
         // 长按左/右任一侧=3.0x 快进播放（2026-09-21，松手回用户倍速）。
         // 必须是视频层的【兄弟节点且靠后组合】——Compose 命中测试取最前的手势分支，
         // AndroidView（Media3 PlayerView）会拦截祖先链路上的事件，兄弟置顶才收得到
-        if (ui.fatalMsg == null) {
+        if (ui.fatalMsg == null || ui.isLive) {
             // 滑动快进/亮度音量 手势反馈浮层数据
             var seekPreviewMs by remember { mutableStateOf<Long?>(null) }
             var seekDir by remember { mutableStateOf(1) }                // +1 快进 / -1 快退（决定箭头朝向）
@@ -352,7 +352,13 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
 
         if (ui.isLive) {
             // ---- 足球直播（需求 足球#14）：无任何菜单、无比分板；唯一控件=信号源选择条 ----
-            LiveSourcePicker(ui, vm, Modifier.align(Alignment.BottomCenter), onTick = { tick++ })
+            LiveSourcePicker(
+                ui = ui,
+                onSelectLine = vm::switchLine,
+                onRetry = vm::retry,
+                modifier = Modifier.align(Alignment.BottomCenter),
+                onTick = { tick++ },
+            )
         } else {
             // ---- 影视：tvOS 播放器（需求 影视#3，视觉 TV 版 1:1）----
             VodPlayerOverlay(
@@ -385,7 +391,7 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
 
     // 错误兜底占据全屏可用区域；竖屏若留在顶部 16:9 视频 Box 内，按钮会被压到
     // 只剩背景。错误内容自身可滚动，因此短横屏也能到达重试/返回/线路操作。
-    ui.fatalMsg?.let { msg ->
+    ui.fatalMsg?.takeIf { !ui.isLive }?.let { msg ->
         ErrorWidget(
             message = msg,
             onRetry = { vm.retry() },
@@ -683,9 +689,10 @@ private fun FullscreenGlyph(color: Color, size: Dp) {
  * 单击画面呼出 → 点 chip 即时换线；BACK 或 5s 无操作隐藏。默认源 = bb。
  */
 @Composable
-private fun LiveSourcePicker(
+internal fun LiveSourcePicker(
     ui: PlayerUiState,
-    vm: PlayerViewModel,
+    onSelectLine: (Int) -> Unit,
+    onRetry: () -> Unit,
     modifier: Modifier,
     onTick: () -> Unit,
 ) {
@@ -694,15 +701,54 @@ private fun LiveSourcePicker(
     val portrait = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
         android.content.res.Configuration.ORIENTATION_PORTRAIT
     val activity = LocalContext.current as? Activity
-    if (!ui.srcPickerVisible) return
+    // A live failure is shown inline with the source controls. Keep the route picker open
+    // while failed so switching sources never requires dismissing a blocking error dialog.
+    if (!ui.srcPickerVisible && ui.fatalMsg == null) return
 
     Column(
         modifier
+            .then(if (ui.fatalMsg != null) Modifier.fillMaxWidth(0.94f) else Modifier)
             .padding(bottom = 56f.sx(ps))
             .background(Color(0xB3111114), RoundedCornerShape(20f.sx(ps)))
             .padding(horizontal = 26f.sx(ps), vertical = 20f.sx(ps)),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        ui.fatalMsg?.let { message ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 14f.sx(ps)),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16f.sx(ps)),
+            ) {
+                Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+                    Text(
+                        "无法播放",
+                        color = Color.White,
+                        fontSize = 19f.sxs(ps),
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.testTag("live-playback-error-title"),
+                    )
+                    Text(
+                        message,
+                        color = Color(0xFFB9C0CC),
+                        fontSize = 15f.sxs(ps),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag("live-playback-error-message"),
+                    )
+                }
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10f.sx(ps)))
+                        .tapCard { onRetry(); onTick() }
+                        .background(AccentBlue, RoundedCornerShape(10f.sx(ps)))
+                        .padding(horizontal = 16f.sx(ps), vertical = 10f.sx(ps))
+                        .testTag("live-playback-retry"),
+                ) {
+                    Text("重新检测", color = Color.White, fontSize = 16f.sxs(ps))
+                }
+            }
+        }
         Text(
             "信号源",
             color = Color(0x99FFFFFF), fontSize = 20f.sxs(ps),
@@ -715,12 +761,13 @@ private fun LiveSourcePicker(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
                         .clip(RoundedCornerShape(12f.sx(ps)))
-                        .tapCard { vm.switchLine(idx); onTick() }
+                        .tapCard { onSelectLine(idx); onTick() }
                         .background(
                             if (active) Color(0x59FFFFFF) else Color(0x24FFFFFF),
                             RoundedCornerShape(12f.sx(ps)),
                         )
-                        .padding(horizontal = 24f.sx(ps), vertical = 12f.sx(ps)),
+                        .padding(horizontal = 24f.sx(ps), vertical = 12f.sx(ps))
+                        .testTag("live-source-$idx"),
                 ) {
                     Text(
                         line.label,

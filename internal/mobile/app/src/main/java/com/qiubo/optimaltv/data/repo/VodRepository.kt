@@ -16,6 +16,8 @@ import com.qiubo.optimaltv.data.source.HhkanSource
 import com.qiubo.optimaltv.data.source.ResolverRanking
 import com.qiubo.optimaltv.data.source.SourceResolveResult
 import com.qiubo.optimaltv.data.source.VodApiSource
+import com.qiubo.optimaltv.data.source.StalePlayReferenceRecoveryPolicy
+import com.qiubo.optimaltv.data.source.VodPlayReferenceUnavailableException
 import com.qiubo.optimaltv.data.source.HhkanSource.ChannelSection as HSec
 import com.qiubo.optimaltv.data.source.HhkanSource.Companion.DetailInfo
 import com.qiubo.optimaltv.data.source.SourceSnapshot
@@ -1621,26 +1623,34 @@ class VodRepository(
         } else {
             val parts = line.playRef.split("|")
             if (parts.size != 3) return@withContext ""
+            val douban = line.vodId.startsWith("douban:")
+            var usedRefreshedReference = false
             val fetched = try {
                 runInterruptibleAndCommit(
                     fetch = {
-                        VodApiSource.fetchPlayResult(
-                            base,
-                            okHttp,
-                            parts[0],
-                            parts[1],
-                            parts[2],
-                            fresh = fresh,
-                            sourceLabel = line.label,
-                            previousDetail = playRefDetailSnapshots.get(line.playRef) ?: detailInfoCache[parts[0]],
-                        )
+                        StalePlayReferenceRecoveryPolicy.resolve(
+                            isDouban = douban,
+                            forceRefresh = fresh,
+                        ) { refreshReference ->
+                            if (refreshReference && douban) usedRefreshedReference = true
+                            VodApiSource.fetchPlayResult(
+                                base,
+                                okHttp,
+                                parts[0],
+                                parts[1],
+                                parts[2],
+                                fresh = refreshReference,
+                                sourceLabel = line.label,
+                                previousDetail = playRefDetailSnapshots.get(line.playRef) ?: detailInfoCache[parts[0]],
+                            )
+                        }
                     },
                     commit = { result ->
                         if (result.selectionUnavailable) throw SelectedSourceUnavailableException()
                         val fetchedUrl = result.urls.firstOrNull()?.takeIf(String::isNotBlank)
                         if (fetchedUrl != null) {
                             playCache[line.playRef] = PlayEntry(fetchedUrl, now)
-                            if (fresh && line.vodId.startsWith("douban:")) {
+                            if (usedRefreshedReference) {
                                 refreshedPlayLineIds[line.playRef] = result.lineId
                                 if (refreshedPlayLineIds.size > 400) {
                                     refreshedPlayLineIds.keys.firstOrNull()?.let(refreshedPlayLineIds::remove)
@@ -1653,6 +1663,9 @@ class VodRepository(
                 throw cancelled
             } catch (unavailable: SelectedSourceUnavailableException) {
                 throw unavailable
+            } catch (stale: VodPlayReferenceUnavailableException) {
+                if (usedRefreshedReference) throw SelectedSourceUnavailableException()
+                null
             } catch (_: Exception) {
                 null
             }?.takeIf { it.urls.firstOrNull().orEmpty().isNotBlank() }

@@ -112,15 +112,45 @@ class VodApiSourceHhkanRoutingTest {
         }
     }
 
+    @Test
+    fun `只有明确的400播放线路不可用响应会标记为陈旧引用`() {
+        withJsonServer(
+            """{"error":"播放线路不可用"}""",
+            statusCode = 400,
+        ) { base, requestedPath ->
+            val failure = runCatching {
+                VodApiSource.fetchPlay(base, OkHttpClient(), "douban:721", "old-source:content", "0")
+            }.exceptionOrNull()
+
+            assertEquals("/vod/play/721/old-source%3Acontent/0", requestedPath.get())
+            org.junit.Assert.assertTrue(failure is VodPlayReferenceUnavailableException)
+        }
+    }
+
+    @Test
+    fun `其他HTTP错误不会被标记为陈旧引用`() {
+        withJsonServer(
+            """{"error":"播放线路不可用"}""",
+            statusCode = 500,
+        ) { base, _ ->
+            val failure = runCatching {
+                VodApiSource.fetchPlay(base, OkHttpClient(), "douban:721", "old-source:content", "0")
+            }.exceptionOrNull()
+
+            org.junit.Assert.assertFalse(failure is VodPlayReferenceUnavailableException)
+        }
+    }
+
     private fun withJsonServer(
         responseBody: String,
+        statusCode: Int = 200,
         block: (base: String, requestedPath: AtomicReference<String>) -> Unit,
     ) {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val requestedPath = AtomicReference("")
         val serverThread = thread(isDaemon = true) {
             runCatching {
-                server.accept().use { socket -> serve(socket, responseBody, requestedPath) }
+                server.accept().use { socket -> serve(socket, responseBody, requestedPath, statusCode) }
             }
         }
         try {
@@ -131,7 +161,7 @@ class VodApiSourceHhkanRoutingTest {
         }
     }
 
-    private fun serve(socket: Socket, body: String, requestedPath: AtomicReference<String>) {
+    private fun serve(socket: Socket, body: String, requestedPath: AtomicReference<String>, statusCode: Int) {
         val input = socket.getInputStream().bufferedReader(Charsets.US_ASCII)
         val requestLine = input.readLine().orEmpty()
         requestedPath.set(requestLine.split(' ').getOrNull(1).orEmpty())
@@ -139,7 +169,8 @@ class VodApiSourceHhkanRoutingTest {
 
         val bytes = body.toByteArray(Charsets.UTF_8)
         socket.getOutputStream().apply {
-            write("HTTP/1.1 200 OK\r\n".toByteArray(Charsets.US_ASCII))
+            val statusText = if (statusCode == 200) "OK" else "Bad Request"
+            write("HTTP/1.1 $statusCode $statusText\r\n".toByteArray(Charsets.US_ASCII))
             write("Content-Type: application/json; charset=utf-8\r\n".toByteArray(Charsets.US_ASCII))
             write("Content-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray(Charsets.US_ASCII))
             write(bytes)

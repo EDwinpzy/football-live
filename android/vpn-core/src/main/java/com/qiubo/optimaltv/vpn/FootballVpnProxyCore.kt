@@ -2,6 +2,7 @@ package com.qiubo.optimaltv.vpn
 
 import android.content.Context
 import android.os.SystemClock
+import android.util.Log
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -9,28 +10,105 @@ import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URI
+import java.net.URLEncoder
 import java.net.URL
+import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.security.SecureRandom
+import java.util.concurrent.ExecutorCompletionService
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
+import java.util.concurrent.Callable
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.CancellationException
 
 /** Starts the bundled Mihomo HTTP proxy used only by Android football requests. */
 object FootballVpnProxyCore {
     const val PROXY_URL = "http://127.0.0.1:17890"
 
     private const val LISTEN_PORT = 17890
+    private const val CONTROLLER_PORT = 17891
+    private const val CONTROLLER_URL = "http://127.0.0.1:$CONTROLLER_PORT"
+    private const val PROXY_GROUP_NAME = "FOOTBALL-NODES"
+    private const val DEFAULT_MATCH_PROBE_URL = "https://www.88zhibo.tv/"
     private const val START_TIMEOUT_MS = 25_000L
     private const val MAX_CONFIG_RESPONSE_BYTES = 64 * 1024
+    private const val MAX_CONTROLLER_RESPONSE_BYTES = 4 * 1024 * 1024
     private const val REMOTE_CONNECT_TIMEOUT_MS = 2_000
     private const val REMOTE_READ_TIMEOUT_MS = 2_000
+    private const val CONTROLLER_CONNECT_TIMEOUT_MS = 3_000
+    private const val CONTROLLER_READ_TIMEOUT_MS = 8_000
+    private const val NODE_DELAY_TIMEOUT_MS = 5_000
+    private const val NODE_TEST_PARALLELISM = 12
+    private const val PROVIDER_WAIT_ATTEMPTS = 16
     private const val REMOTE_FAILURE_RETRY_MS = 30_000L
     private const val CONFIG_NAME = "football-mihomo.yaml"
     private const val SUBSCRIPTIONS_NAME = "football-vpn-subscriptions.json"
+    private const val CONTROLLER_SECRET_NAME = "football-mihomo-controller-secret"
+    private const val TAG = "FootballVpnProxy"
+    private const val SELECTION_POLL_MS = 100L
     private val lock = Any()
     private val refreshLock = Any()
+    private val matchSelectionLock = Any()
+    private val matchSelectionExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "football-node-selection").apply { isDaemon = true }
+    }
     @Volatile private var process: Process? = null
     @Volatile private var lastFailedRefreshAtMs = -1L
+    private var matchSelectionFlight: MatchSelectionFlight? = null
+
+    private val GROUP_PROXY_TYPES = setOf(
+        "selector", "urltest", "url-test", "fallback", "loadbalance", "load-balance", "relay",
+    )
+    private val RESERVED_PROXY_TYPES = setOf("direct", "reject", "reject-drop", "compatible", "pass", "dns")
+    private val RESERVED_PROXY_NAMES = setOf(
+        "direct", "reject", "reject-drop", "compatible", "pass", "dns", "global", "block", "block-dns",
+    )
+
+    internal data class NodeLatency(
+        val name: String,
+        val delayMs: Int,
+    )
+
+    private class CancellationSignal {
+        private val lock = Any()
+        private val connections = LinkedHashSet<HttpURLConnection>()
+        @Volatile var cancelled: Boolean = false
+            private set
+
+        fun track(connection: HttpURLConnection): Boolean = synchronized(lock) {
+            if (cancelled) {
+                false
+            } else {
+                connections += connection
+                true
+            }
+        }
+
+        fun untrack(connection: HttpURLConnection) {
+            synchronized(lock) { connections.remove(connection) }
+        }
+
+        fun cancel() {
+            val active = synchronized(lock) {
+                cancelled = true
+                connections.toList().also { connections.clear() }
+            }
+            active.forEach { runCatching { it.disconnect() } }
+        }
+    }
+
+    private class MatchSelectionFlight(
+        val key: String,
+        val signal: CancellationSignal,
+        val task: FutureTask<Boolean>,
+        var waiters: Int = 0,
+    )
 
     internal data class SubscriptionConfig(
         val version: String,
@@ -107,16 +185,452 @@ object FootballVpnProxyCore {
         ensureReadyLocked(context.applicationContext)
     }
 
+    /**
+     * Measures every concrete member of the football group and selects the fastest node that
+     * can reach the requested HTTPS probe. Simultaneous requests for the same match share work.
+     */
+    fun prepareForMatch(
+        context: Context,
+        probeUrl: String = DEFAULT_MATCH_PROBE_URL,
+        selectionKey: String = probeUrl,
+        isCancelled: () -> Boolean = { false },
+    ): Boolean {
+        val normalizedProbeUrl = normalizeProbeUrl(probeUrl) ?: return false
+        val normalizedKey = selectionKey.trim().takeIf { it.isNotEmpty() } ?: normalizedProbeUrl
+        val appContext = context.applicationContext
+
+        val flight = synchronized(matchSelectionLock) {
+            matchSelectionFlight?.takeIf { it.task.isDone }?.let { matchSelectionFlight = null }
+            val running = matchSelectionFlight
+            if (running != null && running.key != normalizedKey) {
+                // A new match supersedes an unfinished probe. Cancel its HTTP calls before
+                // starting another selection so it cannot later change the shared selector.
+                cancelFlightLocked(running)
+                matchSelectionFlight = null
+            }
+            matchSelectionFlight ?: run {
+                val signal = CancellationSignal()
+                val task = FutureTask<Boolean> { selectNodeForMatch(appContext, normalizedProbeUrl, signal) }
+                MatchSelectionFlight(normalizedKey, signal, task).also { created ->
+                    matchSelectionFlight = created
+                    matchSelectionExecutor.execute(task)
+                }
+            }.also { it.waiters++ }
+        }
+
+        try {
+            while (true) {
+                checkSelectionCancelled(isCancelled, flight.signal)
+                try {
+                    return flight.task.get(SELECTION_POLL_MS, TimeUnit.MILLISECONDS)
+                } catch (_: TimeoutException) {
+                    // Poll the caller's coroutine state while the background network probes run.
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw selectionCancelled("football node selection interrupted", interrupted)
+                } catch (cancelled: CancellationException) {
+                    if (isCancelled() || Thread.currentThread().isInterrupted) throw cancelled
+                    return false
+                } catch (failed: ExecutionException) {
+                    if (isCancelled() || Thread.currentThread().isInterrupted) {
+                        throw selectionCancelled("football node selection cancelled", failed)
+                    }
+                    Log.w(TAG, "node selection failed", failed.cause ?: failed)
+                    return false
+                }
+            }
+        } finally {
+            synchronized(matchSelectionLock) {
+                flight.waiters = (flight.waiters - 1).coerceAtLeast(0)
+                if (flight.waiters == 0 && !flight.task.isDone && matchSelectionFlight === flight) {
+                    cancelFlightLocked(flight)
+                    matchSelectionFlight = null
+                } else if (flight.task.isDone && matchSelectionFlight === flight) {
+                    matchSelectionFlight = null
+                }
+            }
+        }
+    }
+
+    private fun cancelFlightLocked(flight: MatchSelectionFlight) {
+        flight.signal.cancel()
+        flight.task.cancel(true)
+    }
+
+    private fun checkSelectionCancelled(isCancelled: () -> Boolean, signal: CancellationSignal) {
+        if (shouldCancelSelection(Thread.currentThread().isInterrupted, isCancelled(), signal.cancelled)) {
+            throw CancellationException("football node selection cancelled")
+        }
+    }
+
+    internal fun shouldCancelSelection(
+        threadInterrupted: Boolean,
+        callerCancelled: Boolean,
+        selectionCancelled: Boolean,
+    ): Boolean = threadInterrupted || callerCancelled || selectionCancelled
+
+    private fun selectionCancelled(message: String, cause: Throwable): CancellationException =
+        CancellationException(message).apply { initCause(cause) }
+
+    private fun selectNodeForMatch(
+        context: Context,
+        probeUrl: String,
+        signal: CancellationSignal,
+    ): Boolean {
+        Log.i(TAG, "node selection started")
+        checkSelectionCancelled({ false }, signal)
+        if (!ensureReady(context)) {
+            Log.w(TAG, "node selection failed: candidates=0 available=0 (proxy unavailable)")
+            return false
+        }
+        checkSelectionCancelled({ false }, signal)
+        val home = File(context.filesDir, "football-vpn")
+        val secret = readControllerSecret(File(home, CONTROLLER_SECRET_NAME))
+        if (secret == null) {
+            Log.w(TAG, "node selection failed: candidates=0 available=0 (controller key unavailable)")
+            return false
+        }
+        var proxyResponse = controllerRequest(secret, "GET", "/proxies", cancellation = signal)
+        var providerResponse = controllerRequest(secret, "GET", "/providers/proxies", cancellation = signal)
+        var candidates = proxyResponse?.let { parseProxyCandidates(it.body, providerResponse?.body) }
+        for (attempt in 0 until PROVIDER_WAIT_ATTEMPTS) {
+            if (!candidates.isNullOrEmpty()) break
+            checkSelectionCancelled({ false }, signal)
+            try {
+                Thread.sleep(500)
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw interrupted
+            }
+            proxyResponse = controllerRequest(secret, "GET", "/proxies", cancellation = signal)
+            providerResponse = controllerRequest(secret, "GET", "/providers/proxies", cancellation = signal)
+            candidates = proxyResponse?.let { parseProxyCandidates(it.body, providerResponse?.body) }
+        }
+        checkSelectionCancelled({ false }, signal)
+        if (candidates == null || candidates.isEmpty()) {
+            Log.w(TAG, "node selection failed: candidates=0 available=0 (no proxy nodes)")
+            return false
+        }
+
+        val workers = Executors.newFixedThreadPool(minOf(NODE_TEST_PARALLELISM, candidates.size))
+        val providersByNode = providerResponse?.let { parseProviderNodes(it.body) }.orEmpty()
+        val completion = ExecutorCompletionService<NodeLatency?>(workers)
+        try {
+            candidates.forEach { node ->
+                completion.submit(Callable {
+                    checkSelectionCancelled({ false }, signal)
+                    val delay = requestNodeDelay(secret, node, probeUrl, signal, providersByNode[node]?.first)
+                    if (delay == null) null else NodeLatency(node, delay)
+                })
+            }
+            val available = ArrayList<NodeLatency>()
+            repeat(candidates.size) {
+                checkSelectionCancelled({ false }, signal)
+                val measured = completion.take().get()
+                if (measured != null && measured.delayMs > 0) available += measured
+            }
+            checkSelectionCancelled({ false }, signal)
+            val fastest = selectLowestLatency(available)
+            Log.i(
+                TAG,
+                "node selection: candidates=${candidates.size} available=${available.size} " +
+                    "selectedDelayMs=${fastest?.delayMs ?: 0}",
+            )
+            if (fastest == null) return false
+
+            checkSelectionCancelled({ false }, signal)
+            val body = JSONObject().put("name", fastest.name).toString()
+            val selected = controllerRequest(
+                secret = secret,
+                method = "PUT",
+                path = "/proxies/${encodePathSegment(PROXY_GROUP_NAME)}",
+                body = body,
+                cancellation = signal,
+            )
+            checkSelectionCancelled({ false }, signal)
+            return (selected?.statusCode ?: 0) in 200..299
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw interrupted
+        } finally {
+            workers.shutdownNow()
+            runCatching { workers.awaitTermination(1, TimeUnit.SECONDS) }
+        }
+    }
+
+    private fun requestNodeDelay(
+        secret: String,
+        node: String,
+        probeUrl: String,
+        signal: CancellationSignal,
+        provider: String?,
+    ): Int? {
+        val query = "url=${encodeQueryParameter(probeUrl)}&timeout=$NODE_DELAY_TIMEOUT_MS&expected=200"
+        val response = controllerRequest(
+            secret = secret,
+            method = "GET",
+            path = nodeDelayPath(node, provider) + "?$query",
+            cancellation = signal,
+        ) ?: return null
+        checkSelectionCancelled({ false }, signal)
+        if (response.statusCode !in 200..299) return null
+        return parseDelayResponse(response.body)
+    }
+
+    private data class ControllerResponse(
+        val statusCode: Int,
+        val body: String,
+    )
+
+    private fun controllerRequest(
+        secret: String,
+        method: String,
+        path: String,
+        body: String? = null,
+        cancellation: CancellationSignal? = null,
+    ): ControllerResponse? {
+        var connection: HttpURLConnection? = null
+        return try {
+            if (cancellation?.cancelled == true || Thread.currentThread().isInterrupted) return null
+            connection = URL(CONTROLLER_URL + path).openConnection() as? HttpURLConnection ?: return null
+            if (cancellation?.track(connection) == false) return null
+            connection.requestMethod = method
+            connection.connectTimeout = CONTROLLER_CONNECT_TIMEOUT_MS
+            connection.readTimeout = CONTROLLER_READ_TIMEOUT_MS
+            connection.setRequestProperty("Authorization", "Bearer $secret")
+            connection.setRequestProperty("Accept", "application/json")
+            if (body != null) {
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                connection.outputStream.use { it.write(body.toByteArray(StandardCharsets.UTF_8)) }
+            }
+            val status = connection.responseCode
+            if (status !in 200..299) return null
+            val responseBody = if (method == "GET") {
+                connection.inputStream.use { input ->
+                    val output = java.io.ByteArrayOutputStream()
+                    val buffer = ByteArray(8192)
+                    var total = 0
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        total += count
+                        if (total > MAX_CONTROLLER_RESPONSE_BYTES) return null
+                        output.write(buffer, 0, count)
+                    }
+                    output.toString("UTF-8")
+                }
+            } else {
+                ""
+            }
+            ControllerResponse(status, responseBody)
+        } catch (_: Exception) {
+            null
+        } finally {
+            connection?.let { cancellation?.untrack(it) }
+            connection?.disconnect()
+        }
+    }
+
+    internal fun parseProviderNodes(json: String): Map<String, Pair<String, String>> = runCatching {
+        val providers = JSONObject(json).optJSONObject("providers") ?: return@runCatching emptyMap()
+        val result = LinkedHashMap<String, Pair<String, String>>()
+        val names = providers.keys()
+        while (names.hasNext()) {
+            val provider = names.next()
+            val nodes = providers.optJSONObject(provider)?.optJSONArray("proxies") ?: continue
+            for (index in 0 until nodes.length()) {
+                val node = nodes.optJSONObject(index) ?: continue
+                val name = node.optString("name").trim()
+                val type = node.optString("type").trim().lowercase()
+                if (name.isNotEmpty() && !result.containsKey(name)) result[name] = provider to type
+            }
+        }
+        result.toMap()
+    }.getOrDefault(emptyMap())
+
+    internal fun nodeDelayPath(node: String, provider: String?): String =
+        if (provider.isNullOrBlank()) "/proxies/${encodePathSegment(node)}/delay"
+        else "/providers/proxies/${encodePathSegment(provider)}/${encodePathSegment(node)}/healthcheck"
+
+    internal fun parseProxyCandidates(json: String, providersJson: String? = null): List<String>? {
+        return try {
+            val proxies = JSONObject(json).optJSONObject("proxies") ?: return null
+            val group = proxies.optJSONObject(PROXY_GROUP_NAME) ?: return null
+            val members = group.optJSONArray("all") ?: return null
+            val providerNodes = providersJson?.let { parseProviderNodes(it) }.orEmpty()
+            val candidates = LinkedHashSet<String>()
+            for (index in 0 until members.length()) {
+                val name = members.optString(index).trim()
+                if (name.isEmpty() || isReservedProxyName(name)) continue
+                val proxy = proxies.optJSONObject(name)
+                val type = proxy?.optString("type")?.trim()?.lowercase() ?: providerNodes[name]?.second ?: continue
+                if (type.isEmpty() || type in GROUP_PROXY_TYPES || type in RESERVED_PROXY_TYPES) continue
+                candidates += name
+            }
+            candidates.toList()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    internal fun parseDelayResponse(json: String): Int? {
+        return try {
+            val delay = JSONObject(json).opt("delay") as? Number ?: return null
+            delay.toInt().takeIf { it in 1..65_535 }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    internal fun selectLowestLatency(nodes: Collection<NodeLatency>): NodeLatency? =
+        nodes.asSequence().filter { it.delayMs > 0 }.minByOrNull { it.delayMs }
+
+    internal fun normalizeProbeUrl(value: String): String? {
+        if (value.isBlank() || value.length > 4096 || value.any { it.isISOControl() || it.isWhitespace() }) return null
+        return try {
+            val uri = URI(value)
+            if (!uri.scheme.equals("https", ignoreCase = true) || uri.host.isNullOrBlank()) return null
+            if (uri.rawUserInfo != null) return null
+            buildString {
+                append("https://")
+                append(uri.rawAuthority)
+                append(uri.rawPath.ifBlank { "/" })
+                uri.rawQuery?.let { append('?').append(it) }
+            }.takeIf { runCatching { URI(it) }.isSuccess }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun isReservedProxyName(name: String): Boolean = name.trim().lowercase() in RESERVED_PROXY_NAMES
+
+    private fun encodePathSegment(value: String): String =
+        URLEncoder.encode(value, StandardCharsets.UTF_8.name()).replace("+", "%20")
+
+    private fun encodeQueryParameter(value: String): String =
+        URLEncoder.encode(value, StandardCharsets.UTF_8.name())
+
+    private fun isControllerListening(): Boolean = try {
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress("127.0.0.1", CONTROLLER_PORT), 250)
+        }
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    internal fun prepareRuntimeConfig(yaml: String, secret: String): String? {
+        if (!secret.matches(Regex("[0-9a-f]{64}"))) return null
+        val migrated = migrateFootballGroupToSelector(yaml) ?: return null
+        val lines = migrated.split('\n').toMutableList()
+        setTopLevelSetting(lines, "external-controller", "127.0.0.1:$CONTROLLER_PORT")
+        setTopLevelSetting(lines, "secret", "\"$secret\"")
+        return lines.joinToString("\n")
+    }
+
+    private fun migrateFootballGroupToSelector(yaml: String): String? {
+        val output = ArrayList<String>()
+        var inGroups = false
+        var inFootballGroup = false
+        var groupFound = false
+        var typeFound = false
+        val groupName = Regex("^  - name:\\s*(?:\"([^\"]+)\"|'([^']+)'|([^#\\s]+))\\s*(?:#.*)?$")
+        val typeLine = Regex("^    type:\\s*.*$")
+        val removeSelectorUnsupported = Regex(
+            "^    (?:url|interval|timeout|expected-status|tolerance|lazy|max-failed-times|empty-fallback|strategy):\\s*.*$",
+        )
+
+        for (rawLine in yaml.split('\n')) {
+            val line = rawLine.removeSuffix("\r")
+            if (line == "proxy-groups:") {
+                inGroups = true
+                inFootballGroup = false
+                output += rawLine
+                continue
+            }
+            if (inGroups && line.isNotBlank() && !line.startsWith(" ")) {
+                inGroups = false
+                inFootballGroup = false
+            }
+            if (inGroups && line.startsWith("  - ")) {
+                val match = groupName.matchEntire(line)
+                val name = match?.groupValues?.drop(1)?.firstOrNull { it.isNotEmpty() }
+                inFootballGroup = name == PROXY_GROUP_NAME
+                if (inFootballGroup) groupFound = true
+                output += rawLine
+                continue
+            }
+            if (!inFootballGroup) {
+                output += rawLine
+                continue
+            }
+            if (typeLine.matches(line)) {
+                output += "    type: select"
+                typeFound = true
+                continue
+            }
+            if (removeSelectorUnsupported.matches(line)) continue
+            output += rawLine
+        }
+        if (!groupFound || !typeFound) return null
+        return output.joinToString("\n")
+    }
+
+    private fun setTopLevelSetting(lines: MutableList<String>, key: String, value: String) {
+        val setting = Regex("^${Regex.escape(key)}:\\s*.*$")
+        var replaced = false
+        for (index in lines.indices) {
+            val line = lines[index].removeSuffix("\r")
+            if (!setting.matches(line)) continue
+            if (!replaced) {
+                lines[index] = "$key: $value"
+                replaced = true
+            } else {
+                lines[index] = ""
+            }
+        }
+        if (!replaced) lines.add(0, "$key: $value")
+    }
+
+    private fun getOrCreateControllerSecret(home: File): String? {
+        val file = File(home, CONTROLLER_SECRET_NAME)
+        readControllerSecret(file)?.let { return it }
+        val random = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        val secret = random.joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        return secret.takeIf { writeAtomically(file, it) }
+    }
+
+    private fun readControllerSecret(file: File): String? {
+        return try {
+            if (!file.isFile || file.length() > 128) return null
+            file.readText(Charsets.UTF_8).trim().takeIf { it.matches(Regex("[0-9a-f]{64}")) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun ensureReadyLocked(context: Context): Boolean {
-        if (isListening()) return true
+        val home = File(context.filesDir, "football-vpn").apply { mkdirs() }
+        if (!ensureConfigFileLocked(context, home)) return false
+
+        val controllerSecret = readControllerSecret(File(home, CONTROLLER_SECRET_NAME))
+        if (isListening() && isControllerListening() && controllerSecret != null &&
+            controllerRequest(controllerSecret, "GET", "/version") != null
+        ) return true
+        if (isListening()) {
+            // A cached configuration from an older app may have only the HTTP proxy listener.
+            // Restart a process owned by this instance so it picks up the new loopback controller.
+            val running = process?.takeIf { it.isAlive } ?: return false
+            stopProcessLocked()
+            if (running.isAlive) return false
+        }
         process?.takeIf { it.isAlive }?.let { running ->
             if (waitForListener(running)) return true
             running.destroyForcibly()
             process = null
+            if (Thread.currentThread().isInterrupted) return false
         }
-
-        val home = File(context.filesDir, "football-vpn").apply { mkdirs() }
-        if (!ensureConfigFileLocked(context, home)) return false
 
         // Android 14 blocks executing newly written files from app data. Gradle
         // packages one immutable executable per ABI under lib/ via jniLibs.
@@ -145,22 +659,24 @@ object FootballVpnProxyCore {
             start()
         }
         process = child
-        return waitForListener(child)
+        if (waitForListener(child)) return true
+        child.destroyForcibly()
+        if (process === child) process = null
+        return false
     }
 
     private fun ensureConfigFileLocked(context: Context, home: File): Boolean {
         val configFile = File(home, CONFIG_NAME)
         val cached = readSubscriptionConfig(File(home, SUBSCRIPTIONS_NAME))
         val current = readValidLocalConfig(configFile)
-        if (current != null) {
-            if (cached == null || extractSubscriptionUrls(current) == cached.subscriptions) return true
-            val refreshed = replaceSubscriptionUrls(current, cached.subscriptions) ?: return false
-            return writeAtomically(configFile, refreshed)
+        var base = current ?: readBundledConfig(context) ?: return false
+        if (cached != null && extractSubscriptionUrls(base) != cached.subscriptions) {
+            base = replaceSubscriptionUrls(base, cached.subscriptions) ?: return false
         }
-
-        val bundled = readBundledConfig(context) ?: return false
-        val initial = if (cached == null) bundled else replaceSubscriptionUrls(bundled, cached.subscriptions) ?: return false
-        return writeAtomically(configFile, initial)
+        val secret = getOrCreateControllerSecret(home) ?: return false
+        val runtimeConfig = prepareRuntimeConfig(base, secret) ?: return false
+        if (current == runtimeConfig) return true
+        return writeAtomically(configFile, runtimeConfig)
     }
 
     private fun fetchRemoteConfig(endpoint: String): SubscriptionConfig? {
@@ -385,11 +901,12 @@ object FootballVpnProxyCore {
     private fun waitForListener(child: Process): Boolean {
         val deadline = SystemClock.elapsedRealtime() + START_TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
+            if (Thread.currentThread().isInterrupted) return false
             if (!child.isAlive) return false
-            if (isListening()) return true
+            if (isListening() && isControllerListening()) return true
             SystemClock.sleep(100)
         }
-        return isListening()
+        return isListening() && isControllerListening()
     }
 
     private fun isListening(): Boolean = try {
