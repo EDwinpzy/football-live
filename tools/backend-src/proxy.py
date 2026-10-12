@@ -5800,19 +5800,56 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 # ---------------- 网页版电视频道表（/api/iptv，2026-09-04 v1.21） ----------------
-# 与 app IptvRepository.SOURCES 同源：线上主后端托管 latest（2026-09-17 起为 CloudBase
-# appletv-d5ge1bth794873f76，自建站点对象存储已退役）优先，上游每日校验列表殿后。
+# 与 app IptvRepository.SOURCES 同源：站点托管 latest（自建栈由 compose 注入
+# OTV_IPTV_LATEST_URL=http://business-api:8082/iptv/latest）优先，上游 m3u 殿后。
 # 服务端出站无跨源限制，客户端拿到即可播（线路经 /api/relay）。
+#
+# 上游清单 2026-10-12 两轮实测重排（`artifacts/可用源清单-2026-10-12.md` 第一轮 +
+# https://github.com/ngo5/IPTV 清单第二轮），只留返回 200 且正文是合法 m3u 的地址。
+# 旧清单里的 gh-proxy 加速前缀已全部移除：同一 URL 前后两次结果可能不同（200 ↔ 404），
+# 且磐石云 VPS 无境外出口，加速前缀在这台机器上本来也不通。
+# 第二轮被剔除的（实测不合格，别再加回来）：tv.iill.top/m3u/Gather（返回 HTML 首页）、
+# live.zbds.org 两条（000）、live.fanmingming.cn（000）、82.156.243.185:54321（000）、
+# joevess/IPTV（正文只有 8 字节 `#EXTM3U`）、Ftindy/IPTV-URL（404）、aktv.space（302 到 HTML）。
+# 纯 IPv6 清单（Guovin ipv6 / myIPTV ipv6 / m3u.ibert.me / ngo5 ipv6Plus）一律不收：
+# 本列表是「按序回退」，命中即停，垫一条基本放不出来的清单只会让兜底结果更差。
 _IPTV_LOCAL_ENDPOINT = os.environ.get("OTV_IPTV_LATEST_URL", "").strip()
 IPTV_SOURCES = [
     _IPTV_LOCAL_ENDPOINT or "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/iptv/latest",
-    "https://gh-proxy.com/raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
-    "https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",
+    "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",
+    "https://raw.githubusercontent.com/suxuang/myIPTV/refs/heads/main/ipv4.m3u",
+    "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/ipv4/result.m3u",
+    "https://raw.githubusercontent.com/Kimentanm/aptv/master/m3u/iptv.m3u",
+    "https://raw.githubusercontent.com/YueChan/Live/refs/heads/main/IPTV.m3u",
+    "https://raw.githubusercontent.com/hujingguang/ChinaIPTV/main/cnTV_AutoUpdate.m3u8",
+    "https://raw.githubusercontent.com/mytv-android/China-TV-Live-M3U8/main/iptv.m3u",
+    "https://raw.githubusercontent.com/ngo5/IPTV/main/m3u/ipv4.m3u",
+    "https://raw.githubusercontent.com/BurningC4/Chinese-IPTV/master/TV-IPV4.m3u",
+    "https://raw.githubusercontent.com/zwc456baby/iptv_alive/refs/heads/master/live.m3u",
+    "https://raw.githubusercontent.com/kimwang1978/collect-tv-txt/main/bbxx_lite.m3u",
 ]
 IPTV_GROUP_ORDER = ["央视", "卫视", "体育", "地方", "数字付费", "港澳台", "美国/英国"]
 _iptv_cache = {"ts": 0.0, "data": None, "lock": threading.Lock()}
 _IPTV_TTL = 10 * 60
 _IPTV_MAX_LINES = 8   # 单频道线路上限（与 app MAX_LINES_PER_CHANNEL 一致）
+"""兜底链总预算（2026-10-12）：上游从 2 条涨到 11 条，逐条 15s 超时意味着最坏
+12×15=180s 才返回空表——首个请求会被客户端读超时掐死。改成整链共享一个 25s 硬顶，
+单条超时取「剩余预算」与 15s 的较小值；预算耗尽立即返回已有结果（None）。
+正常路径（站点托管 latest 命中）仍是一次请求，行为不变。"""
+IPTV_FETCH_TOTAL_BUDGET = 25.0
+
+"""代理 fake-IP 承载段（与 vod_sources.PROXY_FAKE_IP_RANGES 同口径）。"""
+_PROXY_FAKE_IP_RANGES = ("198.18.0.0/15",)
+
+
+def _in_proxy_fake_ip(address):
+    """地址是否落在本机代理的 fake-IP 段（Clash / Surge / sing-box 默认映射段）。"""
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(str(address))
+    except ValueError:
+        return False
+    return any(ip in ipaddress.ip_network(net) for net in _PROXY_FAKE_IP_RANGES)
 
 
 def _iptv_fetch_m3u(timeout=15.0):
@@ -5833,18 +5870,30 @@ def _iptv_fetch_m3u(timeout=15.0):
         if cached is not None and now - cached[0] < 60:
             return cached[1]
         ok = True
+        addresses = []
         try:
             for info in socket.getaddrinfo(host, None):
-                ip = ipaddress.ip_address(info[4][0])
+                addresses.append(info[4][0])
+            for address in addresses:
+                ip = ipaddress.ip_address(address)
                 if (ip.is_private or ip.is_loopback or ip.is_link_local or
                         ip.is_reserved or ip.is_multicast or ip.is_unspecified):
                     ok = False
                     break
+            # 代理 fake-IP 承载段（与 vod_sources.PROXY_FAKE_IP_RANGES 同口径）：
+            # Clash / Surge / sing-box 默认把域名映射到 198.18.0.0/15，真实连接由本机
+            # 代理完成。国内用户装这类代理是常态，若把这段当「内网」拦掉，整条兜底链
+            # 会被静默跳过（表现为「全部源不可达」）。全部命中才放行，混入其它非公网
+            # 地址仍按内网拦截。
+            if not ok and addresses and all(
+                    _in_proxy_fake_ip(address) for address in addresses):
+                ok = True
         except Exception:
             ok = False
         _dns_public_cache[host] = (now, ok)
         return ok
 
+    deadline = time.monotonic() + max(1.0, float(IPTV_FETCH_TOTAL_BUDGET))
     for u in IPTV_SOURCES:
         pr = urlparse(u)
         host = (pr.hostname or "").lower()
@@ -5857,9 +5906,13 @@ def _iptv_fetch_m3u(timeout=15.0):
         if host not in allowed_hosts or (
                 not trusted_local and (pr.scheme != "https" or not _host_public(host))):
             continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.2:
+            # 整链预算耗尽：返回空表（调用方会降级到旧缓存），不再让下一个源接着等。
+            break
         try:
             req = urlreq.Request(u, headers={"User-Agent": UA})
-            with urlreq.urlopen(req, timeout=timeout) as r:
+            with urlreq.urlopen(req, timeout=min(float(timeout), remaining)) as r:
                 raw = r.read(24 * 1024 * 1024).decode("utf-8", "replace")
             if "#EXTM3U" in raw:
                 return raw, u
@@ -5927,24 +5980,21 @@ def build_iptv_channels():
 # 不得进入 /hhkan/home|channel|latest|search|show|channel-sections 的卡片响应。
 #
 # 2026-09-08 需求⑮「增加影视源，自动切换速度最快清晰度最高最稳定的源」：
-# - 2026-09-09 按 tools/out/vodsource_probe/影视源推荐清单_MCMS_SITES.md 替换补线池；
-#   移除已劣化的 fdzys，接入 8 个 T1 站。站点按 API 实测响应速度排序，失败自动降权。
+# - 2026-10-12 按 artifacts/可用源清单-2026-10-12.md 重置补线池：只保留实测可用的
+#   非凡资源（cj.ffzyapi.com，苹果 CMS 标准 provide/vod，?ac=detail&wd= 可搜索，
+#   直链组 ffm3u8 能出 index.m3u8）。原 8 个 T1 站（暴风/极速/金鹰/虎牙/豪华/
+#   红牛/速播/360）按同一份清单不再采用；其中暴风采集在清单里明确标 ❌。
+#   注意：牛牛视频虽然 ?ac=list 可达，但服务端对 wd 关键词搜索返回「暂不支持搜索」，
+#   本项目所有取源路径都先按标题搜，所以它不能进补线池。
 # - 线路级「清晰度」：线路名提示（1080/蓝光/超清…）+ 真实探测（取该线第 1 集 master
 #   m3u8 读 RESOLUTION，并行 2.5s 超时，URL 级 10min 缓存）→ 线路排序清晰度优先。
 # - hhkan 详情【跨站补线】：detail 响应追加 mcms 池同名影片线路（pid≥100 命名空间），
 #   三端 UI 零改动看到更多线路；高清晰度（≥720p 实测）线路排到 hhkan 线路之前 = 自动选最优。
 # - 同批修复 mcms_play 忽略集数参数的存量 bug（此前恒返回整组 episodes，
 #   前端取 sources[0] 会永远播第 1 集）。
-# T2、成人内容站、HTTP-only/失效站以及历史浏览器型站点均不注册。
+# 只注册 https + 可关键词搜索 + 实测可用的站点（HTTP-only/失效站一律不进）。
 MCMS_SITES = [
-    {"name": "bfzy", "api": "https://bfzyapi.com/api.php/provide/vod/"},
-    {"name": "jszy", "api": "https://jszyapi.com/api.php/provide/vod/"},
-    {"name": "jinying", "api": "https://jyzyapi.com/provide/vod/from/jinyingm3u8/"},
-    {"name": "huya", "api": "https://www.huyaapi.com/api.php/provide/vod/"},
-    {"name": "hhzy", "api": "https://hhzyapi.com/api.php/provide/vod/"},
-    {"name": "hongniu", "api": "https://www.hongniuzy2.com/api.php/provide/vod/"},
-    {"name": "subo", "api": "https://subocaiji.com/api.php/provide/vod/"},
-    {"name": "360zy", "api": "https://360zy.com/api.php/provide/vod/"},
+    {"name": "feifan", "api": "https://cj.ffzyapi.com/api.php/provide/vod/"},
 ]
 MCMS_API = MCMS_SITES[0]["api"]  # 兼容旧引用（域名白名单兜底）
 MCMS_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -5953,16 +6003,14 @@ MCMS_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 _mcms_site_cache = {"ts": 0.0, "order": list(range(len(MCMS_SITES))), "healthy": {}}
 _mcms_pool_lock = threading.Lock()
 # 各站分类树不同；映射仅供内部诊断/强制模式使用，正式目录始终来自好好看。
+# feifan（cj.ffzyapi.com）叶子取自其 ?ac=list 的 class 数组：1 电影片 / 2 连续剧 /
+# 3 综艺片 / 4 动漫片 为四个一级分类，下面挂二级叶子。
 MCMS_CHANNELS = {1: "电影", 2: "电视剧", 3: "动漫", 4: "综艺"}
 MCMS_LEAVES_BY_SITE = {
-    "bfzy":    {1: [20, 21, 22, 23, 24, 25, 26, 27, 28], 2: [30, 31, 32, 33, 34, 35, 36, 37, 38], 3: [40, 41, 42, 43, 44], 4: [45]},
-    "jszy":    {1: [9, 10, 11, 12, 13, 14, 15, 16], 2: [3, 4, 5, 6, 7, 20, 28], 3: [23, 24, 25, 26], 4: [30, 31, 32, 33]},
-    "jinying": {1: [9, 10, 11, 12, 13, 14, 15, 16], 2: [3, 4, 5, 6, 7, 20, 28], 3: [23, 24, 25, 26], 4: [36, 37, 38, 39]},
-    "huya":    {1: [9, 10, 11, 12, 13, 14, 15, 16], 2: [3, 4, 5, 6, 7, 20, 28], 3: [23, 24, 25, 26], 4: [38, 39, 40, 41]},
-    "hhzy":    {1: [9, 10, 11, 12, 13, 14, 15, 16], 2: [3, 4, 5, 6, 7, 20, 28], 3: [23, 24, 25, 26], 4: [30, 31, 32, 33]},
-    "hongniu": {1: [5, 6, 7, 8, 9, 10, 11, 19], 2: [12, 13, 14, 15, 16, 17, 18], 3: [36, 37, 38], 4: [39, 40, 41, 42]},
-    "subo":    {1: [6, 7, 8, 9, 10, 11, 12], 2: [14, 15, 16, 17, 18, 20, 21], 3: [24, 25, 26], 4: [33, 34, 35, 36]},
-    "360zy":   {1: [5, 6, 7, 8, 9, 10, 11, 12], 2: [13, 14, 15, 16], 3: [38, 39, 40], 4: [34, 35, 36, 37]},
+    "feifan":  {1: [6, 7, 8, 9, 10, 11, 12, 20, 34],
+                2: [13, 14, 15, 16, 21, 22, 23, 24, 36],
+                3: [29, 30, 31, 32, 33],
+                4: [25, 26, 27, 28]},
 }
 _vod_mode_cache = {"ts": 0.0, "mcms": False}
 _VOD_MODE_TTL = 300

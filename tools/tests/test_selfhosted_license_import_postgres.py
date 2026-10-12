@@ -296,6 +296,7 @@ def test_license_import_role_insert_duplicate_read_denials_and_updates():
             "selfhosted/license_importer_role.sql",
             "selfhosted/license_importer_smoke.psql",
             "selfhosted/migrations/license_restore_v1.sql",
+            "selfhosted/migrations/vod_sources_replace_v1.sql",
             "license_v2_migration.sql",
             "license_note_migration.sql",
             "admin_sold_migration.sql",

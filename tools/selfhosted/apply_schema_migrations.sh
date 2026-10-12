@@ -52,6 +52,7 @@ selfhosted/license_importer_role.sql
 selfhosted/license_importer_smoke.psql
 selfhosted/rpc_grants_repair.sql
 selfhosted/migrations/license_restore_v1.sql
+selfhosted/migrations/vod_sources_replace_v1.sql
 license_v2_migration.sql
 license_note_migration.sql
 admin_sold_migration.sql
@@ -149,6 +150,10 @@ migration_hash_license_restore=$(sha256_file "$migration_root/tools/selfhosted/m
     printf '%s\n' "schema migration failed: could not hash license restore SQL" >&2
     exit 1
 }
+migration_hash_vod_sources_replace=$(sha256_file "$migration_root/tools/selfhosted/migrations/vod_sources_replace_v1.sql") || {
+    printf '%s\n' "schema migration failed: could not hash VOD source replacement SQL" >&2
+    exit 1
+}
 migration_hash_admin_sold=$(sha256_file "$migration_root/tools/admin_sold_migration.sql") || {
     printf '%s\n' "schema migration failed: could not hash admin sold SQL" >&2
     exit 1
@@ -197,6 +202,7 @@ run_psql_file() {
         -v "license_v2_sha256=$migration_hash_license_v2" \
         -v "license_note_sha256=$migration_hash_license_note" \
         -v "license_restore_sha256=$migration_hash_license_restore" \
+        -v "vod_sources_replace_sha256=$migration_hash_vod_sources_replace" \
         -v "admin_sold_sha256=$migration_hash_admin_sold" \
 -v "admin_license_action_sha256=$migration_hash_admin_license_action" \
 -v "vod_source_undo_sha256=$migration_hash_vod_source_undo" \

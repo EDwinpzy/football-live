@@ -61,6 +61,13 @@ class SelfHostedDatabaseContractTests(unittest.TestCase):
             "base_schema.sql",
             "license_importer_role.sql",
             "license_importer_smoke.psql",
+            # 自建栈专属迁移走自己的目录，不在 MIGRATION_ORDER 里；它们同样是
+            # 文件级 bind mount，漏挂的后果是 `cp: can't stat ...` + 「required
+            # migration file is unavailable」，整个 schema-migrations 门禁失败。
+            # 2026-10-12 就是这么踩的：只加了 .psql/.sh 的分支，忘了在 compose
+            # 里加挂载行。
+            "migrations/license_restore_v1.sql",
+            "migrations/vod_sources_replace_v1.sql",
             *MIGRATION_ORDER,
         ):
             self.assertIn(migration_file, migration_mounts)
@@ -71,6 +78,26 @@ class SelfHostedDatabaseContractTests(unittest.TestCase):
         self.assertIn("output_file", runner)
         self.assertIn("schema migration failed", runner)
         self.assertNotIn("printf '%s\\n' \"$LICENSE_IMPORTER_PASSWORD\"", runner)
+
+    def test_recorded_migration_hash_gate_fails_loudly(self):
+        """账本摘要闸门必须真的能拦住部署。
+
+        2026-10-12 实测：闸门判出「a recorded migration SQL hash changed」后
+        执行的是 `\\quit 3`，而 psql（PostgreSQL 17）的 `\\quit` 不接受退出码——
+        只打一条 `warning: \\quit: extra argument "3" ignored` 就以 exit 0 退出。
+        结果是 run_psql_file 认为成功、部署打印 [OK]，但**所有 pending 迁移一条
+        都没跑**，新迁移既没执行也没进账本。这里锁住「不许再用 \\quit 带参数」。
+        """
+        psql = (ROOT / "tools" / "selfhosted" / "apply_schema_migrations.psql").read_text(encoding="utf-8")
+        # 只禁「真的把 \\quit 当命令执行」的形态：行首 \\quit 后面还带参数。
+        # 注释里提到 \\quit 3 是允许的（历史说明）。
+        self.assertNotRegex(psql, r"(?m)^\\quit\s+\S", "带参数的 \\quit 会被 psql 忽略参数")
+        self.assertIn(
+            "RAISE EXCEPTION 'schema migration failed: a recorded migration SQL hash changed'",
+            psql,
+        )
+        gate = psql.split("AS migration_hashes_match \\gset", 1)[1].split("\\endif", 1)[0]
+        self.assertIn("RAISE EXCEPTION", gate, "哈希闸门失败分支必须抛异常")
 
     def test_license_import_role_is_reconciled_with_least_privilege_grants(self):
         policy = (ROOT / "tools" / "selfhosted" / "license_importer_role.sql").read_text(encoding="utf-8").lower()
@@ -147,6 +174,7 @@ class SelfHostedDatabaseContractTests(unittest.TestCase):
                 "announcement_migration.sql",
                 "iptv_migration.sql",
                 "vod_sources_migration.sql",
+                "vod_sources_replace_v1.sql",
                 "pg_cu_optimization_migration.sql",
             ),
         )
@@ -158,6 +186,7 @@ class SelfHostedDatabaseContractTests(unittest.TestCase):
                 "license_restore_v1.sql",
                 "admin_license_action_migration.sql",
                 "vod_source_undo_migration.sql",
+                "vod_sources_replace_v1.sql",
             ),
         )
         # Restore is a self-hosted ledger entry only; it must not be pulled into

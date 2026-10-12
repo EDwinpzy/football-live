@@ -71,6 +71,7 @@ services:
       - ../../tools/selfhosted/license_importer_smoke.psql:/app/tools/selfhosted/license_importer_smoke.psql:ro
       - ../../tools/selfhosted/rpc_grants_repair.sql:/app/tools/selfhosted/rpc_grants_repair.sql:ro
       - ../../tools/selfhosted/migrations/license_restore_v1.sql:/app/tools/selfhosted/migrations/license_restore_v1.sql:ro
+      - ../../tools/selfhosted/migrations/vod_sources_replace_v1.sql:/app/tools/selfhosted/migrations/vod_sources_replace_v1.sql:ro
       - ../../tools/license_v2_migration.sql:/app/tools/license_v2_migration.sql:ro
       - ../../tools/license_note_migration.sql:/app/tools/license_note_migration.sql:ro
       - ../../tools/admin_sold_migration.sql:/app/tools/admin_sold_migration.sql:ro

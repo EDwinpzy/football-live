@@ -80,19 +80,33 @@ class CatalogSeedReproducibleTests(unittest.TestCase):
         # 同一豆瓣条目在不同首页栏可能使用不同尺寸的同一张图
         # （例如 s_ratio_poster 与 m_ratio_poster）；种子取首次出现的版本，
         # 所以按 ID 收集所有快照中真实出现过的 URL，而不是让后一个栏目覆盖前一个。
+        #
+        # 2026-10-12：条目来源必须覆盖 **home + index**，不能只看 home。
+        # `build_catalog_seed.py` 走的是 `DoubanCatalog.home(category)`，那条路径末尾会过
+        # `_apply_section_policy`（按评分/年份重排、补位），可能把只存在于 index 的条目
+        # 排进首页栏位。快照刷新后实测就出现过一次：种子里的 `douban:38454423`
+        # （完美世界 第七季）在 index 里有真海报，但不在持久化的 home 栏位里，
+        # 于是旧断言直接 KeyError 崩掉——那是断言取数范围太窄，不是种子伪造了海报。
         snapshot_items = {}
+
+        def collect(item):
+            raw_id = str(item.get("douban_id") or item.get("id") or "").removeprefix("douban:")
+            if not raw_id:
+                return
+            entry = snapshot_items.setdefault("douban:" + raw_id, {"p": set(), "h": set()})
+            poster = str(item.get("poster_url") or "")
+            hero = str(item.get("hero_url") or poster)
+            if poster:
+                entry["p"].add(poster)
+            if hero:
+                entry["h"].add(hero)
+
         for category in (snapshot.get("home") or {}).values():
             for section in category.get("sections") or []:
                 for item in section.get("items") or []:
-                    raw_id = str(item.get("douban_id") or item.get("id") or "").removeprefix("douban:")
-                    if raw_id:
-                        entry = snapshot_items.setdefault("douban:" + raw_id, {"p": set(), "h": set()})
-                        poster = str(item.get("poster_url") or "")
-                        hero = str(item.get("hero_url") or poster)
-                        if poster:
-                            entry["p"].add(poster)
-                        if hero:
-                            entry["h"].add(hero)
+                    collect(item)
+        for item in snapshot.get("index") or []:
+            collect(item)
 
         seed = json.loads(TARGETS[0].read_text(encoding="utf-8"))
         for item in seed["items"]:

@@ -330,8 +330,12 @@ class VodSourcesTest(unittest.TestCase):
     def test_default_registry_contains_reachable_fallback_candidates(self):
         registry = vod_sources.SourceRegistry.load_default()
         self.addCleanup(registry.close)
-        self.assertEqual([s.name for s in registry.sources],
-                         ["好好看", "暴风", "极速", "金鹰", "虎牙", "豪华", "红牛", "速播", "360", "猫眼", "VN影视"])
+        # 2026-10-12 按 artifacts/可用源清单-2026-10-12.md 重置：只保留好好看，
+        # 其余换成实测可用的非凡资源（可搜索 + 可出直链 m3u8）。
+        # 牛牛视频虽然 ?ac=list 可达，但对 wd 关键词搜索返回「暂不支持搜索」，
+        # 本项目的取源路径都要先按标题搜，所以不注册。
+        self.assertEqual([s.name for s in registry.sources], ["好好看", "非凡资源"])
+        self.assertEqual([s.adapter_type for s in registry.sources], ["hhkan", "macms_json"])
 
     def test_unreachable_source_does_not_block_reachable_source(self):
         class FakeAdapter:

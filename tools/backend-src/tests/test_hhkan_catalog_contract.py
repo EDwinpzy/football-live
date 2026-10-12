@@ -218,10 +218,13 @@ class HhkanCatalogContractTest(unittest.TestCase):
             for target in node.targets if isinstance(target, ast.Name)
             and target.id in {"MCMS_SITES", "MCMS_LEAVES_BY_SITE"}
         }
-        expected = ["bfzy", "jszy", "jinying", "huya", "hhzy", "hongniu", "subo", "360zy"]
+        # 2026-10-12 重置：补线池按 artifacts/可用源清单-2026-10-12.md 只保留
+        # 实测可搜索的 非凡资源。牛牛视频虽可达但不支持 wd 关键词搜索，不能进池。
+        expected = ["feifan"]
         self.assertEqual([site["name"] for site in assignments["MCMS_SITES"]], expected)
         self.assertEqual(set(assignments["MCMS_LEAVES_BY_SITE"]), set(expected))
         self.assertNotIn("fdzys", expected)
+        self.assertNotIn("niuniu", expected)
 
     def test_each_supplement_site_has_safe_four_channel_mapping(self):
         source = (BACKEND / "proxy.py").read_text(encoding="utf-8")

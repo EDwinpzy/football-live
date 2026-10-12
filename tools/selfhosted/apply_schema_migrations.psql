@@ -21,6 +21,7 @@ INSERT INTO pg_temp.expected_schema_migration_hashes (version, sql_sha256) VALUE
     ('license_v2_migration.sql', :'license_v2_sha256'),
     ('license_note_migration.sql', :'license_note_sha256'),
     ('license_restore_v1.sql', :'license_restore_sha256'),
+    ('vod_sources_replace_v1.sql', :'vod_sources_replace_sha256'),
     ('admin_sold_migration.sql', :'admin_sold_sha256'),
     ('hotupdate_migration.sql', :'hotupdate_sha256'),
     ('announcement_migration.sql', :'announcement_sha256'),
@@ -45,7 +46,17 @@ SELECT NOT EXISTS (
 \if :migration_hashes_match
 \else
 \echo schema migration failed: a recorded migration SQL hash changed
-\quit 3
+-- psql 的 \quit 不接受退出码：PostgreSQL 17 只会打一条
+--   warning: \quit: extra argument "3" ignored
+-- 然后以 exit 0 结束，于是这里原本的 `\quit 3` 把「硬闸门」变成了静默 no-op——
+-- 2026-10-12 实测部署打印 [OK]「schema-migrations 已重跑并成功」，实际上所有
+-- pending 迁移一条都没跑（新迁移既没执行也没进账本）。
+-- 改成抛真异常：ON_ERROR_STOP=1 下 psql 以非 0 退出，runner 立即中止部署。
+DO $migration_hash_gate$
+BEGIN
+    RAISE EXCEPTION 'schema migration failed: a recorded migration SQL hash changed';
+END
+$migration_hash_gate$;
 \endif
 
 SELECT NOT EXISTS (SELECT 1 FROM public.schema_migrations) AS ledger_empty \gset
@@ -284,6 +295,22 @@ BEGIN;
 \ir ../vod_sources_migration.sql
 INSERT INTO public.schema_migrations (version, sql_sha256)
 VALUES ('vod_sources_migration.sql', :'vod_sources_sha256');
+COMMIT;
+\endif
+
+-- 2026-10-12 影视源清单重置（好好看 + 非凡资源）。
+-- 独立成一份迁移而不是改 vod_sources_migration.sql：那份已经进账本，SQL 摘要被
+-- 本文件逐字节锁定，改动会让 migration_hashes_match 为假并 \quit 3。
+-- 必须排在 vod_sources_migration.sql 之后——它依赖 vod_source_drafts 表与
+-- vod_source_admin_publish() 函数已经存在。
+SELECT NOT EXISTS (
+    SELECT 1 FROM public.schema_migrations WHERE version = 'vod_sources_replace_v1.sql'
+) AS migration_pending \gset
+\if :migration_pending
+BEGIN;
+\ir migrations/vod_sources_replace_v1.sql
+INSERT INTO public.schema_migrations (version, sql_sha256)
+VALUES ('vod_sources_replace_v1.sql', :'vod_sources_replace_sha256');
 COMMIT;
 \endif
 

@@ -27,24 +27,37 @@ import java.util.concurrent.TimeUnit
 class IptvRepository(context: Context) {
 
     companion object {
-        /** 上游补源地址按序回退（2026-09-03 实测选型）：
+        /** 上游补源地址按序回退（命中即停）。2026-10-12 两轮实测重排：
+         *  第一轮 artifacts/可用源清单-2026-10-12.md（d1y/kitty lives.json 的 4 条），
+         *  第二轮 github.com/ngo5/IPTV 清单（新增 7 条，实测均 200 且正文是合法 m3u）。
          *  ① 站点每日校验推送产物（/iptv/refresh 定时拉上游→逐线测活剔死→按测速排序
          *     写入对象存储，匿名 GET 直拉——电视#9「每天自动推送可用源、删除不可用源」；
-         *     对象与热更包同桶不同前缀 iptv/）。2026-09-16：后台虽已迁回腾讯云 CloudBase，
-         *     但**电视源按用户要求仍取自建站点那份**（两个地址下发的是同一份文件，
-         *     SHA-256 逐字节一致；切换只影响「从哪取」，不影响频道表内容）；
-         *  ②③ JianghaoPi 聚合直播清单（上游多源回退、每日测速保活；镜像/原站）；
-         *  ④ iptv-org 中国频道清单；⑤⑥ vbskycn/iptv 聚合回退。
-         * Guovin 旧 raw output 路径已停止更新，不再作为备用源。 */
+         *     对象与热更包同桶不同前缀 iptv/）。
+         *  ②~⑫ 上游 m3u，顺序 = 覆盖广度优先（与 proxy.py IPTV_SOURCES、后台
+         *     IPTV_UPSTREAMS 同序）。旧的 JianghaoPi / iptv-org 清单与 gh-proxy 前缀
+         *     已全部移除（gh-proxy 同一 URL 前后两次结果可能不同，200 ↔ 404）。
+         *  第二轮实测不合格、不要再加回来：tv.iill.top/m3u/Gather（HTML）、
+         *  live.zbds.org（000）、live.fanmingming.cn（000）、82.156.243.185:54321（000）、
+         *  joevess/IPTV（正文 8 字节）、Ftindy/IPTV-URL（404）、aktv.space（302 到 HTML）；
+         *  纯 IPv6 清单（Guovin ipv6 / myIPTV ipv6 / m3u.ibert.me / ngo5 ipv6Plus）不收。 */
         val SOURCES = listOf(
                 // 由 apiBaseUrl Gradle 属性注入：迁移后指向新服务器，旧 CloudBase 地址不再内置。
                 BuildConfig.IPTV_LATEST_URL,
-            "https://gh-proxy.com/raw.githubusercontent.com/JianghaoPi/my-tvbox-sources/main/output/live.m3u",
-            "https://raw.githubusercontent.com/JianghaoPi/my-tvbox-sources/main/output/live.m3u",
-            "https://iptv-org.github.io/iptv/countries/cn.m3u",
-            "https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",
             "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",
+            "https://raw.githubusercontent.com/suxuang/myIPTV/refs/heads/main/ipv4.m3u",
+            "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/ipv4/result.m3u",
+            "https://raw.githubusercontent.com/Kimentanm/aptv/master/m3u/iptv.m3u",
+            "https://raw.githubusercontent.com/YueChan/Live/refs/heads/main/IPTV.m3u",
+            "https://raw.githubusercontent.com/hujingguang/ChinaIPTV/main/cnTV_AutoUpdate.m3u8",
+            "https://raw.githubusercontent.com/mytv-android/China-TV-Live-M3U8/main/iptv.m3u",
+            "https://raw.githubusercontent.com/ngo5/IPTV/main/m3u/ipv4.m3u",
+            "https://raw.githubusercontent.com/BurningC4/Chinese-IPTV/master/TV-IPV4.m3u",
+            "https://raw.githubusercontent.com/zwc456baby/iptv_alive/refs/heads/master/live.m3u",
+            "https://raw.githubusercontent.com/kimwang1978/collect-tv-txt/main/bbxx_lite.m3u",
         )
+        /** 兜底链总预算与单条上限（见 fetchLatest 注释）。 */
+        private const val FETCH_TOTAL_BUDGET_MS = 45_000L
+        private const val FETCH_PER_SOURCE_MS = 20_000L
         private const val CURATED_ASSET = "iptv_curated.m3u"
         private const val LOGO_INDEX = "logos/index.json"
         private const val SNAPSHOT = "iptv_snapshot.m3u"
@@ -249,6 +262,11 @@ class IptvRepository(context: Context) {
     private data class FetchedPlaylist(val url: String, val raw: String)
 
     private fun fetchLatest(): FetchedPlaylist? {
+        // 兜底链总预算（2026-10-12）：上游从 5 条涨到 12 条，而本机 client 是
+        // connect 15s + read 30s，逐条硬等意味着「全部源不可达」最坏要 8 分钟。
+        // 整链共享一个 45s 硬顶，单条请求超时取「剩余预算」；站点托管 latest 命中时
+        // 仍是一次请求，正常路径行为不变。
+        val deadline = System.nanoTime() + FETCH_TOTAL_BUDGET_MS * 1_000_000L
         for (src in SOURCES) {
             // 出站前过 UrlGuard（多源地址为内置 https 公网域，防未来配置笔误带入内网地址）
             val verdict = UrlGuard.check(src)
@@ -256,8 +274,15 @@ class IptvRepository(context: Context) {
                 OtvLog.w("iptv 源地址被 UrlGuard 拒绝：$src（${verdict.reason}）")
                 continue
             }
+            val remainingMs = (deadline - System.nanoTime()) / 1_000_000L
+            if (remainingMs <= 200L) {
+                OtvLog.w("iptv 兜底链预算耗尽，放弃剩余 ${SOURCES.size} 条上游中的后续地址")
+                break
+            }
             try {
-                client.newCall(Request.Builder().url(src).build()).execute().use { resp ->
+                val call = client.newCall(Request.Builder().url(src).build())
+                call.timeout().timeout(minOf(remainingMs, FETCH_PER_SOURCE_MS), TimeUnit.MILLISECONDS)
+                call.execute().use { resp ->
                     if (!resp.isSuccessful) {
                         OtvLog.w("iptv 源 $src HTTP ${resp.code}")
                         return@use
