@@ -52,6 +52,18 @@ object PlaybackRecoveryPolicy {
     }
 }
 
+/** Reuse only the resolved URL belonging to the currently selected VOD line. */
+object ResolvedSessionUrlReusePolicy {
+    fun vodUrl(
+        reuseRequested: Boolean,
+        requestedLine: Int,
+        activeLine: Int,
+        sessionUrl: String,
+    ): String? = sessionUrl.takeIf {
+        reuseRequested && requestedLine == activeLine && it.isNotBlank()
+    }
+}
+
 /** Live HLS offset policy shared by both Android clients. */
 object LiveWindowPolicy {
     const val SMALL_WINDOW_MAX_MS = 12_000L

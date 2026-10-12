@@ -268,6 +268,8 @@ class PlayerViewModel(
     private var liveMatchId: String? = null
     /** 引擎实际在播的直播地址（v1.14 续签对比基准；线路表只作展示/手动换线入口） */
     private var livePlayingUrl: String? = null
+    /** 当前引擎会话实际 prepare 的 URL；VOD 原地重载要复用它，而不是旧 playRef 缓存。 */
+    private var sessionUrl: String = ""
 
     /** Refresh one listed dynamic source and retain the source-specific Referer. */
     private suspend fun refreshLiveSource(source: String, fallbackName: String = ""): LiveStreamSource? {
@@ -457,9 +459,15 @@ class PlayerViewModel(
         liveSrcs = emptyList()
         liveReferers.clear()
         _ui.value = _ui.value.copy(lines = emptyList(), activeLine = 0)
-        val sources = runCatching { Graph.live.liveStreamSources(matchId, fresh = true) }
-            .onFailure { OtvLog.w("bootLive 动态线路解析失败 match=$matchId: ${it.message}") }
-            .getOrDefault(emptyList())
+        val sources = try {
+            Graph.live.liveStreamSources(matchId, fresh = true)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            OtvLog.w("bootLive 动态线路解析失败 match=$matchId: ${failure.message}")
+            emptyList()
+        }
+        currentCoroutineContext().ensureActive()
         val remembered = runCatching { Graph.settings.liveLastSrc() }.getOrNull().orEmpty()
         val availableIds = sources.map { it.source }
         val preferred = LiveSourcePolicy.preferred(remembered, availableIds)
@@ -932,6 +940,21 @@ class PlayerViewModel(
         reuseResolvedUrl: Boolean = false,
         forceFresh: Boolean = false,
     ) {
+        val isVod = !_ui.value.isLive
+        val reuseVODSessionUrl = if (isVod) {
+            com.qiubo.optimaltv.playback.ResolvedSessionUrlReusePolicy.vodUrl(
+                reuseRequested = reuseResolvedUrl,
+                requestedLine = lineIdx,
+                activeLine = _ui.value.activeLine,
+                sessionUrl = sessionUrl,
+            )
+        } else null
+        if (reuseResolvedUrl && isVod && reuseVODSessionUrl == null) {
+            OtvLog.w("拒绝复用非当前点播 URL：line=$lineIdx active=${_ui.value.activeLine} urlReady=${sessionUrl.isNotBlank()}")
+            return
+        }
+        // Do not leave an older episode/source URL eligible while a new VOD session resolves.
+        if (isVod) sessionUrl = ""
         // 会话代数（v1.14）：看门狗换线、直连重试、卡顿重解析可能并发触发 startSession，
         // 各自挂起在解析上——旧会话恢复后必须发现自己已被取代并放弃，否则会把引擎
         // 倒灌回旧源（实测：换线 line1 已起播，8s 前的直连重试落地把引擎拽回慢速 line0）
@@ -989,7 +1012,7 @@ class PlayerViewModel(
         currentCoroutineContext().ensureActive()
         if (!isCurrentPlaybackRequest(gen, lineIdx, sessionEngine, sessionEngineEpoch)) return
         val playUrl = try {
-            url ?: run {
+            reuseVODSessionUrl ?: url ?: run {
                 // v1.14 点播默认走本地中继（多连接并行拉片对抗 CDN 单连接限速，根治
                 // 「20 分钟后频繁卡顿」）；该线路中继已被判不可用时直连
                 val preferRelay = line.playRef.isBlank() || line.playRef !in relayBroken
@@ -1020,6 +1043,7 @@ class PlayerViewModel(
         }
         sessionViaRelay = playUrl.contains("/api/relay")
         if (_ui.value.isLive) livePlayingUrl = playUrl
+        sessionUrl = playUrl
         // 直播窗口探测（2026-09-16 长跑卡顿根治）：起播前量一次清单的可播放窗口，
         // 交引擎选目标延迟/缓冲档——中继足球源窗口只有 ~6s，固定「落后 15s」不可达，
         // 速度控制会长期偏离实时并最终掉出滑动窗口（「十几分钟后卡死」的根因）。
@@ -1617,10 +1641,12 @@ class PlayerViewModel(
                 runCatching { com.qiubo.optimaltv.playback.PlaybackHealthLog.stall(healthSnapshot(reason)) }
                 OtvLog.w("recovery kind=$kind step=$attempt action=$action reason=$reason pos=${state.positionMs}")
                 when (action) {
-                    RecoveryAction.RELOAD_CURRENT -> {
-                        requestEngine.seekTo(resume)
-                        requestEngine.play()
-                    }
+                    RecoveryAction.RELOAD_CURRENT -> startRecoverySession(
+                        requestToken,
+                        current,
+                        if (state.isLive) 0L else resume,
+                        reuseResolvedUrl = true,
+                    )
                     RecoveryAction.REFRESH_CURRENT -> {
                         state.lines.getOrNull(current)?.playRef?.takeIf { it.isNotBlank() }?.let(repo::bustPlayCache)
                         startRecoverySession(requestToken, current, if (state.isLive) 0L else resume)
@@ -1664,9 +1690,14 @@ class PlayerViewModel(
     ): Boolean = token == stallRecoveryGeneration &&
         isCurrentPlaybackRequest(generation, lineIndex, expectedEngine, expectedEngineEpoch)
 
-    private suspend fun startRecoverySession(token: Int, line: Int, resume: Long) {
+    private suspend fun startRecoverySession(
+        token: Int,
+        line: Int,
+        resume: Long,
+        reuseResolvedUrl: Boolean = false,
+    ) {
         if (token != stallRecoveryGeneration) return
-        startSession(line, resume)
+        startSession(line, resume, reuseResolvedUrl = reuseResolvedUrl)
         val generation = sessionGen
         // Keep single-flight until READY or the existing 20s watchdog/onLineFail resolves prepare.
         while (token == stallRecoveryGeneration && generation == sessionGen &&
