@@ -94,7 +94,9 @@ fun ApkUpdateUi() {
                         ApkUpdateKey("稍后更新", s, primary = false, navGroup = APKUPDATE_DIALOG_GROUP) { ApkUpdateManager.declineUpdate() }
                     }
                     val primaryLabel = when (state) {
+                        is ApkUpdateState.Downloading -> "取消更新"
                         ApkUpdateState.PermissionRequired -> "打开安装权限"
+                        ApkUpdateState.Installing -> "正在打开系统安装器…"
                         is ApkUpdateState.Error -> "重试"
                         else -> "立即更新"
                     }
@@ -102,11 +104,14 @@ fun ApkUpdateUi() {
                         label = primaryLabel,
                         s = s,
                         primary = true,
+                        enabled = state != ApkUpdateState.Installing,
                         focus = requester,
                         navGroup = APKUPDATE_DIALOG_GROUP,
                     ) {
                         when (state) {
+                            is ApkUpdateState.Downloading -> ApkUpdateManager.cancelUpdate()
                             ApkUpdateState.PermissionRequired -> ApkUpdateManager.openUnknownAppSettings()
+                            ApkUpdateState.Installing -> Unit
                             is ApkUpdateState.Error -> ApkUpdateManager.retryUpdate()
                             else -> ApkUpdateManager.acceptUpdate()
                         }
@@ -167,6 +172,7 @@ private fun ApkUpdateKey(
     label: String,
     s: Float,
     primary: Boolean,
+    enabled: Boolean = true,
     focus: FocusRequester? = null,
     navGroup: String? = null,
     onTap: () -> Unit,
@@ -177,6 +183,7 @@ private fun ApkUpdateKey(
         modifier = Modifier
             .then(if (focus != null) Modifier.focusRequester(focus) else Modifier)
             .dpadFocusable(
+                enabled = enabled,
                 navGroup = navGroup,
                 scaleFocused = 1.04f,
                 focusedBg = if (primary) OtvColors.White else null,

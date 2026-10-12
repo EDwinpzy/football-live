@@ -33,7 +33,9 @@ fun ApkUpdateUi() {
     // REQUIRED offer) can be dismissed or deferred.
     val canDefer = state !is ApkUpdateState.Downloading && state != ApkUpdateState.Installing
     val primaryLabel = when (state) {
+        is ApkUpdateState.Downloading -> "取消更新"
         ApkUpdateState.PermissionRequired -> "打开安装权限"
+        ApkUpdateState.Installing -> "正在打开安装器…"
         is ApkUpdateState.Error -> "重试"
         else -> "立即更新"
     }
@@ -75,9 +77,11 @@ fun ApkUpdateUi() {
             }
         },
         confirmButton = {
-            Button(onClick = {
+            Button(enabled = state != ApkUpdateState.Installing, onClick = {
                 when (state) {
+                    is ApkUpdateState.Downloading -> ApkUpdateManager.cancelUpdate()
                     ApkUpdateState.PermissionRequired -> ApkUpdateManager.openUnknownAppSettings()
+                    ApkUpdateState.Installing -> Unit
                     is ApkUpdateState.Error -> ApkUpdateManager.retryUpdate()
                     else -> ApkUpdateManager.acceptUpdate()
                 }
