@@ -498,8 +498,12 @@ object FootballVpnProxyCore {
         corePath: String,
         arguments: List<String>,
         niceExecutable: String?,
+        inheritedNice: Int = 0,
     ): List<String> = buildList {
-        if (!niceExecutable.isNullOrBlank()) addAll(listOf(niceExecutable, "-n", "10"))
+        // nice adds to the caller's priority; a background launcher already inherits NI=10.
+        if (!niceExecutable.isNullOrBlank() && inheritedNice < 10) {
+            addAll(listOf(niceExecutable, "-n", (10 - inheritedNice).toString()))
+        }
         add(corePath)
         addAll(arguments)
     }
@@ -659,6 +663,9 @@ object FootballVpnProxyCore {
         File(home, "providers").mkdirs()
         val coreArguments = listOf("-d", home.absolutePath, "-f", config.absolutePath)
         val nice = File(NICE_EXECUTABLE).takeIf { it.isFile && it.canExecute() }?.absolutePath
+        val inheritedNice = runCatching {
+            android.os.Process.getThreadPriority(android.os.Process.myTid())
+        }.getOrDefault(0)
         val maxProcs = goMaxProcsForAvailableProcessors(Runtime.getRuntime().availableProcessors())
         fun start(command: List<String>): Process? = try {
             ProcessBuilder(command)
@@ -669,9 +676,9 @@ object FootballVpnProxyCore {
         } catch (_: Exception) {
             null
         }
-        val child = start(coreProcessCommand(core.absolutePath, coreArguments, nice))
+        val child = start(coreProcessCommand(core.absolutePath, coreArguments, nice, inheritedNice))
             ?: if (nice != null) {
-                Log.w(TAG, "nice launch failed; retrying Mihomo with normal process priority")
+                Log.w(TAG, "core launch failed; retrying Mihomo without nice")
                 start(coreProcessCommand(core.absolutePath, coreArguments, niceExecutable = null))
             } else {
                 null

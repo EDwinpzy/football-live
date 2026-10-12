@@ -207,4 +207,17 @@ class FootballVpnProxyCoreTest {
             FootballVpnProxyCore.coreProcessCommand("/libmihomo.so", arguments, niceExecutable = null),
         )
     }
+
+    @Test
+    fun coreCommandDoesNotDoubleLowerAnAlreadyBackgroundLauncher() {
+        val arguments = listOf("-d", "/files", "-f", "football.yaml")
+        assertEquals(
+            listOf("/libmihomo.so") + arguments,
+            FootballVpnProxyCore.coreProcessCommand("/libmihomo.so", arguments, "/system/bin/nice", inheritedNice = 10),
+        )
+        assertEquals(
+            listOf("/system/bin/nice", "-n", "5", "/libmihomo.so") + arguments,
+            FootballVpnProxyCore.coreProcessCommand("/libmihomo.so", arguments, "/system/bin/nice", inheritedNice = 5),
+        )
+    }
 }
