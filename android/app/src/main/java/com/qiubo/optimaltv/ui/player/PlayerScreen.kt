@@ -217,7 +217,8 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                     ui.isLive -> {
                         // 直播收起态：任意方向键呼信号源条（LiveSourcePicker 会把焦点
                         // 落到当前源 chip，恢复真实导航）
-                        vm.toggleSrcPicker(); tick++; true
+                        if (!ui.srcPickerVisible) vm.toggleSrcPicker()
+                        tick++; true
                     }
                     else -> { vm.showControls(); tick++; true }   // 影视：唤出控制条
                 }
@@ -278,7 +279,7 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
 
         // 影院 scrim（控制条可见或未起播时淡入）
         AnimatedVisibility(
-            visible = (ui.controlsVisible && !ui.isLive) || (ui.playState == EnginePlayState.IDLE && ui.fatalMsg == null),
+            visible = !ui.isLive && (ui.controlsVisible || (ui.playState == EnginePlayState.IDLE && ui.fatalMsg == null)),
             modifier = Modifier.fillMaxSize(),
             enter = fadeIn(tween(450)),
             exit = fadeOut(tween(450)),
@@ -317,6 +318,13 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
         }
 
         // 缓冲指示
+        if (ui.isLive && ui.sourceResolving && ui.lines.isEmpty()) {
+            Text(
+                "正在检测可用线路…",
+                color = Color.White.copy(alpha = 0.7f),
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
         if (ui.playState == EnginePlayState.BUFFERING && ui.fatalMsg == null) {
             AppleLoading(modifier = Modifier.align(Alignment.Center), size = 56.dp)
         }
@@ -407,7 +415,10 @@ private fun LiveSourcePicker(
     LaunchedEffect(ui.srcPickerVisible, ui.activeLine, ui.lines, ui.sourceResolving) {
         if (!ui.srcPickerVisible) return@LaunchedEffect
         if (ui.lines.isEmpty()) {
-            if (ui.sourceResolving) return@LaunchedEffect
+            if (ui.sourceResolving) {
+                runCatching { rootFocus.requestFocus() }
+                return@LaunchedEffect
+            }
             repeat(20) {
                 try { retryFocus.requestFocus(); return@LaunchedEffect } catch (_: IllegalStateException) {
                     kotlinx.coroutines.delay(50)

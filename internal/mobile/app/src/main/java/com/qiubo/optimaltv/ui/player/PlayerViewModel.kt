@@ -122,6 +122,8 @@ data class PlayerUiState(
     val isMovie: Boolean = false,
     val lines: List<LineInfo> = emptyList(),
     val activeLine: Int = 0,
+    /** Current football source lookup is in progress; independent of engine buffering. */
+    val sourceResolving: Boolean = false,
     /** 片源列表/当前线路状态，供错误态的侧栏展示查找、空结果、加载与失败重试。 */
     val sourceStatus: PlayerSourceStatus = PlayerSourceStatus.LOADING,
     val engineId: String = "media3",
@@ -167,11 +169,15 @@ data class PlayerUiState(
     val castError: String? = null,
 )
 
-/**
- * 播放会话协调器（技术方案 §3.1 业务层）：
- * 起播看门狗 20s / 卡顿中断检测 / 失败自动换线 / 线路记忆 / 断点续播。
- * 进度保存按 5s 节流（低配机 localStorage 同步教训移植）。
- */
+/** Route identity is known before any source request, including a slow football lookup. */
+object PlayerStartupStatePolicy {
+    fun initial(vodId: String, epIndex: Int): PlayerUiState {
+        val football = vodId.startsWith("live:")
+        return PlayerUiState(epIndex = epIndex, isLive = football, sourceResolving = football)
+    }
+}
+
+/** 播放会话协调器：起播看门狗、恢复、换线、线路记忆与断点续播。 */
 class PlayerViewModel(
     // v1.15：val → var——电视页内嵌播放（TvScreen）在同一 VM 会话内换台时经 switchIptv 更新；
     // PlayerScreen（足球/影视/调试直达）行为不变（构造后不再改）。
@@ -206,7 +212,7 @@ class PlayerViewModel(
         val SPEED_STEPS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f)
     }
 
-    private val _ui = MutableStateFlow(PlayerUiState(epIndex = epStart))
+    private val _ui = MutableStateFlow(PlayerStartupStatePolicy.initial(vodId, epStart))
     val ui: StateFlow<PlayerUiState> = _ui.asStateFlow()
 
     lateinit var engine: MediaEngine
@@ -601,7 +607,10 @@ class PlayerViewModel(
         // Clear prior options immediately so a retry never leaves stale lines visible while loading.
         liveSrcs = emptyList()
         liveReferers.clear()
-        _ui.value = _ui.value.copy(lines = emptyList(), activeLine = 0)
+        _ui.value = _ui.value.copy(
+            lines = emptyList(), activeLine = 0, isLive = true,
+            sourceResolving = true, fatalMsg = null, controlsVisible = false,
+        )
         val sources = try {
             Graph.live.liveStreamSources(matchId, fresh = true)
         } catch (cancelled: CancellationException) {
@@ -611,6 +620,7 @@ class PlayerViewModel(
             emptyList()
         }
         currentCoroutineContext().ensureActive()
+        _ui.value = _ui.value.copy(sourceResolving = false)
         OtvLog.i("bootLive match=$matchId probed HLS 信号源=${sources.size} 个")
         if (sources.isEmpty()) {
             OtvLog.w("bootLive 无可用信号 → fatalMsg")

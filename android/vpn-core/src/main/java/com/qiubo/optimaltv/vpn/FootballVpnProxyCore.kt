@@ -26,6 +26,8 @@ import java.util.concurrent.Callable
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.CancellationException
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Starts the bundled Mihomo HTTP proxy used only by Android football requests. */
 object FootballVpnProxyCore {
@@ -50,14 +52,14 @@ object FootballVpnProxyCore {
     private const val CONFIG_NAME = "football-mihomo.yaml"
     private const val SUBSCRIPTIONS_NAME = "football-vpn-subscriptions.json"
     private const val CONTROLLER_SECRET_NAME = "football-mihomo-controller-secret"
+    private const val NICE_EXECUTABLE = "/system/bin/nice"
     private const val TAG = "FootballVpnProxy"
     private const val SELECTION_POLL_MS = 100L
     private val lock = Any()
     private val refreshLock = Any()
     private val matchSelectionLock = Any()
-    private val matchSelectionExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "football-node-selection").apply { isDaemon = true }
-    }
+    private val matchSelectionExecutor: ExecutorService =
+        Executors.newSingleThreadExecutor(backgroundThreadFactory("football-node-selection"))
     @Volatile private var process: Process? = null
     @Volatile private var lastFailedRefreshAtMs = -1L
     private var matchSelectionFlight: MatchSelectionFlight? = null
@@ -312,7 +314,10 @@ object FootballVpnProxyCore {
             return false
         }
 
-        val workers = Executors.newFixedThreadPool(minOf(NODE_TEST_PARALLELISM, candidates.size))
+        val workers = Executors.newFixedThreadPool(
+            minOf(NODE_TEST_PARALLELISM, candidates.size),
+            backgroundThreadFactory("football-node-probe", daemon = false),
+        )
         val providersByNode = providerResponse?.let { parseProviderNodes(it.body) }.orEmpty()
         val completion = ExecutorCompletionService<NodeLatency?>(workers)
         try {
@@ -486,6 +491,19 @@ object FootballVpnProxyCore {
     internal fun selectLowestLatency(nodes: Collection<NodeLatency>): NodeLatency? =
         nodes.asSequence().filter { it.delayMs > 0 }.minByOrNull { it.delayMs }
 
+    internal fun goMaxProcsForAvailableProcessors(availableProcessors: Int): Int =
+        (availableProcessors - 1).coerceIn(1, 2)
+
+    internal fun coreProcessCommand(
+        corePath: String,
+        arguments: List<String>,
+        niceExecutable: String?,
+    ): List<String> = buildList {
+        if (!niceExecutable.isNullOrBlank()) addAll(listOf(niceExecutable, "-n", "10"))
+        add(corePath)
+        addAll(arguments)
+    }
+
     internal fun normalizeProbeUrl(value: String): String? {
         if (value.isBlank() || value.length > 4096 || value.any { it.isISOControl() || it.isWhitespace() }) return null
         return try {
@@ -639,25 +657,34 @@ object FootballVpnProxyCore {
 
         val config = File(home, CONFIG_NAME)
         File(home, "providers").mkdirs()
-        val child = try {
-            ProcessBuilder(core.absolutePath, "-d", home.absolutePath, "-f", config.absolutePath)
+        val coreArguments = listOf("-d", home.absolutePath, "-f", config.absolutePath)
+        val nice = File(NICE_EXECUTABLE).takeIf { it.isFile && it.canExecute() }?.absolutePath
+        val maxProcs = goMaxProcsForAvailableProcessors(Runtime.getRuntime().availableProcessors())
+        fun start(command: List<String>): Process? = try {
+            ProcessBuilder(command)
                 .directory(home)
                 .redirectErrorStream(true)
+                .apply { environment()["GOMAXPROCS"] = maxProcs.toString() }
                 .start()
         } catch (_: Exception) {
-            return false
+            null
         }
-        Thread({
+        val child = start(coreProcessCommand(core.absolutePath, coreArguments, nice))
+            ?: if (nice != null) {
+                Log.w(TAG, "nice launch failed; retrying Mihomo with normal process priority")
+                start(coreProcessCommand(core.absolutePath, coreArguments, niceExecutable = null))
+            } else {
+                null
+            }
+            ?: return false
+        backgroundThreadFactory("football-vpn-core-output").newThread {
             runCatching {
                 child.inputStream.use { input ->
                     val buffer = ByteArray(4096)
                     while (input.read(buffer) >= 0) Unit
                 }
             }
-        }, "football-vpn-core-output").apply {
-            isDaemon = true
-            start()
-        }
+        }.start()
         process = child
         if (waitForListener(child)) return true
         child.destroyForcibly()
@@ -896,6 +923,20 @@ object FootballVpnProxyCore {
         val providers = File(home, "providers")
         listOf("subscription_1.yaml", "subscription_2.yaml", "subscription_3.yaml")
             .forEach { File(providers, it).delete() }
+    }
+
+    private fun backgroundThreadFactory(namePrefix: String, daemon: Boolean = true): ThreadFactory {
+        val sequence = AtomicInteger()
+        return ThreadFactory { runnable ->
+            Thread({
+                runCatching {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                }
+                runnable.run()
+            }, "$namePrefix-${sequence.incrementAndGet()}").apply {
+                isDaemon = daemon
+            }
+        }
     }
 
     private fun waitForListener(child: Process): Boolean {

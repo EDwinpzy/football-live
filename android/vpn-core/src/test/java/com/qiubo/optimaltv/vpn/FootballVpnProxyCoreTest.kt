@@ -181,4 +181,30 @@ class FootballVpnProxyCoreTest {
         assertTrue(FootballVpnProxyCore.shouldCancelSelection(false, true, false))
         assertTrue(FootballVpnProxyCore.shouldCancelSelection(false, false, true))
     }
+
+    @Test
+    fun goRuntimeReservesOneCpuAndCapsParallelismAtTwo() {
+        assertEquals(1, FootballVpnProxyCore.goMaxProcsForAvailableProcessors(1))
+        assertEquals(1, FootballVpnProxyCore.goMaxProcsForAvailableProcessors(2))
+        assertEquals(2, FootballVpnProxyCore.goMaxProcsForAvailableProcessors(3))
+        assertEquals(2, FootballVpnProxyCore.goMaxProcsForAvailableProcessors(16))
+    }
+
+    @Test
+    fun coreCommandUsesNiceWhenAvailableAndPreservesDirectExecFallback() {
+        val arguments = listOf("-d", "/data/user/0/app/files", "-f", "football.yaml")
+
+        assertEquals(
+            listOf("/system/bin/nice", "-n", "10", "/libmihomo.so") + arguments,
+            FootballVpnProxyCore.coreProcessCommand(
+                "/libmihomo.so",
+                arguments,
+                niceExecutable = "/system/bin/nice",
+            ),
+        )
+        assertEquals(
+            listOf("/libmihomo.so") + arguments,
+            FootballVpnProxyCore.coreProcessCommand("/libmihomo.so", arguments, niceExecutable = null),
+        )
+    }
 }

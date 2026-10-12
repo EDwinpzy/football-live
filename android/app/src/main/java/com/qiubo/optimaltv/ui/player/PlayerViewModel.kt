@@ -140,11 +140,15 @@ data class PlayerUiState(
        一并剥离（移动版 PlayerViewModel 保留完整 DLNA；sync_shared 差异允许清单有备案） */
 )
 
-/**
- * 播放会话协调器（技术方案 §3.1 业务层）：
- * 起播看门狗 20s / 卡顿中断检测 / 失败自动换线 / 线路记忆 / 断点续播。
- * 进度保存按 5s 节流（低配机 localStorage 同步教训移植）。
- */
+/** Route identity is known before any source request, including a slow football lookup. */
+object PlayerStartupStatePolicy {
+    fun initial(vodId: String, epIndex: Int): PlayerUiState {
+        val football = vodId.startsWith("live:")
+        return PlayerUiState(epIndex = epIndex, isLive = football, sourceResolving = football)
+    }
+}
+
+/** 播放会话协调器：起播看门狗、恢复、换线、线路记忆与断点续播。 */
 class PlayerViewModel(
     // v1.15：val → var——电视页内嵌播放（TvScreen）在同一 VM 会话内换台时经 switchIptv 更新；
     // PlayerScreen（足球/影视/调试直达）行为不变（构造后不再改）。
@@ -179,7 +183,7 @@ class PlayerViewModel(
         val SPEED_STEPS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f)
     }
 
-    private val _ui = MutableStateFlow(PlayerUiState(epIndex = epStart))
+    private val _ui = MutableStateFlow(PlayerStartupStatePolicy.initial(vodId, epStart))
     val ui: StateFlow<PlayerUiState> = _ui.asStateFlow()
 
     lateinit var engine: MediaEngine
@@ -458,7 +462,10 @@ class PlayerViewModel(
         // 后端在本次请求内解析、探测所有候选线；按它返回的可播放线路及优先顺序展示。
         liveSrcs = emptyList()
         liveReferers.clear()
-        _ui.value = _ui.value.copy(lines = emptyList(), activeLine = 0)
+        _ui.value = _ui.value.copy(
+            lines = emptyList(), activeLine = 0, isLive = true,
+            sourceResolving = true, fatalMsg = null, controlsVisible = false,
+        )
         val sources = try {
             Graph.live.liveStreamSources(matchId, fresh = true)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -468,6 +475,7 @@ class PlayerViewModel(
             emptyList()
         }
         currentCoroutineContext().ensureActive()
+        _ui.value = _ui.value.copy(sourceResolving = false)
         val remembered = runCatching { Graph.settings.liveLastSrc() }.getOrNull().orEmpty()
         val availableIds = sources.map { it.source }
         val preferred = LiveSourcePolicy.preferred(remembered, availableIds)
