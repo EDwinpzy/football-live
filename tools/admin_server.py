@@ -1168,9 +1168,11 @@ IPTV_KEY_LATEST = "iptv/iptv-latest.m3u"
 IPTV_KEY_META = "iptv/version.json"
 # 「API 同步」按钮使用的上游源
 IPTV_UPSTREAMS = [
-    "https://gh-proxy.com/raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
-    "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
+    "https://gh-proxy.com/raw.githubusercontent.com/JianghaoPi/my-tvbox-sources/main/output/live.m3u",
+    "https://raw.githubusercontent.com/JianghaoPi/my-tvbox-sources/main/output/live.m3u",
     "https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",
+    "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",
+    "https://iptv-org.github.io/iptv/countries/cn.m3u",
 ]
 IPTV_FETCH_MAX = 16 * 1024 * 1024
 _private_ip = re.compile(
@@ -1379,51 +1381,108 @@ def _assert_public_media_url(u: str) -> None:
 
 
 _PROBE_UA = {"User-Agent": "Mozilla/5.0 OptimalTV-probe"}
+IPTV_PLAYLIST_MAX_BYTES = 32 * 1024
 
 
-def _probe_iptv_line(url: str, timeout: float = 5.0):
-    """单线测活（与 iptv-rebuild 云函数 probe_line 同语义）：清单可拉 + 首分片
-    Range 探测 8KB。返回耗时 ms；失败返回 None。重定向手动 ≤2 跳（每跳校验公网）。"""
-    cur, hops = url, 0
-    try:
-        _assert_public_media_url(cur)
-        t0 = time.time()
-        opener = urllib.request.build_opener(runtime_client.NoRedirect)
-        body = None
-        for _ in range(3):
-            req = urllib.request.Request(cur, headers=_PROBE_UA)
-            try:
-                with opener.open(req, timeout=timeout) as r:
-                    if r.status != 200:
-                        return None
-                    body = r.read(4096)
-                    break
-            except urllib.error.HTTPError as e:
-                if e.code in (301, 302, 303, 307, 308):
-                    loc = e.headers.get("Location")
-                    if not loc or hops >= 2:
-                        return None
-                    hops += 1
-                    cur = urllib.parse.urljoin(cur, loc)
-                    _assert_public_media_url(cur)
-                    continue
-                return None
-        if body is None:
+def _iptv_media_payload(body: bytes, content_type: str = "") -> bool:
+    if len(body) < 188:
+        return False
+    prefix = body[:64].lstrip().lower()
+    if prefix.startswith((b"<", b"{", b"#extm3u")) or any(t in content_type.lower() for t in ("html", "json")):
+        return False
+    if body.startswith(b"FLV") or body[4:8] in (b"ftyp", b"styp", b"moof", b"sidx"):
+        return True
+    return any(body[i] == body[i + 188] == body[i + 376] == 0x47
+               for i in range(min(188, len(body) - 376)))
+
+
+def _open_iptv_probe_response(opener, url: str, headers: dict, deadline: float):
+    """Open one probe URL, validating every manually followed public redirect."""
+    current = url
+    redirects = 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             return None
+        try:
+            response = opener.open(urllib.request.Request(current, headers=headers), timeout=remaining)
+            return response, current
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (301, 302, 303, 307, 308) or redirects >= 2:
+                exc.close()
+                return None
+            location = exc.headers.get("Location")
+            if not location:
+                exc.close()
+                return None
+            target = urllib.parse.urljoin(current, location)
+            try:
+                _assert_public_media_url(target)
+                if (urllib.parse.urlsplit(current).scheme.lower() == "https" and
+                        urllib.parse.urlsplit(target).scheme.lower() != "https"):
+                    return None
+            finally:
+                exc.close()
+            current = target
+            redirects += 1
+
+
+def _probe_iptv_line(url: str, timeout: float = 5.0, _depth: int = 0, _deadline: float | None = None):
+    """单线测活（与 iptv-rebuild 云函数 probe_line 同语义）：清单可拉 + 首分片
+    清单最多完整读取 32KB；超限按失败处理。首分片 Range 探测 8KB；重定向手动 ≤2 跳。
+    全链共享 timeout 截止时间，且每个重定向目标都校验公网地址、禁止 HTTPS 降级。"""
+    if _depth > 2:
+        return None
+    t0 = time.monotonic()
+    deadline = _deadline if _deadline is not None else t0 + timeout
+    try:
+        _assert_public_media_url(url)
+        opener = urllib.request.build_opener(runtime_client.NoRedirect)
+        opened = _open_iptv_probe_response(opener, url, _PROBE_UA, deadline)
+        if opened is None:
+            return None
+        r, final_url = opened
+        with r:
+            if r.status != 200:
+                return None
+            content_type = r.headers.get("Content-Type", "")
+            body = r.read(IPTV_PLAYLIST_MAX_BYTES + 1)
         if b"#EXTM3U" in body[:64]:
+            if len(body) > IPTV_PLAYLIST_MAX_BYTES:
+                return None
             text = body.decode("utf-8", "replace")
+            if "#EXT-X-ENDLIST" in text:
+                return None
             seg = next((l.strip() for l in text.splitlines()
                         if l.strip() and not l.startswith("#")), "")
             if seg:
-                absu = urllib.parse.urljoin(cur, seg)
+                absu = urllib.parse.urljoin(final_url, seg)
                 _assert_public_media_url(absu)
-                req2 = urllib.request.Request(
-                    absu, headers={**_PROBE_UA, "Range": "bytes=0-8192"})
-                with opener.open(req2, timeout=timeout) as r2:
+                opened_segment = _open_iptv_probe_response(
+                    opener, absu, {**_PROBE_UA, "Range": "bytes=0-8192"}, deadline)
+                if opened_segment is None:
+                    return None
+                r2, final_segment_url = opened_segment
+                with r2:
                     if r2.status not in (200, 206):
                         return None
-                    r2.read(2048)
-        return int((time.time() - t0) * 1000)
+                    media = r2.read(8192)
+                    media_content_type = r2.headers.get("Content-Type", "")
+                    # A master playlist may point to another playlist. Follow it under
+                    # the remaining time budget instead of accepting its text as video.
+                    if media.lstrip().startswith(b"#EXTM3U"):
+                        if deadline - time.monotonic() <= 0 or final_segment_url == final_url:
+                            return None
+                        nested = _probe_iptv_line(
+                            final_segment_url, _depth=_depth + 1, _deadline=deadline)
+                        return None if nested is None else int((time.monotonic() - t0) * 1000)
+                    if not _iptv_media_payload(media, media_content_type):
+                        return None
+            else:
+                return None
+        elif not _iptv_media_payload(body, content_type):
+            return None
+        return int((time.monotonic() - t0) * 1000)
     except Exception:
         return None
 

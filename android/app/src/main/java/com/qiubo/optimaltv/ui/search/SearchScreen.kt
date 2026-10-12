@@ -103,6 +103,29 @@ import java.net.URLEncoder
 internal val RESULT_CATS = listOf("全部", "电影", "电视剧", "动漫", "综艺", "短剧")
 
 internal const val RESULT_FOCUS_RETRY_ATTEMPTS = 12
+internal const val SEARCH_RESULT_COLUMNS = 7
+
+/** The matching result directly above this grid item, or null when it is in the first row. */
+internal fun previousSearchResultIndex(index: Int, columns: Int = SEARCH_RESULT_COLUMNS): Int? =
+    if (columns > 0 && index >= columns) index - columns else null
+
+/** The matching result directly below this grid item, or null when it is in the last row. */
+internal fun nextSearchResultIndex(
+    index: Int,
+    itemCount: Int,
+    columns: Int = SEARCH_RESULT_COLUMNS,
+): Int? {
+    if (columns <= 0 || index < 0 || index >= itemCount) return null
+    return (index + columns).takeIf { it < itemCount }
+}
+
+/** True only when the entire lazy-grid item is inside the vertical viewport. */
+internal fun isSearchResultItemFullyVisible(
+    itemTop: Int,
+    itemBottom: Int,
+    viewportStart: Int,
+    viewportEnd: Int,
+): Boolean = itemBottom > itemTop && itemTop >= viewportStart && itemBottom <= viewportEnd
 
 /** Compose 的 requestFocus() 在当前 BOM 返回 Unit；用焦点事件确认后再结束重试。 */
 internal fun shouldRetryResultFocus(attempt: Int, focusObserved: Boolean): Boolean =
@@ -396,11 +419,32 @@ fun SearchScreen(nav: NavController) {
 
     suspend fun requestResultFocus(itemId: String, index: Int, requester: FocusRequester): Boolean {
         if (index !in shown.indices) return false
-        resultsGridState.scrollToItem(index)
+
+        fun isFullyVisible(): Boolean {
+            val layout = resultsGridState.layoutInfo
+            val item = layout.visibleItemsInfo.firstOrNull { it.index == index } ?: return false
+            return isSearchResultItemFullyVisible(
+                itemTop = item.offset.y,
+                itemBottom = item.offset.y + item.size.height,
+                viewportStart = layout.viewportStartOffset,
+                viewportEnd = layout.viewportEndOffset,
+            )
+        }
+
+        // Focus.kt excludes clipped/sliver nodes from navigation. Reveal the full card before
+        // requesting focus, otherwise the request can silently fail and the next UP escapes
+        // to the global tab bar.
+        if (!isFullyVisible()) {
+            resultsGridState.scrollToItem(index)
+        }
         repeat(RESULT_FOCUS_RETRY_ATTEMPTS) { attempt ->
-            runCatching { requester.requestFocus() }
-            val focusObserved = focusedResultId == itemId
-            if (!shouldRetryResultFocus(attempt, focusObserved)) return focusObserved
+            if (isFullyVisible()) {
+                runCatching { requester.requestFocus() }
+                val focusObserved = focusedResultId == itemId
+                if (!shouldRetryResultFocus(attempt, focusObserved)) return focusObserved
+            } else if (attempt == RESULT_FOCUS_RETRY_ATTEMPTS - 1) {
+                return false
+            }
             delay(40)
         }
         return focusedResultId == itemId
@@ -411,6 +455,12 @@ fun SearchScreen(nav: NavController) {
         if (first != null) scope.launch {
             requestResultFocus(first.id, 0, firstResultFocus)
         }
+    }
+
+    fun focusResultAt(index: Int) {
+        val item = shown.getOrNull(index) ?: return
+        val requester = if (index == 0) firstResultFocus else cardReg.fr(item.id)
+        scope.launch { requestResultFocus(item.id, index, requester) }
     }
 
     // 返回落焦恢复（需求 影视#6-2）：结果到齐后回到上次聚焦的结果卡
@@ -694,7 +744,7 @@ fun SearchScreen(nav: NavController) {
                 ProvideNavScrolls(vertical = resultScroll) {
                     LazyVerticalGrid(
                         state = resultsGridState,
-                        columns = GridCells.Fixed(7),
+                        columns = GridCells.Fixed(SEARCH_RESULT_COLUMNS),
                         contentPadding = PaddingValues(top = 24f.sx(s), bottom = 60f.sx(s)),
                         horizontalArrangement = Arrangement.spacedBy(20f.sx(s)),
                         verticalArrangement = Arrangement.spacedBy(36f.sx(s)),
@@ -705,14 +755,38 @@ fun SearchScreen(nav: NavController) {
                         // key 用纯 id（results 已 distinctBy id 保证唯一）：结果集变化时
                         // 节点按 id 复用，避免全量销毁重组引发焦点丢失风暴（2026-08-31）
                         items(shown.size, key = { i -> shown[i].id }) { i ->
-                            ResultCard(
-                                nav, shown[i], s, cardReg,
-                                externalFocus = if (i == 0) firstResultFocus else null,
-                                onResultFocusChanged = { focused ->
-                                    if (focused) focusedResultId = shown[i].id
-                                    else if (focusedResultId == shown[i].id) focusedResultId = null
+                            CompositionLocalProvider(
+                                LocalNavOverride provides { direction ->
+                                    when (direction) {
+                                        NAV_UP -> {
+                                            val targetIndex = previousSearchResultIndex(i)
+                                            if (targetIndex == null) {
+                                                // Only the actual first result row can return to input.
+                                                focusTarget(keyboardFocus)
+                                            } else {
+                                                focusResultAt(targetIndex)
+                                            }
+                                            true
+                                        }
+                                        NAV_DOWN -> {
+                                            // Don't rely on geometric search plus a one-step lazy scroll:
+                                            // the next row may exist only as a clipped sliver.
+                                            nextSearchResultIndex(i, shown.size)?.let(::focusResultAt)
+                                            true
+                                        }
+                                        else -> false
+                                    }
                                 },
-                            )
+                            ) {
+                                ResultCard(
+                                    nav, shown[i], s, cardReg,
+                                    externalFocus = if (i == 0) firstResultFocus else null,
+                                    onResultFocusChanged = { focused ->
+                                        if (focused) focusedResultId = shown[i].id
+                                        else if (focusedResultId == shown[i].id) focusedResultId = null
+                                    },
+                                )
+                            }
                         }
                     }
                 }

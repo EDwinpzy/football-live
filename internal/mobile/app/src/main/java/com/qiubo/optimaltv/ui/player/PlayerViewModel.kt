@@ -2570,7 +2570,13 @@ class PlayerViewModel(
                 }
             }
         }
-        runCatching { engine.release() }
+        if (com.qiubo.optimaltv.lifecycle.ExitCoordinator.isExiting()) {
+            // ExitCoordinator terminates this process shortly after Activity teardown. Avoid
+            // blocking its main-thread finish path on ExoPlayer's synchronous native release.
+            runCatching { if (hasEngine()) engine.pause() }
+        } else {
+            runCatching { if (hasEngine()) engine.release() }
+        }
         renewJob?.cancel()
         liveAutoRetryJob?.cancel()
         // v1.21：退出播放页即停投屏（渲染器 Stop；不回本地——页面已销毁）

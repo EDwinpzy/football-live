@@ -159,6 +159,9 @@ internal object HomeLibraryUiPolicy {
         return target.takeIf { page in 0 until pageCount && it in 0 until pageCount }
     }
 
+    fun shouldReturnToCategoryMenuOnBack(page: Int, categoryMenuFocused: Boolean): Boolean =
+        page > 0 && !categoryMenuFocused
+
     fun sourceSectionName(page: Int, available: List<String>): String? {
         val aliases = when (page) {
             0 -> listOf("最近热门", "近期热门")
@@ -292,6 +295,7 @@ fun VodScreen(nav: NavController) {
                         else HomeLibraryUiPolicy.defaultCategoryIndex(categories),
                     )
                 }
+                var categoryMenuFocused by remember { mutableStateOf(false) }
                 val categoryFocusRequesters = remember(categories) { List(categories.size) { FocusRequester() } }
                 val allPageFilterFocus = remember { FocusRequester() }
                 LaunchedEffect(cat, returningFromAllCard, returnKey) {
@@ -493,8 +497,25 @@ fun VodScreen(nav: NavController) {
                 BackHandler {
                     focusRequests.job?.cancel()
                     val atTop = vodListState.firstVisibleItemIndex == 0 && vodListState.firstVisibleItemScrollOffset == 0
-                    if (sectionPagerState.currentPage > 0) {
-                        moveLibraryPage(sectionPagerState.currentPage - 1, focusRequests.row, focusRequests.column)
+                    if (HomeLibraryUiPolicy.shouldReturnToCategoryMenuOnBack(
+                            if (libraryCategoryTilesVisible) sectionPagerState.currentPage + 1 else 0,
+                            categoryMenuFocused,
+                        )
+                    ) {
+                        focusRequests.awaitingPageFocus = false
+                        backScope.launch {
+                            // Keep the selected catalog category and right-side page. The
+                            // Back key exits the content area to the category rail; it must
+                            // not step through adjacent right-side pages.
+                            runCatching { vodListState.scrollToItem(1) }
+                            withFrameNanos { }
+                            val target = categoryFocusRequesters.getOrNull(catSel) ?: return@launch
+                            repeat(24) {
+                                runCatching { target.requestFocus() }
+                                if (categoryMenuFocused) return@launch
+                                withFrameNanos { }
+                            }
+                        }
                     } else if (atTop && tabFocused) {
                         exitApp()
                     } else {
@@ -512,6 +533,7 @@ fun VodScreen(nav: NavController) {
                 val showLibLoading = sectionLoading && sections.isEmpty()
 
                 val selectCategory: (Int) -> Unit = { index ->
+                    categoryMenuFocused = true
                     if (index in categories.indices && index != catSel) {
                         catSel = index
                         categories[index].first.takeIf(String::isNotBlank)?.let { categoryId ->
@@ -520,6 +542,7 @@ fun VodScreen(nav: NavController) {
                     }
                 }
                 fun enterSelectedCategory() {
+                    categoryMenuFocused = false
                     if (selCatId.isBlank()) {
                         if (sectionPagerState.settledPage == HomeLibraryUiPolicy.ALL_PAGE_INDEX) {
                             requestAllPageFilterFocus()
@@ -653,6 +676,7 @@ fun VodScreen(nav: NavController) {
                                         val item = section?.items?.getOrNull(column * 2 + row)
                                         val key = item?.let { "lib:${section?.name ?: title}:${it.id}" }
                                         if (gained) {
+                                            categoryMenuFocused = false
                                             focusRequests.focusedKey = key
                                             focusRequests.job?.cancel()
                                             if (page == sectionPagerState.settledPage && !sectionPagerState.isScrollInProgress) {

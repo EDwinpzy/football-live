@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
+import java.util.concurrent.atomic.AtomicBoolean
 import com.qiubo.optimaltv.BackendService
 import com.qiubo.optimaltv.OtvLog
 import com.qiubo.optimaltv.announcement.AnnouncementManager
@@ -12,7 +13,12 @@ import com.qiubo.optimaltv.hotupdate.HotUpdateManager
 import com.qiubo.optimaltv.playback.StreamDecryptServer
 
 object ExitCoordinator {
+    private val exitStarted = AtomicBoolean(false)
+
+    fun isExiting(): Boolean = exitStarted.get()
+
     fun exit(activity: Activity) {
+        if (!exitStarted.compareAndSet(false, true)) return
         OtvLog.i("explicit exit: release playback helpers and backend")
         AppLifecycleManager.shutdown()
         AnnouncementManager.shutdown()

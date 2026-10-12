@@ -1,7 +1,9 @@
 package com.qiubo.optimaltv.ui.home
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HomeLibraryUiPolicyTest {
@@ -70,6 +72,15 @@ class HomeLibraryUiPolicyTest {
         assertEquals(2, HomeLibraryUiPolicy.contentPageTarget(1, com.qiubo.optimaltv.ui.components.NAV_DOWN, 3))
         assertNull(HomeLibraryUiPolicy.contentPageTarget(2, com.qiubo.optimaltv.ui.components.NAV_DOWN, 3))
         assertNull(HomeLibraryUiPolicy.contentPageTarget(0, com.qiubo.optimaltv.ui.components.NAV_UP, 3))
+    }
+
+    @Test
+    fun `从右侧第二到第四页按返回回到分类菜单并保留当前页`() {
+        assertFalse(HomeLibraryUiPolicy.shouldReturnToCategoryMenuOnBack(0, categoryMenuFocused = false))
+        assertTrue(HomeLibraryUiPolicy.shouldReturnToCategoryMenuOnBack(1, categoryMenuFocused = false))
+        assertTrue(HomeLibraryUiPolicy.shouldReturnToCategoryMenuOnBack(2, categoryMenuFocused = false))
+        assertTrue(HomeLibraryUiPolicy.shouldReturnToCategoryMenuOnBack(3, categoryMenuFocused = false))
+        assertFalse(HomeLibraryUiPolicy.shouldReturnToCategoryMenuOnBack(3, categoryMenuFocused = true))
     }
 
     @Test

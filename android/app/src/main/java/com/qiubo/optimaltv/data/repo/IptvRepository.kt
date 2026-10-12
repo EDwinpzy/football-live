@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -18,24 +20,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
- * IPTV 直播源仓库（v1.16 2026-09-01 重构：精编频道表 + 多源备份 + 上游自动补源）：
- *
- * 频道名单 = **内置精编频道表**（assets/iptv_curated.m3u，79 频道 / 129 条实测可用线路，
- * 分组：央视/卫视/体育/地方/数字付费/港澳台/美国-英国；每周二 08:00 由外部整合工具
- * 测活→剔死→补源重建，随 app 版本更新）。名单收敛：上游聚合源不新增频道，只补线路。
- *
- * 补源（自动更新）：定期拉取公开聚合仓库 vbskycn/iptv（gh-proxy 镜像优先、GitHub raw 兜底），
- * 按**归一化频道名**（CCTV-5+体育赛事 ≡ CCTV5+、CCTV-13新闻 ≡ CCTV13）把上游同名频道的
- * 线路/台标并进精编频道（每频道上限 8 条）——同一频道主线路失效时播放器沿备用线路
- * 轮换（PlayerViewModel.iptvRotateLine），「总有可用的源」。
- *
- * 缓存策略（对齐 LiveRepository 磁盘快照模式）：
- * - 合并结果落 files/iptv_snapshot.m3u；进页先读快照立即上屏，后台拉最新成功后覆盖；
- * - 拉取失败（断网/源失效）保留旧列表不打断页面；内置精编表永远兜底（快照损坏也能重建）；
- * - 刷新节流：距上次成功 <30min 的自动刷新直接跳过（手动刷新不受限）。
- *
- * 安全：拉取本身过 UrlGuard 字符串级校验；解析出的每个播放 URL 过 UrlGuard，
- * 被拒线路剔除并落日志（客户端首道 SSRF 防线）。
+ * IPTV catalog: checked built-in fallbacks plus the admin-managed channel list.
+ * Refreshes run on an IO thread. Stream probes are bounded and never block UI input.
+ * Upstream availability varies by network; the player can rotate through channel fallbacks.
  */
 class IptvRepository(context: Context) {
 
@@ -46,14 +33,15 @@ class IptvRepository(context: Context) {
          *     对象与热更包同桶不同前缀 iptv/）。2026-09-16：后台虽已迁回腾讯云 CloudBase，
          *     但**电视源按用户要求仍取自建站点那份**（两个地址下发的是同一份文件，
          *     SHA-256 逐字节一致；切换只影响「从哪取」，不影响频道表内容）；
-         *  ②③ Guovin/iptv-api 每日自动优化列表（gh-proxy / jsdelivr 双镜像，1619 线路，
-         *     上游每日 EPG 校验，gh-proxy ~4s / jsdelivr ~1.6s）；
-         *  ④⑤ vbskycn/iptv 聚合（原源，gh-proxy 实测 2.7s；raw 直连国内超时仅作兜底）。 */
+         *  ②③ JianghaoPi 聚合直播清单（上游多源回退、每日测速保活；镜像/原站）；
+         *  ④ iptv-org 中国频道清单；⑤⑥ vbskycn/iptv 聚合回退。
+         * Guovin 旧 raw output 路径已停止更新，不再作为备用源。 */
         val SOURCES = listOf(
                 // 由 apiBaseUrl Gradle 属性注入：迁移后指向新服务器，旧 CloudBase 地址不再内置。
                 BuildConfig.IPTV_LATEST_URL,
-            "https://gh-proxy.com/raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
-            "https://cdn.jsdelivr.net/gh/Guovin/iptv-api@gd/output/result.m3u",
+            "https://gh-proxy.com/raw.githubusercontent.com/JianghaoPi/my-tvbox-sources/main/output/live.m3u",
+            "https://raw.githubusercontent.com/JianghaoPi/my-tvbox-sources/main/output/live.m3u",
+            "https://iptv-org.github.io/iptv/countries/cn.m3u",
             "https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",
             "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",
         )
@@ -201,14 +189,16 @@ class IptvRepository(context: Context) {
         if (wasEmpty) _state.value = _state.value.copy(loading = true)
         Thread {
             try {
-                fetchLatest()?.let { upstreamRaw ->
+                fetchLatest()?.let { fetched ->
+                    val upstreamRaw = fetched.raw
                     // v1.20 电视源管理（后台#8）托管模式：云端 m3u 带非空分组（group-title）
                     // = 后台手动发布的托管列表 → 整表直接生效（频道/分组/顺序以后台为准，
                     // 后台可动态增删频道）；自动推流产物分组为空 → 维持旧「精编名单+线路池」
                     // 合并语义（精编表定名单，上游只补线路）
                     val curated = parseM3u(curatedAssetText())
                     val upstream = parseM3u(upstreamRaw)
-                    val managed = upstream.channels.any { it.group.isNotBlank() && it.group != "其他" }
+                    val managed = fetched.url == BuildConfig.IPTV_LATEST_URL &&
+                        upstream.channels.any { it.group.isNotBlank() && it.group != "其他" }
                     val merged = if (managed) upstream else merge(curated, upstream)
                     require(merged.channels.isNotEmpty()) { "合并结果为空" }
                     val raw = serializeM3u(merged.channels)
@@ -256,7 +246,9 @@ class IptvRepository(context: Context) {
     }
 
     /** 多源按序拉取上游原始 m3u 文本；全部失败返回 null */
-    private fun fetchLatest(): String? {
+    private data class FetchedPlaylist(val url: String, val raw: String)
+
+    private fun fetchLatest(): FetchedPlaylist? {
         for (src in SOURCES) {
             // 出站前过 UrlGuard（多源地址为内置 https 公网域，防未来配置笔误带入内网地址）
             val verdict = UrlGuard.check(src)
@@ -273,7 +265,7 @@ class IptvRepository(context: Context) {
                     val body = resp.body?.string()
                     if (!body.isNullOrBlank() && body.contains("#EXTINF")) {
                         OtvLog.i("iptv 源命中：$src（${body.length} 字符）")
-                        return body
+                        return FetchedPlaylist(src, body)
                     }
                 }
             } catch (e: Exception) {
@@ -405,7 +397,7 @@ class IptvRepository(context: Context) {
     fun rankUrls(urls: List<String>): List<String> {
         if (urls.size < 2) return urls
         val scored = urls.mapNotNull { u -> speedOf(u)?.let { u to it } }
-        if (scored.size < 2) return urls   // 至少两条有分数才值得重排
+        if (scored.isEmpty()) return urls   // 至少两条有分数才值得重排
         val good = scored.filter { it.second < LineSpeed.FAIL_MS }.sortedBy { it.second }
         val dead = scored.filter { it.second >= LineSpeed.FAIL_MS }
         return good.map { it.first } +
@@ -430,20 +422,22 @@ class IptvRepository(context: Context) {
 
 /** 线路测速器（电视#5，IptvRepository 类外顶层——跨模块按名引用） */
 /**
- * 线路测速器（电视#5）：对单条播放 URL 做「首字节时延」评分（连接+响应头+首批
- * 数据，读满 ~32KB 或流自然结束即停），毫秒数越小越快；失败记 [FAIL_MS]。
+ * 线路测速器（电视#5）：对单条播放 URL 检查清单与首个媒体分片，再按总耗时评分；
+ * 200 状态的 HTML 错误页、空清单或坏分片都算失败。失败记 [FAIL_MS]。
  * 分数进程内共享（换台排序 ↔ 播放链路兜底互认）；同一 URL 并发探测合并为一次。
  */
 object LineSpeed {
     const val FAIL_MS = 999_999L
-    private const val READ_TARGET = 32 * 1024
+    private const val READ_TARGET = IptvProbePolicy.MAX_PLAYLIST_BYTES + 1
 
+    private val probeSlots = Semaphore(4)
     private val scores = ConcurrentHashMap<String, Long>()
     private val probing = ConcurrentHashMap.newKeySet<String>()
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(2, TimeUnit.SECONDS)
         .readTimeout(3, TimeUnit.SECONDS)
+        .callTimeout(5, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
@@ -454,30 +448,66 @@ object LineSpeed {
 
     /** 探测一条线路并记录分数；失败记 FAIL_MS。返回分数。 */
     suspend fun probe(url: String): Long? = withContext(Dispatchers.IO) {
-        if (url in probing) return@withContext scores[url]
-        probing.add(url)
+        if (!probing.add(url)) return@withContext scores[url]
         try {
             val t0 = SystemClock.elapsedRealtime()
-            val ms = runCatching {
-                client.newCall(
-                    Request.Builder().url(url).header("User-Agent", "Mozilla/5.0 OptimalTV/probe").build(),
-                ).execute().use { r ->
-                    if (!r.isSuccessful) return@use FAIL_MS
-                    var got = 0
-                    val buf = ByteArray(8192)
-                    val ins = r.body?.byteStream() ?: return@use FAIL_MS
-                    while (got < READ_TARGET) {
-                        val n = ins.read(buf)
-                        if (n < 0) break
-                        got += n
-                    }
-                    if (got <= 0) FAIL_MS else SystemClock.elapsedRealtime() - t0
-                }
-            }.getOrNull() ?: FAIL_MS
+            val valid = probeSlots.withPermit { runCatching { inspect(url, 0) }.getOrDefault(false) }
+            val ms = if (valid) SystemClock.elapsedRealtime() - t0 else FAIL_MS
             scores[url] = ms
             ms
         } finally {
             probing.remove(url)
         }
+    }
+
+    /** 最多跟随两级 HLS 清单（主清单→媒体清单）后检查首个分片。 */
+    private fun inspect(url: String, playlistDepth: Int): Boolean {
+        val result = client.newCall(
+            Request.Builder().url(url)
+                .header("User-Agent", "Mozilla/5.0 OptimalTV/probe")
+                .header("Range", "bytes=0-8191")
+                .build(),
+        ).execute().use { response ->
+            if (response.code != 200 && response.code != 206) return false
+            val body = response.body?.byteStream()?.let { readLimited(it, READ_TARGET) } ?: return false
+            ProbeResponse(
+                body = body,
+                contentType = response.header("Content-Type"),
+                finalUrl = response.request.url,
+                status = response.code,
+                contentRange = response.header("Content-Range"),
+            )
+        }
+        if (IptvProbePolicy.isPlaylist(result.body, result.contentType, url)) {
+            if (!IptvProbePolicy.isCompletePlaylistResponse(result.body, result.status, result.contentRange)) return false
+            if (!IptvProbePolicy.isLivePlaylist(result.body)) return false
+            if (playlistDepth >= 2) return false
+            val reference = IptvProbePolicy.firstPlaylistReference(result.body) ?: return false
+            val next = result.finalUrl.resolve(reference) ?: return false
+            return inspect(next.toString(), playlistDepth + 1)
+        }
+        if (IptvProbePolicy.isPlaylistUrl(url) || IptvProbePolicy.isPlaylistContentType(result.contentType)) return false
+        return IptvProbePolicy.isUsableMediaPayload(result.body, result.contentType)
+    }
+
+    private data class ProbeResponse(
+        val body: ByteArray,
+        val contentType: String?,
+        val finalUrl: okhttp3.HttpUrl,
+        val status: Int,
+        val contentRange: String?,
+    )
+
+    private fun readLimited(input: java.io.InputStream, limit: Int): ByteArray {
+        val output = java.io.ByteArrayOutputStream(limit)
+        val buffer = ByteArray(4096)
+        var total = 0
+        while (total < limit) {
+            val count = input.read(buffer, 0, minOf(buffer.size, limit - total))
+            if (count <= 0) break
+            output.write(buffer, 0, count)
+            total += count
+        }
+        return output.toByteArray()
     }
 }

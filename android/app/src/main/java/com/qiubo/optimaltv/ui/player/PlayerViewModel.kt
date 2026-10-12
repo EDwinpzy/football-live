@@ -2419,7 +2419,13 @@ class PlayerViewModel(
                 }
             }
         }
-        runCatching { engine.release() }
+        if (com.qiubo.optimaltv.lifecycle.ExitCoordinator.isExiting()) {
+            // ExitCoordinator terminates this process shortly after Activity teardown. Avoid
+            // blocking its main-thread finish path on ExoPlayer's synchronous native release.
+            runCatching { if (hasEngine()) engine.pause() }
+        } else {
+            runCatching { if (hasEngine()) engine.release() }
+        }
         renewJob?.cancel()
         liveAutoRetryJob?.cancel()
         super.onCleared()

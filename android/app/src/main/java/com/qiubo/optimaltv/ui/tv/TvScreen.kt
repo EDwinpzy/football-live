@@ -103,7 +103,7 @@ import kotlinx.coroutines.launch
  *    顶栏 tab 恢复（与其他主页面一致，可正常切页）。
  * ② 播放态（选中频道后）：全屏沉浸直播（v1.16 行为）——隐藏 tab 栏，UP/DOWN 直接
  *    换台，LEFT/OK/MENU 呼出左侧两级侧边栏选台；BACK 双击返回（提示「再按一次返回」，
- *    电视#2）。
+ *    电视#2）后按主 tab 规则退出应用。
  *
  * 浏览态焦点（OtvNav）：分组列 hover-select 切分组（与影视 chips 同款）；分组 RIGHT
  * 定向进频道列首行；频道 LEFT 定向回选中分组 chip；tab DOWN 定向进内容首焦点。
@@ -363,19 +363,25 @@ fun TvScreen(nav: NavController) {
     }
 
     BackHandler {
-        when {
-            // 浏览态：直接返回上一页（tab 栈自然回退）
-            !playing -> nav.popBackStack()
-            // 播放态侧边栏内：严格分层返回，不与「双击返回」抢判定
-            sidebarVisible && OtvNav.currentGroup == "tv-channels" -> backToGroupColumn()
-            sidebarVisible -> sidebarVisible = false
-            // 播放态画面：2s 内两击返回上一页（必达出口）；呼出侧边栏走 OK/MENU/触屏
-            android.os.SystemClock.uptimeMillis() - lastBackAt < 2000 -> {
-                lastBackAt = 0L
-                navigateToTab(nav, "live")
-            }
-            else -> {
-                lastBackAt = android.os.SystemClock.uptimeMillis()
+        val now = android.os.SystemClock.elapsedRealtime()
+        val action = TvPlaybackBackPolicy.action(
+            playing = playing,
+            sidebarVisible = sidebarVisible,
+            channelColumnFocused = OtvNav.currentGroup == "tv-channels",
+            // A zero timestamp means no prior BACK; don't treat early device uptime as a double tap.
+            isDoubleBack = TvPlaybackBackPolicy.isDoubleBack(lastBackAt, now),
+        )
+        // Sidebar BACK is consumed by its own two-level navigation and must not leave an old
+        // playback exit tap armed for the next BACK after the sidebar closes.
+        lastBackAt = TvPlaybackBackPolicy.nextBackAtMs(action, now)
+        when (action) {
+            TvPlaybackBackAction.POP_BROWSE -> nav.popBackStack()
+            // Match the main-tab double-BACK behavior. ExitCoordinator marks shutdown first so
+            // PlayerViewModel won't synchronously release ExoPlayer while Activity is finishing.
+            TvPlaybackBackAction.EXIT_APP -> com.qiubo.optimaltv.lifecycle.ExitCoordinator.exit(activity)
+            TvPlaybackBackAction.RETURN_TO_GROUPS -> backToGroupColumn()
+            TvPlaybackBackAction.CLOSE_SIDEBAR -> sidebarVisible = false
+            TvPlaybackBackAction.SHOW_EXIT_HINT -> {
                 hint = "再按一次返回"
             }
         }

@@ -174,18 +174,24 @@ class Media3Engine(context: Context) : MediaEngine {
         if (profileChanged) releasePlayerForRebuild()
     }
 
-    /** 释放当前播放器实例（渲染面/监听器复用），下次 ensurePlayer 以新参数重建 */
-    private fun releasePlayerForRebuild() {
-        player?.let {
-            runCatching {
-                it.removeListener(listener)
-                it.removeAnalyticsListener(analyticsListener)
-                it.release()
-            }
-        }
+    /**
+     * Detach PlayerView and listeners before releasing ExoPlayer. PlayerView may still be in the
+     * Compose tree during a same-frame source/engine rebuild; releasing first leaves the attached
+     * view observing a dead player and can race its next measure/draw callbacks.
+     */
+    private fun releasePlayerInstance() {
+        val oldPlayer = player ?: return
         player = null
-        renderViewAsPlayer().player = null
+        runCatching { oldPlayer.removeListener(listener) }
+        runCatching { oldPlayer.removeAnalyticsListener(analyticsListener) }
+        runCatching { renderViewAsPlayer().player = null }
+            .onFailure { com.qiubo.optimaltv.OtvLog.w("engine detach PlayerView failed: ${it.message}") }
+        runCatching { oldPlayer.release() }
+            .onFailure { com.qiubo.optimaltv.OtvLog.w("engine release failed: ${it.message}") }
     }
+
+    /** 释放当前播放器实例（渲染面/监听器复用），下次 ensurePlayer 以新参数重建 */
+    private fun releasePlayerForRebuild() = releasePlayerInstance()
 
     override fun audioCodecs(): String? = runCatching { player?.audioFormat?.codecs }.getOrNull()
 
@@ -522,9 +528,7 @@ class Media3Engine(context: Context) : MediaEngine {
 
     override fun release() {
         scope.cancel()
-        player?.release()
-        player = null
-        renderViewAsPlayer().player = null
+        releasePlayerInstance()
     }
 }
 

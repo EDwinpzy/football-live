@@ -138,7 +138,8 @@ object StreamDecryptServer {
         serverSocket = null
         connPool?.shutdownNow()
         connPool = null
-        reset()
+        // This is a terminal process shutdown. reset() posts WebView rebuilds to the main thread,
+        // which only adds work while the Activity is finishing and the process is about to exit.
         Log.i(TAG, "decrypt bridge shutdown")
     }
 
