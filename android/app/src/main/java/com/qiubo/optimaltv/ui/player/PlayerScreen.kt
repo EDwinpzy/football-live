@@ -128,8 +128,6 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
         },
     )
     val ui by vm.ui.collectAsStateWithLifecycle()
-    var sourceMenuOpen by remember(vm) { mutableStateOf(false) }
-    LaunchedEffect(ui.panel) { if (ui.panel != Panel.MORE) sourceMenuOpen = false }
 
     // KEEP_SCREEN_ON：投影仪防息屏
     val activity = LocalContext.current as Activity
@@ -171,7 +169,6 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
     fun onBackPressed() {
         com.qiubo.optimaltv.OtvLog.i("player onBackPressed: panel=${ui.panel} src=${ui.srcPickerVisible} ctl=${ui.controlsVisible} fatal=${ui.fatalMsg != null} hint=${backHint.value != null}")
         when {
-            ui.panel == Panel.MORE && sourceMenuOpen -> sourceMenuOpen = false
             ui.panel != Panel.NONE -> vm.setPanel(Panel.NONE)
             ui.srcPickerVisible -> vm.hideSrcPicker()    // 直播：先收信号源条（需求 足球#14；错误态开条时 BACK 也先收条）
             ui.fatalMsg != null -> nav.popBackStack()    // 错误兜底态：BACK 直接返回上一页
@@ -369,13 +366,11 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
         /* ⑭（2026-09-08）：TV 版投屏功能整体移除——v1.21 投屏入口胶囊与设备浮层删除
            （移动版保留；共享层 PlayerViewModel 的 DLNA 逻辑因双端同源不动，TV 侧无任何入口触达） */
 
-        // 面板：更多（影片信息+选集[仅非电影]+换源+倍速）
+        // 面板：更多（影片信息+选集[仅非电影]+倍速+换源）
         if (ui.panel == Panel.MORE) {
             MorePanel(
                 ui = ui,
                 vm = vm,
-                sourceMenuOpen = sourceMenuOpen,
-                onSourceMenuChange = { sourceMenuOpen = it },
                 // v1.19：VM 内直切换集（不走路由堆叠 VM/引擎实例，见 switchEpisode）
                 onPickEpisode = { i ->
                     vm.switchEpisode(i)
@@ -741,19 +736,16 @@ private fun VodPlayerOverlay(
     }
 }
 
-/** Compact main sidebar and same-size covering source selector. */
+/** Main sidebar with source groups and lines below episodes and speed. */
 @Composable
 private fun MorePanel(
     ui: PlayerUiState,
     vm: PlayerViewModel,
     onPickEpisode: (Int) -> Unit,
-    sourceMenuOpen: Boolean,
-    onSourceMenuChange: (Boolean) -> Unit,
 ) {
-    // Recreate the initial-focus target when switching the covering panel; BACK restores the entry.
-    val panelFocus = remember(sourceMenuOpen) { FocusRequester() }
-    InitialFocusEffect(panelFocus, "panel-more-$sourceMenuOpen")
-    val panelScroll = remember(sourceMenuOpen) { androidx.compose.foundation.ScrollState(0) }
+    val panelFocus = remember { FocusRequester() }
+    InitialFocusEffect(panelFocus, "panel-more")
+    val panelScroll = rememberScrollState()
     val panelNav = remember(panelScroll) { scrollNavContainer(panelScroll) }
     Box(Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize().background(Color(0x66000000)))
@@ -763,91 +755,73 @@ private fun MorePanel(
                     .background(Color(0xE9121216), RoundedCornerShape(topStart = 24.dp, bottomStart = 24.dp))
                     .verticalScroll(panelScroll).padding(horizontal = 28.dp, vertical = 24.dp),
             ) {
-                if (sourceMenuOpen) {
-                    PlayerSourceMenu(ui, vm, panelFocus) { onSourceMenuChange(false) }
-                } else {
-                    Row(verticalAlignment = Alignment.Top) {
-                        if (ui.posterUrl.isNotBlank()) {
-                            AsyncImage(
-                                model = ui.posterUrl, contentDescription = ui.title,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.width(72.dp).height(100.dp).clip(RoundedCornerShape(10.dp)),
-                            )
-                            Spacer(Modifier.width(16.dp))
-                        }
-                        Column(Modifier.weight(1f)) {
-                            Text(ui.title.ifBlank { "影片" }, color = TextPrimary,
-                                style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            if (ui.meta.isNotBlank()) {
-                                Spacer(Modifier.height(6.dp))
-                                Text(ui.meta, color = TextPrimary.copy(alpha = 0.6f),
-                                    style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
+                Row(verticalAlignment = Alignment.Top) {
+                    if (ui.posterUrl.isNotBlank()) {
+                        AsyncImage(
+                            model = ui.posterUrl, contentDescription = ui.title,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.width(72.dp).height(100.dp).clip(RoundedCornerShape(10.dp)),
+                        )
+                        Spacer(Modifier.width(16.dp))
                     }
-                    if (ui.desc.isNotBlank()) {
-                        Spacer(Modifier.height(10.dp))
-                        Text(ui.desc, color = TextPrimary.copy(alpha = 0.7f),
-                            style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    }
-                    if (!ui.isMovie && ui.epCount > 1) {
-                        Spacer(Modifier.height(12.dp))
-                        SectionLabel("选集")
-                        val pageSize = EpisodeMenuPolicy.RANGE_SIZE
-                        val pageCount = (ui.epCount + pageSize - 1) / pageSize
-                        var page by remember(ui.epIndex / pageSize) { mutableIntStateOf(ui.epIndex / pageSize) }
-                        if (EpisodeMenuPolicy.hasRanges(ui.epCount)) {
-                            val rangeScroll = rememberScrollState()
-                            ProvideNavScrolls(horizontal = remember(rangeScroll) { scrollNavContainer(rangeScroll) }) {
-                                Row(Modifier.fillMaxWidth().horizontalScroll(rangeScroll), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    for (p in 0 until pageCount) {
-                                        val from = p * pageSize + 1
-                                        val to = minOf((p + 1) * pageSize, ui.epCount)
-                                        PlayerPanelChip("第$from-${to}集", p == page) { page = p }
-                                    }
-                                }
-                            }
-                            Spacer(Modifier.height(8.dp))
-                        }
-                        // Non-lazy rows keep every episode focusable in the panel scroll container.
-                        // Five per full row; incomplete final rows also share the entire available width.
-                        EpisodeMenuPolicy.visibleRange(ui.epCount, page).toList().chunked(5).forEach { row ->
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                row.forEach { index ->
-                                    PlayerPanelChip(EpisodeMenuPolicy.episodeLabel(index), index == ui.epIndex,
-                                        Modifier.weight(1f)) { onPickEpisode(index) }
-                                }
-                            }
+                    Column(Modifier.weight(1f)) {
+                        Text(ui.title.ifBlank { "影片" }, color = TextPrimary,
+                            style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        if (ui.meta.isNotBlank()) {
                             Spacer(Modifier.height(6.dp))
-                        }
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    SectionLabel("倍速")
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        PlayerViewModel.SPEED_STEPS.forEach { speed ->
-                            PlayerPanelChip("${speed}x", kotlin.math.abs(speed - ui.speed) < 0.01f,
-                                Modifier.weight(1f), compact = true) { vm.setSpeed(speed) }
-                        }
-                    }
-                    Spacer(Modifier.height(12.dp))
-                    Box(
-                        Modifier.fillMaxWidth().focusRequester(panelFocus)
-                            .background(Color(0x24FFFFFF), RoundedCornerShape(14.dp))
-                            .dpadFocusable(navGroup = PANEL_NAV_GROUP, scaleFocused = 1.02f) { onSourceMenuChange(true) }
-                            .padding(horizontal = 18.dp, vertical = 12.dp),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("⇄", color = Color.White, style = MaterialTheme.typography.titleLarge)
-                            Spacer(Modifier.width(14.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text("信号源选择", color = Color.White, style = MaterialTheme.typography.titleSmall)
-                                Text(playerSourceStatus(ui), color = TextPrimary.copy(alpha = 0.65f),
-                                    style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            Text("›", color = Color.White, style = MaterialTheme.typography.titleLarge)
+                            Text(ui.meta, color = TextPrimary.copy(alpha = 0.6f),
+                                style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
+                if (ui.desc.isNotBlank()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(ui.desc, color = TextPrimary.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                if (!ui.isMovie && ui.epCount > 1) {
+                    Spacer(Modifier.height(12.dp))
+                    SectionLabel("选集")
+                    val pageSize = EpisodeMenuPolicy.RANGE_SIZE
+                    val pageCount = (ui.epCount + pageSize - 1) / pageSize
+                    var page by remember(ui.epIndex / pageSize) { mutableIntStateOf(ui.epIndex / pageSize) }
+                    if (EpisodeMenuPolicy.hasRanges(ui.epCount)) {
+                        val rangeScroll = rememberScrollState()
+                        ProvideNavScrolls(horizontal = remember(rangeScroll) { scrollNavContainer(rangeScroll) }) {
+                            Row(Modifier.fillMaxWidth().horizontalScroll(rangeScroll), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                for (p in 0 until pageCount) {
+                                    val from = p * pageSize + 1
+                                    val to = minOf((p + 1) * pageSize, ui.epCount)
+                                    PlayerPanelChip("第$from-${to}集", p == page) { page = p }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    // Non-lazy rows keep every episode focusable in the panel scroll container.
+                    // Five per full row; incomplete final rows also share the entire available width.
+                    EpisodeMenuPolicy.visibleRange(ui.epCount, page).toList().chunked(5).forEach { row ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            row.forEach { index ->
+                                PlayerPanelChip(EpisodeMenuPolicy.episodeLabel(index), index == ui.epIndex,
+                                    Modifier.weight(1f)) { onPickEpisode(index) }
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                SectionLabel("倍速")
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    PlayerViewModel.SPEED_STEPS.forEach { speed ->
+                        PlayerPanelChip("${speed}x", kotlin.math.abs(speed - ui.speed) < 0.01f,
+                            Modifier.weight(1f).then(
+                                if (kotlin.math.abs(speed - ui.speed) < 0.01f) Modifier.focusRequester(panelFocus) else Modifier
+                            ), compact = true) { vm.setSpeed(speed) }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                PlayerSourceSection(ui, vm)
             }
         }
     }
@@ -877,7 +851,7 @@ private fun PlayerPanelChip(
 }
 
 @Composable
-private fun PlayerSourceMenu(ui: PlayerUiState, vm: PlayerViewModel, initialFocus: FocusRequester, onBack: () -> Unit) {
+private fun PlayerSourceSection(ui: PlayerUiState, vm: PlayerViewModel) {
     val groups = remember(ui.lines) { PlayerSourceGroupingPolicy.groups(ui.lines.map { it.label }) }
     val activeProvider = groups.firstOrNull { ui.activeLine in it.lineIndices }?.provider
     var provider by remember(ui.title) { mutableStateOf(activeProvider ?: groups.firstOrNull()?.provider) }
@@ -885,26 +859,11 @@ private fun PlayerSourceMenu(ui: PlayerUiState, vm: PlayerViewModel, initialFocu
         if (groups.none { it.provider == provider }) provider = activeProvider ?: groups.firstOrNull()?.provider
     }
     val selected = groups.firstOrNull { it.provider == provider } ?: groups.firstOrNull()
-    val initialLine = selected?.lineIndices?.firstOrNull { it == ui.activeLine } ?: selected?.lineIndices?.firstOrNull()
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            Modifier.then(if (initialLine == null) Modifier.focusRequester(initialFocus) else Modifier)
-                .size(42.dp).background(Color(0x24FFFFFF), CircleShape)
-                .dpadFocusable(navGroup = PANEL_NAV_GROUP, onClick = onBack),
-            contentAlignment = Alignment.Center,
-        ) { Text("‹", color = Color.White, style = MaterialTheme.typography.titleLarge) }
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text("信号源选择", color = Color.White, style = MaterialTheme.typography.titleMedium)
-            Text(ui.title + if (!ui.isMovie && ui.epCount > 1) " · 第${ui.epIndex + 1}集" else "",
-                color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-    }
-    Spacer(Modifier.height(16.dp))
-    if (groups.isEmpty()) {
-        Text(playerSourceStatus(ui), color = TextPrimary.copy(alpha = 0.7f), style = MaterialTheme.typography.bodyMedium)
-    } else {
+    SectionLabel("信号源选择")
+    Text(playerSourceStatus(ui), color = TextPrimary.copy(alpha = 0.65f),
+        style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    Spacer(Modifier.height(12.dp))
+    if (groups.isNotEmpty()) {
         val tabScroll = rememberScrollState()
         ProvideNavScrolls(horizontal = remember(tabScroll) { scrollNavContainer(tabScroll) }) {
             Row(Modifier.fillMaxWidth().horizontalScroll(tabScroll), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -918,7 +877,7 @@ private fun PlayerSourceMenu(ui: PlayerUiState, vm: PlayerViewModel, initialFocu
             val line = ui.lines[index]
             val active = index == ui.activeLine
             Box(
-                Modifier.fillMaxWidth().then(if (index == initialLine) Modifier.focusRequester(initialFocus) else Modifier)
+                Modifier.fillMaxWidth()
                     .background(if (active) AccentBlue else Color(0x24FFFFFF), RoundedCornerShape(12.dp))
                     .dpadFocusable(navGroup = PANEL_NAV_GROUP, scaleFocused = 1.02f) { vm.switchLine(index) }
                     .padding(horizontal = 16.dp, vertical = 12.dp),

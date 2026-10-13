@@ -115,7 +115,7 @@ class MobileDetailPlayerComponentsTest {
 
         rule.onNodeWithText("选择集数").assertExists()
         rule.onNodeWithText("5").performClick()
-        rule.onNodeWithText("线路B").performClick()
+        rule.onNodeWithText("线路B").performScrollTo().performClick()
         rule.onNodeWithText("1.5x").performScrollTo().performClick()
         rule.onNodeWithText("4:3").performScrollTo().performClick()
         rule.runOnIdle {
@@ -129,7 +129,7 @@ class MobileDetailPlayerComponentsTest {
 
     @Test
     @OptIn(ExperimentalComposeUiApi::class)
-    fun sourceSelectorPrecedesSynopsisAndEpisodesAndReceivesDefaultFocus() {
+    fun sourceSelectorFollowsSynopsisEpisodesAndSpeedBeforeAspectAndKeepsDefaultFocus() {
         val synopsis = "这是一段很长的影片简介。".repeat(80)
         val ui = PlayerUiState(
             title = "自动化测试影片",
@@ -165,19 +165,65 @@ class MobileDetailPlayerComponentsTest {
             .fetchSemanticsNode().boundsInRoot
         val description = rule.onNodeWithText(synopsis).fetchSemanticsNode().boundsInRoot
         val episodes = rule.onNodeWithText("选择集数").fetchSemanticsNode().boundsInRoot
-        assertTrue("线路必须在简介前", source.top < description.top)
-        assertTrue("线路必须在选集前", source.top < episodes.top)
+        val speed = rule.onNodeWithText("1.0x").fetchSemanticsNode().boundsInRoot
+        val aspect = rule.onNodeWithText("画幅").fetchSemanticsNode().boundsInRoot
+        assertTrue("线路必须在简介后", source.top > description.bottom)
+        assertTrue("线路必须在选集后", source.top > episodes.bottom)
+        assertTrue("线路必须接在倍速后", source.top > speed.bottom)
+        assertTrue("线路必须位于画幅前", source.bottom < aspect.top)
+    }
+
+    @Test
+    @OptIn(ExperimentalComposeUiApi::class)
+    fun sourceRetryActionFollowsSpeedAndStaysBeforeAspect() {
+        var retries = 0
+        val ui = PlayerUiState(
+            title = "片源失败测试",
+            isMovie = true,
+            sourceStatus = com.qiubo.optimaltv.ui.player.PlayerSourceStatus.ERROR,
+        )
+        MobileUiHarness.scene = {
+            val inputModeManager = LocalInputModeManager.current
+            LaunchedEffect(inputModeManager) {
+                inputModeManager.requestInputMode(InputMode.Keyboard)
+            }
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                PlayerMoreSections(
+                    ui = ui,
+                    onPickEpisode = {},
+                    onSwitchLine = {},
+                    onRetrySources = { retries++ },
+                    onSetSpeed = {},
+                    onSetAspect = {},
+                    onStartCast = {},
+                    onStopCast = {},
+                    onRescanCast = {},
+                    autoFocusSource = true,
+                )
+            }
+        }
+        rule.waitForIdle()
+
+        val speed = rule.onNodeWithText("1.0x").fetchSemanticsNode().boundsInRoot
+        val retry = rule.onNodeWithText("重新查找片源").assertIsFocused().fetchSemanticsNode().boundsInRoot
+        val aspect = rule.onNodeWithText("画幅").fetchSemanticsNode().boundsInRoot
+        assertTrue("重试入口必须接在倍速后", retry.top > speed.bottom)
+        assertTrue("重试入口必须位于画幅前", retry.bottom < aspect.top)
+        rule.onNodeWithText("重新查找片源").performScrollTo().performClick()
+        rule.runOnIdle { assertEquals(1, retries) }
     }
 
     /** 电影不渲染选集区（需求⑨），直播不渲染倍速区。 */
     @Test
     fun moreSectionsHideEpisodePickerForMovieAndSpeedForLive() {
         MobileUiHarness.scene = {
-            PlayerMoreSections(
-                ui = PlayerUiState(title = "电影", isMovie = true, epCount = 1, speed = 1.0f),
-                onPickEpisode = {}, onSwitchLine = {}, onSetSpeed = {}, onSetAspect = {},
-                onStartCast = {}, onStopCast = {}, onRescanCast = {},
-            )
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                PlayerMoreSections(
+                    ui = PlayerUiState(title = "电影", isMovie = true, epCount = 1, speed = 1.0f),
+                    onPickEpisode = {}, onSwitchLine = {}, onSetSpeed = {}, onSetAspect = {},
+                    onStartCast = {}, onStopCast = {}, onRescanCast = {},
+                )
+            }
         }
         rule.waitForIdle()
         rule.onNodeWithText("选择集数").assertDoesNotExist()
@@ -185,14 +231,25 @@ class MobileDetailPlayerComponentsTest {
         rule.onNodeWithText("画幅").assertExists()
 
         MobileUiHarness.scene = {
-            PlayerMoreSections(
-                ui = PlayerUiState(title = "CCTV-5", isLive = true, speed = 1.0f),
-                onPickEpisode = {}, onSwitchLine = {}, onSetSpeed = {}, onSetAspect = {},
-                onStartCast = {}, onStopCast = {}, onRescanCast = {},
-            )
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                PlayerMoreSections(
+                    ui = PlayerUiState(
+                        title = "CCTV-5",
+                        isLive = true,
+                        speed = 1.0f,
+                        desc = "直播介绍",
+                        lines = listOf(LineInfo("live:a", "直播线路A", ""), LineInfo("live:b", "直播线路B", "")),
+                    ),
+                    onPickEpisode = {}, onSwitchLine = {}, onSetSpeed = {}, onSetAspect = {},
+                    onStartCast = {}, onStopCast = {}, onRescanCast = {},
+                )
+            }
         }
         rule.waitForIdle()
         rule.onNodeWithText("倍速").assertDoesNotExist()
         rule.onNodeWithText("画幅").assertExists()
+        val liveSource = rule.onNodeWithText("直播线路A").fetchSemanticsNode().boundsInRoot
+        val liveDescription = rule.onNodeWithText("直播介绍").fetchSemanticsNode().boundsInRoot
+        assertTrue("直播换源顺序应保持不变", liveSource.bottom < liveDescription.top)
     }
 }

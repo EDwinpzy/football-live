@@ -97,7 +97,7 @@ import kotlin.math.roundToInt
  * 播放页（v1.18 浮层视觉与 TV 版 1:1 同款：tvOS 播放器，需求 影视#3 / 足球#13/14）：
  * - 影视：单击画面呼出/隐藏菜单（标题+meta / 更多钮 / 进度条带拖动 seek）；BACK 隐藏菜单，
  *   菜单隐藏时两次返回退出（首次提示）；双击左右 1/3 = ±10s（TV 版为左右键 ±30s 的触控映射）；
- *   更多钮 → 右侧悬浮栏（影片信息+选集+换源+倍速+画幅）
+ *   更多钮 → 右侧悬浮栏（影片信息+选集+倍速+换源+画幅）
  * - 足球直播（需求 足球#14）：无任何菜单、无比分板；唯一控件=信号源选择条
  *   （单击画面呼出/收起，点 chip 即时换线，BACK/5s 自动隐藏）；两次返回退出
  * - 播放会话与 TV 版共用同一 PlayerViewModel（断点续播/看门狗换线/90s 续签/三段回退全保留）
@@ -469,7 +469,7 @@ private fun CinematicScrim(visible: Boolean) {
 }
 
 /** 竖屏播放器内容区（2026-09-19 v2 设计稿定稿）：视频下方常驻 =「更多」区段平铺
- *  （影片信息/简介/选集/换源/倍速/画幅/投屏，与横屏抽屉同源 PlayerMoreSections）。
+ *  （影片信息/简介/选集/倍速/换源/画幅/投屏，与横屏抽屉同源 PlayerMoreSections）。
  *  播放控制全部回归视频浮层 + 手势；竖屏进横屏走浮层右下全屏小钮（VodPlayerOverlay）。 */
 @Composable
 private fun PortraitPlayerPanel(ui: PlayerUiState, vm: PlayerViewModel) {
@@ -1031,7 +1031,7 @@ private fun MorePanel(
                 .padding(horizontal = 34.dp, vertical = 28.dp),
         ) {
             // 区段与竖屏视频下方内容区同源（PlayerMoreSections）：
-            // 影片信息/换源/简介/选集/倍速/画幅/投屏；换源优先进入视口并接收默认焦点。
+            // 影片信息/简介/选集/倍速/换源/画幅/投屏；换源区域按需滚动进入视口并接收默认焦点。
             PlayerMoreSections(
                 ui = ui,
                 onPickEpisode = onPickEpisode,

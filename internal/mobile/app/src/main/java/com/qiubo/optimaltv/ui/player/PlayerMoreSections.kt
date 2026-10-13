@@ -65,7 +65,7 @@ import com.qiubo.optimaltv.ui.theme.AccentBlue
 import com.qiubo.optimaltv.ui.theme.TextPrimary
 
 /**
- * 「更多」区段内容（2026-09-19 v2 设计稿定稿）：影片信息 + 换源 + 简介 + 选集 + 倍速 + 画幅 + 投屏。
+ * 「更多」区段内容：影片信息 + 简介 + 选集 + 倍速 + VOD 换源 + 画幅 + 投屏；直播换源顺序保持不变。
  * 横屏右侧抽屉（MorePanel）与竖屏视频下方常驻内容区（PortraitPlayerPanel）共用同一份区段，
  * 视觉 / 数据 / 动作 1:1；动作全部以回调注入，便于无 ViewModel 的自动化回归。
  */
@@ -125,46 +125,9 @@ internal fun PlayerMoreSections(
             }
         }
     }
-    // Put the source selector before synopsis and episode grids so it remains immediately visible.
-    // The side panel can request focus here when it opens; portrait detail content stays touch-first.
     val sourceFocusIndex = ui.activeLine.takeIf { it in ui.lines.indices } ?: 0
-    if (!ui.isLive) {
-        SectionLabel("换源线路")
-        when {
-            ui.lines.isEmpty() && ui.sourceStatus == PlayerSourceStatus.LOADING ->
-                Text("正在查找片源…", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
-            ui.lines.isEmpty() && ui.sourceStatus == PlayerSourceStatus.EMPTY ->
-                Text("没有找到可用片源", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
-            ui.lines.isEmpty() ->
-                Text(ui.fatalMsg ?: "片源查找失败", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
-            ui.sourceStatus == PlayerSourceStatus.LOADING ->
-                Text("正在加载：${ui.lines.getOrNull(ui.activeLine)?.label.orEmpty()}", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
-            ui.sourceStatus == PlayerSourceStatus.ERROR ->
-                Text("当前线路失败，可重试或切换线路", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
-            else ->
-                Text("当前线路：${ui.lines.getOrNull(ui.activeLine)?.label.orEmpty()}", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
-        }
-        if (ui.lines.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            SourceLineSelector(
-                title = ui.title,
-                labels = ui.lines.mapIndexed { idx, line ->
-                    if (idx == ui.activeLine) "${line.label} · 当前" else line.label
-                },
-                activeLine = sourceFocusIndex,
-                onSwitchLine = onSwitchLine,
-                focusRequester = sourceFocusRequester.takeIf { autoFocusSource },
-            )
-        } else if (ui.sourceStatus != PlayerSourceStatus.LOADING) {
-            Spacer(Modifier.height(8.dp))
-            SourceAction(
-                "重新查找片源",
-                onClick = onRetrySources,
-                modifier = if (autoFocusSource) Modifier.focusRequester(sourceFocusRequester) else Modifier,
-            )
-        }
-        Spacer(Modifier.height(18.dp))
-    } else if (ui.lines.size > 1) {
+    // Live source switching keeps its existing position and behavior.
+    if (ui.isLive && ui.lines.size > 1) {
         SectionLabel("换源线路")
         SourceLineSelector(
             title = ui.title,
@@ -264,6 +227,44 @@ internal fun PlayerMoreSections(
                     Text("%.1fx".format(sp), color = Color.White, style = MaterialTheme.typography.labelMedium)
                 }
             }
+        }
+        Spacer(Modifier.height(18.dp))
+    }
+    // VOD source groups sit after episode and speed controls at the bottom of the main panel.
+    if (!ui.isLive) {
+        SectionLabel("换源线路")
+        when {
+            ui.lines.isEmpty() && ui.sourceStatus == PlayerSourceStatus.LOADING ->
+                Text("正在查找片源…", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
+            ui.lines.isEmpty() && ui.sourceStatus == PlayerSourceStatus.EMPTY ->
+                Text("没有找到可用片源", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
+            ui.lines.isEmpty() ->
+                Text(ui.fatalMsg ?: "片源查找失败", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
+            ui.sourceStatus == PlayerSourceStatus.LOADING ->
+                Text("正在加载：${ui.lines.getOrNull(ui.activeLine)?.label.orEmpty()}", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
+            ui.sourceStatus == PlayerSourceStatus.ERROR ->
+                Text("当前线路失败，可重试或切换线路", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
+            else ->
+                Text("当前线路：${ui.lines.getOrNull(ui.activeLine)?.label.orEmpty()}", color = TextPrimary.copy(alpha = 0.65f), style = MaterialTheme.typography.bodySmall)
+        }
+        if (ui.lines.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            SourceLineSelector(
+                title = ui.title,
+                labels = ui.lines.mapIndexed { idx, line ->
+                    if (idx == ui.activeLine) "${line.label} · 当前" else line.label
+                },
+                activeLine = sourceFocusIndex,
+                onSwitchLine = onSwitchLine,
+                focusRequester = sourceFocusRequester.takeIf { autoFocusSource },
+            )
+        } else if (ui.sourceStatus != PlayerSourceStatus.LOADING) {
+            Spacer(Modifier.height(8.dp))
+            SourceAction(
+                "重新查找片源",
+                onClick = onRetrySources,
+                modifier = if (autoFocusSource) Modifier.focusRequester(sourceFocusRequester) else Modifier,
+            )
         }
         Spacer(Modifier.height(18.dp))
     }

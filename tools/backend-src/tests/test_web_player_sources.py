@@ -29,6 +29,17 @@ class WebPlayerSourcesTest(unittest.TestCase):
         self.assertIn('class="hscroll mp-chips mp-routes" id="mpLines"', html)
         self.assertIn('id="mpLinesToggle" class="mp-route-toggle"', html)
 
+    def test_vod_source_list_follows_episodes_and_speed_in_the_same_panel(self):
+        html = HTML.read_text(encoding="utf-8")
+        positions = [
+            html.index('id="mpEpsWrap"'),
+            html.index('id="mpSpeedSec"'),
+            html.index('id="mpLinesSec"'),
+            html.index('id="mpAspect"'),
+        ]
+        self.assertEqual(positions, sorted(positions),
+                         "the VOD panel order is episodes, speed, source list, then aspect")
+
 
 if __name__ == "__main__":
     unittest.main()
