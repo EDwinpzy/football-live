@@ -1,6 +1,5 @@
 package com.qiubo.optimaltv.data.repo
 
-import com.qiubo.optimaltv.BuildConfig
 import com.qiubo.optimaltv.OtvLog
 import com.qiubo.optimaltv.data.model.LiveStreamSource
 import com.qiubo.optimaltv.data.model.MatchChannel
@@ -9,7 +8,6 @@ import com.qiubo.optimaltv.data.model.NewsItem
 import com.qiubo.optimaltv.data.model.ResultItem
 import com.qiubo.optimaltv.data.model.VideoItem
 import com.qiubo.optimaltv.data.prefs.SettingsStore
-import com.qiubo.optimaltv.vpn.FootballVpnProxyCore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -20,55 +18,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.net.URLEncoder
-
-internal data class MatchFetchResult<T>(val value: T, val usedFootballProxy: Boolean)
-
-internal suspend fun <T> fetchMatchesWithFootballProxyFallback(
-    directRequest: suspend () -> T,
-    startFootballProxy: suspend () -> Unit,
-    proxyRequest: suspend () -> T,
-    preferFootballProxy: Boolean = false,
-): MatchFetchResult<T> {
-    fun message(error: Exception) = error.message?.takeIf { it.isNotBlank() }?.take(180)
-        ?: error.javaClass.simpleName
-
-    suspend fun fetchProxy(): T {
-        startFootballProxy()
-        return proxyRequest()
-    }
-
-    if (preferFootballProxy) {
-        try {
-            return MatchFetchResult(fetchProxy(), usedFootballProxy = true)
-        } catch (proxyError: Exception) {
-            if (proxyError is CancellationException) throw proxyError
-            try {
-                return MatchFetchResult(directRequest(), usedFootballProxy = false)
-            } catch (directError: Exception) {
-                if (directError is CancellationException) throw directError
-                throw IllegalStateException(
-                    "足球代理优先请求失败（${message(proxyError)}）；直连回退失败（${message(directError)}）",
-                    directError,
-                )
-            }
-        }
-    }
-
-    try {
-        return MatchFetchResult(directRequest(), usedFootballProxy = false)
-    } catch (directError: Exception) {
-        if (directError is CancellationException) throw directError
-        try {
-            return MatchFetchResult(fetchProxy(), usedFootballProxy = true)
-        } catch (proxyError: Exception) {
-            if (proxyError is CancellationException) throw proxyError
-            throw IllegalStateException(
-                "赛程直连失败（${message(directError)}）；足球代理重试失败（${message(proxyError)}）",
-                proxyError,
-            )
-        }
-    }
-}
 
 /**
  * 足球直播仓库（1:1 复刻原版 web 数据链路，同一后端）：
@@ -86,12 +35,10 @@ class LiveRepository(
 
     companion object {
         /** 直播源由服务端提供对应 Referer，供中继播放清单及分片。 */
-        fun relayUrl(base: String, raw: String, referer: String = "https://www.88zhibo.tv/", footballVpn: Boolean = false): String =
-            "$base/api/relay?u=" + URLEncoder.encode(raw, "UTF-8") + "&ref=" + URLEncoder.encode(referer, "UTF-8") +
-                if (footballVpn) "&football_vpn=1" else ""
+        fun relayUrl(base: String, raw: String, referer: String = "https://www.88zhibo.tv/"): String =
+            "$base/api/relay?u=" + URLEncoder.encode(raw, "UTF-8") + "&ref=" + URLEncoder.encode(referer, "UTF-8")
 
-        internal fun matchesRequestPath(footballVpn: Boolean): String =
-            "/api/matches?fresh=1" + if (footballVpn) "&football_vpn=1" else ""
+        internal fun matchesRequestPath(): String = "/api/matches?fresh=1"
 
         internal fun matchesArray(response: JSONObject): org.json.JSONArray {
             val error = if (response.isNull("error")) "" else response.optString("error").trim()
@@ -137,19 +84,32 @@ class LiveRepository(
     }
 
     private var matchesCache: Pair<Long, List<MatchItem>>? = null
-    @Volatile private var preferFootballProxyForMatches = false
-
     /** 冷抓接口（/hhkan/search 站点实时抓取）专用：75s 读超时——后端 _fetch 会在
      *  镜像域间切换重试（每域最长 25s×挑战求解），45s 会把「慢而能成」的搜索截成空结果（需求 搜索#2） */
     private val slowHttp by lazy {
-        okHttp.newBuilder().readTimeout(75, java.util.concurrent.TimeUnit.SECONDS).build()
+        okHttp.newBuilder()
+            .readTimeout(75, java.util.concurrent.TimeUnit.SECONDS)
+            .proxy(java.net.Proxy.NO_PROXY)
+            .build()
     }
 
-    /** fresh 赛程可能经过源站与云端兜底；为完整直连和 VPN 两次抓取留出时间。 */
+    /** 赛程只请求一次直连接口；代理重试曾让失败路径额外等待订阅刷新和原生核心启动。 */
     private val matchesHttp by lazy {
         okHttp.newBuilder()
-            .readTimeout(100, java.util.concurrent.TimeUnit.SECONDS)
-            .callTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
+            .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(50, java.util.concurrent.TimeUnit.SECONDS)
+            .proxy(java.net.Proxy.NO_PROXY)
+            .build()
+    }
+
+    /** 足球源在本地后端解析，但超时不应继承搜索抓取的 75 秒宽限。 */
+    private val liveSourceHttp by lazy {
+        okHttp.newBuilder()
+            .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(40, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
+            .proxy(java.net.Proxy.NO_PROXY)
             .build()
     }
 
@@ -159,6 +119,17 @@ class LiveRepository(
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
             .build()
         liveHttpResponse(slowHttp, req).use { resp ->
+            require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
+            JSONObject(resp.body?.string().orEmpty())
+        }
+    }
+
+    private suspend fun getLiveSource(base: String, path: String): JSONObject = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url(base.trimEnd('/') + path)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
+            .build()
+        liveHttpResponse(liveSourceHttp, req).use { resp ->
             require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
             JSONObject(resp.body?.string().orEmpty())
         }
@@ -190,14 +161,14 @@ class LiveRepository(
             .url(base.trimEnd('/') + path)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
             .build()
-        liveHttpResponse(okHttp, req).use { resp ->
+        liveHttpResponse(liveSourceHttp, req).use { resp ->
             require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
             JSONObject(resp.body?.string().orEmpty())
         }
     }
 
-    private suspend fun getMatches(base: String, footballVpn: Boolean): org.json.JSONArray = withContext(Dispatchers.IO) {
-        val path = matchesRequestPath(footballVpn)
+    private suspend fun getMatches(base: String): org.json.JSONArray = withContext(Dispatchers.IO) {
+        val path = matchesRequestPath()
         val req = Request.Builder()
             .url(base.trimEnd('/') + path)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
@@ -233,7 +204,7 @@ class LiveRepository(
         repeat(30) {
             runCatching {
                 val req = Request.Builder().url("$base/api/health").build()
-                liveHttpResponse(okHttp, req).use { if (it.isSuccessful) return }
+                liveHttpResponse(liveSourceHttp, req).use { if (it.isSuccessful) return }
             }
             kotlinx.coroutines.delay(500)
         }
@@ -298,19 +269,7 @@ class LiveRepository(
         matchesCache?.takeIf { !force && System.currentTimeMillis() - it.first < 30_000 }?.second?.let { return@withContext it }
         val base = baseUrl()
         waitBackendReady(base)
-        val fetched = fetchMatchesWithFootballProxyFallback(
-            directRequest = { getMatches(base, footballVpn = false) },
-            startFootballProxy = {
-                if (!preferFootballProxyForMatches) {
-                    FootballVpnProxyCore.refreshSubscriptions(appContext, BuildConfig.HOTUPDATE_ENDPOINT)
-                }
-                check(FootballVpnProxyCore.ensureReady(appContext)) { "足球代理无法启动或未就绪" }
-            },
-            proxyRequest = { getMatches(base, footballVpn = true) },
-            preferFootballProxy = preferFootballProxyForMatches,
-        )
-        preferFootballProxyForMatches = fetched.usedFootballProxy
-        val arr = fetched.value
+        val arr = getMatches(base)
         val (today, tomorrow) = todayTomorrowKeys()
         // optString 对 JSON null 会返回字面量 "null"（需求 足球#1「null'」根因之一）——统一消毒
         fun os(o: org.json.JSONObject, k: String): String =
@@ -437,26 +396,15 @@ class LiveRepository(
         withContext(Dispatchers.IO) {
             val selectionJob = currentCoroutineContext()[Job]
             runCatching {
-                FootballVpnProxyCore.refreshSubscriptions(appContext, BuildConfig.HOTUPDATE_ENDPOINT)
-                // Each match opening measures the current nodes before resolving any stream.
-                // Renewal requests retain the selected node to avoid disrupting playback.
-                selectionJob?.let { if (!it.isActive) throw CancellationException("stream request cancelled") }
-                check(
-                    FootballVpnProxyCore.prepareForMatch(
-                        context = appContext,
-                        selectionKey = matchId,
-                        isCancelled = { selectionJob?.isActive == false },
-                    ),
-                ) { "football_vpn_no_usable_node" }
                 selectionJob?.let { if (!it.isActive) throw CancellationException("stream request cancelled") }
                 val base = baseUrl()
-                val o = getSlow(base, LiveStreamRequestPath.build(matchId, "all", fresh, footballVpn = true))
+                val o = getLiveSource(base, LiveStreamRequestPath.build(matchId, "all", fresh))
                 selectionJob?.let { if (!it.isActive) throw CancellationException("stream request cancelled") }
                 LiveStreamPayloadParser.available(o).map { payload ->
                     LiveStreamSource(
                         source = payload.source,
                         name = payload.name,
-                        playbackUrl = relayUrl(base, payload.url, payload.referer, footballVpn = true),
+                        playbackUrl = relayUrl(base, payload.url, payload.referer),
                         referer = payload.referer,
                     )
                 }
@@ -478,11 +426,9 @@ class LiveRepository(
     ): LiveStreamSource? = withContext(Dispatchers.IO) {
         if (source.isBlank()) return@withContext null
         runCatching {
-            FootballVpnProxyCore.refreshSubscriptions(appContext, BuildConfig.HOTUPDATE_ENDPOINT)
-            check(FootballVpnProxyCore.ensureReady(appContext)) { "football_vpn_unavailable" }
             val base = baseUrl()
             val payload = LiveStreamPayloadParser.renewed(
-                getSlow(base, LiveStreamRequestPath.build(matchId, source, fresh, footballVpn = true)),
+                getLiveSource(base, LiveStreamRequestPath.build(matchId, source, fresh)),
                 requestedSource = source,
                 fallbackName = fallbackName,
                 fallbackReferer = fallbackReferer,
@@ -490,7 +436,7 @@ class LiveRepository(
             LiveStreamSource(
                 source = payload.source,
                 name = payload.name,
-                playbackUrl = relayUrl(base, payload.url, payload.referer, footballVpn = true),
+                playbackUrl = relayUrl(base, payload.url, payload.referer),
                 referer = payload.referer,
             )
         }.onFailure { android.util.Log.w(TAG, "renew stream $source 失败: ${it.message}") }.getOrNull()
@@ -502,11 +448,11 @@ class LiveRepository(
      *  网络异常保守视为「活」（防误切；死地址随后由卡顿触发 kick 续签兜底）。 */
     suspend fun playlistAlive(relayUrl: String): Boolean = withContext(Dispatchers.IO) {
         if (relayUrl.isBlank()) return@withContext false
-        if (!FootballVpnProxyCore.ensureReady(appContext)) return@withContext false
         runCatching {
             val fast = okHttp.newBuilder()
                 .callTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(java.util.concurrent.TimeUnit.SECONDS.toMillis(8), java.util.concurrent.TimeUnit.MILLISECONDS)
+                .proxy(java.net.Proxy.NO_PROXY)
                 .build()
             liveHttpResponse(fast, Request.Builder().url(relayUrl).build()).use { resp ->
                 val alive = resp.code == 200

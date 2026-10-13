@@ -26,7 +26,6 @@ CORS_HEADERS = {
 RPC_ALLOWLIST = frozenset({
     "activate_code",
     "announcement_latest",
-    "football_vpn_config_get",
     "hotupdate_check",
     "hotupdate_report",
     "vod_source_public_check",
@@ -268,38 +267,6 @@ class BusinessApi:
                 out = self._cached_rpc(("announcement_latest",), ANNOUNCE_CACHE_SECONDS, "announcement_latest", {})
                 result = {"ret": 0, **out} if isinstance(out, dict) else {"ret": 0}
                 return _json_response(result, cache_control="public, max-age=60, stale-while-revalidate=300")
-            except Exception:
-                return _json_response({"ret": 502, "msg": "upstream_error"})
-
-        # Android refreshes this configuration before starting the football-only
-        # proxy. It is intentionally public and never cached by browsers, CDNs,
-        # or the API adapter so an admin replacement takes effect promptly.
-        if path == "/hotupdate/football-vpn/config":
-            if method != "GET":
-                return _not_found()
-            try:
-                result = self.rpc("football_vpn_config_get", {})
-                subscriptions = result.get("subscriptions") if isinstance(result, dict) else None
-                version = result.get("version") if isinstance(result, dict) else None
-                updated_at = result.get("updatedAt") if isinstance(result, dict) else None
-                if (
-                    not isinstance(result, dict)
-                    or type(result.get("ret")) is not int
-                    or result.get("ret") != 0
-                    or type(version) is not int
-                    or version < 0
-                    or not (updated_at is None or isinstance(updated_at, str))
-                    or not isinstance(subscriptions, list)
-                    or len(subscriptions) != 3
-                    or any(not isinstance(url, str) for url in subscriptions)
-                ):
-                    return _json_response({"ret": 502, "msg": "upstream_error"})
-                return _json_response({
-                    "ret": 0,
-                    "version": version,
-                    "updatedAt": updated_at,
-                    "subscriptions": subscriptions,
-                })
             except Exception:
                 return _json_response({"ret": 502, "msg": "upstream_error"})
 

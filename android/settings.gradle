@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "optimal-tv"
-include ':app', ':vpn-core'
+include ':app'

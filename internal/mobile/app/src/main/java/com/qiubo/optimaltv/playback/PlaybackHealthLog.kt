@@ -155,7 +155,7 @@ object PlaybackHealthLog {
 
     fun threadCount(): Int = runCatching { Thread.activeCount() }.getOrDefault(-1)
 
-    /** 当前链路类型（ETHERNET/WIFI/CELLULAR/VPN/OTHER/NONE）：卡顿排查要能区分
+    /** 当前链路类型（ETHERNET/WIFI/CELLULAR/OTHER/NONE）：卡顿排查要能区分
      *  「上游挂了」还是「设备自己掉网」。 */
     fun network(): String = runCatching {
         val cm = Graph.appContext
@@ -167,7 +167,6 @@ object PlaybackHealthLog {
             caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ETHERNET"
             caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
             caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "VPN"
             else -> "OTHER"
         }
     }.getOrDefault("UNKNOWN")

@@ -8,6 +8,8 @@ import binascii
 import json
 import pathlib
 import sys
+import threading
+import time
 import unittest
 from datetime import datetime
 from unittest import mock
@@ -27,37 +29,25 @@ def _source_response(links):
 
 
 class ZhiBo88LiveTest(unittest.TestCase):
-    def test_schedule_proxy_flag_is_scoped_to_football_request(self):
+    def test_legacy_football_vpn_query_does_not_select_a_proxy_route(self):
         handler = object.__new__(proxy.Handler)
         observed = []
-        def receive(parsed):
-            observed.append((parsed.path, proxy._active_upstream_proxy()))
-        with mock.patch.object(proxy.Handler, "_do_get_with_upstream_proxy", side_effect=receive):
+        with mock.patch.object(proxy.Handler, "_do_get", side_effect=observed.append):
             for path in ("/api/matches?fresh=1&football_vpn=1", "/vod/home?football_vpn=1", "/api/matches?fresh=1"):
                 handler.path = path
                 handler.do_GET()
-        self.assertEqual([
-            ("/api/matches", proxy.FOOTBALL_PROXY_URL),
-            ("/vod/home", None),
-            ("/api/matches", None),
-        ], observed)
-        self.assertIsNone(proxy._active_upstream_proxy())
+        self.assertEqual(["/api/matches", "/vod/home", "/api/matches"], [item.path for item in observed])
+        self.assertFalse(hasattr(proxy, "FOOTBALL_PROXY_URL"))
+        self.assertFalse(hasattr(proxy, "_UPSTREAM_PROXY_URL"))
 
-    def test_schedule_fetch_uses_football_proxy_when_requested(self):
+    def test_schedule_fetch_uses_explicit_direct_opener(self):
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = "足球赛程".encode("utf-8")
-        opener = mock.Mock()
-        opener.open.return_value = response
-        token = proxy._UPSTREAM_PROXY_URL.set(proxy.FOOTBALL_PROXY_URL)
-        try:
-            with mock.patch.object(proxy, "_url_opener", return_value=opener) as factory, \
-                    mock.patch.object(proxy.urlreq, "urlopen") as direct:
-                self.assertEqual("足球赛程", proxy.fetch_source())
-                factory.assert_called_once_with(proxy.FOOTBALL_PROXY_URL)
-                opener.open.assert_called_once()
-                direct.assert_not_called()
-        finally:
-            proxy._UPSTREAM_PROXY_URL.reset(token)
+        with mock.patch.object(proxy._direct_opener, "open", return_value=response) as direct, \
+                mock.patch.object(proxy.urlreq, "urlopen") as implicit:
+            self.assertEqual("足球赛程", proxy.fetch_source())
+            direct.assert_called_once()
+            implicit.assert_not_called()
 
     def test_parse_filters_non_football_keeps_four_routes_in_order_with_nested_li(self):
         page = """
@@ -408,6 +398,101 @@ class ZhiBo88PlayableProbeTest(unittest.TestCase):
         params = proxy.parse_qs(proxy.urlsplit(rewritten).query)
         self.assertEqual(embed_referer, params["ref"][0])
         self.assertEqual("https://media.example/live/child.m3u8", params["u"][0])
+
+
+class ZhiBo88StreamBudgetTest(unittest.TestCase):
+    def setUp(self):
+        self.old_slots = proxy._football_stream_slots
+        self.old_budget = proxy.FOOTBALL_STREAMS_WAIT_BUDGET
+        self.old_max_wait = proxy.FOOTBALL_STREAMS_MAX_WAIT
+
+    def tearDown(self):
+        proxy._football_stream_slots = self.old_slots
+        proxy.FOOTBALL_STREAMS_WAIT_BUDGET = self.old_budget
+        proxy.FOOTBALL_STREAMS_MAX_WAIT = self.old_max_wait
+
+    @staticmethod
+    def _links():
+        return [
+            {"name": "线路A2", "url": "https://play.example/a2"},
+            {"name": "线路migu", "url": "https://play.example/migu"},
+        ]
+
+    def test_fast_playable_route_returns_without_waiting_for_slow_dead_route(self):
+        release_slow = threading.Event()
+        slow_started = threading.Event()
+        slow_finished = threading.Event()
+        proxy._football_stream_slots = threading.BoundedSemaphore(2)
+        proxy.FOOTBALL_STREAMS_WAIT_BUDGET = 0.08
+        proxy.FOOTBALL_STREAMS_MAX_WAIT = 0.4
+
+        def resolve(_match_id, src, _fresh, _links):
+            if src == "88z_0":
+                return {"url": "https://media.example/fast.m3u8"}, False
+            slow_started.set()
+            release_slow.wait(2)
+            slow_finished.set()
+            return {"url": None, "error": "dead"}, False
+
+        try:
+            started = time.monotonic()
+            with mock.patch.object(proxy, "_88z_source_links", return_value=self._links()), \
+                    mock.patch.object(proxy, "resolve_88zhibo_stream", side_effect=resolve):
+                payload, cached = proxy.resolve_88zhibo_streams("880777", fresh=True)
+            elapsed = time.monotonic() - started
+
+            self.assertFalse(cached)
+            self.assertEqual(["88z_0"], [item["source"] for item in payload["sources"]])
+            self.assertTrue(slow_started.is_set())
+            self.assertFalse(slow_finished.is_set())
+            self.assertLess(elapsed, 0.35)
+        finally:
+            release_slow.set()
+            self.assertTrue(slow_finished.wait(1))
+
+    def test_route_that_succeeds_after_quick_window_is_still_returned(self):
+        allow_success = threading.Event()
+        route_started = threading.Event()
+        request_finished = threading.Event()
+        result = {}
+        proxy._football_stream_slots = threading.BoundedSemaphore(1)
+        proxy.FOOTBALL_STREAMS_WAIT_BUDGET = 0.06
+        proxy.FOOTBALL_STREAMS_MAX_WAIT = 0.6
+
+        def resolve(_match_id, _src, _fresh, _links):
+            route_started.set()
+            allow_success.wait(2)
+            return {"url": "https://media.example/slow-but-playable.m3u8"}, False
+
+        def call_endpoint():
+            with mock.patch.object(proxy, "_88z_source_links", return_value=self._links()), \
+                    mock.patch.object(proxy, "resolve_88zhibo_stream", side_effect=resolve):
+                result["payload"] = proxy.resolve_88zhibo_streams("880778", fresh=True)[0]
+            request_finished.set()
+
+        worker = threading.Thread(target=call_endpoint, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(route_started.wait(1))
+            time.sleep(0.12)  # Longer than the scaled quick window above.
+            self.assertFalse(request_finished.is_set())
+            allow_success.set()
+            self.assertTrue(request_finished.wait(1))
+            self.assertEqual(1, len(result["payload"]["sources"]))
+            self.assertIsNone(result["payload"]["error"])
+        finally:
+            allow_success.set()
+            worker.join(timeout=1)
+
+    def test_saturated_resolver_reports_retryable_busy(self):
+        proxy._football_stream_slots = threading.BoundedSemaphore(0)
+        with mock.patch.object(proxy, "_88z_source_links", return_value=self._links()):
+            payload, cached = proxy.resolve_88zhibo_streams("880779", fresh=True)
+
+        self.assertFalse(cached)
+        self.assertEqual([], payload["sources"])
+        self.assertTrue(payload["retryable"])
+        self.assertIn("繁忙", payload["error"])
 
 
 if __name__ == "__main__":

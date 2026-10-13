@@ -594,9 +594,8 @@ class PlayerViewModel(
         }
     }
 
-    /** Football opens always refresh the server's probed HLS list, so the picker only contains
-     * sources that are playable now. The server owns source IDs, display names, and order. */
-    private suspend fun bootLive() {
+    /** Reuse 60-second probes on normal opens; explicit retries refresh the server-probed HLS list. */
+    private suspend fun bootLive(fresh: Boolean) {
         val matchId = vodId.removePrefix("live:")
         liveMatchId = matchId
         // 标题异步补：matches() 冷抓可能 20s+，绝不能挡在起播链路上。
@@ -612,7 +611,7 @@ class PlayerViewModel(
             sourceResolving = true, fatalMsg = null, controlsVisible = false,
         )
         val sources = try {
-            Graph.live.liveStreamSources(matchId, fresh = true)
+            Graph.live.liveStreamSources(matchId, fresh = fresh)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
@@ -996,7 +995,7 @@ class PlayerViewModel(
         OtvLog.i("boot 计时：awaitBackendReady ${android.os.SystemClock.elapsedRealtime() - tBoot}ms")
         when {
             // 直播比赛走独立分支（无目录依赖）
-            vodId.startsWith("live:") -> { bootLive(); return }
+            vodId.startsWith("live:") -> { bootLive(fresh = fresh); return }
             // IPTV 电视直播（v1.13）：公开 m3u 源原生直连，无目录依赖
             vodId.startsWith("iptv:") -> { bootIptv(); return }
             // 回放（原版 playRewatch：hhkan 搜索 → 多线路）

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Android football requests use the bundled local proxy; normal relays stay direct."""
+"""Football relay requests always connect directly; VLC session repair is preserved."""
 import http.client
 import pathlib
 import sys
@@ -53,14 +53,11 @@ class _ResponseServer:
 
 class FootballProxyRoutingTest(unittest.TestCase):
     def setUp(self):
-        self.local_proxy = _ResponseServer(PLAYLIST, record_requests=True)
         self.direct_origin = _ResponseServer(PLAYLIST, record_requests=True)
         self.backend = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Handler)
         self.backend_port = self.backend.server_address[1]
         threading.Thread(target=self.backend.serve_forever, daemon=True).start()
-        self.old_proxy_url = proxy.FOOTBALL_PROXY_URL
         self.old_blocked = proxy._blocked_internal_url
-        proxy.FOOTBALL_PROXY_URL = self.local_proxy.url
         proxy._blocked_internal_url = lambda _url: False
         proxy.RELAY_CACHE.clear()
         proxy.MANIFEST_SEGS.clear()
@@ -68,9 +65,7 @@ class FootballProxyRoutingTest(unittest.TestCase):
     def tearDown(self):
         self.backend.shutdown()
         self.backend.server_close()
-        self.local_proxy.close()
         self.direct_origin.close()
-        proxy.FOOTBALL_PROXY_URL = self.old_proxy_url
         proxy._blocked_internal_url = self.old_blocked
         proxy.RELAY_CACHE.clear()
         proxy.MANIFEST_SEGS.clear()
@@ -84,24 +79,15 @@ class FootballProxyRoutingTest(unittest.TestCase):
         conn.close()
         return status, body
 
-    def test_only_marked_football_relay_uses_proxy_and_marks_child_playlist(self):
-        football_url = "http://football-source.example/live/master.m3u8"
-        football_path = "/api/relay?u=%s&football_vpn=1" % urllib.parse.quote(football_url, safe="")
-        status, football_body = self._get(football_path)
-
-        self.assertEqual(status, 200)
-        self.assertIn("football_vpn=1", football_body)
-        self.assertEqual(1, len(self.local_proxy.httpd.seen))
-        self.assertTrue(self.local_proxy.httpd.seen[0].startswith("http://football-source.example/"))
-
+    def test_legacy_football_vpn_query_is_ignored_and_relay_is_direct(self):
         direct_url = self.direct_origin.url + "/live/master.m3u8"
-        direct_path = "/api/relay?u=%s" % urllib.parse.quote(direct_url, safe="")
-        status, direct_body = self._get(direct_path)
+        path = "/api/relay?u=%s&football_vpn=1" % urllib.parse.quote(direct_url, safe="")
+        status, body = self._get(path)
 
         self.assertEqual(status, 200)
-        self.assertNotIn("football_vpn=1", direct_body)
-        self.assertEqual(1, len(self.local_proxy.httpd.seen))
+        self.assertNotIn("football_vpn=1", body)
         self.assertEqual(1, len(self.direct_origin.httpd.seen))
+        self.assertTrue(self.direct_origin.httpd.seen[0].startswith("/live/master.m3u8"))
 
     def test_vlc_session_propagates_without_leaking_into_next_request(self):
         direct_url = self.direct_origin.url + "/live/master.m3u8"
@@ -140,17 +126,14 @@ class FootballProxyRoutingTest(unittest.TestCase):
 
 
 class AndroidMatchNodeSelectionContractTest(unittest.TestCase):
-    def test_both_clients_measure_nodes_before_resolving_each_match(self):
+    def test_both_clients_request_direct_stream_lines_without_vpn_configuration(self):
         root = BACKEND.parents[1]
         for client in ("android", "internal/mobile"):
             with self.subTest(client=client):
                 code = (root / client / "app/src/main/java/com/qiubo/optimaltv/data/repo/LiveRepository.kt").read_text(encoding="utf-8")
-                opening = code.split("suspend fun liveStreamSources(", 1)[1].split("suspend fun refreshLiveStreamSource(", 1)[0]
-                self.assertLess(opening.index("refreshSubscriptions("), opening.index("prepareForMatch("))
-                self.assertLess(opening.index("prepareForMatch("), opening.index("getSlow("))
-                renewal = code.split("suspend fun refreshLiveStreamSource(", 1)[1].split("suspend fun playlistAlive(", 1)[0]
-                self.assertNotIn("prepareForMatch(", renewal)
-                self.assertIn("ensureReady(", renewal)
+                self.assertIn('LiveStreamRequestPath.build(matchId, "all", fresh)', code)
+                self.assertIn("LiveStreamRequestPath.build(matchId, source, fresh)", code)
+                self.assertNotIn("football_vpn", code.lower())
 
 
 if __name__ == "__main__":

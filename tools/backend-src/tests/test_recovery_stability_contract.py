@@ -8,7 +8,7 @@ class RecoveryStabilityContractTest(unittest.TestCase):
     def test_cancelled_live_resolution_does_not_publish_failure_or_retry(self):
         for client in ('android', 'internal/mobile'):
             text = (ROOT / client / 'app/src/main/java/com/qiubo/optimaltv/ui/player/PlayerViewModel.kt').read_text(encoding='utf-8')
-            start = text.index('private suspend fun bootLive()')
+            start = text.index('private suspend fun bootLive(fresh: Boolean)')
             end = text.index('\n    private ', start + 1)
             body = text[start:end]
             self.assertNotIn('runCatching { Graph.live.liveStreamSources', body)

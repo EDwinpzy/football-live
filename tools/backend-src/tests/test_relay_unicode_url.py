@@ -30,7 +30,7 @@ class RelayUnicodeUrlTests(unittest.TestCase):
         client.request.return_value = response
 
         with mock.patch.object(proxy, "HAS_URLLIB3", True), \
-                mock.patch.object(proxy, "_http_client_for", return_value=client):
+                mock.patch.object(proxy, "_http", client):
             result, final_url = proxy._open_upstream(raw_url, {}, read_timeout=2)
 
         expected = vod_sources._ascii_http_url(raw_url)
@@ -50,7 +50,7 @@ class RelayUnicodeUrlTests(unittest.TestCase):
         client.request.side_effect = [redirect, final]
 
         with mock.patch.object(proxy, "HAS_URLLIB3", True), \
-                mock.patch.object(proxy, "_http_client_for", return_value=client), \
+                mock.patch.object(proxy, "_http", client), \
                 mock.patch.object(proxy, "_blocked_internal_url", return_value=False):
             result, final_url = proxy._open_upstream(raw_url, {}, read_timeout=2)
 
@@ -72,7 +72,6 @@ class RelayUnicodeUrlTests(unittest.TestCase):
         opener.open.return_value = response
 
         with mock.patch.object(proxy, "HAS_URLLIB3", False), \
-                mock.patch.object(proxy, "_active_upstream_proxy", return_value=None), \
                 mock.patch.object(proxy, "_no_redirect_opener", opener):
             result, final_url = proxy._open_upstream(raw_url, {}, read_timeout=2)
 
@@ -91,7 +90,6 @@ class RelayUnicodeUrlTests(unittest.TestCase):
         opener.open.side_effect = [redirect, response]
 
         with mock.patch.object(proxy, "HAS_URLLIB3", False), \
-                mock.patch.object(proxy, "_active_upstream_proxy", return_value=None), \
                 mock.patch.object(proxy, "_no_redirect_opener", opener), \
                 mock.patch.object(proxy, "_blocked_internal_url", return_value=False):
             result, final_url = proxy._open_upstream(raw_url, {}, read_timeout=2)

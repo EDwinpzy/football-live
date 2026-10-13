@@ -30,27 +30,6 @@ class LiveFlashContractTest(unittest.TestCase):
             proxy._cache.update(previous_cache)
             proxy._cache_refresh_event.set()
 
-    def test_background_schedule_refresh_keeps_proxy_context(self):
-        previous_cache = copy.deepcopy(proxy._cache)
-        observed = []
-        proxy._cache.update(ts=0, data={"matches": []}, raw_error=None, refreshing=False)
-        def refresh():
-            observed.append(proxy._active_upstream_proxy())
-            with proxy._cache_lock:
-                proxy._cache["refreshing"] = False
-            proxy._cache_refresh_event.set()
-        token = proxy._UPSTREAM_PROXY_URL.set(proxy.FOOTBALL_PROXY_URL)
-        try:
-            with mock.patch.object(proxy, "_refresh_matches_bg", side_effect=refresh):
-                proxy.build_api()
-                self.assertTrue(proxy._cache_refresh_event.wait(timeout=2))
-            self.assertEqual([proxy.FOOTBALL_PROXY_URL], observed)
-        finally:
-            proxy._UPSTREAM_PROXY_URL.reset(token)
-            proxy._cache.clear()
-            proxy._cache.update(previous_cache)
-            proxy._cache_refresh_event.set()
-
     def test_live_kickoff_time_survives_minute_projection(self):
         original_now = proxy._now_cn
         proxy._now_cn = lambda: datetime(2026, 9, 13, 22, 40)

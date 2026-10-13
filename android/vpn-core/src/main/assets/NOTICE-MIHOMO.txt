@@ -1,5 +1,0 @@
-Mihomo Android core
-Version: v1.19.32
-License: GNU General Public License v3.0
-Source code: https://github.com/MetaCubeX/mihomo/tree/v1.19.32
-The Android executables are downloaded from the upstream release and SHA-256 checked by the Gradle task in this module.

@@ -51,38 +51,12 @@ except ImportError:
     HAS_URLLIB3 = False
 
 SOURCE_URL = "https://www.88zhibo.tv/"
-FOOTBALL_PROXY_URL = "http://127.0.0.1:17890"
-_UPSTREAM_PROXY_URL = contextvars.ContextVar("otv_upstream_proxy_url", default=None)
 _VLC_HLS_SESSION = contextvars.ContextVar("otv_vlc_hls_session", default=None)
-_PROXY_CLIENT_LOCK = threading.Lock()
-_PROXY_CLIENTS = {}
-_PROXY_OPENERS = {}
 WWW_ROOT = Path(__file__).parent / "www"
 
 
-def _active_upstream_proxy():
-    return _UPSTREAM_PROXY_URL.get()
-
-
 def _relay_cache_key(url):
-    proxy_url = _active_upstream_proxy()
-    return (url, proxy_url) if proxy_url else url
-
-
-def _http_client_for(proxy_url):
-    if not HAS_URLLIB3:
-        return None
-    if not proxy_url:
-        return _http
-    with _PROXY_CLIENT_LOCK:
-        client = _PROXY_CLIENTS.get(proxy_url)
-        if client is None:
-            client = urllib3.ProxyManager(
-                proxy_url, maxsize=16, retries=0,
-                timeout=urllib3.Timeout(connect=5, read=15),
-            )
-            _PROXY_CLIENTS[proxy_url] = client
-        return client
+    return url
 
 # ---- 网页静态资源缓存合同（内容寻址资源 immutable）----
 # tools/build_web_assets.py 生成的 manifest.json 里的 cacheControl 才是
@@ -579,9 +553,7 @@ def fetch_source():
                 "Referer": host,
                 "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
             })
-            proxy_url = _active_upstream_proxy()
-            open_source = _url_opener(proxy_url).open if proxy_url else urlreq.urlopen
-            with open_source(req, timeout=20) as resp:
+            with _direct_opener.open(req, timeout=20) as resp:
                 body = resp.read().decode("utf-8", errors="ignore")
             _active_source["i"] = i
             _active_source["url"] = url
@@ -604,6 +576,11 @@ def _now_cn():
 _88Z_STREAM_SRCS = frozenset(("a2", "migu", "q2", "q3", "c4"))
 _88Z_VISIBLE_STREAM_SRCS = ("a2", "migu", "q3", "c4")
 _88Z_DYNAMIC_SOURCE_RE = re.compile(r"^88z_(\d{1,4})$")
+FOOTBALL_STREAMS_WAIT_BUDGET = 3.5
+FOOTBALL_STREAMS_MAX_WAIT = 12.0
+FOOTBALL_STREAMS_COALESCE_WINDOW = 0.15
+FOOTBALL_STREAMS_MAX_PENDING = 16
+_football_stream_slots = threading.BoundedSemaphore(FOOTBALL_STREAMS_MAX_PENDING)
 _88Z_SOURCE_LABELS = {
     "a2": "线路A2",
     "migu": "线路migu",
@@ -1392,16 +1369,14 @@ def fetch_url(url, referer=None, timeout=20):
     if referer:
         headers["Referer"] = referer
     if HAS_URLLIB3:
-        resp = _http_client_for(_active_upstream_proxy()).request(
+        resp = _http.request(
             "GET", url, headers=headers,
             timeout=urllib3.Timeout(connect=5, read=timeout),
         )
         return resp.data.decode("utf-8", errors="ignore")
     else:
         req = urlreq.Request(url, headers=headers)
-        proxy_url = _active_upstream_proxy()
-        opener = _url_opener(proxy_url) if proxy_url else None
-        with (opener.open(req, timeout=timeout) if opener else urlreq.urlopen(req, timeout=timeout)) as resp:
+        with _direct_opener.open(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="ignore")
 
 
@@ -1836,7 +1811,7 @@ def resolve_88zhibo_stream(match_id, src="a2", fresh=False, source_links=None):
     if not str(match_id).isdigit():
         return {"url": None, "error": "invalid_match_id"}, False
     now = time.time()
-    key = "%s-%s-%s" % (src, match_id, "vpn" if _active_upstream_proxy() else "direct")
+    key = "%s-%s" % (src, match_id)
     with _stream_lock:
         cached = STREAM_CACHE.get(key)
         if not fresh and cached and cached["ts"] > 0 and now - cached["ts"] < STREAM_SUCCESS_TTL:
@@ -1897,17 +1872,44 @@ def resolve_88zhibo_streams(match_id, fresh=False):
         else:
             item["display_name"] = item["name"]
 
-    available = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {
-            pool.submit(
-                contextvars.copy_context().run,
+    slots = _football_stream_slots
+    accepted = []
+    for item in entries:
+        if not slots.acquire(blocking=False):
+            break
+        accepted.append(item)
+
+    if entries and not accepted:
+        return {
+            "url": None, "sources": [],
+            "error": "线路解析繁忙，请稍后重试", "retryable": True,
+        }, False
+
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(8, max(1, len(accepted))),
+        thread_name_prefix="football-stream",
+    )
+    futures = {}
+    for item in accepted:
+        try:
+            future = pool.submit(
                 resolve_88zhibo_stream,
                 str(match_id), item["src"], fresh, links,
-            ): item
-            for item in entries
-        }
-        for future in concurrent.futures.as_completed(futures):
+            )
+        except Exception:
+            slots.release()
+            continue
+        future.add_done_callback(lambda _done, semaphore=slots: semaphore.release())
+        futures[future] = item
+
+    available = []
+    processed = set()
+
+    def collect(completed):
+        for future in completed:
+            if future in processed:
+                continue
+            processed.add(future)
             item = futures[future]
             try:
                 payload, _cached = future.result()
@@ -1920,10 +1922,68 @@ def resolve_88zhibo_streams(match_id, fresh=False):
             payload["source"] = item["src"]
             available.append(payload)
 
+    unresolved = set()
+    try:
+        first_deadline = time.monotonic() + FOOTBALL_STREAMS_WAIT_BUDGET
+        done, unresolved = concurrent.futures.wait(
+            futures,
+            timeout=max(0.0, first_deadline - time.monotonic()),
+            return_when=concurrent.futures.ALL_COMPLETED,
+        )
+        collect(done)
+
+        # A successful route is enough to start playback; do not wait for weak
+        # alternatives. If none succeeded in the quick window, keep listening
+        # briefly so a slower but usable route is not reported as unavailable.
+        if not available and unresolved:
+            final_deadline = time.monotonic() + max(
+                0.0,
+                FOOTBALL_STREAMS_MAX_WAIT - FOOTBALL_STREAMS_WAIT_BUDGET,
+            )
+            while unresolved:
+                remaining = final_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                completed, unresolved = concurrent.futures.wait(
+                    unresolved,
+                    timeout=remaining,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                if not completed:
+                    break
+                collect(completed)
+                if available and unresolved:
+                    remaining = final_deadline - time.monotonic()
+                    if remaining > 0:
+                        extra, unresolved = concurrent.futures.wait(
+                            unresolved,
+                            timeout=min(FOOTBALL_STREAMS_COALESCE_WINDOW, remaining),
+                            return_when=concurrent.futures.ALL_COMPLETED,
+                        )
+                        collect(extra)
+                    break
+    finally:
+        for future in futures:
+            if not future.done():
+                future.cancel()
+        # Active requests finish independently; the shared semaphore caps all
+        # per-request work, and shutdown cancels queued tasks instead of waiting
+        # for the slowest upstream route before answering the player.
+        pool.shutdown(wait=False, cancel_futures=True)
+
     # Future completion order depends on CDN latency. Restore deterministic order.
     order = {item["src"]: position for position, item in enumerate(entries)}
     available.sort(key=lambda item: order.get(item.get("source"), len(order)))
     first = available[0] if available else None
+    if not available and unresolved:
+        error = "线路解析超时，请稍后重试"
+        retryable = True
+    elif not available and len(accepted) < len(entries):
+        error = "线路解析繁忙，已尝试部分线路，请稍后重试"
+        retryable = True
+    else:
+        error = None if available else "当前没有可播放的线路"
+        retryable = False
     return {
         "url": first.get("url") if first else None,
         "player": "m3u8" if first else None,
@@ -1931,7 +1991,8 @@ def resolve_88zhibo_streams(match_id, fresh=False):
         "name": first.get("name") if first else None,
         "referer": first.get("referer") if first else None,
         "sources": available,
-        "error": None if available else "当前没有可播放的线路",
+        "error": error,
+        "retryable": retryable,
     }, False
 
 
@@ -2158,12 +2219,8 @@ def _prefetch_after(u, ref):
     """预取 u 在其所属清单中的后 PREFETCH_AHEAD 片（找不到清单则忽略）。"""
     try:
         segs = None
-        proxy_url = _active_upstream_proxy()
         with _MANIFEST_LOCK:
-            for manifest_key, (lst, ts) in MANIFEST_SEGS.items():
-                manifest_proxy = manifest_key[1] if isinstance(manifest_key, tuple) else None
-                if manifest_proxy != proxy_url:
-                    continue
+            for _manifest_key, (lst, ts) in MANIFEST_SEGS.items():
                 if u in lst:
                     segs = lst
                     break
@@ -2356,20 +2413,9 @@ class _NoRedirectHandler(urlreq.HTTPRedirectHandler):
         return None
 
 
-_no_redirect_opener = urlreq.build_opener(_NoRedirectHandler)
+_direct_opener = urlreq.build_opener(urlreq.ProxyHandler({}))
+_no_redirect_opener = urlreq.build_opener(urlreq.ProxyHandler({}), _NoRedirectHandler())
 _REDIRECT_CODES = (301, 302, 303, 307, 308)
-
-
-def _url_opener(proxy_url, no_redirect=False):
-    handlers = [urlreq.ProxyHandler({"http": proxy_url, "https": proxy_url})]
-    if no_redirect:
-        handlers.append(_NoRedirectHandler())
-    with _PROXY_CLIENT_LOCK:
-        opener = _PROXY_OPENERS.get((proxy_url, no_redirect))
-        if opener is None:
-            opener = urlreq.build_opener(*handlers)
-            _PROXY_OPENERS[(proxy_url, no_redirect)] = opener
-        return opener
 
 
 def _open_upstream(u, headers, read_timeout, preload=True, connect_timeout=5):
@@ -2386,10 +2432,9 @@ def _open_upstream(u, headers, read_timeout, preload=True, connect_timeout=5):
     # 探测请求保持一致，先做 UTF-8 percent-encoding；每次拼好重定向目标后
     # 也规范化，避免 relay 探测成功但实际播放在 urllib 请求构造时失败。
     cur, hops = vod_sources._ascii_http_url(u), 0
-    proxy_url = _active_upstream_proxy()
     while True:
         if HAS_URLLIB3:
-            resp = _http_client_for(proxy_url).request(
+            resp = _http.request(
                 "GET", cur, headers=headers,
                 timeout=urllib3.Timeout(connect=connect_timeout, read=read_timeout),
                 preload_content=preload, redirect=False,
@@ -2402,8 +2447,7 @@ def _open_upstream(u, headers, read_timeout, preload=True, connect_timeout=5):
         else:
             req = urlreq.Request(cur, headers=headers)
             try:
-                opener = _url_opener(proxy_url, no_redirect=True) if proxy_url else _no_redirect_opener
-                resp = opener.open(req, timeout=read_timeout)
+                resp = _no_redirect_opener.open(req, timeout=read_timeout)
                 return resp, cur
             except urlreq.HTTPError as e:
                 if e.code not in _REDIRECT_CODES:
@@ -2666,9 +2710,8 @@ def relay_url(u, ref=None):
             # → 同目录 /api/relay；绝对路径 /api/relay 在「网关子路径部署」（网页版
             # https://…/web/）下会被浏览器解析到网关根而 404。设备端（根部署）
             # 解析结果与原绝对路径完全一致（ExoPlayer/hls.js 均按规范相对解析）。
-            football_vpn = "&football_vpn=1" if _active_upstream_proxy() else ""
             vlc_query = "&vlc_session=" + vlc_session if vlc_session else ""
-            return "relay?u=" + q + "&ref=" + rq + football_vpn + vlc_query
+            return "relay?u=" + q + "&ref=" + rq + vlc_query
 
         out = []
         raw_segs = []
@@ -3383,6 +3426,8 @@ TEAM_ALIAS = {
     "国安": "北京国安", "泰山": "山东泰山", "纽卡": "纽卡斯尔联", "西汉姆": "西汉姆联",
     "毕尔巴鄂": "毕尔巴鄂竞技", "皇社": "皇家社会", "拉科": "拉科鲁尼亚", "莱斯特": "莱斯特城",
     "柏林联": "柏林联合",
+    "萨巴赫": "沙巴巴库", "林茨": "LASK", "雅典AEK": "AEK雅典",
+    "博多格林特": "博德闪耀",
     "米兰": "AC米兰", "药厂": "勒沃库森",
     "红牛": "莱比锡红牛", "大巴黎": "巴黎圣日耳曼", "恒大": "广州恒大",
 }
@@ -4700,23 +4745,14 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
-        football_route = (
-            parsed.path == "/api/matches" or
-            parsed.path.startswith("/api/stream/") or
-            parsed.path == "/api/relay" or
-            parsed.path.startswith("/api/relayts/")
-        )
-        enabled = football_route and (qs.get("football_vpn") or ["0"])[0] == "1"
-        token = _UPSTREAM_PROXY_URL.set(FOOTBALL_PROXY_URL if enabled else None)
         vlc_session = (qs.get("vlc_session") or [""])[0]
         vlc_token = _VLC_HLS_SESSION.set(vlc_session if re.fullmatch(r"[0-9a-f]{32}", vlc_session) else None)
         try:
-            self._do_get_with_upstream_proxy(parsed)
+            self._do_get(parsed)
         finally:
-            _UPSTREAM_PROXY_URL.reset(token)
             _VLC_HLS_SESSION.reset(vlc_token)
 
-    def _do_get_with_upstream_proxy(self, parsed):
+    def _do_get(self, parsed):
         self._static_response = False
         if self._apk_update_manifest(parsed):
             return

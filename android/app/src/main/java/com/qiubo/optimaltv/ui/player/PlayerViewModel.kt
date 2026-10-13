@@ -449,8 +449,8 @@ class PlayerViewModel(
         }
     }
 
-    /** 直播分支：每次打开播放器都由后端解析并探测全线路，只展示可用 HLS 结果。 */
-    private suspend fun bootLive() {
+    /** 首次打开复用 60 秒内已探活的结果；显式重试时重新解析，线路表只保留可播放 HLS。 */
+    private suspend fun bootLive(fresh: Boolean) {
         val matchId = vodId.removePrefix("live:")
         if (liveMatchId != matchId) liveEndedRecoveries = 0
         liveMatchId = matchId
@@ -467,7 +467,7 @@ class PlayerViewModel(
             sourceResolving = true, fatalMsg = null, controlsVisible = false,
         )
         val sources = try {
-            Graph.live.liveStreamSources(matchId, fresh = true)
+            Graph.live.liveStreamSources(matchId, fresh = fresh)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
@@ -764,7 +764,7 @@ class PlayerViewModel(
         OtvLog.i("boot 计时：awaitBackendReady ${android.os.SystemClock.elapsedRealtime() - tBoot}ms")
         when {
             // 直播比赛走独立分支（无目录依赖）
-            vodId.startsWith("live:") -> { bootLive(); return }
+            vodId.startsWith("live:") -> { bootLive(fresh = fresh); return }
             // IPTV 电视直播（v1.13）：公开 m3u 源原生直连，无目录依赖
             vodId.startsWith("iptv:") -> { bootIptv(); return }
             // 回放（原版 playRewatch：hhkan 搜索 → 多线路）

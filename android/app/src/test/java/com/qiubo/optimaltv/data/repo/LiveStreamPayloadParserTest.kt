@@ -11,18 +11,18 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 class LiveStreamPayloadParserTest {
     @Test
-    fun `player request fetches every source fresh and renewal encodes dynamic source ids`() {
+    fun `player request supports cached opens and encodes dynamic source ids`() {
         assertEquals(
             "/api/stream/127583?src=all&fresh=1",
             LiveStreamRequestPath.build("127583", "all", fresh = true),
         )
         assertEquals(
-            "/api/stream/127583?src=channel%3Aq2+-fr&fresh=1",
-            LiveStreamRequestPath.build("127583", "channel:q2 -fr", fresh = true),
+            "/api/stream/127583?src=all",
+            LiveStreamRequestPath.build("127583", "all", fresh = false),
         )
         assertEquals(
-            "/api/stream/127583?src=all&fresh=1&football_vpn=1",
-            LiveStreamRequestPath.build("127583", "all", fresh = true, footballVpn = true),
+            "/api/stream/127583?src=channel%3Aq2+-fr&fresh=1",
+            LiveStreamRequestPath.build("127583", "channel:q2 -fr", fresh = true),
         )
     }
 
@@ -95,18 +95,17 @@ class LiveStreamPayloadParserTest {
             "https://api.example.test",
             "https://cdn.example.test/live.m3u8?token=x",
             "https://taifood-blog.asia/embed/match",
-            footballVpn = true,
         )
 
         assertTrue(relay.contains("u=https%3A%2F%2Fcdn.example.test%2Flive.m3u8%3Ftoken%3Dx"))
         assertTrue(relay.contains("ref=https%3A%2F%2Ftaifood-blog.asia%2Fembed%2Fmatch"))
-        assertTrue(relay.endsWith("&football_vpn=1"))
+        assertTrue(!relay.contains("football_vpn"))
     }
 
     @Test
     fun `relay defaults to direct routing`() {
         val relay = LiveRepository.relayUrl("https://api.example.test", "https://cdn.example.test/live.m3u8")
 
-        assertTrue(!relay.contains("football_vpn=1"))
+        assertTrue(!relay.contains("football_vpn"))
     }
 }
