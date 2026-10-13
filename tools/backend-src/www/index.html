@@ -216,9 +216,8 @@
         <div class="mp-sec">信号源</div>
         <div id="mpSourceState" class="mp-source-state" role="status" aria-live="polite"></div>
         <button id="mpSourceRetry" class="mp-source-retry" type="button">刷新信号源</button>
-        <div class="hscroll mp-chips mp-routes" id="mpLines"></div>
-        <button id="mpLinesToggle" class="mp-route-toggle" type="button" aria-controls="mpLines"
-          aria-expanded="false" aria-label="展开信号源" hidden>⌄</button>
+        <div class="hscroll mp-provider-tabs" id="mpLineProviders" role="group" aria-label="信号源分组"></div>
+        <div class="mp-route-list" id="mpLines" role="group" aria-label="信号源列表"></div>
       </div>
       <div class="mp-sec">画幅</div>
       <div class="hscroll mp-chips" id="mpAspect"></div>

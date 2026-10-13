@@ -21,6 +21,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
@@ -33,6 +36,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -57,8 +61,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.testTag
 import coil.compose.AsyncImage
 import com.qiubo.optimaltv.data.cast.DlnaDevice
+import com.qiubo.optimaltv.data.model.LineInfo
 import com.qiubo.optimaltv.data.prefs.AspectMode
 import com.qiubo.optimaltv.ui.components.tapCard
 import com.qiubo.optimaltv.ui.theme.AccentBlue
@@ -89,6 +95,8 @@ internal fun PlayerMoreSections(
     LaunchedEffect(Unit) { onRescanCast() }
     LaunchedEffect(autoFocusSource, ui.activeLine, ui.lines.size, ui.sourceStatus) {
         if (autoFocusSource && (ui.lines.isNotEmpty() || ui.sourceStatus != PlayerSourceStatus.LOADING)) {
+            // VOD's lazy, fixed-height list owns focus after revealing its active row.
+            if (!ui.isLive && ui.lines.isNotEmpty()) return@LaunchedEffect
             runCatching { sourceFocusRequester.requestFocus() }
         }
     }
@@ -249,11 +257,9 @@ internal fun PlayerMoreSections(
         }
         if (ui.lines.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
-            SourceLineSelector(
+            VodSourceLineSelector(
                 title = ui.title,
-                labels = ui.lines.mapIndexed { idx, line ->
-                    if (idx == ui.activeLine) "${line.label} · 当前" else line.label
-                },
+                lines = ui.lines,
                 activeLine = sourceFocusIndex,
                 onSwitchLine = onSwitchLine,
                 focusRequester = sourceFocusRequester.takeIf { autoFocusSource },
@@ -453,6 +459,101 @@ private fun SourceLineSelector(
         }
     }
 }
+
+/** VOD provider tabs plus an independently scrolling, fixed-height source list. */
+@Composable
+private fun VodSourceLineSelector(
+    title: String,
+    lines: List<LineInfo>,
+    activeLine: Int,
+    onSwitchLine: (Int) -> Unit,
+    focusRequester: FocusRequester?,
+) {
+    val groups = remember(lines) { PlayerSourceGroupingPolicy.groups(lines) }
+    if (groups.isEmpty()) return
+
+    val activeGroupIndex = groups.indexOfFirst { activeLine in it.lineIndices }.takeIf { it >= 0 } ?: 0
+    var selectedGroupIndex by remember(title, lines) { mutableIntStateOf(activeGroupIndex) }
+    LaunchedEffect(activeGroupIndex) {
+        if (activeGroupIndex >= 0) selectedGroupIndex = activeGroupIndex
+    }
+
+    val listState = rememberLazyListState()
+    val selectedGroup = groups.getOrNull(selectedGroupIndex) ?: groups.first()
+    val activePosition = selectedGroup.lineIndices.indexOf(activeLine)
+    LaunchedEffect(selectedGroupIndex, activeLine, focusRequester) {
+        listState.scrollToItem(activePosition.takeIf { it >= 0 } ?: 0)
+        if (focusRequester != null && activePosition >= 0) {
+            withFrameNanos { }
+            runCatching { focusRequester.requestFocus() }
+        }
+    }
+
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 10.dp)
+                .horizontalScroll(rememberScrollState()),
+        ) {
+            groups.forEachIndexed { index, group ->
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .tapCard { selectedGroupIndex = index }
+                        .background(
+                            if (index == selectedGroupIndex) AccentBlue else Color(0x24FFFFFF),
+                            RoundedCornerShape(10.dp),
+                        )
+                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                ) {
+                    Text(group.provider, color = Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                }
+            }
+        }
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(VOD_SOURCE_LIST_HEIGHT)
+                .testTag("vod-source-list"),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(selectedGroup.lineIndices, key = { "${title}:$it" }) { globalIndex ->
+                val active = globalIndex == activeLine
+                val sourceFocusModifier = if (focusRequester != null && active) {
+                    Modifier.focusRequester(focusRequester)
+                } else Modifier
+                val name = PlayerSourceGroupingPolicy.displayLabel(lines[globalIndex].label, selectedGroup.provider)
+                Box(
+                    contentAlignment = Alignment.CenterStart,
+                    modifier = Modifier
+                        .then(sourceFocusModifier)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .tapCard { onSwitchLine(globalIndex) }
+                        .background(
+                            if (active) AccentBlue else Color(0x24FFFFFF),
+                            RoundedCornerShape(10.dp),
+                        )
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                ) {
+                    Text(
+                        if (active) "$name · 当前" else name,
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private val VOD_SOURCE_LIST_HEIGHT = 220.dp
 
 @Composable
 private fun SourceLineToggle(

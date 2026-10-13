@@ -131,8 +131,8 @@ android {
     // 必须严格递增：客户端 ApkUpdatePolicy 只比较 versionCode（manifest.versionCode
     // <= 本机 versionCode 即视为无更新），系统安装也不允许降级覆盖。V1.0 取 100 而不是
     // 10，是为了同时高于重置前的 42，已装 1.4x 的设备仍能收到 V1.0 的更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 324)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "3.0.14")
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 325)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "3.0.15")
         // 方案 §5：双 ABI split 思路——真机 arm64/v7a + 模拟器 x86_64（开发验证用）
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
         // AOSP 谷歌拼音解码器（搜索页拼音候选，2026-08-29）；默认 c++_static（new/delete 需要 libc++）

@@ -3372,8 +3372,7 @@ const pv = { hls: null, video: null, ctx: null, sources: [], srcIds: [], srcName
   stallTimer: 0, speedIdx: 2, pausedAt: -1, controls: false, picker: false,
   recoveryGen: 0, recoveryAttempts: 0, recovering: false, loadGen: 0, playerSession: 0,
   playController: null, detailController: null, detailRequest: null,
-  vodSources: [], vodLineIdx: 0, vodSourceStatus: "idle", vodSourceMessage: "", panelOpen: false,
-  routeLinesExpanded: false,
+  vodSources: [], vodLineIdx: 0, vodProvider: "", vodSourceStatus: "idle", vodSourceMessage: "", panelOpen: false,
   loadPending: false };
 /* PlayerViewModel.SPEED_STEPS */
 const SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
@@ -3398,11 +3397,11 @@ function openPlayer(ctx) {
   pv.vodSources = sources;
   if (ctx.kind === "vod") pv.sources = [];
   pv.vodLineIdx = playerVodLineIndex(sources, pv.ctx.playRef, pv.ctx.sourceKey, pv.ctx.lineIndex);
+  pv.vodProvider = "";
   pv.vodSourceStatus = ctx.kind === "vod" ? (sources.length ? "refreshing" : "loading") : "idle";
   pv.vodSourceMessage = ctx.kind === "vod"
     ? (sources.length ? "正在更新可用信号源…" : "正在加载可用信号源…") : "";
   pv.panelOpen = ctx.kind === "vod" && !!state.portrait;
-  pv.routeLinesExpanded = false;
   pv.loadPending = ctx.kind === "vod";
   $("#pPlayer").hidden = false; document.body.style.overflow = "hidden";
   $("#pError").hidden = true; $("#bufSpin").hidden = false;
@@ -4049,6 +4048,18 @@ function startPlayFromCtx(keepPos) {
 function playerSourceName(line, index) {
   return String((line && (line.name || line.source_name)) || `信号源${index + 1}`);
 }
+function playerSourceProvider(line, index, context = pv.ctx) {
+  const sourceName = String((line && (line.source_name || line.provider_name)) || "").trim();
+  if (sourceName) return sourceName;
+  if (String((line && line.source_id) || "").trim().toLowerCase() === "hhkan") return "好好看";
+  const label = playerSourceName(line, index);
+  const separator = label.search(/[·•・]/);
+  if (separator > 0) return label.slice(0, separator).trim() || "其他信号源";
+  const sourceRef = vodIdentity(context && context.vid);
+  const nativePid = Number(((line && line.episodes) || []).find(ep => ep && ep.pid != null)?.pid);
+  return sourceRef.kind === "hhkan" && Number.isFinite(nativePid) && nativePid < 100
+    ? "好好看" : "其他信号源";
+}
 function playerVodReadyMessage() {
   return pv.vodSources.length === 1
     ? "仅有 1 个信号源，可再次点击当前线路重试"
@@ -4145,6 +4156,7 @@ function selectVodLine(index) {
     failedLineIds: [],
   };
   pv.vodLineIdx = index;
+  pv.vodProvider = playerSourceProvider(line, index);
   pv.vodSourceStatus = "loading";
   pv.vodSourceMessage = retryingCurrent ? "正在重新加载当前信号源…"
     : `正在切换到 ${nextCtx.lineName}…`;
@@ -4232,15 +4244,17 @@ function setPlayerSourcePanel(open) {
   pv.panelOpen = state.portrait ? true : !!open;
   if (pv.panelOpen) renderMorePanel();
   syncPlayerSourcePanel();
-  if (pv.panelOpen) syncPlayerRouteDisclosure();
 }
 $("#mpToggle").addEventListener("click", () => setPlayerSourcePanel(true));
 $("#mpClose").addEventListener("click", () => setPlayerSourcePanel(false));
-$("#mpLinesToggle").addEventListener("click", () => {
-  pv.routeLinesExpanded = !pv.routeLinesExpanded;
-  syncPlayerRouteDisclosure();
+$("#mpLineProviders").addEventListener("click", event => {
+  const tab = event.target && event.target.closest && event.target.closest(".mp-provider");
+  const provider = tab && tab.dataset && tab.dataset.provider;
+  if (!provider || !pv.ctx || pv.ctx.kind !== "vod") return;
+  $("#mpLines").scrollTop = 0;
+  pv.vodProvider = provider;
+  renderMorePanel();
 });
-addEventListener("resize", syncPlayerRouteDisclosure);
 $("#mpSourceRetry").addEventListener("click", () => refreshPlayerEpisodes({ force: true }));
 function armHide() {
   clearTimeout(pv.hideTimer);
@@ -4379,7 +4393,7 @@ function closePlayer() {
   document.body.style.overflow = "";
   pv.recoveryGen++; pv.loadGen++; pv.playerSession++; pv.ctx = null;
   pv.controls = false; pv.picker = false; pv.recovering = false; pv.panelOpen = false;
-  pv.vodSources = []; pv.vodLineIdx = 0; pv.vodSourceStatus = "idle"; pv.vodSourceMessage = "";
+  pv.vodSources = []; pv.vodLineIdx = 0; pv.vodProvider = ""; pv.vodSourceStatus = "idle"; pv.vodSourceMessage = "";
 }
 
 /* 需求12⑦：竖屏全屏按钮——全屏走系统原生播放器（video 全屏 + 原生控件） */
@@ -4446,24 +4460,46 @@ function renderMorePanel() {
     $("#mpSourceState").dataset.state = state;
     $("#mpSourceRetry").hidden = state !== "error" && state !== "empty";
     $("#mpSourceRetry").textContent = "重新检测信号源";
-    $("#mpLines").innerHTML = pv.vodSources.map((source, i) => {
+    const groupsByProvider = new Map();
+    pv.vodSources.forEach((source, index) => {
+      const provider = playerSourceProvider(source, index);
+      if (!groupsByProvider.has(provider)) groupsByProvider.set(provider, []);
+      groupsByProvider.get(provider).push(index);
+    });
+    const groups = Array.from(groupsByProvider, ([provider, indices]) => ({ provider, indices }));
+    const activeProvider = groups.find(group => group.indices.includes(pv.vodLineIdx))?.provider
+      || (groups[0] && groups[0].provider) || "";
+    const previousProvider = pv.vodProvider;
+    const previousScrollTop = $("#mpLines").scrollTop || 0;
+    const selectedProvider = groups.some(group => group.provider === previousProvider)
+      ? previousProvider : activeProvider;
+    pv.vodProvider = selectedProvider;
+    const selectedGroup = groups.find(group => group.provider === selectedProvider);
+    $("#mpLineProviders").innerHTML = groups.map(group =>
+      `<button class="mp-provider ${group.provider === selectedProvider ? "on" : ""}"
+        aria-pressed="${group.provider === selectedProvider ? "true" : "false"}"
+        data-provider="${esc(group.provider)}">${esc(group.provider)}<span class="mp-provider-count">${group.indices.length}</span></button>`
+    ).join("");
+    const routes = $("#mpLines");
+    routes.innerHTML = (selectedGroup ? selectedGroup.indices : []).map(i => {
+      const source = pv.vodSources[i];
       const name = playerSourceName(source, i);
       const selected = i === pv.vodLineIdx;
       return `<button class="lchip ${selected ? "on" : ""}" data-i="${i}"
-        aria-current="${selected ? "true" : "false"}"
+        aria-pressed="${selected ? "true" : "false"}" aria-current="${selected ? "true" : "false"}"
         aria-label="${esc(selected ? `${name}，当前信号源，再次点击重试` : `切换到${name}`)}"
         title="${esc(selected ? "再次点击重试当前信号源" : `切换到${name}`)}">${esc(name)}</button>`;
     }).join("");
     $$("#mpLines .lchip").forEach(ch => ch.addEventListener("click", () => selectVodLine(+ch.dataset.i)));
-    syncPlayerRouteDisclosure();
+    routes.scrollTop = previousProvider === selectedProvider ? previousScrollTop : 0;
+    const activeRoute = routes.querySelector(".lchip.on");
+    if (selectedProvider === activeProvider && activeRoute && activeRoute.scrollIntoView)
+      activeRoute.scrollIntoView({ block: "nearest" });
   } else {
     $("#mpSourceState").textContent = "";
     $("#mpSourceState").dataset.state = "";
     $("#mpLines").innerHTML = "";
-    pv.routeLinesExpanded = false;
-    $("#mpLines").classList.remove("expanded");
-    $("#mpLinesToggle").hidden = true;
-    $("#mpLinesToggle").setAttribute("aria-expanded", "false");
+    $("#mpLineProviders").innerHTML = "";
   }
   /* 选集（电影不显示） */
   const isMovie = c.epCount <= 1 && !/电视剧|连续剧|网剧|短剧|动漫|综艺|美剧|英剧|韩剧|日剧|泰剧/.test(playerDetail && playerDetail.meta || "");
@@ -4511,34 +4547,6 @@ function renderMorePanel() {
   if (state.portrait && c.kind === "vod") pv.panelOpen = true;
   if (state.portrait) $("#morePanel").hidden = false;
   if (c.kind === "vod") syncPlayerSourcePanel();
-}
-function syncPlayerRouteDisclosure() {
-  const routes = $("#mpLines"), toggle = $("#mpLinesToggle");
-  if (!routes || !toggle) return;
-  const buttons = Array.from(routes.querySelectorAll(".lchip"));
-  buttons.forEach(button => { button.hidden = false; });
-  /* 面板被 hidden 时测量值全为 0；等打开或 resize 后再按真实宽度排版。 */
-  routes.classList.add("expanded");
-  const routeWidth = routes.getBoundingClientRect().width;
-  if (!routeWidth) {
-    routes.classList.toggle("expanded", !!pv.routeLinesExpanded);
-    return;
-  }
-  const rowTops = [], buttonRows = [];
-  buttons.forEach(button => {
-    const top = button.offsetTop;
-    let row = rowTops.findIndex(existing => Math.abs(existing - top) <= 1);
-    if (row < 0) { row = rowTops.length; rowTops.push(top); }
-    buttonRows.push(row);
-  });
-  const hasMore = rowTops.length > 2;
-  const expanded = hasMore && !!pv.routeLinesExpanded;
-  routes.classList.toggle("expanded", expanded);
-  if (!expanded) buttons.forEach((button, index) => { button.hidden = buttonRows[index] >= 2; });
-  toggle.hidden = !hasMore;
-  toggle.textContent = expanded ? "⌃" : "⌄";
-  toggle.setAttribute("aria-label", expanded ? "收起信号源" : "展开信号源");
-  toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
 }
 if ("mediaSession" in navigator) {
   navigator.mediaSession.setActionHandler("play", () => pv.video && pv.video.play());

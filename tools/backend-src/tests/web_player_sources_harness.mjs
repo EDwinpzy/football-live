@@ -177,6 +177,17 @@ function lines() {
   ];
 }
 
+function providerLines() {
+  const [lineA, lineB] = lines();
+  return [
+    { ...lineA, name: "好好看 · 源 A" },
+    { ...lineB, name: "非凡资源 · 源 B" },
+    { ...lineA, id: "line-c", source_id: "c", name: "单独源", episodes: lineA.episodes.map(ep => ({ ...ep, pid: "c" })) },
+    { ...lineA, id: "line-d", source_id: "d", name: "好好看 · 源 D", episodes: lineA.episodes.map(ep => ({ ...ep, pid: "d" })) },
+    { ...lineB, id: "line-e", source_id: "e", name: "非凡资源 · 源 E", episodes: lineB.episodes.map(ep => ({ ...ep, pid: "e" })) },
+  ];
+}
+
 function makeRuntime(detailFactory = async () => ({
   title: "测试片", poster_url: "", sources: lines(),
 })) {
@@ -266,6 +277,7 @@ function makeRuntime(detailFactory = async () => ({
       ctx: pv.ctx, sources: pv.vodSources, selected: pv.vodLineIdx,
       status: pv.vodSourceStatus, message: pv.vodSourceMessage, panelOpen: pv.panelOpen,
     });
+    globalThis.__providerFor = (line, index, ctx) => playerSourceProvider(line, index, ctx);
   `, context);
   return { context, nodes, fetches, attached, requests, $, windowListeners };
 }
@@ -276,52 +288,53 @@ const flush = async () => {
   await Promise.resolve();
 };
 
-console.log("== landscape VOD source panel, retry and latest request wins ==");
+console.log("== provider grouping uses source metadata and HHKan reference for raw HN routes ==");
 {
-  const runtime = makeRuntime();
-  const { context: c, $, requests, attached, fetches, windowListeners } = runtime;
+  const { context: c } = makeRuntime();
+  assert.equal(c.__providerFor({ name: "HN线路", episodes: [{ pid: 9 }] }, 0,
+    { vid: "hhkan:12345" }), "好好看", "raw native HHKan lines inherit their provider from HHKan detail reference and pid");
+  assert.equal(c.__providerFor({ name: "HN线路", episodes: [{ pid: 9 }] }, 0,
+    { vid: "douban:12345" }), "其他信号源", "an unprefixed route is not guessed to be HHKan for another provider");
+  assert.equal(c.__providerFor({ name: "HN线路", source_name: "好好看", episodes: [{ pid: 9 }] }, 0,
+    { vid: "douban:12345" }), "好好看", "explicit source metadata takes precedence over label/context inference");
+}
+
+console.log("== landscape VOD source groups, fixed list, retry and latest request wins ==");
+{
+  const groupedSources = providerLines();
+  const runtime = makeRuntime(async () => ({ title: "测试片", poster_url: "", sources: groupedSources }));
+  const { context: c, $, requests, attached, fetches } = runtime;
   c.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", cover: "", epIdx: 1,
     epName: "第2集", epCount: 2, lineIndex: 0, sourceKey: "id:line-a",
-    playRef: { pid: "a", vid: 1 }, sources: lines(), resume: 0 });
+    playRef: { pid: "a", vid: 1 }, sources: groupedSources, resume: 0 });
   await flush();
 
   assert.equal($("#mpToggle").hidden, false, "landscape VOD exposes a source-panel entry while loading");
   assert.equal($("#morePanel").hidden, true, "panel remains closed until selected");
   assert.equal($("#mpLinesSec").hidden, false, "the one-or-more-source section is available");
   assert.match($("#mpLines").innerHTML, /源 A/);
-  assert.match($("#mpLines").innerHTML, /源 B/);
-  const routeChips = Array.from({ length: 7 }, (_, index) => {
-    const chip = new FakeNode();
-    chip.rectWidth = 80;
-    chip.offsetTop = index < 3 ? 100 : index < 5 ? 140 : 180;
-    return chip;
-  });
-  $("#mpLines").chips = routeChips;
-  $("#mpLines").rectWidth = 560;
-  assert.equal($("#morePanel").hidden, true, "the route panel starts closed before layout measurement");
-  assert.equal($("#mpLinesToggle").hidden, true, "a hidden player panel defers route measurement");
+  assert.match($("#mpLineProviders").innerHTML, /好好看/);
+  assert.match($("#mpLineProviders").innerHTML, /非凡资源/);
+  assert.match($("#mpLineProviders").innerHTML, /其他信号源/);
+  const visibleSourceIndices = () => Array.from($("#mpLines").innerHTML.matchAll(/data-i="(\d+)"/g), match => +match[1]);
+  assert.deepEqual(visibleSourceIndices(), [0, 3], "the active source's provider is selected initially");
+  assert.equal($("#mpLines").innerHTML.includes('aria-current="true"'), true,
+    "the currently playing route remains marked inside its provider group");
+  assert.equal($("#morePanel").hidden, true, "the panel remains closed until selected");
   assert.ok(fetches.some(row => row.url.endsWith("/vod/detail/1?refresh=1")));
 
   $("#mpToggle").dispatch("click");
-  assert.equal($("#morePanel").hidden, false, "opening the panel remeasures routes after it becomes visible");
-  assert.equal($("#mpLinesToggle").hidden, false, "more than two rows exposes the route disclosure control");
-  assert.equal($("#mpLinesToggle").textContent, "⌄", "route choices start collapsed");
-  assert.deepEqual(routeChips.map(chip => chip.hidden), [false, false, false, false, false, true, true],
-    "only the first two actual layout rows remain visible and keyboard reachable");
-  $("#mpLinesToggle").dispatch("click");
-  assert.equal($("#mpLines").classes.has("expanded"), true, "expanding shows the remaining source rows");
-  assert.equal($("#mpLinesToggle").textContent, "⌃");
-  assert.ok(routeChips.every(chip => !chip.hidden), "expanded routes all become visible again");
-  $("#mpLinesToggle").dispatch("click");
-  assert.equal($("#mpLines").classes.has("expanded"), false, "the route list can be collapsed again");
-  assert.ok(routeChips.slice(5).every(chip => chip.hidden), "collapsing removes overflow rows from focus order");
-  routeChips.forEach(chip => { chip.offsetTop = chip.offsetTop < 140 ? 100 : 140; });
-  windowListeners.get("resize")();
-  assert.equal($("#mpLinesToggle").hidden, true, "resize to two rows hides the disclosure control");
-  assert.ok(routeChips.every(chip => !chip.hidden), "resize to two rows restores every route chip");
-  routeChips.forEach(chip => { chip.offsetTop = 100; });
-  windowListeners.get("resize")();
-  assert.equal($("#mpLinesToggle").hidden, true, "a single route row also hides the disclosure control");
+  assert.equal($("#morePanel").hidden, false, "the grouped source list stays in the original panel");
+  $("#mpLines").scrollTop = 54;
+  const requestsBeforeProviderChange = requests.length;
+  $("#mpLineProviders").dispatch("click", {
+    target: { closest: () => ({ dataset: { provider: "非凡资源" } }) },
+  });
+  assert.deepEqual(visibleSourceIndices(), [1, 4], "provider filtering retains original global source indices");
+  assert.equal($("#mpLines").scrollTop, 0, "changing provider starts at the top of its list");
+  assert.equal(requests.length, requestsBeforeProviderChange, "browsing providers does not start playback");
+  assert.match($("#mpLineProviders").innerHTML, /class="mp-provider on"[^]*aria-pressed="true"[^]*data-provider="非凡资源"/,
+    "the selected provider is visibly and accessibly marked");
 
   const oldSignal = c.__pv.playController.signal;
   c.__pv.video.duration = 600;

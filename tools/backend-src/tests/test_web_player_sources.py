@@ -6,6 +6,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 HARNESS = ROOT / "tools" / "backend-src" / "tests" / "web_player_sources_harness.mjs"
 HTML = ROOT / "tools" / "backend-src" / "www" / "index.html"
+CSS = ROOT / "tools" / "backend-src" / "www" / "style.css"
 
 
 class WebPlayerSourcesTest(unittest.TestCase):
@@ -26,8 +27,15 @@ class WebPlayerSourcesTest(unittest.TestCase):
         self.assertIn('id="mpSourceState"', html)
         self.assertIn('id="mpSourceRetry"', html)
         self.assertIn('id="mpClose"', html)
-        self.assertIn('class="hscroll mp-chips mp-routes" id="mpLines"', html)
-        self.assertIn('id="mpLinesToggle" class="mp-route-toggle"', html)
+        self.assertIn('id="mpLineProviders" role="group" aria-label="信号源分组"', html)
+        self.assertIn('class="mp-route-list" id="mpLines"', html)
+        self.assertNotIn("mpLinesToggle", html, "the old route disclosure arrow is removed")
+
+    def test_source_rows_use_a_fixed_height_independently_scrollable_list(self):
+        css = CSS.read_text(encoding="utf-8")
+        self.assertRegex(css, r"\.mp-route-list\{[^}]*height:192px;min-height:192px;max-height:192px")
+        self.assertRegex(css, r"\.mp-route-list\{[^}]*overflow-x:hidden;overflow-y:auto")
+        self.assertIn("overscroll-behavior-y:contain", css)
 
     def test_vod_source_list_follows_episodes_and_speed_in_the_same_panel(self):
         html = HTML.read_text(encoding="utf-8")

@@ -32,6 +32,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -46,6 +49,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -100,6 +104,8 @@ import com.qiubo.optimaltv.ui.components.ProvideNavScrolls
 import com.qiubo.optimaltv.ui.components.dpadFocusable
 import com.qiubo.optimaltv.ui.components.navSink
 import com.qiubo.optimaltv.ui.components.scrollNavContainer
+import com.qiubo.optimaltv.ui.components.NAV_DOWN
+import com.qiubo.optimaltv.ui.components.NAV_UP
 import com.qiubo.optimaltv.ui.detail.simpleFactory
 import com.qiubo.optimaltv.ui.theme.AccentBlue
 import com.qiubo.optimaltv.ui.theme.OtvColors
@@ -108,6 +114,7 @@ import com.qiubo.optimaltv.ui.theme.sxs
 import com.qiubo.optimaltv.ui.theme.sx
 import com.qiubo.optimaltv.ui.theme.TextPrimary
 import java.net.URLDecoder
+import kotlinx.coroutines.launch
 
 /**
  * 播放页（2026-08-28 复刻 tvOS 播放器，需求 影视#3 / 足球#13/14）：
@@ -851,8 +858,11 @@ private fun PlayerPanelChip(
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun PlayerSourceSection(ui: PlayerUiState, vm: PlayerViewModel) {
-    val groups = remember(ui.lines) { PlayerSourceGroupingPolicy.groups(ui.lines.map { it.label }) }
+    val groups = remember(ui.lines) {
+        PlayerSourceGroupingPolicy.groups(ui.lines.map { it.label }, ui.lines.map { it.playRef.ifBlank { it.vodId } })
+    }
     val activeProvider = groups.firstOrNull { ui.activeLine in it.lineIndices }?.provider
     var provider by remember(ui.title) { mutableStateOf(activeProvider ?: groups.firstOrNull()?.provider) }
     LaunchedEffect(groups) {
@@ -873,26 +883,58 @@ private fun PlayerSourceSection(ui: PlayerUiState, vm: PlayerViewModel) {
             }
         }
         Spacer(Modifier.height(12.dp))
-        selected?.lineIndices?.forEach { index ->
-            val line = ui.lines[index]
-            val active = index == ui.activeLine
-            Box(
-                Modifier.fillMaxWidth()
-                    .background(if (active) AccentBlue else Color(0x24FFFFFF), RoundedCornerShape(12.dp))
-                    .dpadFocusable(navGroup = PANEL_NAV_GROUP, scaleFocused = 1.02f) { vm.switchLine(index) }
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(line.label, color = Color.White, style = MaterialTheme.typography.labelLarge,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                    if (active) {
-                        Spacer(Modifier.width(10.dp))
-                        Text(if (ui.fatalMsg != null) "播放失败" else if (ui.sourceResolving || ui.playState == EnginePlayState.BUFFERING) "加载中" else "正在播放",
-                            color = Color.White, style = MaterialTheme.typography.labelSmall)
+        // Keep provider tabs outside the fixed viewport. Explicit adjacent focus moves
+        // prevent UP from jumping back to the tabs while earlier lines are offscreen.
+        key(selected?.provider) {
+            val indices = selected?.lineIndices.orEmpty()
+            val lineScroll = rememberScrollState()
+            val lineNav = remember(lineScroll) { scrollNavContainer(lineScroll) }
+            val scope = rememberCoroutineScope()
+            val requesters = remember(indices) { indices.map { FocusRequester() } }
+            val revealers = remember(indices) { indices.map { BringIntoViewRequester() } }
+            ProvideNavScrolls(vertical = lineNav) {
+                Column(
+                    Modifier.fillMaxWidth().height(252.dp).verticalScroll(lineScroll).padding(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    indices.forEachIndexed { position, index ->
+                        val line = ui.lines[index]
+                        val active = index == ui.activeLine
+                        Box(
+                            Modifier.fillMaxWidth().height(56.dp)
+                                .focusRequester(requesters[position])
+                                .bringIntoViewRequester(revealers[position])
+                                .background(if (active) AccentBlue else Color(0x24FFFFFF), RoundedCornerShape(12.dp))
+                                .dpadFocusable(navGroup = PANEL_NAV_GROUP, scaleFocused = 1.02f,
+                                    navOverride = { direction ->
+                                        val next = when (direction) {
+                                            NAV_UP -> position - 1
+                                            NAV_DOWN -> position + 1
+                                            else -> -1
+                                        }
+                                        if (direction in listOf(NAV_UP, NAV_DOWN) && next in indices.indices) {
+                                            scope.launch {
+                                                revealers[next].bringIntoView()
+                                                requesters[next].requestFocus()
+                                            }
+                                            true
+                                        } else false
+                                    }) { vm.switchLine(index) }
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(line.label, color = Color.White, style = MaterialTheme.typography.labelLarge,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                if (active) {
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(if (ui.fatalMsg != null) "播放失败" else if (ui.sourceResolving || ui.playState == EnginePlayState.BUFFERING) "加载中" else "正在播放",
+                                        color = Color.White, style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
                     }
                 }
             }
-            Spacer(Modifier.height(8.dp))
         }
     }
 }
