@@ -745,7 +745,7 @@ private fun VodPlayerOverlay(
 
 /** Main sidebar with source groups and lines below episodes and speed. */
 @Composable
-private fun MorePanel(
+internal fun MorePanel(
     ui: PlayerUiState,
     vm: PlayerViewModel,
     onPickEpisode: (Int) -> Unit,
@@ -806,13 +806,14 @@ private fun MorePanel(
                         Spacer(Modifier.height(8.dp))
                     }
                     // Non-lazy rows keep every episode focusable in the panel scroll container.
-                    // Five per full row; incomplete final rows also share the entire available width.
+                    // Reserve five equal slots so incomplete rows retain the same chip width.
                     EpisodeMenuPolicy.visibleRange(ui.epCount, page).toList().chunked(5).forEach { row ->
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             row.forEach { index ->
                                 PlayerPanelChip(EpisodeMenuPolicy.episodeLabel(index), index == ui.epIndex,
                                     Modifier.weight(1f)) { onPickEpisode(index) }
                             }
+                            repeat(5 - row.size) { Spacer(Modifier.weight(1f)) }
                         }
                         Spacer(Modifier.height(6.dp))
                     }
