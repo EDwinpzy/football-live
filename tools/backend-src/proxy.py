@@ -5813,6 +5813,8 @@ class Handler(SimpleHTTPRequestHandler):
 # joevess/IPTV（正文只有 8 字节 `#EXTM3U`）、Ftindy/IPTV-URL（404）、aktv.space（302 到 HTML）。
 # 纯 IPv6 清单（Guovin ipv6 / myIPTV ipv6 / m3u.ibert.me / ngo5 ipv6Plus）一律不收：
 # 本列表是「按序回退」，命中即停，垫一条基本放不出来的清单只会让兜底结果更差。
+# 2026-10-13：ngo5/IPTV 的 IPv4 汇总清单已在此链中；YueChan/Live 虽为合法 M3U，96 条均是
+# rtp:// 组播地址，会被客户端 UrlGuard 拒绝，因此移除。
 _IPTV_LOCAL_ENDPOINT = os.environ.get("OTV_IPTV_LATEST_URL", "").strip()
 IPTV_SOURCES = [
     _IPTV_LOCAL_ENDPOINT or "https://appletv-d5ge1bth794873f76.service.tcloudbase.com/iptv/latest",
@@ -5820,7 +5822,6 @@ IPTV_SOURCES = [
     "https://raw.githubusercontent.com/suxuang/myIPTV/refs/heads/main/ipv4.m3u",
     "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/ipv4/result.m3u",
     "https://raw.githubusercontent.com/Kimentanm/aptv/master/m3u/iptv.m3u",
-    "https://raw.githubusercontent.com/YueChan/Live/refs/heads/main/IPTV.m3u",
     "https://raw.githubusercontent.com/hujingguang/ChinaIPTV/main/cnTV_AutoUpdate.m3u8",
     "https://raw.githubusercontent.com/mytv-android/China-TV-Live-M3U8/main/iptv.m3u",
     "https://raw.githubusercontent.com/ngo5/IPTV/main/m3u/ipv4.m3u",
@@ -5832,8 +5833,8 @@ IPTV_GROUP_ORDER = ["央视", "卫视", "体育", "地方", "数字付费", "港
 _iptv_cache = {"ts": 0.0, "data": None, "lock": threading.Lock()}
 _IPTV_TTL = 10 * 60
 _IPTV_MAX_LINES = 8   # 单频道线路上限（与 app MAX_LINES_PER_CHANNEL 一致）
-"""兜底链总预算（2026-10-12）：上游从 2 条涨到 11 条，逐条 15s 超时意味着最坏
-12×15=180s 才返回空表——首个请求会被客户端读超时掐死。改成整链共享一个 25s 硬顶，
+"""兜底链总预算（2026-10-12）：上游从 2 条涨到 10 条，逐条 15s 超时意味着最坏
+11×15=165s 才返回空表——首个请求会被客户端读超时掐死。改成整链共享一个 25s 硬顶，
 单条超时取「剩余预算」与 15s 的较小值；预算耗尽立即返回已有结果（None）。
 正常路径（站点托管 latest 命中）仍是一次请求，行为不变。"""
 IPTV_FETCH_TOTAL_BUDGET = 25.0

@@ -33,10 +33,13 @@ class IptvRepository(context: Context) {
          *  ① 站点每日校验推送产物（/iptv/refresh 定时拉上游→逐线测活剔死→按测速排序
          *     写入对象存储，匿名 GET 直拉——电视#9「每天自动推送可用源、删除不可用源」；
          *     对象与热更包同桶不同前缀 iptv/）。
-         *  ②~⑫ 上游 m3u，顺序 = 覆盖广度优先（与 proxy.py IPTV_SOURCES、后台
+         *  ②~⑪ 上游 m3u，顺序 = 覆盖广度优先（与 proxy.py IPTV_SOURCES、后台
          *     IPTV_UPSTREAMS 同序）。旧的 JianghaoPi / iptv-org 清单与 gh-proxy 前缀
          *     已全部移除（gh-proxy 同一 URL 前后两次结果可能不同，200 ↔ 404）。
-         *  第二轮实测不合格、不要再加回来：tv.iill.top/m3u/Gather（HTML）、
+         *  2026-10-13 复核：ngo5/IPTV 的 m3u/ipv4.m3u 已在上游链中（158 频道）；
+         *  YueChan/Live IPTV.m3u 虽有 96 条，但全是 rtp:// 组播，
+         *  客户端 UrlGuard 只接受 http/https，已剔除。
+         *  其他实测不合格、不要再加回来：tv.iill.top/m3u/Gather（HTML）、
          *  live.zbds.org（000）、live.fanmingming.cn（000）、82.156.243.185:54321（000）、
          *  joevess/IPTV（正文 8 字节）、Ftindy/IPTV-URL（404）、aktv.space（302 到 HTML）；
          *  纯 IPv6 清单（Guovin ipv6 / myIPTV ipv6 / m3u.ibert.me / ngo5 ipv6Plus）不收。 */
@@ -47,7 +50,6 @@ class IptvRepository(context: Context) {
             "https://raw.githubusercontent.com/suxuang/myIPTV/refs/heads/main/ipv4.m3u",
             "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/ipv4/result.m3u",
             "https://raw.githubusercontent.com/Kimentanm/aptv/master/m3u/iptv.m3u",
-            "https://raw.githubusercontent.com/YueChan/Live/refs/heads/main/IPTV.m3u",
             "https://raw.githubusercontent.com/hujingguang/ChinaIPTV/main/cnTV_AutoUpdate.m3u8",
             "https://raw.githubusercontent.com/mytv-android/China-TV-Live-M3U8/main/iptv.m3u",
             "https://raw.githubusercontent.com/ngo5/IPTV/main/m3u/ipv4.m3u",

@@ -1171,14 +1171,14 @@ IPTV_KEY_META = "iptv/version.json"
 # 只留返回 200 且正文是合法 m3u 的地址；旧的 JianghaoPi / iptv-org 与 gh-proxy 前缀
 # 全部移除（gh-proxy 同 URL 前后两次结果可能不同，200 ↔ 404）。
 # 实测不合格、不要加回来：tv.iill.top/m3u/Gather（HTML）、live.zbds.org（000）、
-# live.fanmingming.cn（000）、82.156.243.185:54321（000）、joevess/IPTV（正文 8 字节）、
+# live.fanmingming.cn（000）、82.156.243.185:54321（000）、
+# YueChan/Live IPTV.m3u（96 条均为 rtp:// 组播，客户端只接收 http/https）、joevess/IPTV（正文 8 字节）、
 # Ftindy/IPTV-URL（404）、aktv.space（302 到 HTML）；纯 IPv6 清单一律不收（本链命中即停）。
 IPTV_UPSTREAMS = [
     "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",
     "https://raw.githubusercontent.com/suxuang/myIPTV/refs/heads/main/ipv4.m3u",
     "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/ipv4/result.m3u",
     "https://raw.githubusercontent.com/Kimentanm/aptv/master/m3u/iptv.m3u",
-    "https://raw.githubusercontent.com/YueChan/Live/refs/heads/main/IPTV.m3u",
     "https://raw.githubusercontent.com/hujingguang/ChinaIPTV/main/cnTV_AutoUpdate.m3u8",
     "https://raw.githubusercontent.com/mytv-android/China-TV-Live-M3U8/main/iptv.m3u",
     "https://raw.githubusercontent.com/ngo5/IPTV/main/m3u/ipv4.m3u",
@@ -1186,8 +1186,8 @@ IPTV_UPSTREAMS = [
     "https://raw.githubusercontent.com/zwc456baby/iptv_alive/refs/heads/master/live.m3u",
     "https://raw.githubusercontent.com/kimwang1978/collect-tv-txt/main/bbxx_lite.m3u",
 ]
-"""上游链总预算（2026-10-12）：上游从 5 条涨到 11 条，逐条按各自超时重试意味着
-最坏 11×60s 才返回「全部上游不可达」——后台点一次「API 同步」会挂十分钟。
+"""上游链总预算（2026-10-13）：上游从 5 条涨到 10 条，逐条按各自超时重试意味着
+最坏 10×60s 才返回「全部上游不可达」——后台点一次「API 同步」会挂十分钟。
 整链共享一个 45s 硬顶，单条超时取「剩余预算」；预算耗尽立即收队返回。"""
 IPTV_UPSTREAM_TOTAL_BUDGET = 45.0
 IPTV_FETCH_MAX = 16 * 1024 * 1024
@@ -1523,7 +1523,7 @@ def h_iptv_auto_run(d: dict) -> dict:
         deadline = time.time() + 38.0
         channels = []
         src_used = ""
-        # 上游链单独给 25s（与 IPTV_UPSTREAM_TOTAL_BUDGET 取小）：11 条 × 20s 的
+        # 上游链单独给 25s（与 IPTV_UPSTREAM_TOTAL_BUDGET 取小）：10 条 × 20s 的
         # 最坏情况会把「立即自动重建」拖到三分钟以上，而测活本身还要 38s。
         fetch_deadline = time.time() + min(25.0, float(IPTV_UPSTREAM_TOTAL_BUDGET))
         for u in IPTV_UPSTREAMS:
