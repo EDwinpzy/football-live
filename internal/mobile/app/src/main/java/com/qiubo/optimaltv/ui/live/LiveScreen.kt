@@ -761,6 +761,7 @@ private fun GameCard(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 TeamBlock(m.home, s)
                 Column(
+                    modifier = Modifier.weight(1f),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     // 需求 2026-09-11：联赛/VS/时间三行上下收紧——行距 5→2，各文本显式紧凑行高
                     //（不设行高时中文联赛名按 CJK 字体度量撑高，三行整体偏松）
