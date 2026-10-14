@@ -133,7 +133,10 @@ public struct BackendClient {
 
     public func detail(item: MediaItem, refresh: Bool = false) async throws -> MediaDetail {
         let route = Self.detailRoute(detailRef: item.detailRef, itemID: item.id)
-        let query = refresh ? [URLQueryItem(name: "refresh", value: "1")] : []
+        let query = refresh
+            ? [URLQueryItem(name: "refresh", value: "1")] +
+                (route.isHHKan ? [URLQueryItem(name: "enrich", value: "1")] : [])
+            : []
         let data = try await get(segments: route.segments, query: query)
         let object = try jsonObject(data)
         let kind: MediaKind = route.isHHKan ? .hhkan : .douban

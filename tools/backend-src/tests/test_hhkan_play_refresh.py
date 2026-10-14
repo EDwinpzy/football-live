@@ -1,9 +1,11 @@
 import concurrent.futures
 import http.server
 import json
+import os
 import pathlib
 import sys
 import threading
+import time
 import unittest
 import urllib.request
 from unittest.mock import patch
@@ -122,6 +124,70 @@ class HhkanPlayRefreshTest(unittest.TestCase):
             self.assertEqual(proxy._mcms_videolist_item(0, 3)["url"], "new")
             self.assertEqual(fetch.call_count, 2)
         self.assertEqual(proxy._MCMS_VIDEOLIST_PENDING, {})
+
+    def test_refresh_detail_bypasses_ranked_and_page_cache_and_disables_http_cache(self):
+        self.start_server()
+        vid = 71234
+        cache_key = "/hhkan/detail/%d?refresh=1&enrich=1" % vid
+        stale = {"id": vid, "title": "旧剧集详情", "sources": []}
+        proxy._HHKAN_PAGE_CACHE[cache_key] = (time.time(), stale)
+        self.addCleanup(proxy._HHKAN_PAGE_CACHE.pop, cache_key, None)
+        episodes = [{"ep": "第%d集" % index, "pid": 9, "vid": index - 1}
+                    for index in range(1, 22)]
+        refresh_values = []
+
+        def enrich(detail, requested_vid, refresh=False):
+            refresh_values.append(refresh)
+            detail["sources"] = [{"name": "更新线路", "episodes": episodes}]
+
+        with patch.object(proxy, "_detail_ranked_get", return_value=stale) as ranked_get, \
+                patch.object(proxy, "_hhkan_origin_call", side_effect=lambda producer: producer()), \
+                patch.object(proxy.hhkan, "get_page", return_value="fresh detail") as upstream, \
+                patch.object(proxy.hhkan, "parse_detail", return_value={
+                    "id": vid, "title": "正在更新的剧", "sources": []}), \
+                patch.object(proxy, "enrich_detail_sources", side_effect=enrich):
+            with urllib.request.urlopen(self.base + cache_key, timeout=3) as response:
+                payload = json.load(response)
+                cache_control = response.headers.get("Cache-Control")
+                cache_status = response.headers.get("X-Cache")
+
+        ranked_get.assert_not_called()
+        upstream.assert_called_once_with("/detail/%d.html" % vid)
+        self.assertEqual(refresh_values, [True])
+        self.assertEqual(len(payload["sources"][0]["episodes"]), 21)
+        self.assertEqual(cache_control, "no-store")
+        self.assertEqual(cache_status, "MISS")
+
+    def test_detail_enrichment_forwards_refresh_to_search_and_videolist_cache(self):
+        vid = 71235
+        eps = [{"ep": "第%d集" % index} for index in range(1, 22)]
+        ranked_group = {"name": "更新线路", "probe_h": 720, "pid": 100, "eps": eps}
+        detail = {"id": vid, "title": "正在更新的剧", "sources": []}
+        with patch.dict(os.environ, {"OTV_ENRICH": "1"}), \
+                patch.object(proxy, "_probe_native_sources"), \
+                patch.object(proxy, "_enrich_find_sites", return_value={0: 991}) as find_sites, \
+                patch.object(proxy, "_mcms_videolist_item", return_value={"id": 991}) as videolist, \
+                patch.object(proxy, "_mcms_groups", return_value=[{}]), \
+                patch.object(proxy, "_rank_mcms_groups", return_value=([ranked_group], 0)), \
+                patch.object(proxy, "_detail_ranked_put"):
+            proxy.enrich_detail_sources(detail, vid, refresh=True)
+
+        find_sites.assert_called_once_with("正在更新的剧", fresh=True)
+        videolist.assert_called_once_with(0, 991, timeout=3.5, fresh=True)
+        self.assertEqual(len(detail["sources"][-1]["episodes"]), 21)
+
+    def test_fresh_enrichment_search_bypasses_cached_site_match(self):
+        title = "实时更新剧"
+        proxy._enrich_search_cache[title] = (time.time(), {0: 111})
+        self.addCleanup(proxy._enrich_search_cache.pop, title, None)
+        with patch.object(proxy, "MCMS_SITES", [proxy.MCMS_SITES[0]]), \
+                patch.object(proxy, "_mcms_fetch_site", return_value={"list": [
+                    {"vod_name": title, "vod_id": 222}
+                ]}) as fetch:
+            result = proxy._enrich_find_sites(title, fresh=True)
+
+        self.assertEqual(result, {0: 222})
+        fetch.assert_called_once()
 
     def test_cross_site_old_inflight_list_cannot_replace_fresh_signed_link(self):
         entered, release = threading.Event(), threading.Event()

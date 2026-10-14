@@ -5291,6 +5291,8 @@ class Handler(SimpleHTTPRequestHandler):
             v = qs.get(name)
             return v[0] if v else default
 
+        refresh_detail = p.startswith("/hhkan/detail/") and q("refresh", "0") == "1"
+
         # v1.22 网页版加载提速（2026-09-05 需求⑫）：目录类接口加进程内页缓存。
         # 旧版 /hhkan/* 每次实时抓源站 + 响应 no-store——云函数冷实例/弱网下进影视页、
         # 切分类都要等源站往返（秒级），且重复抓取易触发源站限流。
@@ -5319,7 +5321,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             # 页缓存接口给浏览器 30s 复用（tab 往返不重拉）；其余（play/search/proxy）no-store
-            self.send_header("Cache-Control", "max-age=30" if cacheable else "no-store")
+            self.send_header("Cache-Control", "no-store" if refresh_detail else (
+                "max-age=30" if cacheable else "no-store"))
             if cacheable:
                 self.send_header("X-Cache", "HIT" if from_cache else "MISS")
             self.send_header("Content-Length", str(len(body)))
@@ -5331,7 +5334,7 @@ class Handler(SimpleHTTPRequestHandler):
         if cacheable:
             # v1.32 性能：detail 优先吃「统一排名详情缓存」——补线+原生探测的完整
             # 结果 plain 与 ?enrich=1 同享，起播 enrich=1 不再重跑 ~8-10s 探测预算。
-            if p.startswith("/hhkan/detail/"):
+            if p.startswith("/hhkan/detail/") and not refresh_detail:
                 try:
                     _dvid = int(p.rsplit("/", 1)[1])
                 except ValueError:
@@ -5340,7 +5343,7 @@ class Handler(SimpleHTTPRequestHandler):
                     ranked = _detail_ranked_get(_dvid)
                     if ranked is not None:
                         return respond(ranked, from_cache=True)
-            hit = _HHKAN_PAGE_CACHE.get(ckey)
+            hit = None if refresh_detail else _HHKAN_PAGE_CACHE.get(ckey)
             ttl = (_HHKAN_PAGE_CACHE_TTL_FILTERS if p.startswith("/hhkan/filters/")
                    else _HHKAN_PAGE_CACHE_TTL)
             if hit and time.time() - hit[0] < ttl:
@@ -5508,7 +5511,7 @@ class Handler(SimpleHTTPRequestHandler):
                 # ?enrich=1 同步等待完整补线。这避免客户端把首次的基础响应缓存后，
                 # 永远看不到新增播放源。
                 if q("enrich", "0") == "1":
-                    enrich_detail_sources(d, vid)
+                    enrich_detail_sources(d, vid, refresh=refresh_detail)
                 else:
                     threading.Thread(target=enrich_detail_sources, args=(d, vid), daemon=True).start()
                 return respond(d)
@@ -6598,14 +6601,14 @@ def _title_norm(t):
     return re.sub(r"[^\w\u4e00-\u9fff]+", "", t or "")
 
 
-def _enrich_find_sites(title):
+def _enrich_find_sites(title, fresh=False):
     """同名影片在 mcms 池各站的命中。搜索策略：全标题 → 归一化前缀6 → 前缀4
     （MacCMS wd 是连续子串匹配，「蜘蛛侠英雄无归」搜不到「蜘蛛侠：英雄无归」，
     前缀降级可命中标点变体；命中即早停），结果按归一化标题等值校验。"""
     now = time.time()
     with _enrich_lock:
         hit = _enrich_search_cache.get(title)
-    if hit and now - hit[0] < _ENRICH_TTL:
+    if not fresh and hit and now - hit[0] < _ENRICH_TTL:
         return hit[1]
     want = _title_norm(title)
     tn = re.sub(r"[^\w\u4e00-\u9fff]+", "", title)
@@ -6856,7 +6859,7 @@ def _probe_native_sources(vodid, sources, budget=6.0):
         ex.shutdown(wait=False, cancel_futures=True)
 
 
-def enrich_detail_sources(d, vodid):
+def enrich_detail_sources(d, vodid, refresh=False):
     """hhkan 详情补线主入口（在 detail 响应组装后调用，原地修改 d["sources"]）。
     各命中站【并行】取线路（含探测），总预算 ~8s；超时站点静默放弃（命中已缓存，
     下次打开秒出完整结果）。
@@ -6881,7 +6884,7 @@ def enrich_detail_sources(d, vodid):
                            args=(vodid, merged_srcs, 6.0), daemon=True)
     _nt.start()
     try:
-        found = _enrich_find_sites(title)
+        found = _enrich_find_sites(title, fresh=refresh)
     except Exception:
         found = {}
     hits = {si: v for si, v in found.items() if v}
@@ -6893,7 +6896,7 @@ def enrich_detail_sources(d, vodid):
         return
 
     def _site_lines(si, vod_id):
-        it = _mcms_videolist_item(si, vod_id, timeout=3.5)
+        it = _mcms_videolist_item(si, vod_id, timeout=3.5, fresh=refresh)
         if not it:
             return []
         groups, _p = _rank_mcms_groups(_mcms_groups(it),

@@ -40,16 +40,16 @@ class VodApiSourceHhkanRoutingTest {
     }
 
     @Test
-    fun `刷新 HHKan 详情请求补充线路`() {
+    fun `刷新 HHKan 详情绕过缓存并补充线路`() {
         withJsonServer("""{"title":"测试剧","sources":[]}""") { base, requestedPath ->
             VodApiSource.fetchDetail(base, OkHttpClient(), "hhkan:721", refresh = true)
 
-            assertEquals("/hhkan/detail/721?enrich=1", requestedPath.get())
+            assertEquals("/hhkan/detail/721?refresh=1&enrich=1", requestedPath.get())
         }
     }
 
     @Test
-    fun `延迟片源的 HHKan 详情不请求补充线路`() {
+    fun `延迟片源的 HHKan 详情仍可强制绕过缓存`() {
         withJsonServer("""{"title":"测试剧","sources":[]}""") { base, requestedPath ->
             VodApiSource.fetchDetail(
                 base,
@@ -59,7 +59,7 @@ class VodApiSourceHhkanRoutingTest {
                 refresh = true,
             )
 
-            assertEquals("/hhkan/detail/721", requestedPath.get())
+            assertEquals("/hhkan/detail/721?refresh=1", requestedPath.get())
         }
     }
 

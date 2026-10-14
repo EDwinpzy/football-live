@@ -1,4 +1,5 @@
 import json
+import concurrent.futures
 import pathlib
 import sys
 import tempfile
@@ -779,6 +780,42 @@ class DoubanCatalogTest(unittest.TestCase):
             result = refresh_detail("1292052")
 
             self.assertEqual(result["title"], "更新后详情")
+
+    def test_forced_detail_refresh_does_not_reuse_an_inflight_stale_result(self):
+        first_started, release_first, forced_waiting = threading.Event(), threading.Event(), threading.Event()
+        calls = []
+
+        def fetch(_url):
+            calls.append(len(calls) + 1)
+            if len(calls) == 1:
+                first_started.set()
+                self.assertTrue(release_first.wait(2))
+                title = "先前详情"
+            else:
+                title = "最新详情"
+            return {"id": "1", "title": title, "year": "2026"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog = douban_catalog.DoubanCatalog(
+                fetch=fetch, cache=douban_catalog.JsonDiskCache(tmp))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(catalog.detail, "1")
+                self.assertTrue(first_started.wait(1))
+                condition = catalog._conditions["detail:1"]
+                original_wait_for = condition.wait_for
+
+                def observe_wait(predicate, timeout=None):
+                    forced_waiting.set()
+                    return original_wait_for(predicate, timeout)
+
+                condition.wait_for = observe_wait
+                forced = pool.submit(catalog.refresh_detail, "1")
+                self.assertTrue(forced_waiting.wait(1))
+                release_first.set()
+                self.assertEqual(first.result(timeout=2)["title"], "先前详情")
+                self.assertEqual(forced.result(timeout=2)["title"], "最新详情")
+
+            self.assertEqual(len(calls), 2)
 
     def test_cold_cache_serves_snapshot_first_and_refreshes_in_background(self):
         """冷缓存（首装 / 热更换了缓存文件名后的第一次运行）不许同步等源站。

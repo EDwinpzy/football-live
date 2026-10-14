@@ -316,7 +316,7 @@ class HhkanCatalogContractTest(unittest.TestCase):
         route = backend[backend.index('if p.startswith("/hhkan/detail/"):'):
                         backend.index('if p.startswith("/hhkan/play/"):')]
         self.assertIn('q("enrich", "0") == "1"', route)
-        self.assertIn("enrich_detail_sources(d, vid)", route)
+        self.assertIn("enrich_detail_sources(d, vid, refresh=refresh_detail)", route)
 
         repo = (ROOT / "android/app/src/main/java/com/qiubo/optimaltv/data/repo/VodRepository.kt").read_text(encoding="utf-8")
         source = (ROOT / "android/app/src/main/java/com/qiubo/optimaltv/data/source/HhkanSource.kt").read_text(encoding="utf-8")

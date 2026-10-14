@@ -79,15 +79,40 @@ object EpisodeRefreshPolicy {
         currentLines: Int,
         incomingLines: Int,
         keepIndex: Int,
+        sameEpisodeSource: Boolean = true,
     ): Boolean {
         if (keepIndex !in 0 until incomingNames.size) return false
-        if (incomingNames.size < currentNames.size) return false
+        if (sameEpisodeSource && incomingNames.size < currentNames.size) return false
         if (incomingNames.size > currentNames.size) return true
         if (incomingLines > currentLines) return true
         // 同集数但集名/线路内容变了：仍然替换，否则「更新了但不显示」。
         return incomingNames != currentNames
     }
+
+    internal fun isCurrentRequest(
+        request: EpisodeRefreshTicket,
+        latestRequestId: Long,
+        vodId: String,
+        detailRef: String,
+        playbackGeneration: Int,
+        episodeIndex: Int,
+        activeLine: Int,
+        sourceIdentity: String?,
+    ): Boolean = request.requestId == latestRequestId &&
+        request.vodId == vodId && request.detailRef == detailRef &&
+        request.playbackGeneration == playbackGeneration && request.episodeIndex == episodeIndex &&
+        request.activeLine == activeLine && request.sourceIdentity == sourceIdentity
 }
+
+internal data class EpisodeRefreshTicket(
+    val requestId: Long,
+    val vodId: String,
+    val detailRef: String,
+    val playbackGeneration: Int,
+    val episodeIndex: Int,
+    val activeLine: Int,
+    val sourceIdentity: String?,
+)
 
 /** Manual selection of the active VOD line is an explicit retry; live picker behavior stays unchanged. */
 internal object ManualLineSelectionPolicy {
@@ -341,6 +366,8 @@ class PlayerViewModel(
     private var systemResumeNeeded = false
     private var hostPausedAtMs = 0L
     private var currentItem: com.qiubo.optimaltv.data.model.VodItem? = null
+    private var episodeNamesSourceIdentity: String? = null
+    private var episodeRefreshRequestId = 0L
     private var sourceBootJob: Job? = null
 
     /** 足球回放/集锦（replay:/hhkanplay:）不进观看历史/进度库——与直播同规则，
@@ -757,6 +784,7 @@ class PlayerViewModel(
     }
 
     private suspend fun boot(fresh: Boolean = false) {
+        invalidateEpisodeRefresh()
         // v1.14：冷启动秒进播放器时先等内置后端就绪（最多 ~15s）——backend 未监听时
         // 详情请求连接拒绝被 runCatching 吞掉，直接假性「该集没有可用线路」
         val tBoot = android.os.SystemClock.elapsedRealtime()
@@ -883,6 +911,13 @@ class PlayerViewModel(
         val initialLine = pick.preferredIndex.takeIf { it in lines.indices && pick.hasImmediate }
             ?: memory?.second?.takeIf { it in lines.indices }
             ?: 0
+        val initialLineInfo = lines.getOrNull(initialLine)
+        val initialEpisodes = repo.episodesForLine(effItem, initialLineInfo)
+            ?.takeIf { epStart in it.indices }
+        val playerItem = initialEpisodes?.let { effItem.copy(episodes = it) } ?: effItem
+        currentItem = playerItem
+        episodeNamesSourceIdentity = repo.episodeSourceIdentity(initialLineInfo)
+            ?: repo.defaultEpisodeSourceIdentity(effItem)
 
         if (this::engine.isInitialized) runCatching { engine.release() }
         installEngine(EngineRegistry.create(enginePref, Graph.appContext))
@@ -896,27 +931,27 @@ class PlayerViewModel(
                 "1" -> true
                 "2", "3", "4", "6" -> false
                 else -> {
-                    val versionish = effItem.episodes.size in 2..4 &&
-                        effItem.episodes.none {
+                    val versionish = playerItem.episodes.size in 2..4 &&
+                        playerItem.episodes.none {
                             it.name.contains("集") || it.name.contains("期") || it.name.contains("话")
                         }
                     com.qiubo.optimaltv.ui.search.classifyVod(
-                        effItem.meta,
-                        if (versionish) 1 else effItem.episodes.size,
+                        playerItem.meta,
+                        if (versionish) 1 else playerItem.episodes.size,
                     ) == "电影"
                 }
             }
         }
         _ui.value = _ui.value.copy(
-            title = effItem.title,
-            epCount = effItem.episodes.size,
-            epNames = effItem.episodes.map { it.name },
+            title = playerItem.title,
+            epCount = playerItem.episodes.size,
+            epNames = playerItem.episodes.map { it.name },
             isMovie = isMovie,
-            meta = effItem.meta.ifBlank {
-                (listOf(effItem.year, effItem.area).filter { it.isNotBlank() } + effItem.tags).joinToString(" / ")
+            meta = playerItem.meta.ifBlank {
+                (listOf(playerItem.year, playerItem.area).filter { it.isNotBlank() } + playerItem.tags).joinToString(" / ")
             },
-            desc = effItem.desc,
-            posterUrl = effItem.posterUrl,
+            desc = playerItem.desc,
+            posterUrl = playerItem.posterUrl,
             lines = lines,
             sourceResolving = false,
             engineId = engine.engineId,
@@ -930,7 +965,7 @@ class PlayerViewModel(
         // 续播位置（方案 §3.4 断点续播；t<1s 不算有效进度）：
         // v1.19 优先用路由带入的跨线路位置（详情页扫全部线路取最近观看）；
         // 无带入（最近观看卡直达/调试注入）走本线路 DB 查询
-        val key = effItem.vodKey(epStart)
+        val key = playerItem.vodKey(epStart)
         val saved = db.vodDao().getProgress(key)
         val dbPos =
             if (saved != null && saved.positionMs > 1_000 &&
@@ -940,6 +975,7 @@ class PlayerViewModel(
         if (startPos > 0) Log.i(TAG, "resume $key @${startPos}ms (route=${resumeStartMs > 0})")
 
         startSession(initialLine, startPos)
+        refreshEpisodesForPanel()
     }
 
     private suspend fun startSession(
@@ -1744,7 +1780,7 @@ class PlayerViewModel(
         pendingVodSessionJob?.cancel()
         pendingVodSessionJob = null
         awaitingPrepare = false
-        episodeRefreshJob?.cancel()
+        invalidateEpisodeRefresh()
         prefetchJob?.cancel()
         watchdogJob?.cancel()
         stallJob?.cancel()
@@ -2241,37 +2277,80 @@ class PlayerViewModel(
     }
 
     fun setPanel(p: Panel) {
-        _ui.value = _ui.value.copy(panel = p)
-        if (p == Panel.MORE && !_ui.value.isLive) refreshEpisodesForPanel()
+        val previous = _ui.value
+        _ui.value = previous.copy(panel = p)
+        if (p == Panel.MORE && previous.panel != Panel.MORE && !previous.isLive) refreshEpisodesForPanel()
         touch()
     }
 
-    /** 每次打开更多面板都后台检查新增集数；只增补列表，不重启或移动当前播放。 */
+    private fun invalidateEpisodeRefresh() {
+        episodeRefreshRequestId++
+        episodeRefreshJob?.cancel()
+        episodeRefreshJob = null
+    }
+
+    /** 每次打开选集都强制回源；只更新当前线路的选集信息，不动播放和线路焦点。 */
     private fun refreshEpisodesForPanel() {
-        if (episodeRefreshJob?.isActive == true) return
+        if (_ui.value.isLive) return
+        val item = currentItem ?: return
+        if (item.detailRef.isBlank()) return
+        invalidateEpisodeRefresh()
+        val state = _ui.value
+        val line = state.lines.getOrNull(state.activeLine)
+        val ticket = EpisodeRefreshTicket(
+            requestId = episodeRefreshRequestId,
+            vodId = item.id,
+            detailRef = item.detailRef,
+            playbackGeneration = sessionGen,
+            episodeIndex = state.epIndex,
+            activeLine = state.activeLine,
+            sourceIdentity = repo.episodeSourceIdentity(line),
+        )
         episodeRefreshJob = viewModelScope.launch {
-            val current = currentItem ?: return@launch
-            val fresh = runCatching {
-                repo.resolveDetail(current.id, forceRefresh = true)
-            }.getOrNull() ?: return@launch
-            val state = _ui.value
-            // 线路表只是内存换算（强制刷新已把 detailInfoCache 换成最新一版），不额外打网。
-            val refreshedLines = runCatching {
-                VisibleVodLinePolicy.apply(repo.resolveLines(fresh, state.epIndex))
-            }.getOrDefault(emptyList())
-            if (!EpisodeRefreshPolicy.accepts(
-                    currentNames = current.episodes.map { it.name },
-                    incomingNames = fresh.episodes.map { it.name },
-                    currentLines = state.lines.size,
-                    incomingLines = refreshedLines.size,
-                    keepIndex = state.epIndex,
-                )) return@launch
-            currentItem = fresh
-            _ui.value = state.copy(
-                epCount = fresh.episodes.size,
-                epNames = fresh.episodes.map { it.name },
-                lines = refreshedLines.takeIf { state.activeLine in it.indices } ?: state.lines,
-            )
+            try {
+                val fresh = try {
+                    repo.resolveDetail(ticket.vodId, forceRefresh = true)
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
+                } ?: return@launch
+                val latest = _ui.value
+                val latestItem = currentItem ?: return@launch
+                val latestLine = latest.lines.getOrNull(latest.activeLine)
+                val latestSourceIdentity = repo.episodeSourceIdentity(latestLine)
+                if (!EpisodeRefreshPolicy.isCurrentRequest(
+                        request = ticket,
+                        latestRequestId = episodeRefreshRequestId,
+                        vodId = latestItem.id,
+                        detailRef = latestItem.detailRef,
+                        playbackGeneration = sessionGen,
+                        episodeIndex = latest.epIndex,
+                        activeLine = latest.activeLine,
+                        sourceIdentity = latestSourceIdentity,
+                    )) return@launch
+                val incomingEpisodes = repo.episodesForLine(fresh, latestLine)
+                    ?: if (latestLine?.playRef.isNullOrBlank()) fresh.episodes else null
+                if (incomingEpisodes.isNullOrEmpty()) return@launch
+                val incomingIdentity = latestSourceIdentity ?: repo.defaultEpisodeSourceIdentity(fresh)
+                val currentNames = latest.epNames.ifEmpty { latestItem.episodes.map { it.name } }
+                if (!EpisodeRefreshPolicy.accepts(
+                        currentNames = currentNames,
+                        incomingNames = incomingEpisodes.map { it.name },
+                        currentLines = latest.lines.size,
+                        incomingLines = latest.lines.size,
+                        keepIndex = latest.epIndex,
+                        sameEpisodeSource = episodeNamesSourceIdentity == incomingIdentity,
+                    )) return@launch
+                currentItem = fresh.copy(episodes = incomingEpisodes)
+                episodeNamesSourceIdentity = incomingIdentity
+                _ui.value = latest.copy(
+                    epCount = incomingEpisodes.size,
+                    epNames = incomingEpisodes.map { it.name },
+                )
+            } finally {
+                if (ticket.requestId == episodeRefreshRequestId) episodeRefreshJob = null
+            }
         }
     }
 

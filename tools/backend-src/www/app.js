@@ -3568,7 +3568,8 @@ function refreshPlayerEpisodes(options = {}) {
   pv.vodSourceMessage = pv.vodSources.length ? "正在更新可用信号源…" : "正在加载可用信号源…";
   renderMorePanel();
   const ref = vodIdentity(ctx.vid);
-  const path = vodDetailPath(ctx.vid) + (ref.kind === "hhkan" ? "?enrich=1" : "?refresh=1");
+  const path = vodDetailPath(ctx.vid) + (ref.kind === "hhkan"
+    ? "?refresh=1&enrich=1" : "?refresh=1");
   let request = null;
   request = fetchJSON(BASE + path, { timeout: 90000, signal: controller.signal })
     .then(raw => {
@@ -4241,8 +4242,12 @@ function syncPlayerSourcePanel() {
 }
 function setPlayerSourcePanel(open) {
   if (!pv.ctx || pv.ctx.kind !== "vod") return;
+  const wasOpen = pv.panelOpen;
   pv.panelOpen = state.portrait ? true : !!open;
-  if (pv.panelOpen) renderMorePanel();
+  if (pv.panelOpen) {
+    renderMorePanel();
+    if (!wasOpen) refreshPlayerEpisodes({ session: pv.playerSession, force: true });
+  }
   syncPlayerSourcePanel();
 }
 $("#mpToggle").addEventListener("click", () => setPlayerSourcePanel(true));

@@ -20,6 +20,10 @@ struct PlaybackView: View {
     @State private var savedPlaybackTime: TimeInterval = 0
     @State private var resolutionTask: Task<Void, Never>?
     @State private var stallCheckTask: Task<Void, Never>?
+    @State private var pickerRefreshTask: Task<Void, Never>?
+    @State private var pickerRefreshGeneration = 0
+    @State private var isRefreshingSources = false
+    @State private var sourceRefreshMessage = ""
     @State private var relayFallbackURL: URL?
     @State private var isDirectAttempt = false
     @State private var relayFallbackAttempted = false
@@ -104,6 +108,9 @@ struct PlaybackView: View {
             resolutionTask = nil
             stallCheckTask?.cancel()
             stallCheckTask = nil
+            pickerRefreshGeneration += 1
+            pickerRefreshTask?.cancel()
+            pickerRefreshTask = nil
             isSourcePickerPresented = false
             relayFallbackURL = nil
             isDirectAttempt = false
@@ -141,6 +148,17 @@ struct PlaybackView: View {
         }
         .sheet(isPresented: $isSourcePickerPresented) {
             sourcePicker
+        }
+        .onChange(of: isSourcePickerPresented) { presented in
+            if presented {
+                refreshPickerSources()
+            } else {
+                pickerRefreshGeneration += 1
+                pickerRefreshTask?.cancel()
+                pickerRefreshTask = nil
+                isRefreshingSources = false
+                sourceRefreshMessage = ""
+            }
         }
     }
 
@@ -327,6 +345,15 @@ struct PlaybackView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    if isRefreshingSources {
+                        Label("正在更新最新集数…", systemImage: "arrow.clockwise")
+                            .font(.footnote)
+                            .foregroundStyle(MyTVStyle.secondaryText)
+                    } else if !sourceRefreshMessage.isEmpty {
+                        Text(sourceRefreshMessage)
+                            .font(.footnote)
+                            .foregroundStyle(MyTVStyle.secondaryText)
+                    }
                     ForEach(availableSources) { source in
                         VStack(alignment: .leading, spacing: 11) {
                             Button {
@@ -406,6 +433,53 @@ struct PlaybackView: View {
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .preferredColorScheme(.dark)
+    }
+
+    @MainActor
+    private func refreshPickerSources() {
+        guard let item = route.item, let client = settings.client else { return }
+        pickerRefreshGeneration += 1
+        let generation = pickerRefreshGeneration
+        pickerRefreshTask?.cancel()
+        isRefreshingSources = true
+        sourceRefreshMessage = ""
+        pickerRefreshTask = Task { @MainActor in
+            do {
+                let freshDetail = try await client.detail(item: item, refresh: true)
+                try Task.checkCancellation()
+                guard generation == pickerRefreshGeneration, isSourcePickerPresented else { return }
+                guard !freshDetail.sources.isEmpty else {
+                    isRefreshingSources = false
+                    sourceRefreshMessage = "暂未获取到更新，继续显示现有选集。"
+                    return
+                }
+
+                let previousSource = selectedSource
+                let previousEpisode = selectedEpisode
+                availableSources = freshDetail.sources
+                if let previousSource,
+                   let refreshedSource = PlaybackSourceSelection.refreshedSource(
+                       matching: previousSource,
+                       in: freshDetail.sources
+                   ) {
+                    selectedSource = refreshedSource
+                    if let previousEpisode,
+                       let refreshedEpisode = PlaybackSourceSelection.refreshedEpisode(
+                           in: refreshedSource,
+                           matching: previousEpisode
+                       ) {
+                        selectedEpisode = refreshedEpisode
+                    }
+                }
+                isRefreshingSources = false
+            } catch is CancellationError {
+                return
+            } catch {
+                guard generation == pickerRefreshGeneration, isSourcePickerPresented else { return }
+                isRefreshingSources = false
+                sourceRefreshMessage = "更新失败，暂时显示已有选集。"
+            }
+        }
     }
 
     @MainActor

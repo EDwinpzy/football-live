@@ -45,6 +45,44 @@ class EpisodeRefreshPolicyTest {
     }
 
     @Test
+    fun acceptsCurrentSourceEpisodesEvenWhenAnotherSourceHadMore() {
+        assertTrue(EpisodeRefreshPolicy.accepts(
+            currentNames = (1..14).map { "第${it}集" },
+            incomingNames = (1..13).map { "第${it}集" },
+            currentLines = 2,
+            incomingLines = 2,
+            keepIndex = 7,
+            sameEpisodeSource = false,
+        ))
+    }
+
+    @Test
+    fun rejectsARefreshThatBelongsToAnOlderMovieOrPlaybackLine() {
+        val request = EpisodeRefreshTicket(
+            requestId = 3,
+            vodId = "hhkan:721",
+            detailRef = "hhkan:721",
+            playbackGeneration = 8,
+            episodeIndex = 4,
+            activeLine = 1,
+            sourceIdentity = "线路甲|23",
+        )
+
+        assertFalse(EpisodeRefreshPolicy.isCurrentRequest(
+            request, latestRequestId = 4, vodId = "hhkan:721", detailRef = "hhkan:721",
+            playbackGeneration = 8, episodeIndex = 4, activeLine = 1, sourceIdentity = "线路甲|23",
+        ))
+        assertFalse(EpisodeRefreshPolicy.isCurrentRequest(
+            request, latestRequestId = 3, vodId = "hhkan:999", detailRef = "hhkan:999",
+            playbackGeneration = 9, episodeIndex = 4, activeLine = 1, sourceIdentity = "线路甲|23",
+        ))
+        assertFalse(EpisodeRefreshPolicy.isCurrentRequest(
+            request, latestRequestId = 3, vodId = "hhkan:721", detailRef = "hhkan:721",
+            playbackGeneration = 8, episodeIndex = 4, activeLine = 1, sourceIdentity = "线路乙|24",
+        ))
+    }
+
+    @Test
     fun rejectsEpisodeListThatNoLongerCoversThePlayingEpisode() {
         assertFalse(episodes(current = 1, incoming = 3, keepIndex = 3))
     }

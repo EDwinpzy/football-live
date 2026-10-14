@@ -1248,21 +1248,56 @@ class VodRepository(
      *  /hhkan/detail 抓取——旧版 resolveLines 再抓一次详情页，起播平白多一整轮
      *  网络往返（低端机+冷抓 20s+ 时翻倍），v1.10 去重 */
     private val detailInfoCache = java.util.concurrent.ConcurrentHashMap<String, DetailInfo>()
+    /** A slower earlier detail response must not overwrite a newer refresh for the same title. */
+    private val detailRequestGenerations = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
     /** 已为播放会话拉取过完整补充源的好好看 vid。 */
     private val playbackDetailReady = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     private suspend fun fetchDetailCached(ref: String, forceRefresh: Boolean = false): DetailInfo? {
         val cached = detailInfoCache[ref]
         if (!forceRefresh && cached != null) return cached
-        val d = runCatching {
+        val generation = detailRequestGenerations.computeIfAbsent(ref) { java.util.concurrent.atomic.AtomicLong() }
+            .incrementAndGet()
+        val d = try {
             VodApiSource.fetchDetail(
                 settings.current().hhkanBaseUrl, detailClient, ref, refresh = forceRefresh)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            android.util.Log.w("OTV", "fetchDetail 失败 ref=$ref : ${failure.message}")
+            return cached
         }
-            .onFailure { android.util.Log.w("OTV", "fetchDetail 失败 ref=$ref : ${it.message}") }
-            .getOrNull()
-            ?: return cached
+        if (detailRequestGenerations[ref]?.get() != generation) return detailInfoCache[ref] ?: cached
         if (d.lines.isNotEmpty()) detailInfoCache[ref] = d
         return if (d.lines.isNotEmpty() || cached == null) d else cached
+    }
+
+    /** Read the refreshed episode list for the exact source currently selected in the player. */
+    fun episodesForLine(item: VodItem, line: LineInfo?): List<Episode>? {
+        if (item.detailRef.isBlank() || line == null || line.playRef.isBlank()) return null
+        val sourceId = line.playRef.split('|').getOrNull(1)?.takeIf(String::isNotBlank) ?: return null
+        val details = detailInfoCache[item.detailRef] ?: return null
+        val source = details.lines.firstOrNull { candidate ->
+            candidate.name == line.label && candidate.episodes.any { it.second == sourceId }
+        } ?: details.lines.firstOrNull { candidate -> candidate.episodes.any { it.second == sourceId } }
+            ?: return null
+        return source.episodes.mapIndexed { index, (name, _, _) ->
+            Episode(index, name.ifBlank { "第${index + 1}集" }, "")
+        }.takeIf { it.isNotEmpty() }
+    }
+
+    /** Stable identity used to decide whether a refreshed episode list belongs to the same source. */
+    fun episodeSourceIdentity(line: LineInfo?): String? {
+        if (line == null || line.playRef.isBlank()) return null
+        val sourceId = line.playRef.split('|').getOrNull(1)?.takeIf(String::isNotBlank) ?: return null
+        return "${line.label}|$sourceId"
+    }
+
+    /** Identity of the source backing [resolveDetail]'s default episode list. */
+    fun defaultEpisodeSourceIdentity(item: VodItem): String? {
+        val first = detailInfoCache[item.detailRef]?.lines?.firstOrNull() ?: return null
+        val sourceId = first.episodes.firstOrNull()?.second?.takeIf(String::isNotBlank) ?: return null
+        return "${first.name}|$sourceId"
     }
 
     /** 解析详情：拉选集（默认线路）+ 元数据补全；非懒源原样返回 */
@@ -1347,8 +1382,7 @@ class VodRepository(
                     LineInfo(s.id, "${s.sourceId} · ${ep.name}", ep.url)
                 }
         }
-        val full = resolveDetail(item.id) ?: return@withContext emptyList()
-        if (epIndex >= full.episodes.size) return@withContext emptyList()
+        if (resolveDetail(item.id) == null) return@withContext emptyList()
         // 详情页用快速主数据，播放器起播前补一次 enrich=1：保证首次打开时
         // 新增站点也已进入自动选源池，不被详情页的基础响应永久缓存。
         var d = detailInfoCache[item.detailRef] ?: fetchDetailCached(item.detailRef)

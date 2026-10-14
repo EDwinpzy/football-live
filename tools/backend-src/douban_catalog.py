@@ -1015,11 +1015,12 @@ class DoubanCatalog:
         with condition:
             if getattr(condition, "_running", False):
                 condition.wait_for(lambda: not getattr(condition, "_running", False), timeout=15)
-                fresh = self.cache.get(key, TTL[kind]) if self.cache else None
-                if fresh is not None:
-                    if _scrub_placeholder_poster_fields(fresh):
-                        self._rewrite_scrubbed_cache(key, fresh)
-                    return fresh
+                if not force_refresh:
+                    fresh = self.cache.get(key, TTL[kind]) if self.cache else None
+                    if fresh is not None:
+                        if _scrub_placeholder_poster_fields(fresh):
+                            self._rewrite_scrubbed_cache(key, fresh)
+                        return fresh
             condition._running = True
         try:
             value = producer()

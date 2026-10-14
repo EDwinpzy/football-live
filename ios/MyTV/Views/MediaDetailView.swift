@@ -198,10 +198,10 @@ struct MediaDetailView: View {
             errorMessage = "请先在设置中填写有效的 HTTPS 服务地址。"
             return
         }
-        isLoading = true
+        isLoading = loadedDetail == nil
         errorMessage = nil
         do {
-            let loaded = try await client.detail(item: item)
+            let loaded = try await client.detail(item: item, refresh: true)
             try Task.checkCancellation()
             loadedDetail = loaded
             isLoading = false

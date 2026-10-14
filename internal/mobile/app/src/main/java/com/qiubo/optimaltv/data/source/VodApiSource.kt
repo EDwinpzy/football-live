@@ -446,6 +446,7 @@ class VodApiSource(
                     okHttp = client,
                     vid = id.removePrefix("hhkan:"),
                     enrich = refresh && !deferSources,
+                    refresh = refresh,
                 )
             }
             val json = fetchJson(base, VodRoutes.detail(id, deferSources, refresh), client)

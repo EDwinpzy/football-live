@@ -90,6 +90,33 @@ class HhkanVodRoutingTest {
     }
 
     @Test
+    fun hhkanEpisodeRefreshBypassesCachesAndEnrichesTheSourceList() {
+        val path = "/hhkan/detail/123?refresh=1&enrich=1"
+        responses[path] = """{"title":"剧名","sources":[{"name":"线路甲","episodes":[{"ep":"第1集","pid":45,"vid":6}]}]}"""
+
+        val detail = VodApiSource.fetchDetail(origin, okhttp3.OkHttpClient(), "hhkan:123", refresh = true)
+
+        assertEquals("第1集", detail.lines.single().episodes.single().first)
+        assertEquals(listOf(path), requestOrder.toList())
+    }
+
+    @Test
+    fun hhkanDeferredDetailCanRefreshWithoutEnrichment() {
+        val path = "/hhkan/detail/123?refresh=1"
+        responses[path] = """{"title":"剧名","sources":[]}"""
+
+        VodApiSource.fetchDetail(
+            origin,
+            okhttp3.OkHttpClient(),
+            "hhkan:123",
+            deferSources = true,
+            refresh = true,
+        )
+
+        assertEquals(listOf(path), requestOrder.toList())
+    }
+
+    @Test
     fun hhkanPlaybackReferencesUseNativeRouteWithVodPidAndVid() {
         responses["/hhkan/play/123/45/6"] = """{"sources":[{"url":"https://cdn.example/video.m3u8"}]}"""
 

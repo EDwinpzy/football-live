@@ -150,6 +150,24 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(detail.sources.first?.episodes.first?.id, "4422228")
     }
 
+    func testHHKanDetailRefreshRequestsLatestEnrichedEpisodeSources() async throws {
+        let requests = RequestRecorder()
+        StubURLProtocol.install { request in
+            requests.append(request)
+            return (200, Data(#"{"id":4422228,"title":"港剧示例","sources":[]}"#.utf8))
+        }
+        let client = makeClient()
+        let item = MediaItem(id: "hhkan:4422228", title: "港剧示例", detailRef: "hhkan:4422228")
+
+        _ = try await client.detail(item: item, refresh: true)
+
+        let requestURL = try XCTUnwrap(requests.all.first?.url)
+        XCTAssertEqual(requestURL.path, "/web/hhkan/detail/4422228")
+        let queryItems = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(queryItems?.first(where: { $0.name == "refresh" })?.value, "1")
+        XCTAssertEqual(queryItems?.first(where: { $0.name == "enrich" })?.value, "1")
+    }
+
     func testPlaybackSourceSelectionPreservesSourceAndEpisodeAcrossRefresh() throws {
         let original = MediaSource(
             id: "line-a",

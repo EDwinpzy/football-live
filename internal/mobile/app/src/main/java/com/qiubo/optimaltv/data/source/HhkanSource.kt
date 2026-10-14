@@ -273,8 +273,18 @@ class HhkanSource(
          * GET /hhkan/detail/{vid} → 多线路选集（4K 死线路已由后端过滤）。
          * [enrich] 仅在播放器起播前使用：详情页保持快速，播放器等到补充源后再自动选线。
          */
-        fun fetchDetail(base: String, okHttp: OkHttpClient, vid: String, enrich: Boolean = false): DetailInfo {
-            val path = "/hhkan/detail/$vid" + if (enrich) "?enrich=1" else ""
+        fun fetchDetail(
+            base: String,
+            okHttp: OkHttpClient,
+            vid: String,
+            enrich: Boolean = false,
+            refresh: Boolean = false,
+        ): DetailInfo {
+            val query = buildList {
+                if (refresh) add("refresh=1")
+                if (enrich) add("enrich=1")
+            }.joinToString("&")
+            val path = "/hhkan/detail/$vid" + query.takeIf(String::isNotEmpty)?.let { "?$it" }.orEmpty()
             val o = fetchJson(base, path, slow(okHttp))
             val lines = mutableListOf<LineDetail>()
             val srcArr = o.optJSONArray("sources")

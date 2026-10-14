@@ -277,6 +277,7 @@ function makeRuntime(detailFactory = async () => ({
       ctx: pv.ctx, sources: pv.vodSources, selected: pv.vodLineIdx,
       status: pv.vodSourceStatus, message: pv.vodSourceMessage, panelOpen: pv.panelOpen,
     });
+    globalThis.__setPlayerSourcePanel = open => setPlayerSourcePanel(open);
     globalThis.__providerFor = (line, index, ctx) => playerSourceProvider(line, index, ctx);
   `, context);
   return { context, nodes, fetches, attached, requests, $, windowListeners };
@@ -535,8 +536,51 @@ console.log("== source loading failure and empty result are visible ==");
   hhkan.context.openPlayer({ kind: "vod", vid: "hhkan:7", title: "测试片", epIdx: 0,
     epName: "第1集", epCount: 2, playRef: { pid: "a", vid: 0 }, sources: lines() });
   await flush();
-  assert.ok(hhkan.fetches.some(row => row.url.endsWith("/hhkan/detail/7?enrich=1")),
-    "HHKan refresh uses its supported enrich endpoint instead of the Douban route");
+  assert.ok(hhkan.fetches.some(row => row.url.endsWith("/hhkan/detail/7?refresh=1&enrich=1")),
+    "HHKan refresh bypasses detail caches and waits for current episode sources");
+}
+
+console.log("== reopening the episode panel forces a fresh list without interrupting playback ==");
+{
+  const oldRequest = deferred();
+  const latestRequest = deferred();
+  let detailCalls = 0;
+  const episodes = count => Array.from({ length: count }, (_, index) => ({
+    pid: "a", vid: index, ep: `第${index + 1}集`,
+  }));
+  const oldLine = { id: "line-a", source_id: "a", name: "源 A", episodes: episodes(20) };
+  const latestLine = { ...oldLine, episodes: episodes(21) };
+  const runtime = makeRuntime(() => detailCalls++ === 0 ? oldRequest.promise : latestRequest.promise);
+  const { context: c, fetches, requests } = runtime;
+  c.openPlayer({ kind: "vod", vid: "hhkan:7", title: "测试片", epIdx: 1,
+    epName: "第2集", epCount: 20, lineIndex: 0, sourceKey: "id:line-a",
+    playRef: { pid: "a", vid: 1 }, sources: [oldLine] });
+  await flush();
+  assert.equal(fetches[0].url, "/web/hhkan/detail/7?refresh=1&enrich=1");
+  const playerSignal = c.__pv.playController.signal;
+  const startedPlayRequests = requests.length;
+
+  c.__setPlayerSourcePanel(true);
+  await flush();
+  assert.equal(fetches.length, 2, "opening the panel issues a new detail request");
+  assert.equal(fetches[0].signal.aborted, true, "the superseded initial detail request is cancelled");
+  assert.equal(fetches[1].signal.aborted, false);
+  assert.equal(playerSignal.aborted, false, "a list refresh leaves the active play pipeline alive");
+  assert.equal(requests.length, startedPlayRequests, "opening the panel does not restart playback");
+
+  latestRequest.resolve({ title: "测试片", sources: [latestLine] });
+  await c.__pv.detailRequest.promise;
+  assert.equal(c.__getPlayer().sources[0].episodes.length, 21);
+  assert.equal(c.__getPlayer().selected, 0);
+  assert.equal(c.__getPlayer().ctx.epName, "第2集");
+  assert.equal(c.__getPlayer().ctx.playRef.vid, 1);
+
+  oldRequest.resolve({ title: "测试片", sources: [oldLine] });
+  await flush();
+  assert.equal(c.__getPlayer().sources[0].episodes.length, 21,
+    "a late superseded response cannot replace the refreshed episode list");
+  assert.equal(c.__getPlayer().ctx.playRef.vid, 1,
+    "the current episode remains selected while the new episode becomes visible");
 }
 
 console.log("== refreshed lines preserve the selected source and episode ==");
