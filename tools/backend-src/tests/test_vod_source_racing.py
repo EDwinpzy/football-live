@@ -7,7 +7,11 @@
    冷却期间跳过、到期放行试探；全部熔断时忽略熔断器照常发车（宁可慢不能没片看）。
 3) 后台补完：早返回时被甩下的源后台跑完，合并进短 TTL 缓存，
    同片再查给全量且不重复触网。
+4) 首条可播快速路径（2026-10-14）：详情页按「谁先出实测可播线路」收队，
+   快源给的死链不得把详情页钉死；未探测线路保持 alive=None，不冒充可播。
+5) 落盘缓存：终态结果落盘，冷启动后的新实例直接命中、不触网。
 """
+import json
 import pathlib
 import socket
 import sys
@@ -43,6 +47,7 @@ class FakeAdapter:
 
     behaviors = {}
     calls = {}
+    line_counts = {}
 
     def __init__(self, source):
         self.source = source
@@ -58,13 +63,19 @@ class FakeAdapter:
                  "category": subject.get("category"), "season": 0}]
 
     def detail(self, candidate):
-        return [{"id": "%s:1" % self.source.id, "source_id": self.source.id,
-                 "name": "线", "height": 0, "latency_ms": None, "alive": True,
-                 "episodes": [{"index": 0, "name": "第1集", "url": "https://v.example/1.m3u8"}]}]
+        count = max(1, int(FakeAdapter.line_counts.get(self.source.id, 1)))
+        return [{"id": "%s:1:%d" % (self.source.id, index), "source_id": self.source.id,
+                 "source_name": self.source.id, "name": "线%d" % (index + 1),
+                 "height": 0, "latency_ms": None, "alive": None,
+                 "episodes": [{"index": 0, "name": "第1集",
+                               "url": "https://v.example/%s/%d.m3u8" % (self.source.id, index)}]}
+                for index in range(count)]
 
     def resolve(self, line, episode_index):
         return {"line_id": line.get("id"), "name": "第1集",
-                "url": "https://v.example/1.m3u8", "headers": {}}
+                "url": (line.get("episodes") or [{}])[0].get("url") or
+                       "https://v.example/%s/0.m3u8" % line.get("source_id"),
+                "headers": {}}
 
 
 class RacingTestCase(unittest.TestCase):
@@ -75,33 +86,96 @@ class RacingTestCase(unittest.TestCase):
         vod_sources.PROBE_EARLY_GRACE = 0.2
         FakeAdapter.behaviors = {}
         FakeAdapter.calls = {}
+        FakeAdapter.line_counts = {}
         self.addCleanup(self._restore)
 
     def _restore(self):
         vod_sources.MacCmsAdapter = self._real_macms
         vod_sources.PROBE_EARLY_GRACE = self._grace
 
-    def _registry(self, ids, stats=None):
+    def _registry(self, ids, stats=None, alive_sources=None):
+        """``alive_sources`` 为 None 时所有线路探测都通过；否则只有名单内源的线路可播。"""
+
+        def probe(url):
+            if alive_sources is None:
+                return dict(PROBE_OK)
+            for source_id in alive_sources:
+                if "/%s/" % source_id in str(url):
+                    return dict(PROBE_OK)
+            return {"alive": False, "latency_ms": None, "height": 0}
+
         return vod_sources.SourceRegistry(
-            [_source(i) for i in ids], version=1, stats=stats, probe=lambda _url: dict(PROBE_OK))
+            [_source(i) for i in ids], version=1, stats=stats, probe=probe)
 
 
-class EarlyReturnTest(RacingTestCase):
-    def test_detail_policy_returns_first_source_without_waiting_or_probing(self):
+class FirstPlayableTest(RacingTestCase):
+    """详情页快速路径契约（2026-10-14）。
+
+    线上回归现场：非凡资源 0.55s 出 2 条线路、好好看 2.30s 出 33 条。旧策略
+    「谁先出线就用谁、不探测」在 0.55s 返回那 2 条，而它们实际不可播 → 详情页
+    只有 2 条死线。这里锁住新口径：**谁先出「实测可播」的线路就用谁**。
+    """
+
+    def test_verified_line_returns_without_waiting_for_the_slow_source(self):
         FakeAdapter.behaviors = {"s1": "fast", "s2": "slow"}
-        registry = self._registry(["s1", "s2"])
-        registry._race_probe = lambda *_args: self.fail("detail must skip foreground probes")
+        registry = self._registry(["s1", "s2"], alive_sources=["s1"])
 
         started = time.monotonic()
-        lines = registry.resolve_subject(
-            dict(SUBJECT), early_exit_source_count=1, probe_lines=False)
+        lines = registry.resolve_subject(dict(SUBJECT), first_playable=True)
+        elapsed = time.monotonic() - started
 
-        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertLess(elapsed, 1.5, "首源可播就不该等慢源")
         self.assertEqual({line["source_id"] for line in lines}, {"s1"})
+        self.assertTrue(all(line.get("alive") is True for line in lines))
 
-        # The slow provider still completes into the shared cache for a later request.
+    def test_dead_fast_source_does_not_pin_the_detail_page(self):
+        """回归锁：快源出线但线路全死 → 必须继续等下一台源出可播线路。"""
+        FakeAdapter.behaviors = {"s1": "fast", "s2": "slow"}
+        registry = self._registry(["s1", "s2"], alive_sources=["s2"])
+
+        started = time.monotonic()
+        lines = registry.resolve_subject(dict(SUBJECT), first_playable=True)
+        elapsed = time.monotonic() - started
+
+        self.assertGreaterEqual(elapsed, 2.0, "慢源还没出线就不该收队")
+        self.assertEqual({line["source_id"] for line in lines}, {"s1", "s2"})
+        verified = [line for line in lines if line.get("alive") is True]
+        self.assertEqual([line["source_id"] for line in verified], ["s2"])
+        self.assertEqual(lines[0]["source_id"], "s2", "实测可播的线路必须排最前")
+
+    def test_unprobed_lines_stay_unknown_instead_of_claiming_playability(self):
+        FakeAdapter.behaviors = {"s1": "fast", "s2": "slow"}
+        FakeAdapter.line_counts = {"s1": 6}
+        registry = self._registry(["s1", "s2"], alive_sources=["s2"])
+
+        lines = registry.resolve_subject(dict(SUBJECT), first_playable=True)
+        fast = [line.get("alive") for line in lines if line["source_id"] == "s1"]
+
+        self.assertEqual(len(fast), 6)
+        self.assertEqual(fast.count(False), vod_sources.FIRST_PLAYABLE_PROBES_PER_SOURCE)
+        self.assertEqual(fast.count(None), 6 - vod_sources.FIRST_PLAYABLE_PROBES_PER_SOURCE)
+        self.assertNotIn(True, fast, "没探测过的线路不能冒充可播")
+
+    def test_dead_everything_returns_collected_lines_without_claiming_playability(self):
+        FakeAdapter.behaviors = {"s1": "fast", "s2": "fast"}
+        registry = self._registry(["s1", "s2"], alive_sources=[])
+
+        started = time.monotonic()
+        lines = registry.resolve_subject(dict(SUBJECT), first_playable=True)
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, vod_sources.FIRST_PLAYABLE_BUDGET_SECONDS + 1.5)
+        self.assertEqual({line["source_id"] for line in lines}, {"s1", "s2"})
+        self.assertNotIn(True, [line.get("alive") for line in lines])
+
+    def test_slow_source_still_completes_into_the_cache_for_a_later_open(self):
+        FakeAdapter.behaviors = {"s1": "fast", "s2": "slow"}
+        registry = self._registry(["s1", "s2"], alive_sources=["s1"])
+        first = registry.resolve_subject(dict(SUBJECT), first_playable=True)
+        self.assertEqual({line["source_id"] for line in first}, {"s1"})
+
         cache_key = vod_sources._subject_cache_key(SUBJECT)
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 6
         cached = None
         while time.monotonic() < deadline:
             cached = registry._cache_get(cache_key)
@@ -110,6 +184,15 @@ class EarlyReturnTest(RacingTestCase):
             time.sleep(0.05)
         self.assertIsNotNone(cached)
         self.assertEqual({line["source_id"] for line in cached}, {"s1", "s2"})
+
+    def test_default_policy_still_waits_for_two_sources(self):
+        """老调用方（wait_for_all / early_exit_source_count）口径不变。"""
+        FakeAdapter.behaviors = {"s1": "fast", "s2": "fast", "s3": "slow"}
+        registry = self._registry(["s1", "s2", "s3"])
+        started = time.monotonic()
+        lines = registry.resolve_subject(dict(SUBJECT))
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual({line["source_id"] for line in lines}, {"s1", "s2"})
 
     def test_two_fast_sources_return_before_slow_source_finishes(self):
         FakeAdapter.behaviors = {"s1": "fast", "s2": "fast", "s3": "slow"}
@@ -160,6 +243,83 @@ class EarlyReturnTest(RacingTestCase):
         second = registry.resolve_subject(dict(SUBJECT))
         self.assertEqual(FakeAdapter.calls, calls_before)
         self.assertEqual([line["id"] for line in second], [line["id"] for line in first])
+
+
+class DiskResolveCacheTest(RacingTestCase):
+    """落盘解析缓存契约（2026-10-14）。
+
+    App 冷启动时内嵌后端刚起来，内存短缓存必然为空；没有落盘缓存的话「第一次打开
+    影片」只能吃完整网络延迟。这里锁住：终态结果落盘、新实例直接命中、过期不命中、
+    文件损坏降级成没有缓存。
+    """
+
+    def _settled_registry(self, path, ids=("s1",)):
+        registry = self._registry(list(ids))
+        registry.enable_disk_cache(path)
+        lines = registry.resolve_subject(dict(SUBJECT), first_playable=True)
+        self.assertTrue(lines)
+        registry.flush_disk_cache()
+        registry.close()
+        return lines
+
+    def test_settled_result_is_reused_by_a_fresh_registry_without_any_search(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "vod_resolve_cache.json"
+            first = self._settled_registry(path)
+            self.assertTrue(path.exists())
+
+            FakeAdapter.behaviors = {"s1": "dead"}
+            FakeAdapter.calls = {}
+            fresh = self._registry(["s1"])
+            fresh.enable_disk_cache(path)
+            self.addCleanup(fresh.close)
+
+            second = fresh.resolve_subject(dict(SUBJECT))
+
+            self.assertEqual([line["id"] for line in second], [line["id"] for line in first])
+            self.assertEqual(FakeAdapter.calls, {}, "磁盘命中不该再触网搜索")
+
+    def test_expired_entries_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "vod_resolve_cache.json"
+            self._settled_registry(path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            for entry in payload["entries"].values():
+                entry["at"] = time.time() - vod_sources.DISK_CACHE_TTL_SECONDS - 60
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            FakeAdapter.behaviors = {"s1": "fast"}
+            FakeAdapter.calls = {}
+            fresh = self._registry(["s1"])
+            fresh.enable_disk_cache(path)
+            self.addCleanup(fresh.close)
+            lines = fresh.resolve_subject(dict(SUBJECT))
+
+            self.assertTrue(lines)
+            self.assertEqual(FakeAdapter.calls.get("s1"), 1, "过期条目必须回源")
+
+    def test_corrupt_cache_file_degrades_to_no_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "vod_resolve_cache.json"
+            path.write_text("{ not json", encoding="utf-8")
+            registry = self._registry(["s1"])
+            registry.enable_disk_cache(path)
+            self.addCleanup(registry.close)
+            self.assertTrue(registry.resolve_subject(dict(SUBJECT), first_playable=True))
+
+    def test_invalidate_subject_drops_the_disk_entry_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "vod_resolve_cache.json"
+            self._settled_registry(path)
+            registry = self._registry(["s1"])
+            registry.enable_disk_cache(path)
+            self.addCleanup(registry.close)
+
+            registry.invalidate_subject(dict(SUBJECT))
+            registry.flush_disk_cache()
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(payload["entries"], {})
 
 
 class SourceStatsTest(unittest.TestCase):

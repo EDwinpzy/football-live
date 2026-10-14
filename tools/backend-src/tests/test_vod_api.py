@@ -49,7 +49,7 @@ class VodServiceRefreshTest(unittest.TestCase):
         service.detail("1292052")
         self.assertEqual(self.invalidated, ["更新中的剧"])
 
-    def test_detail_uses_first_match_fast_policy_for_normal_and_refresh_requests(self):
+    def test_detail_uses_first_playable_policy_for_normal_and_refresh_requests(self):
         seen = []
         self.registry.resolve_subject = lambda _subject, **kwargs: seen.append(kwargs) or []
         service = vod_api.VodService(_StubCatalog(), self.registry)
@@ -57,12 +57,16 @@ class VodServiceRefreshTest(unittest.TestCase):
         service.detail("1292052")
         service.detail("1292052", refresh=True)
 
-        expected = {
+        # 详情页必须走「首条实测可播即返回」策略：不再按「谁先出线」收队，
+        # 否则快源给的死链会把详情页钉死在少量不可播线路上（2026-10-14 回归）。
+        # refresh 走 refresh_subject，它会带上自己的默认参数并原样转发 first_playable。
+        self.assertEqual(seen[0], {"first_playable": True})
+        self.assertEqual(seen[1], {
             "wait_for_all": False,
-            "early_exit_source_count": 1,
-            "probe_lines": False,
-        }
-        self.assertEqual(seen, [expected, expected])
+            "early_exit_source_count": vod_sources.RESOLVE_EARLY_SOURCES,
+            "probe_lines": True,
+            "first_playable": True,
+        })
         self.assertEqual(self.invalidated, ["更新中的剧"])
 
     def test_injected_resolver_also_clears_short_cache_on_refresh(self):

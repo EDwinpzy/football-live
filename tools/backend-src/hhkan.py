@@ -130,6 +130,12 @@ class _SafeBoundedHTTPSHandler(source_dns.BoundedHTTPSHandler):
 
 
 _safe_opener = urllib.request.build_opener(
+    # 与 vod_sources._SOURCE_URL_OPENER 同口径：显式禁用系统代理。
+    # 2026-10-14 实测：装了 Clash 这类本机代理时 urllib 会继承注册表里的
+    # ``127.0.0.1:7897``，source_dns 的 SSRF 防护把回环地址判成非公网直接拒绝，
+    # 表现是「好好看源 0 线路、只剩别的源」——而且报错被 _fetch 吞成
+    # 「抓取失败：全部镜像域不可用」，极难定位。
+    urllib.request.ProxyHandler({}),
     _SafeRedirectHandler, _SafeBoundedHTTPHandler, _SafeBoundedHTTPSHandler)
 
 

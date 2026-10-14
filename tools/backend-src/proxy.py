@@ -377,6 +377,9 @@ def _get_vod_service():
                 registry = remote_registry or vod_sources.SourceRegistry.load_current()
                 registry.history = vod_sources.LineHistory(cache_root / "vod_line_history.json")
                 registry.stats = vod_sources.SourceStats(cache_root / "vod_source_stats.json")
+                # 落盘解析缓存：App 冷启动时内嵌后端刚起，内存缓存必然为空，
+                # 冷启动后的首次打开靠它直接命中（实测 0.00s），TTL 6 小时。
+                registry.enable_disk_cache(cache_root / "vod_resolve_cache.json")
                 resolver = vod_resolver.VodResolver(
                     metadata_client.MetadataClient(),
                     vod_resolver.StaticLineIndex(
@@ -402,6 +405,10 @@ def _get_vod_service():
             previous = service.registry
             current.history = previous.history
             current.stats = previous.stats
+            # 落盘缓存跟着注册表走：热替换后冷启动仍能直接命中。
+            adopt_cache = getattr(current, "adopt_disk_cache", None)
+            if callable(adopt_cache):
+                adopt_cache(previous)
             resolver = getattr(service, "resolver", None)
             if resolver is not None:
                 # Lock order is service lock -> resolver cache lock. Resolver code

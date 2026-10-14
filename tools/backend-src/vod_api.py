@@ -78,12 +78,12 @@ class VodService:
             return subject
         if self._uses_registry_resolver:
             resolver = self.registry.refresh_subject if refresh else self._resolve_sources
-            # A detail page only needs a playable source to become useful.
-            # Let the other providers finish in the registry's background cache;
-            # probing playback URLs is deferred so a dead line cannot hold the page.
-            sources = resolver(
-                subject, wait_for_all=False, early_exit_source_count=1,
-                probe_lines=False) or []
+            # 首条「实测可播」线路出现即返回（2026-10-14）：
+            # - 不再按「谁先出线」收队——快源给的死链会把详情页钉死在 2 条不可播线路上；
+            # - 源一出线就并行探测它的前几条线路，探测到可播立刻返回，首开 ≈ 0.9s；
+            # - 首源全死则继续等下一台源，未探测的线路保持 alive=None（不冒充可播）；
+            # - 被甩下的源/线路后台补完并进缓存，再打开详情页就是全量线路。
+            sources = resolver(subject, first_playable=True) or []
         else:
             if refresh:
                 self.registry.invalidate_subject(subject)

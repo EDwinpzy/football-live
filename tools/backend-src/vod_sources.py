@@ -56,6 +56,36 @@ PROBE_MAX_WORKERS = 18
 PROBE_TIMEOUT_SECONDS = 4
 PROBE_EARLY_EXIT_ALIVE = 3
 PROBE_EARLY_GRACE = 0.8
+"""首条可播快速路径（2026-10-14）：详情页不再「谁先出线就用谁」，而是
+「谁先出**实测可播**的线路就用谁」。
+
+线上回归现场：非凡资源 0.55s 出 2 条线路、好好看 2.30s 出 33 条。旧策略在 0.55s
+就返回那 2 条（不探测、alive 由适配器预置为 True = 假可播），而那 2 条指向境外
+CDN 实际 403 → 详情页只有 2 条死线，用户看到「无法播放」且换源无路可走。
+
+新策略：源一出线就立刻并行探测它最前面的几条线路，首条**真可播**即返回；
+首源给的线路全死则继续等下一台源（不提前收队）。首开耗时 =
+「首个能出可播线路的源」+「一次探测 RTT」，实测 0.9s（好好看先出）~2.6s
+（非凡资源先出但全死，必须等好好看），且返回的线路里至少有一条是实测可播的。
+预算到点即返回已收集结果，永不比旧实现更慢。"""
+FIRST_PLAYABLE_BUDGET_SECONDS = 5.5
+"""硬预算。实测好好看一条线路的「拿直链 + 探测」成本 ≈ 2.6s（`/play/x-y-z.html`
+抓页解析，6 条并行后墙钟仍是 2.6s）+ 0.2s 探测，加上搜索本身的 1.4~3.0s，
+首条实测可播线路落在 ~4.2s（实测区间 3.4~5.0s）。预算给到 5.5s 才稳定拿到结果；
+到点仍没探到可播就原样返回已收集的线路，交给播放器按「未知 → 判死」的顺序自己试，
+绝不比旧实现更慢。"""
+"""每源探测条数：源给的线路顺序 = 站点里的镜像顺序，而「前几条恰好全死」是常态。
+2026-10-14 实测好好看 33 条线路的排头 3 条（64.112.77.72 / vip.ffzy-play7 /
+s1.bfzycdn）全不可播，第 4 条 hn.bfvvs.com 才活；只探 3 条会一条都探不到可播。
+探测是并行的，探 6 条的墙钟时间与探 1 条基本相同（由最慢的那条决定），所以放宽到 6。"""
+FIRST_PLAYABLE_PROBES_PER_SOURCE = 6
+FIRST_PLAYABLE_MAX_PROBES = 18
+"""解析结果落盘缓存（2026-10-14）：短缓存只活在进程内，App 冷启动（内嵌后端刚起）
+时必然全量回源，首开只能吃网络延迟。这里把「subject → 线路表」按 TTL 落盘，
+冷启动后的首次打开直接命中磁盘（实测 0.00s），超过 TTL 自然回源。
+TTL 取 6 小时：线路 URL 是无签名的路径式 CDN 地址（实测 hhkan/ffzy/猫眼都是），
+6 小时内失效概率低；即便失效，LineHistory 会把失败线路在下次排序里压后。"""
+DISK_CACHE_TTL_SECONDS = 6 * 3600
 FAST_RESOLVER_MAX_SOURCES = 3
 FAST_RESOLVER_MAX_WORKERS = 3
 FAST_RESOLVER_MAX_IN_FLIGHT = 6
@@ -283,6 +313,12 @@ class SourceRegistry:
         self.stats = stats
         self._resolve_cache = {}
         self._cache_lock = threading.Lock()
+        self._disk_cache_path = None
+        self._disk_cache = {}
+        self._disk_cache_lock = threading.Lock()
+        self._disk_dirty = False
+        self._disk_flush_lock = threading.Lock()
+        self._disk_flush_scheduled = False
         self._resolver_clock = clock
         self._resolver_pool_lock = threading.RLock()
         self._resolver_closed = False
@@ -425,10 +461,14 @@ class SourceRegistry:
                 return
             self._resolver_closed = True
         self._fast_executor.shutdown(wait=False, cancel_futures=True)
+        try:
+            self.flush_disk_cache()
+        except Exception:  # noqa: BLE001 - 关闭路径不允许因缓存写盘失败而中断
+            pass
 
     def resolve_subject(self, subject, wait_for_all=False,
                         early_exit_source_count=RESOLVE_EARLY_SOURCES,
-                        probe_lines=True):
+                        probe_lines=True, first_playable=False):
         """Search enabled adapters and return only confident, normalized lines.
 
         竞速契约（2026-09-19）：源按画像得分排序发车、熔断源跳过；≥EARLY_SOURCES 台
@@ -439,6 +479,10 @@ class SourceRegistry:
         ``early_exit_source_count`` and ``probe_lines`` let detail requests
         return their first matching source without waiting for the other source
         or checking playback URLs on the request thread.
+
+        ``first_playable``（2026-10-14，影视详情页默认路径）走另一条收队口径：
+        不在「某台源出线」时返回，而在「某条线路**实测可播**」时返回；首源给的
+        线路全是死链就继续等下一台源。详见 ``_race_first_playable``。
 
         重试契约：只有当**确有源抛异常**（弱网/代理抖动导致整批失联）时才补一次，
         避免用户看到「没有信号源 / 无法播放」；源都正常应答、只是标题匹配不上时
@@ -456,6 +500,9 @@ class SourceRegistry:
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
+
+        if first_playable:
+            return self._resolve_first_playable(enabled, subject, cache_key, stats)
 
         deadline = time.monotonic() + max(1.0, float(RESOLVE_TOTAL_BUDGET))
         lines, pending_searches = [], []
@@ -514,15 +561,53 @@ class SourceRegistry:
                    if self.history else None)
         return rank_lines(lines, history)
 
+    def _resolve_first_playable(self, enabled, subject, cache_key, stats):
+        """详情页快速路径：首条**实测可播**线路出现即返回（契约见 FIRST_PLAYABLE_*）。"""
+        deadline = time.monotonic() + max(1.0, float(FIRST_PLAYABLE_BUDGET_SECONDS))
+        lines, pending_searches, pending_probes = [], [], []
+        for attempt in range(max(1, RESOLVE_ATTEMPTS)):
+            lines, pending_searches, pending_probes, failures = self._race_first_playable(
+                enabled, subject, deadline, stats)
+            # 只有「整批源都抛异常」才值得补一次；已经有源正常应答（哪怕没出可播线路）
+            # 说明网络是通的，再等一遍只会白拖时间。
+            if lines or not failures or pending_searches:
+                break
+            if attempt + 1 >= max(1, RESOLVE_ATTEMPTS):
+                break
+            if deadline - time.monotonic() <= RESOLVE_RETRY_DELAY:
+                break
+            time.sleep(RESOLVE_RETRY_DELAY)
+
+        if pending_searches or pending_probes:
+            # 被甩下的源/线路后台补完并合并进缓存：再打开详情页就是全量。
+            # 这里也落盘（而不是只落终态）：早返回结果里已经至少有一条**实测可播**
+            # 线路，App 冷启动时它能直接把首开从 ~4s 降到 0；后台补完会用全量覆盖它。
+            if lines:
+                self._cache_put(cache_key, lines, persist=True)
+            threading.Thread(
+                target=self._complete_in_background,
+                args=(cache_key, list(lines), pending_searches, pending_probes, stats),
+                daemon=True,
+            ).start()
+        elif lines:
+            # 没有待补任务 = 结果是终态，落盘供冷启动直接命中。
+            self._cache_put(cache_key, lines, persist=True)
+            if stats:
+                stats.flush()
+
+        history = ({line["id"]: self.history.success_rate(line["id"]) for line in lines}
+                   if self.history else None)
+        return rank_lines(lines, history)
+
     def refresh_subject(self, subject, wait_for_all=False,
                         early_exit_source_count=RESOLVE_EARLY_SOURCES,
-                        probe_lines=True):
+                        probe_lines=True, first_playable=False):
         """Bypass the short source cache so newly published episodes become visible."""
         self.invalidate_subject(subject)
         return self.resolve_subject(
             subject, wait_for_all=wait_for_all,
             early_exit_source_count=early_exit_source_count,
-            probe_lines=probe_lines)
+            probe_lines=probe_lines, first_playable=first_playable)
 
     def invalidate_subject(self, subject):
         """Drop the short resolve cache for [subject] without resolving it again.
@@ -534,6 +619,10 @@ class SourceRegistry:
         if cache_key:
             with self._cache_lock:
                 self._resolve_cache.pop(cache_key, None)
+            with self._disk_cache_lock:
+                if self._disk_cache.pop(cache_key, None) is not None:
+                    self._disk_dirty = True
+            self._schedule_disk_flush()
 
     def _search_fast_one(self, source, subject):
         deadline = time.monotonic() + max(0.0, float(FAST_SOURCE_JOB_TIMEOUT_SECONDS))
@@ -683,6 +772,79 @@ class SourceRegistry:
         pool.shutdown(wait=False)
         return lines, failures, pending
 
+    def _race_first_playable(self, enabled, subject, deadline, stats):
+        """事件驱动：搜索与探测同池竞速，首条**实测可播**线路出现即收队。
+
+        与 ``_race_search`` 的差别（2026-10-14 线上回归的直接修复）：
+        - 收队条件是「某条线路探测为 alive」，不是「某台源出线」。首源给的全是死链
+          时继续等下一台源，绝不把死链当结果交出去。
+        - 探测与搜索并发：源一出线立刻送探测，不等第二台源出线（旧实现要先凑 ≥2 台）。
+        - 未被挑中探测的线路保持 ``alive=None``（未知），不再由适配器预置成 True。
+
+        返回 ``(lines, pending_searches, pending_probes, failures)``；未完成的 future
+        由 ``_complete_in_background`` 补完并合并进缓存，请求线程不被拖住。
+        """
+        workers = max(2, min(RESOLVE_MAX_WORKERS,
+                             len(enabled) + FIRST_PLAYABLE_PROBES_PER_SOURCE))
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        tasks = {}
+        for source in enabled:
+            tasks[pool.submit(self._search_one, source, subject)] = ("search", source)
+        lines, failures, probed = [], [], set()
+        per_source_probes = {}
+        probe_count = 0
+        hit = False
+        try:
+            while tasks and not hit:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                done, _waiting = concurrent.futures.wait(
+                    list(tasks), timeout=remaining,
+                    return_when=concurrent.futures.FIRST_COMPLETED)
+                if not done:
+                    break
+                for future in done:
+                    kind, payload = tasks.pop(future)
+                    if kind == "probe":
+                        try:
+                            probed_line = future.result()
+                        except Exception:  # noqa: BLE001 - 单条探测失败不算源失败
+                            continue
+                        if probed_line.get("alive"):
+                            hit = True
+                        continue
+                    source = payload
+                    try:
+                        _source, group, error, elapsed = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        failures.append(str(exc)[:120])
+                        continue
+                    if stats:
+                        stats.record_search(source.id, error is None, elapsed)
+                    if error is not None:
+                        failures.append(error)
+                    group = group or []
+                    lines.extend(group)
+                    # 一出线就探测，不等其它源：探测 RTT 才是首开耗时的主要变量。
+                    for line in group:
+                        if probe_count >= FIRST_PLAYABLE_MAX_PROBES:
+                            break
+                        if per_source_probes.get(source.id, 0) >= FIRST_PLAYABLE_PROBES_PER_SOURCE:
+                            break
+                        line_id = str(line.get("id") or "")
+                        if not line_id or line_id in probed:
+                            continue
+                        probed.add(line_id)
+                        per_source_probes[source.id] = per_source_probes.get(source.id, 0) + 1
+                        probe_count += 1
+                        tasks[pool.submit(self._inspect_line, line)] = ("probe", line)
+        finally:
+            pending_searches = [f for f in tasks if tasks[f][0] == "search"]
+            pending_probes = [f for f in tasks if tasks[f][0] == "probe"]
+            pool.shutdown(wait=False)
+        return lines, pending_searches, pending_probes, failures
+
     def _inspect_line(self, line):
         try:
             source = next(item for item in self.sources if item.id == line.get("source_id"))
@@ -746,7 +908,7 @@ class SourceRegistry:
                 finally:
                     pool.shutdown(wait=False)
             if lines:
-                self._cache_put(cache_key, lines)
+                self._cache_put(cache_key, lines, persist=True)
             if stats:
                 stats.flush()
         except Exception:  # noqa: BLE001 - 后台补完是锦上添花，挂了只丢缓存不丢响应
@@ -758,17 +920,139 @@ class SourceRegistry:
         with self._cache_lock:
             item = self._resolve_cache.get(key)
         if not item or time.time() - item[0] > max(60, RESOLVE_CACHE_TTL):
-            return None
+            item = None
+        if item is None:
+            item = self._disk_cache_get(key)
+            if item is None:
+                return None
+            # 磁盘命中回填内存，后续同片请求不再走文件 IO。
+            with self._cache_lock:
+                self._resolve_cache.setdefault(key, item)
         lines = copy.deepcopy(item[1])
         history = ({line["id"]: self.history.success_rate(line["id"]) for line in lines}
                    if self.history else None)
         return rank_lines(lines, history)
 
-    def _cache_put(self, key, lines):
+    def _cache_put(self, key, lines, persist=False):
         if not key or not lines:
             return
+        snapshot = copy.deepcopy(lines)
         with self._cache_lock:
-            self._resolve_cache[key] = (time.time(), copy.deepcopy(lines))
+            self._resolve_cache[key] = (time.time(), snapshot)
+        if persist:
+            with self._disk_cache_lock:
+                self._disk_cache[key] = {"at": time.time(), "lines": snapshot}
+                self._prune_disk_cache_locked()
+                self._disk_dirty = True
+            self._schedule_disk_flush()
+
+    # ------------------------------------------------------------ 落盘缓存
+
+    def enable_disk_cache(self, path, ttl=DISK_CACHE_TTL_SECONDS, max_entries=400):
+        """打开解析结果落盘缓存（App 冷启动时内嵌后端刚起，内存缓存必然为空）。
+
+        只影响「同片再开」的耗时：磁盘命中直接返回，不触网；超过 TTL 自然回源。
+        文件损坏/不可写一律降级成「没有磁盘缓存」，绝不抛到请求线程。
+        """
+        self._disk_cache_path = Path(path) if path else None
+        self._disk_cache_ttl = max(60.0, float(ttl))
+        self._disk_cache_max = max(16, int(max_entries))
+        if self._disk_cache_path is None:
+            return
+        loaded = {}
+        try:
+            payload = json.loads(self._disk_cache_path.read_text(encoding="utf-8"))
+            entries = payload.get("entries") if isinstance(payload, dict) else None
+            if isinstance(entries, dict):
+                now = time.time()
+                for key, value in entries.items():
+                    if not isinstance(value, dict):
+                        continue
+                    lines = value.get("lines")
+                    at = float(value.get("at") or 0)
+                    if not isinstance(lines, list) or not lines or now - at > self._disk_cache_ttl:
+                        continue
+                    loaded[str(key)] = {"at": at, "lines": lines}
+        except (OSError, ValueError, TypeError):
+            loaded = {}
+        with self._disk_cache_lock:
+            self._disk_cache.update(loaded)
+            self._prune_disk_cache_locked()
+
+    def adopt_disk_cache(self, other):
+        """注册表热替换时继承磁盘缓存（配置版本变化会换掉 registry 实例）。"""
+        path = getattr(other, "_disk_cache_path", None)
+        if not path:
+            return
+        self.enable_disk_cache(path)
+        with other._disk_cache_lock:
+            snapshot = dict(other._disk_cache)
+        with self._disk_cache_lock:
+            self._disk_cache.update(snapshot)
+
+    def _disk_cache_get(self, key):
+        with self._disk_cache_lock:
+            entry = self._disk_cache.get(key)
+        if not entry:
+            return None
+        if time.time() - float(entry.get("at") or 0) > getattr(
+                self, "_disk_cache_ttl", DISK_CACHE_TTL_SECONDS):
+            return None
+        lines = entry.get("lines")
+        return (float(entry.get("at") or 0), copy.deepcopy(lines)) if lines else None
+
+    def _prune_disk_cache_locked(self):
+        ttl = getattr(self, "_disk_cache_ttl", DISK_CACHE_TTL_SECONDS)
+        limit = getattr(self, "_disk_cache_max", 400)
+        now = time.time()
+        for key in [k for k, v in self._disk_cache.items()
+                    if now - float((v or {}).get("at") or 0) > ttl]:
+            self._disk_cache.pop(key, None)
+        if len(self._disk_cache) > limit:
+            for key, _value in sorted(self._disk_cache.items(),
+                                      key=lambda item: float(item[1].get("at") or 0))[
+                    :len(self._disk_cache) - limit]:
+                self._disk_cache.pop(key, None)
+
+    def _schedule_disk_flush(self):
+        """节流落盘：合并 1 秒内的多次写入，只有一个后台写线程。"""
+        if self._disk_cache_path is None:
+            return
+        with self._disk_flush_lock:
+            if self._disk_flush_scheduled:
+                return
+            self._disk_flush_scheduled = True
+        threading.Thread(target=self._disk_flush_worker, daemon=True).start()
+
+    def _disk_flush_worker(self):
+        try:
+            time.sleep(1.0)
+            self.flush_disk_cache()
+        finally:
+            with self._disk_flush_lock:
+                self._disk_flush_scheduled = False
+
+    def flush_disk_cache(self):
+        if self._disk_cache_path is None:
+            return
+        with self._disk_cache_lock:
+            if not self._disk_dirty:
+                return
+            self._disk_dirty = False
+            payload = json.dumps({"schema": 1, "entries": self._disk_cache},
+                                 ensure_ascii=False, separators=(",", ":"))
+        try:
+            self._disk_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._disk_cache_path.with_suffix(self._disk_cache_path.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self._disk_cache_path)
+        except OSError:
+            # 磁盘满/只读：退回纯内存缓存，不影响请求。
+            with self._disk_cache_lock:
+                self._disk_dirty = True
 
     def resolve_line(self, line, episode_index):
         source = next((item for item in self.sources if item.id == line.get("source_id")), None)
@@ -1074,6 +1358,19 @@ def latency_score(milliseconds):
     return 100 if milliseconds <= 1000 else 80 if milliseconds <= 3000 else 50 if milliseconds <= 6000 else 20
 
 
+def availability_rank(line):
+    """三态可用性：2=实测可播，1=未探测（未知），0=实测不可播。
+
+    适配器不再预置 ``alive=True``：那会让「没探测过」的线路冒充可播，排到真可播
+    线路前面（2026-10-14 线上回归的直接成因）。未探测只表示「不知道」，
+    既不判死也不冒充可播。
+    """
+    alive = (line or {}).get("alive")
+    if alive is True:
+        return 2
+    return 1 if alive is None else 0
+
+
 def rank_lines(lines, history=None):
     history = history or {}
     ranked = []
@@ -1088,7 +1385,7 @@ def rank_lines(lines, history=None):
             0.30 * latency_score(line.get("latency_ms")) +
             0.20 * (reliability * 100), 2)
         ranked.append(line)
-    ranked.sort(key=lambda item: (item["available"], item["score"]), reverse=True)
+    ranked.sort(key=lambda item: (availability_rank(item), item["score"]), reverse=True)
     return ranked
 
 
@@ -1503,7 +1800,7 @@ class MacCmsAdapter:
                     "id": "%s:%s:%d" % (self.source.id, candidate.get("id"), index),
                     "source_id": self.source.id, "source_name": self.source.name,
                     "name": "%s·%s" % (self.source.name, label), "episodes": episodes,
-                    "height": 0, "latency_ms": None, "alive": True,
+                    "height": 0, "latency_ms": None, "alive": None,
                 })
         return lines
 
@@ -1670,7 +1967,7 @@ class HhkanAdapter:
                 pid = episodes[0]["pid"]
                 lines.append({"id": "%s:%d:%d" % (self.source.id, vid, pid), "source_id": self.source.id,
                               "source_name": self.source.name, "name": "%s·%s" % (self.source.name, raw.get("name") or "线路%d" % (index + 1)),
-                              "vod_id": vid, "episodes": episodes, "height": 0, "latency_ms": None, "alive": True})
+                              "vod_id": vid, "episodes": episodes, "height": 0, "latency_ms": None, "alive": None})
         if candidate_id:
             if len(self._detail_cache) >= HHKAN_BASE_CANDIDATE_DETAIL_MAX + 1:
                 self._detail_cache.pop(next(iter(self._detail_cache)))
