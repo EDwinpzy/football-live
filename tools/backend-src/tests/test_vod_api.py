@@ -1,4 +1,5 @@
 import json
+import time
 import pathlib
 import socket
 import sys
@@ -80,6 +81,102 @@ class VodServiceRefreshTest(unittest.TestCase):
         service.detail("1292052")
         self.assertEqual(len(seen), 2)
         self.assertEqual(self.invalidated, ["更新中的剧"])
+
+
+class _HomeCatalog:
+    """只回一份带两段的首页载荷，用于预热测试。"""
+
+    def __init__(self, sections):
+        self.sections = sections
+        self.home_calls = 0
+
+    def home(self, category):
+        self.home_calls += 1
+        return {"category": category, "sections": self.sections}
+
+    def refresh_home(self, category):
+        return self.home(category)
+
+
+class VodPrefetchTest(unittest.TestCase):
+    """首页预热（2026-10-14）：用户从首页点到详情要几秒，这段时间先把线路解析好。
+
+    契约：请求线程只入队（绝不等后台）；已缓存的、冷却期内的、开关关掉的一律不排；
+    预热失败要退避，不能把源站打毛。
+    """
+
+    def _sections(self, count):
+        return [{"title": "最近热门", "items": [
+            {"id": "douban:%d" % index, "title": "片%d" % index, "year": "2026",
+             "category": "movie", "season": 0} for index in range(count)]}]
+
+    def _service(self, sections, result=()):
+        calls = []
+
+        def resolver(subject, **kwargs):
+            calls.append(subject["title"])
+            return list(result)
+
+        registry = vod_sources.SourceRegistry([], version=1)
+        registry.resolve_subject = resolver
+        service = vod_api.VodService(_HomeCatalog(sections), registry)
+        return service, calls, registry
+
+    def test_candidates_come_from_the_first_section_and_are_capped(self):
+        service, _calls, _registry = self._service(self._sections(9))
+        candidates = service.prefetch_candidates(service.catalog.home("movie"))
+        self.assertEqual(len(candidates), vod_api.PREFETCH_MAX_TITLES)
+        self.assertEqual(candidates[0], {
+            "title": "片0", "year": "2026", "category": "movie", "season": 0})
+
+    def test_home_enqueues_prefetch_without_blocking_and_the_worker_resolves_them(self):
+        service, calls, _registry = self._service(self._sections(3), result=[{"id": "x"}])
+        with patch.object(vod_api, "PREFETCH_GAP_SECONDS", 0), \
+                patch.object(vod_api, "PREFETCH_FAILURE_BACKOFF_SECONDS", 0):
+            started = time.monotonic()
+            payload = service.home("movie")
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.5, "请求线程只入队，不等后台")
+            self.assertEqual(payload["sections"][0]["title"], "最近热门")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and len(calls) < 3:
+                time.sleep(0.05)
+        self.assertEqual(calls, ["片0", "片1", "片2"])
+
+    def test_cached_titles_are_not_prefetched_again(self):
+        service, calls, registry = self._service(self._sections(2), result=[{"id": "x"}])
+        subject = {"title": "片0", "year": "2026", "category": "movie", "season": 0}
+        registry._cache_put(vod_sources._subject_cache_key(subject), [{"id": "cached"}])
+        with patch.object(vod_api, "PREFETCH_GAP_SECONDS", 0), \
+                patch.object(vod_api, "PREFETCH_FAILURE_BACKOFF_SECONDS", 0):
+            enqueued = service.prefetch_home(service.catalog.home("movie"))
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and len(calls) < 1:
+                time.sleep(0.05)
+        self.assertEqual(enqueued, 1)
+        self.assertEqual(calls, ["片1"])
+
+    def test_same_title_is_not_queued_twice_within_the_cooldown(self):
+        service, _calls, _registry = self._service(self._sections(1))
+        payload = service.catalog.home("movie")
+        first = service.prefetch_home(payload)
+        second = service.prefetch_home(payload)
+        self.assertEqual(first, 1)
+        self.assertEqual(second, 0)
+
+    def test_prefetch_can_be_switched_off(self):
+        service, _calls, _registry = self._service(self._sections(3))
+        service._prefetch_enabled = False
+        self.assertEqual(service.prefetch_home(service.catalog.home("movie")), 0)
+        self.assertTrue(service._prefetch_queue.empty())
+
+    def test_injected_resolver_is_never_prefetched(self):
+        """注入自定义 resolver 的调用方自己管缓存，预热不插手。"""
+        registry = vod_sources.SourceRegistry([], version=1)
+        service = vod_api.VodService(
+            _HomeCatalog(self._sections(3)), registry,
+            resolve_sources=lambda subject, **kwargs: [])
+        self.assertEqual(service.prefetch_home(service.catalog.home("movie")), 0)
 
 
 class VodResolverLifecycleTest(unittest.TestCase):

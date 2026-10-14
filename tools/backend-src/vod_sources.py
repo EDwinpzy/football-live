@@ -68,12 +68,12 @@ CDN 实际 403 → 详情页只有 2 条死线，用户看到「无法播放」�
 「首个能出可播线路的源」+「一次探测 RTT」，实测 0.9s（好好看先出）~2.6s
 （非凡资源先出但全死，必须等好好看），且返回的线路里至少有一条是实测可播的。
 预算到点即返回已收集结果，永不比旧实现更慢。"""
-FIRST_PLAYABLE_BUDGET_SECONDS = 5.5
-"""硬预算。实测好好看一条线路的「拿直链 + 探测」成本 ≈ 2.6s（`/play/x-y-z.html`
-抓页解析，6 条并行后墙钟仍是 2.6s）+ 0.2s 探测，加上搜索本身的 1.4~3.0s，
-首条实测可播线路落在 ~4.2s（实测区间 3.4~5.0s）。预算给到 5.5s 才稳定拿到结果；
-到点仍没探到可播就原样返回已收集的线路，交给播放器按「未知 → 判死」的顺序自己试，
-绝不比旧实现更慢。"""
+FIRST_PLAYABLE_BUDGET_SECONDS = 4.0
+"""硬预算。正常路径下「首条实测可播」在 0.5~1.5s 就返回（实测：好好看搜索 0.3~1.4s +
+抓 `/play/x-y-z.html` 0.16~0.27s + 探测 0.2s），预算是给**异常路径**兜底的：上游整批失联、
+或某条线路的探测一直挂到 PROBE_TIMEOUT(4s)。给 4s 足以覆盖一次完整搜索 + 一次解析 + 一次
+探测；再长只会让「这部片所有源都没有可播线路」的情况白等。到点返回已收集线路，
+交给播放器按「未知 → 判死」的顺序自己试，绝不比旧实现更慢。"""
 """每源探测条数：源给的线路顺序 = 站点里的镜像顺序，而「前几条恰好全死」是常态。
 2026-10-14 实测好好看 33 条线路的排头 3 条（64.112.77.72 / vip.ffzy-play7 /
 s1.bfzycdn）全不可播，第 4 条 hn.bfvvs.com 才活；只探 3 条会一条都探不到可播。
@@ -608,6 +608,17 @@ class SourceRegistry:
             subject, wait_for_all=wait_for_all,
             early_exit_source_count=early_exit_source_count,
             probe_lines=probe_lines, first_playable=first_playable)
+
+    def has_cached_subject(self, subject):
+        """该片是否已有可用缓存（内存或落盘）。首页预热用它跳过已经解析过的片子。"""
+        key = _subject_cache_key(subject)
+        if not key:
+            return False
+        with self._cache_lock:
+            item = self._resolve_cache.get(key)
+        if item and time.time() - item[0] <= max(60, RESOLVE_CACHE_TTL):
+            return True
+        return self._disk_cache_get(key) is not None
 
     def invalidate_subject(self, subject):
         """Drop the short resolve cache for [subject] without resolving it again.

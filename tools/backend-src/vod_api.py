@@ -3,9 +3,29 @@
 from __future__ import annotations
 
 import copy
+import os
+import queue
+import threading
+import time
 
 import vod_resolver
 import vod_sources
+
+
+"""首页预热（2026-10-14）：用户从首页点到详情通常要 3~10 秒，这段时间后台把首屏那几部
+影片的线路先解析好，等他真点进去时命中缓存 → 首次打开接近 0ms。
+
+边界（都要守住）：
+- 只在首屏第一段里取前 PREFETCH_MAX_TITLES 部，串行解析，每部之间停 PREFETCH_GAP_SECONDS；
+- 已经缓存过的跳过；同一部在 PREFETCH_COOLDOWN_SECONDS 内只排一次；
+- 连续失败（上游限流/失联）就退避 PREFETCH_FAILURE_BACKOFF_SECONDS，不硬刚；
+- 请求线程只做入队，绝不等后台；
+- ``OTV_VOD_PREFETCH=0`` 可整体关掉（排障/省流）。
+"""
+PREFETCH_MAX_TITLES = 4
+PREFETCH_COOLDOWN_SECONDS = 900
+PREFETCH_GAP_SECONDS = 1.5
+PREFETCH_FAILURE_BACKOFF_SECONDS = 60
 
 
 class VodService:
@@ -23,6 +43,98 @@ class VodService:
         # 任一 provider 返回空或抛异常都继续往下走，绝不改变本地匹配成功的既有行为。
         self._fallback_sources = tuple(fallback_sources)
         self._resolved_lines = {}
+        self._prefetch_queue = queue.Queue()
+        self._prefetch_lock = threading.Lock()
+        self._prefetch_seen = {}
+        self._prefetch_thread = None
+        self._prefetch_enabled = os.environ.get("OTV_VOD_PREFETCH", "1").strip() != "0"
+        self.prefetch_calls = 0
+
+    # ------------------------------------------------------------ 首页预热
+
+    def prefetch_candidates(self, payload, limit=PREFETCH_MAX_TITLES):
+        """从首页载荷里挑出要预热的 subject（首屏第一段，最多 limit 部）。纯函数。"""
+        sections = (payload or {}).get("sections") or []
+        for section in sections:
+            items = (section or {}).get("items") or []
+            candidates = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                if not title:
+                    continue
+                candidates.append({
+                    "title": title,
+                    "year": str(item.get("year") or ""),
+                    "category": str(item.get("category") or ""),
+                    "season": int(item.get("season") or 0),
+                })
+                if len(candidates) >= max(0, int(limit)):
+                    break
+            if candidates:
+                return candidates
+        return []
+
+    def prefetch_home(self, payload):
+        """请求线程只入队；缓存已命中的、刚排过的、关掉开关的都不排。"""
+        if not self._prefetch_enabled or not self._uses_registry_resolver:
+            return 0
+        enqueued = 0
+        now = time.time()
+        for subject in self.prefetch_candidates(payload):
+            key = vod_sources._subject_cache_key(subject)
+            if not key:
+                continue
+            with self._prefetch_lock:
+                last = float(self._prefetch_seen.get(key) or 0)
+                if now - last < PREFETCH_COOLDOWN_SECONDS:
+                    continue
+                self._prefetch_seen[key] = now
+            if self.registry.has_cached_subject(subject):
+                continue
+            self._prefetch_queue.put(subject)
+            enqueued += 1
+        if enqueued:
+            self._ensure_prefetch_worker()
+        return enqueued
+
+    def _ensure_prefetch_worker(self):
+        with self._prefetch_lock:
+            if self._prefetch_thread is not None and self._prefetch_thread.is_alive():
+                return
+            self._prefetch_thread = threading.Thread(
+                target=self._prefetch_loop, name="vod-prefetch", daemon=True)
+            self._prefetch_thread.start()
+
+    def _prefetch_loop(self):
+        failures = 0
+        while True:
+            try:
+                subject = self._prefetch_queue.get(timeout=PREFETCH_GAP_SECONDS)
+            except queue.Empty:
+                return  # 闲下来就退出线程，下次入队再起
+            if subject is None:
+                return
+            try:
+                lines = self._resolve_sources(subject, first_playable=True) or []
+            except Exception:  # noqa: BLE001 - 预热失败只退避，绝不冒到请求线程
+                lines = []
+            self.prefetch_calls += 1
+            if lines:
+                failures = 0
+            else:
+                failures += 1
+            if failures:
+                # 上游限流/失联：退避一段再继续，别把源站打毛。
+                time.sleep(min(PREFETCH_FAILURE_BACKOFF_SECONDS * failures, 300))
+            else:
+                time.sleep(PREFETCH_GAP_SECONDS)
+
+    def home(self, category, refresh=False):
+        payload = self.catalog.refresh_home(category) if refresh else self.catalog.home(category)
+        self.prefetch_home(payload)
+        return payload
 
     def _adopt_external_lines(self, sources):
         """把外部兜底线路翻译成本机 registry 的 source_id。
@@ -50,9 +162,6 @@ class VodService:
             if target:
                 adopted.append(dict(line, source_id=target))
         return adopted
-
-    def home(self, category, refresh=False):
-        return self.catalog.refresh_home(category) if refresh else self.catalog.home(category)
 
     def filters(self, category):
         return self.catalog.filters(category)
