@@ -426,13 +426,19 @@ class SourceRegistry:
             self._resolver_closed = True
         self._fast_executor.shutdown(wait=False, cancel_futures=True)
 
-    def resolve_subject(self, subject, wait_for_all=False):
+    def resolve_subject(self, subject, wait_for_all=False,
+                        early_exit_source_count=RESOLVE_EARLY_SOURCES,
+                        probe_lines=True):
         """Search enabled adapters and return only confident, normalized lines.
 
         竞速契约（2026-09-19）：源按画像得分排序发车、熔断源跳过；≥EARLY_SOURCES 台
         出有效线路即进探测，首个可播线路 + 短宽限即返回；总预算硬顶 RESOLVE_TOTAL_BUDGET。
         早返回时被甩下的源/线路在后台线程补完，结果进 RESOLVE_CACHE_TTL 短缓存，
         并喂给 SourceStats 画像——弱源不再挡路，但每次失败都会变成熔断的证据。
+
+        ``early_exit_source_count`` and ``probe_lines`` let detail requests
+        return their first matching source without waiting for the other source
+        or checking playback URLs on the request thread.
 
         重试契约：只有当**确有源抛异常**（弱网/代理抖动导致整批失联）时才补一次，
         避免用户看到「没有信号源 / 无法播放」；源都正常应答、只是标题匹配不上时
@@ -454,7 +460,9 @@ class SourceRegistry:
         deadline = time.monotonic() + max(1.0, float(RESOLVE_TOTAL_BUDGET))
         lines, pending_searches = [], []
         for attempt in range(max(1, RESOLVE_ATTEMPTS)):
-            lines, failures, pending_searches = self._race_search(enabled, subject, deadline, stats)
+            lines, failures, pending_searches = self._race_search(
+                enabled, subject, deadline, stats,
+                early_exit_source_count=early_exit_source_count)
             if lines or not failures or attempt + 1 >= max(1, RESOLVE_ATTEMPTS):
                 break
             time.sleep(RESOLVE_RETRY_DELAY)
@@ -478,8 +486,11 @@ class SourceRegistry:
                 remaining = [future for future in pending_searches if not future.done()]
             pending_searches = remaining
 
-        picked = _pick_probe_lines(lines, PROBE_MAX_LINES)
-        pending_probes = self._race_probe(picked, deadline)
+        if probe_lines:
+            picked = _pick_probe_lines(lines, PROBE_MAX_LINES)
+            pending_probes = self._race_probe(picked, deadline)
+        else:
+            pending_probes = []
 
         if pending_searches or pending_probes:
             # Reopening detail must reuse the useful result already returned,
@@ -503,10 +514,15 @@ class SourceRegistry:
                    if self.history else None)
         return rank_lines(lines, history)
 
-    def refresh_subject(self, subject, wait_for_all=False):
+    def refresh_subject(self, subject, wait_for_all=False,
+                        early_exit_source_count=RESOLVE_EARLY_SOURCES,
+                        probe_lines=True):
         """Bypass the short source cache so newly published episodes become visible."""
         self.invalidate_subject(subject)
-        return self.resolve_subject(subject, wait_for_all=wait_for_all)
+        return self.resolve_subject(
+            subject, wait_for_all=wait_for_all,
+            early_exit_source_count=early_exit_source_count,
+            probe_lines=probe_lines)
 
     def invalidate_subject(self, subject):
         """Drop the short resolve cache for [subject] without resolving it again.
@@ -638,8 +654,9 @@ class SourceRegistry:
         except Exception as exc:  # noqa: BLE001 - 单源失败不拖累整批，但要记下来
             return source, [], str(exc)[:120], _elapsed_ms(started)
 
-    def _race_search(self, enabled, subject, deadline, stats):
-        """并行搜索，as_completed 随到随判；≥EARLY_SOURCES 台出线或到点即收队。
+    def _race_search(self, enabled, subject, deadline, stats,
+                     early_exit_source_count=RESOLVE_EARLY_SOURCES):
+        """并行搜索，as_completed 随到随判；达到指定出线源数或到点即收队。
         返回 (lines, failures, pending_futures)：pending 是未等到的 future，由后台补完。"""
         workers = min(RESOLVE_MAX_WORKERS, len(enabled))
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
@@ -659,7 +676,7 @@ class SourceRegistry:
                 if group:
                     sources_with_lines += 1
                     lines.extend(group)
-                if sources_with_lines >= max(1, RESOLVE_EARLY_SOURCES):
+                if sources_with_lines >= max(1, int(early_exit_source_count)):
                     break
         except concurrent.futures.TimeoutError:
             pass

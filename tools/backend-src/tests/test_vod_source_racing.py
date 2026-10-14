@@ -87,6 +87,30 @@ class RacingTestCase(unittest.TestCase):
 
 
 class EarlyReturnTest(RacingTestCase):
+    def test_detail_policy_returns_first_source_without_waiting_or_probing(self):
+        FakeAdapter.behaviors = {"s1": "fast", "s2": "slow"}
+        registry = self._registry(["s1", "s2"])
+        registry._race_probe = lambda *_args: self.fail("detail must skip foreground probes")
+
+        started = time.monotonic()
+        lines = registry.resolve_subject(
+            dict(SUBJECT), early_exit_source_count=1, probe_lines=False)
+
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertEqual({line["source_id"] for line in lines}, {"s1"})
+
+        # The slow provider still completes into the shared cache for a later request.
+        cache_key = vod_sources._subject_cache_key(SUBJECT)
+        deadline = time.monotonic() + 5
+        cached = None
+        while time.monotonic() < deadline:
+            cached = registry._cache_get(cache_key)
+            if cached and {line["source_id"] for line in cached} == {"s1", "s2"}:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(cached)
+        self.assertEqual({line["source_id"] for line in cached}, {"s1", "s2"})
+
     def test_two_fast_sources_return_before_slow_source_finishes(self):
         FakeAdapter.behaviors = {"s1": "fast", "s2": "fast", "s3": "slow"}
         registry = self._registry(["s1", "s2", "s3"])

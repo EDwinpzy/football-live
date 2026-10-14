@@ -49,6 +49,22 @@ class VodServiceRefreshTest(unittest.TestCase):
         service.detail("1292052")
         self.assertEqual(self.invalidated, ["更新中的剧"])
 
+    def test_detail_uses_first_match_fast_policy_for_normal_and_refresh_requests(self):
+        seen = []
+        self.registry.resolve_subject = lambda _subject, **kwargs: seen.append(kwargs) or []
+        service = vod_api.VodService(_StubCatalog(), self.registry)
+
+        service.detail("1292052")
+        service.detail("1292052", refresh=True)
+
+        expected = {
+            "wait_for_all": False,
+            "early_exit_source_count": 1,
+            "probe_lines": False,
+        }
+        self.assertEqual(seen, [expected, expected])
+        self.assertEqual(self.invalidated, ["更新中的剧"])
+
     def test_injected_resolver_also_clears_short_cache_on_refresh(self):
         seen = []
         service = vod_api.VodService(

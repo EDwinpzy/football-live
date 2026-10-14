@@ -15,7 +15,7 @@ class VodService:
         self.registry = registry
         self.resolver = resolver
         self._resolve_sources = resolve_sources or registry.resolve_subject
-        self._resolve_sources_waits_for_all = resolve_sources is None
+        self._uses_registry_resolver = resolve_sources is None
         self._resolve_play = resolve_play
         # 片源兜底链：本地匹配为空时按顺序试这些 provider，第一个给出线路的就用。
         # 自建 VPS 出口到不了片源站（实测 Cloudflare/海外全超时），所以线上用的是
@@ -76,9 +76,14 @@ class VodService:
             subject["source_state"] = "matching"
             subject["sources"] = []
             return subject
-        if self._resolve_sources_waits_for_all:
+        if self._uses_registry_resolver:
             resolver = self.registry.refresh_subject if refresh else self._resolve_sources
-            sources = resolver(subject, wait_for_all=True) or []
+            # A detail page only needs a playable source to become useful.
+            # Let the other providers finish in the registry's background cache;
+            # probing playback URLs is deferred so a dead line cannot hold the page.
+            sources = resolver(
+                subject, wait_for_all=False, early_exit_source_count=1,
+                probe_lines=False) or []
         else:
             if refresh:
                 self.registry.invalidate_subject(subject)
