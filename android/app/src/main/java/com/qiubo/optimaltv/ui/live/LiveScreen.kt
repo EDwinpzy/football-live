@@ -207,6 +207,8 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     val refreshEpoch by com.qiubo.optimaltv.lifecycle.AppLifecycleManager.refreshEpoch.collectAsStateWithLifecycle()
     val s = rememberUiScale()
+    // 400 设计像素卡宽给队名和联赛名留出空间；1920 宽下每行 4 张并留出安全边距。
+    val liveCols = 4
     LaunchedEffect(refreshEpoch) {
         if (refreshEpoch > 0L) vm.refresh(silent = true)
     }
@@ -347,8 +349,8 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                 // v1.13：方向导航统一 OtvNav 引擎，容器仅声明滚动挂靠
                 val liveScroll = remember(listState) { lazyNavContainer(listState) }
                 // 比赛分组（今日/明日固定分区 + 按日期分组，原版 renderGameRow）
-                // 需求 足球#8：今日 = 双行横滑（LazyRow 每列上下两卡）；明日及以后 =
-                // 每行固定 5 卡、行数不限（随页面上下滚动，21 场也完整可见）
+                // 需求 足球#8：今日 = 双行横滑（LazyRow 每列上下两卡）；明日及以后每行 4 卡，
+                // 行数不限，避免固定 5 列把卡片挤窄。
                 // v1.19 流畅度：过滤+分组提级并 remember——旧版在 LazyColumn content
                 // lambda 里逐次重算，本页任何状态变化（hint/tab 焦点/hero/筛选）都全量
                 // 重跑过滤+建组+两次日期格式化；LazyListScope 非组合域不能 remember
@@ -452,11 +454,11 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                                 }
                             }
                         } else if (ms.isNotEmpty()) {
-                            // 明日及以后：每行固定 5 卡（320×5 + 4×36 ≈ 1744 ≤ 可用宽），行数不限随页滚动。
+                            // 明日及以后：按 400 设计像素卡宽计算列数；1920 宽下为 4 列。
                             // v1.10（2026-08-31）：逐行独立 item（原为单个巨 item 内非 lazy Column，
                             // 比赛多时整页一次性组合全部行，低端机切页/滚动卡顿）；间距 1:1 保留
                             // （首行 top24 / 行距 28 / 组间由下一组日期标题 top40 衔接）
-                            ms.chunked(5).forEachIndexed { ri, rowMs ->
+                            ms.chunked(liveCols).forEachIndexed { ri, rowMs ->
                                 item(key = "row-$date-$ri") {
                                     Row(
                                         horizontalArrangement = Arrangement.spacedBy(36f.sx(s)),
@@ -851,7 +853,8 @@ fun dateLabel(date: String): String {
     }
 }
 
-/** 比赛卡（需求 #2：去掉中部「联赛 日期 时间」文案；
+/** 比赛卡（400×146，给两侧队名和中部联赛信息留出宽度；
+ *  需求 #2：去掉中部「联赛 日期 时间」文案；
  *  需求 #3：直播 = LIVE 徽章(上下居中)/分钟/比分；未开赛 = VS；完场 = 比分。
  *  需求 #6：中部加入联赛名（意甲/意大利杯等）。
  *  需求 足球#3/#1：选中环内缩白色描边（贴卡内缘；行边缘不裁剪）。
@@ -866,7 +869,7 @@ private fun GameCard(
     upToChip: (() -> Unit)? = null,
     cardReg: FocusRegistry? = null,
 ) {
-    Column(Modifier.width(320f.sx(s))) {
+    Column(Modifier.width(400f.sx(s))) {
         Box(
             Modifier
                 .dpadFocusable(
@@ -884,7 +887,7 @@ private fun GameCard(
             contentAlignment = Alignment.Center,
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                TeamBlock(m.home, s)
+                TeamBlock(m.home, s, width = 112f)
                 Column(
                     modifier = Modifier.weight(1f),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -934,7 +937,7 @@ private fun GameCard(
                         Text(m.time, color = OtvColors.White50, fontSize = 20f.sxs(s), lineHeight = 22f.sxs(s), fontWeight = FontWeight.Medium)
                     }
                 }
-                TeamBlock(m.away, s)
+                TeamBlock(m.away, s, width = 112f)
             }
         }
     }
@@ -979,8 +982,8 @@ fun matchStartMillis(m: MatchItem, nowMillis: Long = System.currentTimeMillis())
 /** 队标+队名（原版 gc-team-wrap：72 队标 + 动态队名，加载失败首字兜底）
  *  需求 足球#6：一行放得下就优先只放一行——字号按列宽/字数自适应收缩，超 8 字才折行 */
 @Composable
-private fun TeamBlock(team: String, s: Float) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(96f.sx(s))) {
+private fun TeamBlock(team: String, s: Float, width: Float = 112f) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(width.sx(s))) {
         Box(
             Modifier.size(72f.sx(s)),
             contentAlignment = Alignment.Center,

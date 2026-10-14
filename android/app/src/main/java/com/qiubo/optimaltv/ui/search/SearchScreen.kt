@@ -49,6 +49,7 @@ import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.navigation.NavController
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.qiubo.optimaltv.BuildConfig
 import coil.compose.AsyncImage
 import com.qiubo.optimaltv.Graph
 import com.qiubo.optimaltv.R
@@ -131,12 +132,24 @@ internal fun isSearchResultItemFullyVisible(
 internal fun shouldRetryResultFocus(attempt: Int, focusObserved: Boolean): Boolean =
     !focusObserved && attempt < RESULT_FOCUS_RETRY_ATTEMPTS - 1
 
+/** Debug-only deterministic items for exercising the real search grid and D-pad focus path. */
+internal fun searchFocusFixtureItems(count: Int): List<VodItem> =
+    List(count.coerceIn(0, 60)) { index ->
+        VodItem(
+            id = "debug:search-focus-$count-$index",
+            sourceId = "debug",
+            title = "焦点测试 ${index + 1}",
+            categoryId = "douban:movie",
+        )
+    }
+
 /** 详情 meta/集数 → 分类（源站频道 tag：欧美剧/国产剧等以「剧」结尾的类型 + 综艺/动漫/短剧直配） */
 private val TV_TAG_RE = Regex("欧美剧|国产剧|香港剧|台湾剧|韩国剧|日本剧|海外剧|泰剧|美剧|英剧|连续剧|电视剧|网剧")
 
 /** 调试词注入通道（adb 广播 → 搜索页 query，仅 debug 构建有写入方；绕过模拟器丢键问题） */
 object SearchDebugBus {
     @Volatile var pendingQuery: String? = null
+    @Volatile var pendingFixtureCount: Int? = null
 }
 
 internal fun classifyVod(meta: String, epCount: Int): String = when {
@@ -232,12 +245,20 @@ fun SearchScreen(nav: NavController) {
         }
     }
 
-    // 调试注入：adb 广播写入 pendingQuery → 变为搜索框内容（MuMu 注键丢键严重，实测用）
+    // 调试注入：adb intent 注入查询词及确定数量的结果，供模拟器实测焦点导航。
+    var debugFixtureItems by remember { mutableStateOf<List<VodItem>?>(null) }
     LaunchedEffect(Unit) {
         while (true) {
             SearchDebugBus.pendingQuery?.let {
                 SearchDebugBus.pendingQuery = null
                 query = it
+            }
+            if (BuildConfig.DEBUG) {
+                SearchDebugBus.pendingFixtureCount?.let { count ->
+                    SearchDebugBus.pendingFixtureCount = null
+                    debugFixtureItems = searchFocusFixtureItems(count)
+                    android.util.Log.i("SearchFocusFixture", "results=${debugFixtureItems?.size} applied")
+                }
             }
             delay(200)
         }
@@ -367,8 +388,8 @@ fun SearchScreen(nav: NavController) {
         localHits = if (query.isBlank()) emptyList()
         else Graph.repo.search(query)
     }
-    val results = remember(localHits, remote) {
-        mergeSearchResults(localHits, remote)
+    val results = remember(localHits, remote, debugFixtureItems) {
+        debugFixtureItems ?: mergeSearchResults(localHits, remote)
     }
 
     // 键盘焦点守卫：候选/结果变化引发的重组会把焦点从软键盘/候选词上清掉（LOST 后无落点）。
@@ -782,7 +803,15 @@ fun SearchScreen(nav: NavController) {
                                     nav, shown[i], s, cardReg,
                                     externalFocus = if (i == 0) firstResultFocus else null,
                                     onResultFocusChanged = { focused ->
-                                        if (focused) focusedResultId = shown[i].id
+                                        if (focused) {
+                                            focusedResultId = shown[i].id
+                                            if (BuildConfig.DEBUG) {
+                                                android.util.Log.d(
+                                                    "SearchFocusFixture",
+                                                    "focused index=$i id=${shown[i].id} count=${shown.size}",
+                                                )
+                                            }
+                                        }
                                         else if (focusedResultId == shown[i].id) focusedResultId = null
                                     },
                                 )

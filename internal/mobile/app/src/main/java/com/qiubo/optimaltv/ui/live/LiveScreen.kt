@@ -204,8 +204,14 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
     // 竖屏（2026-09-07 竖屏优化）：hero 内容列/CTA/分组标题/筛选行侧距按 750 基准收窄
     val portrait = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
         android.content.res.Configuration.ORIENTATION_PORTRAIT
-    // v1.19 竖屏自适应：比赛卡列数（横屏公式自然=5）
-    val liveCols = com.qiubo.optimaltv.ui.theme.rememberRowColumns(cardW = 320f, gap = 36f, sidePad = 86f)
+    // 横屏用 400 设计像素卡宽，1920 宽时 4 张完整展示；竖屏继续用 320 宽双列卡。
+    val liveCardWidth = if (portrait) 320f else 400f
+    val teamBlockWidth = if (portrait) 96f else 112f
+    val liveCols = com.qiubo.optimaltv.ui.theme.rememberRowColumns(
+        cardW = liveCardWidth,
+        gap = 36f,
+        sidePad = 86f,
+    )
 
     // hero 状态：仅手动切换（触控=横滑/点圆点，对应 TV 版播放钮左右键语义，不自动轮播）；
     // 按 matchId 记忆（列表刷新重排时海报不再自动换比赛，需求 #11）
@@ -354,7 +360,15 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                                         Column(verticalArrangement = Arrangement.spacedBy(28f.sx(s))) {
                                             pages[pi].rows.forEach { row ->
                                                 Row(horizontalArrangement = Arrangement.spacedBy(40f.sx(s))) {
-                                                    row.forEach { GameCard(it, s, onPlay = ::playMatch) }
+                                                    row.forEach {
+                                                        GameCard(
+                                                            it,
+                                                            s,
+                                                            onPlay = ::playMatch,
+                                                            cardWidth = liveCardWidth,
+                                                            teamBlockWidth = teamBlockWidth,
+                                                        )
+                                                    }
                                                 }
                                             }
                                         }
@@ -362,8 +376,8 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                                 }
                             }
                         } else if (ms.isNotEmpty()) {
-                            // 明日及以后：每行 5 卡（320×5+4×36≈1744 ≤ 横屏可用宽）；
-                            // v1.19 竖屏自适应（总体#2）：按屏宽算列数（横屏公式自然=5）。
+                            // 明日及以后：按卡宽和可用屏宽决定列数，横屏 1920 宽为 4 列；
+                            // 竖屏维持 2 列，卡片在 Row 内均分宽度。
                             // 逐行独立 item（低端机滚动性能）；间距 1:1 保留
                             ms.chunked(liveCols).forEachIndexed { ri, rowMs ->
                                 item(key = "row-$date-$ri") {
@@ -376,7 +390,14 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                                         rowMs.forEach { m ->
                                             // 竖屏 2 列卡宽自适应（weight 均分；卡内布局/高度不变，
                                             // 固定 320×2+36 在 750 基准下溢出屏宽）
-                                            GameCard(m, s, if (portrait) Modifier.weight(1f) else Modifier, ::playMatch)
+                                            GameCard(
+                                                m,
+                                                s,
+                                                if (portrait) Modifier.weight(1f) else Modifier,
+                                                ::playMatch,
+                                                cardWidth = liveCardWidth,
+                                                teamBlockWidth = teamBlockWidth,
+                                            )
                                         }
                                     }
                                 }
@@ -738,7 +759,7 @@ fun dateLabel(date: String): String {
     }
 }
 
-/** 比赛卡（TV 版 1:1：黑80%圆角卡 320×146 + 左右队块 + 中部联赛/LIVE/比分/VS；触控点按进直播）
+/** 比赛卡（横屏 400×146、竖屏 320×146 + 左右队块 + 中部联赛/LIVE/比分/VS；触控点按进直播）
  *  modifier 传入 RowScope.weight(1f) 时竖屏均分自适应宽（卡高/内部样式不变） */
 @Composable
 private fun GameCard(
@@ -746,8 +767,10 @@ private fun GameCard(
     s: Float,
     modifier: Modifier = Modifier,
     onPlay: (MatchItem) -> Unit = {},
+    cardWidth: Float = 400f,
+    teamBlockWidth: Float = 112f,
 ) {
-    Column(modifier.width(320f.sx(s))) {
+    Column(modifier.width(cardWidth.sx(s))) {
         Box(
             Modifier
                 .clip(RoundedCornerShape(16f.sx(s)))
@@ -759,7 +782,7 @@ private fun GameCard(
             contentAlignment = Alignment.Center,
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                TeamBlock(m.home, s)
+                TeamBlock(m.home, s, width = teamBlockWidth)
                 Column(
                     modifier = Modifier.weight(1f),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -809,7 +832,7 @@ private fun GameCard(
                         Text(m.time, color = OtvColors.White50, fontSize = 20f.sxs(s), lineHeight = 22f.sxs(s), fontWeight = FontWeight.Medium)
                     }
                 }
-                TeamBlock(m.away, s)
+                TeamBlock(m.away, s, width = teamBlockWidth)
             }
         }
     }
@@ -853,8 +876,8 @@ fun matchStartMillis(m: MatchItem, nowMillis: Long = System.currentTimeMillis())
 /** 队标+队名（原版 gc-team-wrap：72 队标 + 动态队名，加载失败首字兜底）
  *  需求 足球#6：一行放得下就优先只放一行——字号按列宽/字数自适应收缩，超 8 字才折行 */
 @Composable
-private fun TeamBlock(team: String, s: Float) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(96f.sx(s))) {
+private fun TeamBlock(team: String, s: Float, width: Float = 112f) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(width.sx(s))) {
         Box(
             Modifier.size(72f.sx(s)),
             contentAlignment = Alignment.Center,

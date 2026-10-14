@@ -30,13 +30,25 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.border
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -59,6 +71,7 @@ import com.qiubo.optimaltv.ui.theme.sx
 import com.qiubo.optimaltv.ui.theme.sxs
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.net.URLEncoder
 
 /**
@@ -71,6 +84,30 @@ import java.net.URLEncoder
 /** 搜索结果分类 tab（需求④）。「综艺」补齐：6 个，竖屏每行 3 个刚好两整行。 */
 internal val RESULT_CATS = listOf("全部", "电影", "电视剧", "动漫", "综艺", "短剧")
 
+/** D-pad 邻居索引；水平键留在当前行，竖向键按列移动，残行向最近的卡片收敛。 */
+internal enum class SearchResultFocusDirection { Left, Right, Up, Down }
+
+internal fun mobileSearchResultFocusTarget(
+    index: Int,
+    resultCount: Int,
+    columns: Int,
+    direction: SearchResultFocusDirection,
+): Int? {
+    if (columns <= 0 || index !in 0 until resultCount) return null
+    val row = index / columns
+    val column = index % columns
+    return when (direction) {
+        SearchResultFocusDirection.Left -> index.takeIf { column > 0 }?.minus(1)
+        SearchResultFocusDirection.Right ->
+            (index + 1).takeIf { column + 1 < columns && it < resultCount }
+        SearchResultFocusDirection.Up -> (index - columns).takeIf { row > 0 }
+        SearchResultFocusDirection.Down -> {
+            val nextRowStart = (row + 1) * columns
+            if (nextRowStart >= resultCount) null
+            else (nextRowStart + column).coerceAtMost(resultCount - 1)
+        }
+    }
+}
 /** 详情 meta/集数 → 分类（源站频道 tag：欧美剧/国产剧等以「剧」结尾的类型 + 综艺/动漫/短剧直配） */
 private val TV_TAG_RE = Regex("欧美剧|国产剧|香港剧|台湾剧|韩国剧|日本剧|海外剧|泰剧|美剧|英剧|连续剧|电视剧|网剧")
 
@@ -215,6 +252,37 @@ fun SearchScreen(nav: NavController) {
 
     // 顶栏下潜：结果区离开绝对顶部即隐藏、回顶显示
     val resultsGridState = rememberLazyGridState()
+    val resultColumns = if (portrait) 3 else com.qiubo.optimaltv.ui.theme.rememberRowColumns(
+        cardW = 232f, gap = 20f, sidePad = bodyPad,
+    )
+    val resultFocusRequesters = remember(shown) {
+        shown.associate { it.id to FocusRequester() }
+    }
+    val scope = rememberCoroutineScope()
+    var focusedResultId by remember { mutableStateOf<String?>(null) }
+    var pendingResultFocusId by remember { mutableStateOf<String?>(null) }
+
+    fun requestSearchResultFocus(index: Int) {
+        val item = shown.getOrNull(index) ?: return
+        if (focusedResultId == item.id || pendingResultFocusId == item.id) return
+        val requester = resultFocusRequesters[item.id] ?: return
+        pendingResultFocusId = item.id
+        scope.launch {
+            try {
+                // Bring lazy items into composition before requesting focus. This also makes
+                // 20-result lists navigable when the next row has not yet been composed.
+                resultsGridState.scrollToItem(index)
+                repeat(12) {
+                    runCatching { requester.requestFocus() }
+                    if (focusedResultId == item.id) return@launch
+                    delay(40)
+                }
+            } finally {
+                if (pendingResultFocusId == item.id) pendingResultFocusId = null
+            }
+        }
+    }
+
     LaunchedEffect(query) {
         selectedCat = "全部"
         resultsGridState.scrollToItem(0)
@@ -243,7 +311,11 @@ fun SearchScreen(nav: NavController) {
                 hidden = chromeGone,
             )
 
-        Column(Modifier.fillMaxSize().padding(horizontal = bodyPad.sx(s))) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(horizontal = bodyPad.sx(s)),
+        ) {
             // ---- 搜索输入行（需求④版式：⌕ + 52 Bold 输入；触屏直接唤系统输入法）----
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -303,10 +375,24 @@ fun SearchScreen(nav: NavController) {
                     verticalArrangement = Arrangement.spacedBy(10f.sx(s)),
                     modifier = Modifier.padding(top = 26f.sx(s)),
                 ) {
-                    tabRows.forEach { tabRow ->
+                    tabRows.forEachIndexed { rowIndex, tabRow ->
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(12f.sx(s)),
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .then(
+                                    if (rowIndex == tabRows.lastIndex) {
+                                        Modifier.onPreviewKeyEvent { event ->
+                                            if (event.type == KeyEventType.KeyDown &&
+                                                event.key == Key.DirectionDown &&
+                                                shown.isNotEmpty()
+                                            ) {
+                                                requestSearchResultFocus(0)
+                                                true
+                                            } else false
+                                        }
+                                    } else Modifier,
+                                ),
                         ) {
                             tabRow.forEach { catName ->
                                 val count = if (catName == "全部") results.size else results.count { catMap[it.id] == catName }
@@ -361,11 +447,7 @@ fun SearchScreen(nav: NavController) {
             } else {
                 LazyVerticalGrid(
                     state = resultsGridState,
-                    columns = GridCells.Fixed(
-                        if (portrait) 3 else com.qiubo.optimaltv.ui.theme.rememberRowColumns(
-                            cardW = 232f, gap = 20f, sidePad = bodyPad,
-                        ),
-                    ),
+                    columns = GridCells.Fixed(resultColumns),
                     contentPadding = PaddingValues(top = 24f.sx(s), bottom = 60f.sx(s)),
                     horizontalArrangement = Arrangement.spacedBy((if (portrait) 12f else 20f).sx(s)),
                     verticalArrangement = Arrangement.spacedBy((if (portrait) 28f else 36f).sx(s)),
@@ -375,7 +457,69 @@ fun SearchScreen(nav: NavController) {
                 ) {
                     // key 用纯 id（results 已 distinctBy id 保证唯一）
                     items(shown.size, key = { i -> shown[i].id }) { i ->
-                        ResultCard(nav, shown[i], s, compact = portrait)
+                        val item = shown[i]
+                        val openResult = {
+                            nav.navigate("detail/" + URLEncoder.encode(item.id, "UTF-8"))
+                        }
+                        val requester = resultFocusRequesters[item.id]
+                        MobileVodCard(
+                            item = item,
+                            s = s,
+                            compact = portrait,
+                            modifier = Modifier
+                                .focusRequester(requireNotNull(requester))
+                                .onFocusChanged { state ->
+                                    if (state.hasFocus) focusedResultId = item.id
+                                    else if (focusedResultId == item.id) focusedResultId = null
+                                }
+                                .onPreviewKeyEvent { event ->
+                                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                    when (event.key) {
+                                        Key.Enter, Key.DirectionCenter -> {
+                                            openResult()
+                                            true
+                                        }
+                                        Key.DirectionLeft,
+                                        Key.DirectionRight,
+                                        Key.DirectionUp,
+                                        Key.DirectionDown -> {
+                                            val direction = when (event.key) {
+                                                Key.DirectionLeft -> SearchResultFocusDirection.Left
+                                                Key.DirectionRight -> SearchResultFocusDirection.Right
+                                                Key.DirectionUp -> SearchResultFocusDirection.Up
+                                                else -> SearchResultFocusDirection.Down
+                                            }
+                                            val target = mobileSearchResultFocusTarget(
+                                                index = i,
+                                                resultCount = shown.size,
+                                                columns = resultColumns,
+                                                direction = direction,
+                                            )
+                                            if (target != null) requestSearchResultFocus(target)
+                                            target != null || direction == SearchResultFocusDirection.Left ||
+                                                direction == SearchResultFocusDirection.Right
+                                        }
+                                        else -> false
+                                    }
+                                }
+                                .focusable()
+                                .graphicsLayer {
+                                    val focused = focusedResultId == item.id
+                                    val scale = if (focused) 1.04f else 1f
+                                    scaleX = scale
+                                    scaleY = scale
+                                }
+                                .then(
+                                    if (focusedResultId == item.id) {
+                                        Modifier.border(
+                                            width = 3f.sx(s),
+                                            color = OtvColors.White,
+                                            shape = RoundedCornerShape(12f.sx(s)),
+                                        )
+                                    } else Modifier,
+                                ),
+                            onClick = openResult,
+                        )
                     }
                 }
             }
@@ -385,22 +529,4 @@ fun SearchScreen(nav: NavController) {
         MobileBackButton(onBack = { nav.popBackStack() })
         OtvHint(hint)
     }
-}
-
-/** 竖版结果卡（与片库同款竖版海报；片名在卡下，右下角 remark 角标同片库样式；触控点卡进详情）
- *  需求②：角标字号加大黑底压扁（同 AllScreen.VcardCard）
- *  竖屏优化：fillMaxWidth 填满网格 cell（1fr 均分，与网页版 poster-grid 同构） */
-@Composable
-private fun ResultCard(
-    nav: NavController,
-    item: VodItem,
-    s: Float,
-    compact: Boolean,
-) {
-    MobileVodCard(
-        item = item,
-        s = s,
-        compact = compact,
-        onClick = { nav.navigate("detail/" + URLEncoder.encode(item.id, "UTF-8")) },
-    )
 }

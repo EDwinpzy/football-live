@@ -44,4 +44,15 @@ class SearchFocusPolicyTest {
         assertFalse(isSearchResultItemFullyVisible(150, 501, 0, 500))
         assertFalse(isSearchResultItemFullyVisible(100, 100, 0, 500))
     }
+
+    @Test
+    fun debugFocusFixturesHaveTheRequestedCountAndUniqueStableIds() {
+        listOf(1, 2, 3, 7, 8, 14, 15, 20).forEach { count ->
+            val fixtures = searchFocusFixtureItems(count)
+            assertEquals(count, fixtures.size)
+            assertEquals(count, fixtures.map { it.id }.distinct().size)
+        }
+        assertTrue(searchFocusFixtureItems(0).isEmpty())
+        assertEquals(60, searchFocusFixtureItems(100).size)
+    }
 }

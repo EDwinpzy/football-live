@@ -165,6 +165,16 @@ class MainActivity : ComponentActivity() {
                 DebugNavBus.pendingRoute = it
                 com.qiubo.optimaltv.OtvLog.i("debug-nav（intent extra）route=$it")
             }
+            if (intent?.hasExtra("otvDebugResultCount") == true) {
+                val count = intent.getIntExtra("otvDebugResultCount", -1)
+                if (count in 0..60) {
+                    com.qiubo.optimaltv.ui.search.SearchDebugBus.pendingFixtureCount = count
+                    if (!intent.hasExtra("otvDebugQuery")) {
+                        com.qiubo.optimaltv.ui.search.SearchDebugBus.pendingQuery = ""
+                    }
+                    com.qiubo.optimaltv.OtvLog.i("debug-nav search-focus-fixture count=$count")
+                }
+            }
         }
         // v1.17 调试注入激活码（模拟器键盘注键丢键，测试用；码本身仍走完整验证链路：
         // 云端查表+设备绑定+本地 ECDSA 验签，无任何安全豁免；公测版 debug 构建限定）

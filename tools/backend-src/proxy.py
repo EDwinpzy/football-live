@@ -3832,6 +3832,14 @@ def resolve_team_icon(team_name):
         "马梅洛迪日落": "https://assets.football-logos.cc/logos/south-africa/64x64/mamelodi-sundowns.435ac696.png",
         "马瑟韦尔": "https://assets.football-logos.cc/logos/scotland/64x64/motherwell.a8fd7032.png",
         "鹿特丹斯巴达": "https://assets.football-logos.cc/logos/netherlands/64x64/sparta-rotterdam.8f93fe3c.png",
+        "阿尔萨德": "https://r2.thesportsdb.com/images/media/team/badge/908a011774579337.png",
+        "席贝": "https://r2.thesportsdb.com/images/media/team/badge/xlskhy1693027251.png",
+        "侯赛因": "https://r2.thesportsdb.com/images/media/team/badge/ijbwwm1753204799.png",
+        "沙巴巴库": "https://r2.thesportsdb.com/images/media/team/badge/o2ttq41614284640.png",
+        "布拉格斯拉维亚": "https://r2.thesportsdb.com/images/media/team/badge/l7kl4n1759252139.png",
+        "LASK": "https://r2.thesportsdb.com/images/media/team/badge/oox26l1683556395.png",
+        "顿涅茨克矿工": "https://r2.thesportsdb.com/images/media/team/badge/sqrxsr1421791799.png",
+        "AEK雅典": "https://r2.thesportsdb.com/images/media/team/badge/4nogst1602773624.png",
     }
     if team_name in KNOWN_MAP:
         val = KNOWN_MAP[team_name]
