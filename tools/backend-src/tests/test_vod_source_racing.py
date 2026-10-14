@@ -65,7 +65,7 @@ class FakeAdapter:
     def detail(self, candidate):
         count = max(1, int(FakeAdapter.line_counts.get(self.source.id, 1)))
         return [{"id": "%s:1:%d" % (self.source.id, index), "source_id": self.source.id,
-                 "source_name": self.source.id, "name": "线%d" % (index + 1),
+                 "source_name": self.source.id, "name": "%s·线%d" % (self.source.id, index + 1),
                  "height": 0, "latency_ms": None, "alive": None,
                  "episodes": [{"index": 0, "name": "第1集",
                                "url": "https://v.example/%s/%d.m3u8" % (self.source.id, index)}]}
@@ -727,6 +727,87 @@ class FastResolverPoolTest(unittest.TestCase):
                         self.assertLess(retry_result[3], 250)
                 finally:
                     registry.close()
+
+
+class LabelHistoryTest(RacingTestCase):
+    """标签健康度排序（2026-10-14）。
+
+    好好看的线路名 ``好好看·HN线路 / ·FF线路 / ·蓝光1`` 在**搜索响应里就有**，不用抓
+    播放页；实测 HN线路 → hn.bfvvs.com 可播、FF线路 → vip.ffzy-play7.com 不可播。
+    用标签历史可播率排序，未探测的线路也能把大概率可播的排前面。
+
+    契约：标签只影响**未探测**线路的相对顺序；「实测可播 > 未知 > 实测不可播」的
+    兜底不变；没有历史（rate is None）等同未知，不掺信号。
+    """
+
+    def test_rate_is_none_without_history_and_round_trips(self):
+        history = vod_sources.LabelHistory()
+        self.assertIsNone(history.rate("好好看·HN线路"))
+        history.record("好好看·HN线路", True)
+        history.record("好好看·HN线路", False)
+        self.assertEqual(history.rate("好好看·HN线路"), 0.5)
+        self.assertIsNone(history.rate("好好看·FF线路"))
+
+    def test_empty_label_is_ignored(self):
+        history = vod_sources.LabelHistory()
+        history.record("", True)
+        history.record(None, True)
+        self.assertEqual(history.data, {})
+
+    def test_rank_puts_healthy_label_above_unknown_above_dead_label(self):
+        history = vod_sources.LabelHistory()
+        history.record("好好看·HN线路", True)
+        history.record("好好看·FF线路", False)
+        lines = [
+            {"id": "l-ff", "source_id": "s1", "name": "好好看·FF线路", "alive": None,
+             "height": 0, "latency_ms": None,
+             "episodes": [{"index": 0, "name": "第1集", "url": "https://v.example/1.m3u8"}]},
+            {"id": "l-unknown", "source_id": "s1", "name": "好好看·未知线路", "alive": None,
+             "height": 0, "latency_ms": None,
+             "episodes": [{"index": 0, "name": "第1集", "url": "https://v.example/2.m3u8"}]},
+            {"id": "l-hn", "source_id": "s1", "name": "好好看·HN线路", "alive": None,
+             "height": 0, "latency_ms": None,
+             "episodes": [{"index": 0, "name": "第1集", "url": "https://v.example/3.m3u8"}]},
+        ]
+        ranked = vod_sources.rank_lines(lines, label_history=history)
+        self.assertEqual([line["id"] for line in ranked], ["l-hn", "l-unknown", "l-ff"])
+        self.assertEqual(ranked[0]["label_rate"], 1.0)
+        self.assertEqual(ranked[2]["label_rate"], 0.0)
+
+    def test_probed_lines_keep_their_order_and_are_not_resorted_by_label(self):
+        """已探测的线路由 availability_rank + score 决定，标签不掺和。"""
+        history = vod_sources.LabelHistory()
+        history.record("好好看·HN线路", False)      # 历史差，但这条实测可播
+        lines = [
+            {"id": "l-dead", "source_id": "s1", "name": "好好看·HN线路", "alive": False,
+             "height": 1080, "latency_ms": 100,
+             "episodes": [{"index": 0, "name": "第1集", "url": "https://v.example/1.m3u8"}]},
+            {"id": "l-alive", "source_id": "s1", "name": "好好看·超清2", "alive": True,
+             "height": 0, "latency_ms": 300,
+             "episodes": [{"index": 0, "name": "第1集", "url": "https://v.example/2.m3u8"}]},
+        ]
+        ranked = vod_sources.rank_lines(lines, label_history=history)
+        self.assertEqual([line["id"] for line in ranked], ["l-alive", "l-dead"])
+
+    def test_probe_outcome_feeds_the_label_history(self):
+        FakeAdapter.behaviors = {"s1": "fast", "s2": "slow"}
+        FakeAdapter.line_counts = {"s1": 2}
+        registry = self._registry(["s1", "s2"], alive_sources=["s2"])
+        registry.label_history = vod_sources.LabelHistory()
+        registry.resolve_subject(dict(SUBJECT), first_playable=True)
+
+        # 在途探测由后台线程收尾，等它把结论记进标签历史。
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            recorded = registry.label_history.data
+            if len(recorded) >= 2:
+                break
+            time.sleep(0.05)
+
+        recorded = registry.label_history.data
+        self.assertEqual(recorded.get("s1·线1"), [False])
+        self.assertEqual(recorded.get("s1·线2"), [False])
+        self.assertEqual(recorded.get("s2·线1"), [True])
 
 
 if __name__ == "__main__":

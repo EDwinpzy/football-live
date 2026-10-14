@@ -309,6 +309,7 @@ class SourceRegistry:
         self.sources = tuple(sources)
         self.version = int(version)
         self.history = history
+        self.label_history = None
         self.probe = probe or probe_stream
         self.stats = stats
         self._resolve_cache = {}
@@ -557,9 +558,13 @@ class SourceRegistry:
             if stats:
                 stats.flush()
 
+        return self._ranked(lines)
+
+    def _ranked(self, lines):
+        """按「实测可播 > 标签健康 > 分数」排序（标签历史见 LabelHistory）。"""
         history = ({line["id"]: self.history.success_rate(line["id"]) for line in lines}
                    if self.history else None)
-        return rank_lines(lines, history)
+        return rank_lines(lines, history, label_history=self.label_history)
 
     def _resolve_first_playable(self, enabled, subject, cache_key, stats):
         """详情页快速路径：首条**实测可播**线路出现即返回（契约见 FIRST_PLAYABLE_*）。"""
@@ -595,9 +600,13 @@ class SourceRegistry:
             if stats:
                 stats.flush()
 
+        return self._ranked(lines)
+
+    def _ranked(self, lines):
+        """按「实测可播 > 标签健康 > 分数」排序（标签历史见 LabelHistory）。"""
         history = ({line["id"]: self.history.success_rate(line["id"]) for line in lines}
                    if self.history else None)
-        return rank_lines(lines, history)
+        return rank_lines(lines, history, label_history=self.label_history)
 
     def refresh_subject(self, subject, wait_for_all=False,
                         early_exit_source_count=RESOLVE_EARLY_SOURCES,
@@ -864,7 +873,18 @@ class SourceRegistry:
             line.update(self.probe(resolved.get("url")))
         except Exception:
             line.update({"alive": False, "latency_ms": None, "height": 0})
+        self._record_label_outcome(line)
         return line
+
+    def _record_label_outcome(self, line):
+        """探测结论喂给标签历史：``好好看·HN线路`` 这类标签在搜索响应里就有，
+        下一次同标签的线路不用再抓播放页也知道大概率可不可播（见 LabelHistory）。"""
+        history = self.label_history
+        if history is None or not isinstance(line, dict):
+            return
+        verdict = line.get("alive")
+        if verdict in (True, False):
+            history.record(str(line.get("name") or ""), bool(verdict))
 
     def _race_probe(self, picked, deadline):
         """并行探测；凑够 EARLY_EXIT_ALIVE 条可播、或首个可播后宽限期满、或到点即收队。
@@ -940,9 +960,13 @@ class SourceRegistry:
             with self._cache_lock:
                 self._resolve_cache.setdefault(key, item)
         lines = copy.deepcopy(item[1])
+        return self._ranked(lines)
+
+    def _ranked(self, lines):
+        """按「实测可播 > 标签健康 > 分数」排序（标签历史见 LabelHistory）。"""
         history = ({line["id"]: self.history.success_rate(line["id"]) for line in lines}
                    if self.history else None)
-        return rank_lines(lines, history)
+        return rank_lines(lines, history, label_history=self.label_history)
 
     def _cache_put(self, key, lines, persist=False):
         if not key or not lines:
@@ -1382,8 +1406,78 @@ def availability_rank(line):
     return 1 if alive is None else 0
 
 
-def rank_lines(lines, history=None):
+class LabelHistory:
+    """按线路标签（``好好看·HN线路`` 这类）记最近 20 次尝试的成功率。
+
+    背景（2026-10-14）：好好看的线路名 ``HN线路 / FF线路 / 蓝光1 / 超清2`` 在**搜索响应里
+    就有**，不用抓播放页就能知道；实测 HN线路 → `hn.bfvvs.com` 可播、FF线路 →
+    `vip.ffzy-play7.com` 不可播（非凡 CDN 境外）、超清2 → `64.112.77.72:21305` 不可播。
+
+    用标签历史可播率做**排序信号**：未探测的线路也能把大概率可播的排前面，还能少探几条
+    （省上游请求）。标签是统计信号不是保证，所以只作排序加分，`availability_rank` 的
+    「实测可播 > 未知 > 实测不可播」兜底不变。
+    """
+
+    def __init__(self, path=None):
+        self.path = Path(path) if path else None
+        self.data = {}
+        if self.path:
+            try:
+                value = json.loads(self.path.read_text(encoding="utf-8"))
+                self.data = value if isinstance(value, dict) else {}
+            except (OSError, ValueError):
+                self.data = {}
+
+    def attempts(self, label):
+        return list(self.data.get(str(label)) or [])[-20:]
+
+    def rate(self, label):
+        """没有历史返回 ``None``（= 未知，不掺信号），有历史返回 0~1。"""
+        values = self.attempts(label)
+        return sum(bool(value) for value in values) / len(values) if values else None
+
+    def record(self, label, ok):
+        if not str(label or "").strip():
+            return
+        key = str(label)
+        self.data[key] = (self.attempts(key) + [bool(ok)])[-20:]
+        self.flush()
+
+    def flush(self):
+        if not self.path:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self.data, fh, ensure_ascii=False, separators=(",", ":"))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, self.path)
+
+
+def label_rank(line):
+    """标签历史在排序里的位置：好标签 2 > 未知 1 > 差标签 0。
+
+    已探测的线路（alive 非 None）统一返回 1——它们的位置由 ``availability_rank``
+    和 ``score`` 决定，不再掺标签信号，避免打乱既有排序契约。
+    """
+    if (line or {}).get("alive") is not None:
+        return 1
+    rate = (line or {}).get("label_rate")
+    if rate is None:
+        return 1
+    return 2 if float(rate) >= 0.5 else 0
+
+
+def rank_lines(lines, history=None, label_history=None):
     history = history or {}
+    label_rates = {}
+    if label_history:
+        for raw in lines:
+            if isinstance(raw, dict):
+                name = str(raw.get("name") or "")
+                if name and name not in label_rates:
+                    label_rates[name] = label_history.rate(name)
     ranked = []
     for raw in lines:
         line = copy.deepcopy(raw)
@@ -1391,12 +1485,16 @@ def rank_lines(lines, history=None):
         reliability = history.get(str(line.get("id")), line.get("success_rate", 0.5))
         reliability = max(0.0, min(1.0, float(reliability)))
         line["available"] = alive
+        name = str(line.get("name") or "")
+        if name and name in label_rates and label_rates[name] is not None:
+            line["label_rate"] = round(float(label_rates[name]), 4)
         line["score"] = round(
             0.50 * quality_score(line.get("height")) +
             0.30 * latency_score(line.get("latency_ms")) +
             0.20 * (reliability * 100), 2)
         ranked.append(line)
-    ranked.sort(key=lambda item: (availability_rank(item), item["score"]), reverse=True)
+    ranked.sort(key=lambda item: (availability_rank(item), label_rank(item), item["score"]),
+                reverse=True)
     return ranked
 
 

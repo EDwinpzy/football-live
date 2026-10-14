@@ -216,6 +216,16 @@ class VodService:
         subject["source_state"] = "ready" if sources else "unavailable"
         return subject
 
+    def _record_label_outcome(self, douban_id, line_id, ok):
+        """播放成功/失败也喂标签历史（探测只覆盖前几条，播放是全量线路的判决来源）。"""
+        label_history = getattr(self.registry, "label_history", None)
+        if label_history is None:
+            return
+        line = (self._resolved_lines.get(str(douban_id)) or {}).get(str(line_id)) or {}
+        name = str(line.get("name") or "")
+        if name:
+            label_history.record(name, bool(ok))
+
     def play(self, douban_id, line_id, episode):
         try:
             if self._resolve_play:
@@ -226,13 +236,16 @@ class VodService:
         except Exception:
             if self.registry.history:
                 self.registry.history.record(line_id, False)
+            self._record_label_outcome(douban_id, line_id, False)
             raise
         if not result:
             if self.registry.history:
                 self.registry.history.record(line_id, False)
+            self._record_label_outcome(douban_id, line_id, False)
             raise LookupError("播放线路不可用")
         if self.registry.history:
             self.registry.history.record(line_id, True)
+        self._record_label_outcome(douban_id, line_id, True)
         return result
 
     def resolve(self, mytv_id, episode=1):
