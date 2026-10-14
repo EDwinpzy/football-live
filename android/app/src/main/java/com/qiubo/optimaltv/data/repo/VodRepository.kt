@@ -24,6 +24,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -1656,14 +1658,23 @@ class VodRepository(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (unavailable: SelectedSourceRefreshException) {
+                currentCoroutineContext().ensureActive()
                 throw unavailable
             } catch (stale: VodPlayReferenceUnavailableException) {
+                // 取消优先：换源/换集/退出播放器都会取消上一轮解析。runInterruptible 会把
+                // 阻塞中的 OkHttp 读打断，抛出来的却是 InterruptedIOException（不是
+                // CancellationException）；在「已取消的协程」里抛非取消异常不会有人接，
+                // 直接冒到线程未捕获处理器 → 闪退（2026-10-14 实机复现：
+                // FATAL EXCEPTION: main / SelectedSourceRefreshException: 无法刷新所选信号源，
+                // cause = java.io.InterruptedIOException: interrupted）。
+                currentCoroutineContext().ensureActive()
                 if (usedRefreshedReference) {
                     throw SelectedSourceRefreshException("刷新后所选信号源仍不可用", stale)
                 }
                 android.util.Log.w("OTV", "play reference unavailable ref=${line.playRef}")
                 ""
             } catch (failure: Exception) {
+                currentCoroutineContext().ensureActive()
                 if (usedRefreshedReference) {
                     throw SelectedSourceRefreshException("无法刷新所选信号源", failure)
                 }
