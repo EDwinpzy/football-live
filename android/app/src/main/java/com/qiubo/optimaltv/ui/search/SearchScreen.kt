@@ -28,7 +28,6 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -393,23 +392,20 @@ fun SearchScreen(nav: NavController) {
     }
 
     // 键盘焦点守卫：候选/结果变化引发的重组会把焦点从软键盘/候选词上清掉（LOST 后无落点）。
-    // 守卫只认「真丢失」：左栏节点 GAIN 即清除标记；LOST 后 600ms 内 query|remote 再变化
+    // 守卫只认「真丢失」：输入、分类或结果节点 GAIN 即清除标记；LOST 后 600ms 内 query|remote 再变化
     // 且仍无 GAIN，才把焦点拉回【最后失焦的那个键】（不是固定 'a'，否则连打会错位）。
-    var keyFocusLostAt by remember { mutableLongStateOf(0L) }
-    var lastLostKeyFr by remember { mutableStateOf<androidx.compose.ui.focus.FocusRequester?>(null) }
+    val inputFocusRecovery = remember { SearchInputFocusRecovery<FocusRequester>() }
     val noteKeyLost: (androidx.compose.ui.focus.FocusRequester?) -> Unit = { fr ->
-        keyFocusLostAt = android.os.SystemClock.uptimeMillis(); lastLostKeyFr = fr
+        inputFocusRecovery.onInputLost(android.os.SystemClock.uptimeMillis(), fr ?: keyboardFocus)
     }
-    val noteKeyGained = { keyFocusLostAt = 0L; lastLostKeyFr = null }
+    // 分类/结果接管焦点也结束输入恢复，避免远程结果更新把光标抢回。
+    val noteKeyGained = { inputFocusRecovery.onFocusGained() }
     LaunchedEffect(query, remote) {
         if (query.isEmpty()) return@LaunchedEffect
         kotlinx.coroutines.delay(150)
-        if (keyFocusLostAt > 0 && android.os.SystemClock.uptimeMillis() - keyFocusLostAt < 600) {
+        inputFocusRecovery.takeRestoreTarget(android.os.SystemClock.uptimeMillis())?.let { fr ->
             android.util.Log.d("OptimalTV", "search: keyboard focus dropped on update — restore")
-            keyFocusLostAt = 0
-            val fr = lastLostKeyFr
-            lastLostKeyFr = null
-            runCatching { (fr ?: keyboardFocus).requestFocus() }
+            runCatching { fr.requestFocus() }
         }
     }
 
@@ -718,7 +714,10 @@ fun SearchScreen(nav: NavController) {
                                 .dpadFocusable(
                                     scaleFocused = 1.05f, focusedBg = OtvColors.White,
                                     focusedBgRadius = 26f.sx(s),
-                                    onFocusedChange = { tabFocused = it },
+                                    onFocusedChange = {
+                                        tabFocused = it
+                                        if (it) noteKeyGained()
+                                    },
                                     autoSelect = true,
                                 ) { selectedCat = catName }
                                 .background(
@@ -804,6 +803,7 @@ fun SearchScreen(nav: NavController) {
                                     externalFocus = if (i == 0) firstResultFocus else null,
                                     onResultFocusChanged = { focused ->
                                         if (focused) {
+                                            noteKeyGained()
                                             focusedResultId = shown[i].id
                                             if (BuildConfig.DEBUG) {
                                                 android.util.Log.d(
