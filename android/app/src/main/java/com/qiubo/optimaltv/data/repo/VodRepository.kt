@@ -1255,14 +1255,18 @@ class VodRepository(
     /** 已为播放会话拉取过完整补充源的好好看 vid。 */
     private val playbackDetailReady = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-    private suspend fun fetchDetailCached(ref: String, forceRefresh: Boolean = false): DetailInfo? {
+    private suspend fun fetchDetailCached(
+        ref: String,
+        forceRefresh: Boolean = false,
+        refreshSources: Boolean = forceRefresh,
+    ): DetailInfo? {
         val cached = detailInfoCache[ref]
         if (!forceRefresh && cached != null) return cached
         val generation = detailRequestGenerations.computeIfAbsent(ref) { java.util.concurrent.atomic.AtomicLong() }
             .incrementAndGet()
         val d = try {
             VodApiSource.fetchDetail(
-                settings.current().hhkanBaseUrl, detailClient, ref, refresh = forceRefresh)
+                settings.current().hhkanBaseUrl, detailClient, ref, refresh = refreshSources)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
@@ -1288,6 +1292,31 @@ class VodRepository(
         }.takeIf { it.isNotEmpty() }
     }
 
+    /**
+     * Select the longest current episode list across all returned sources. The player filters
+     * playback lines again for the chosen episode, so a new episode can appear as soon as any
+     * source has it, even when the currently selected source is still one episode behind.
+     */
+    fun episodesForSelection(item: VodItem, preferredLine: LineInfo?): List<Episode>? {
+        if (item.detailRef.isBlank()) return null
+        val details = detailInfoCache[item.detailRef] ?: return null
+        val candidates = details.lines.filter { it.episodes.isNotEmpty() }
+        val longestSize = candidates.maxOfOrNull { it.episodes.size } ?: return null
+        val sourceId = preferredLine?.playRef?.split('|')?.getOrNull(1)?.takeIf(String::isNotBlank)
+        val preferredLabel = preferredLine?.label
+        val preferred = if (sourceId == null) null else {
+            candidates.firstOrNull { candidate ->
+                candidate.name == preferredLabel && candidate.episodes.any { it.second == sourceId }
+            } ?: candidates.firstOrNull { candidate -> candidate.episodes.any { it.second == sourceId } }
+        }
+        val source = preferred?.takeIf { it.episodes.size == longestSize }
+            ?: candidates.firstOrNull { it.episodes.size == longestSize }
+            ?: return null
+        return source.episodes.mapIndexed { index, (name, _, _) ->
+            Episode(index, name.ifBlank { "第${index + 1}集" }, "")
+        }
+    }
+
     /** Stable identity used to decide whether a refreshed episode list belongs to the same source. */
     fun episodeSourceIdentity(line: LineInfo?): String? {
         if (line == null || line.playRef.isBlank()) return null
@@ -1303,7 +1332,11 @@ class VodRepository(
     }
 
     /** 解析详情：拉选集（默认线路）+ 元数据补全；非懒源原样返回 */
-    suspend fun resolveDetail(vodId: String, forceRefresh: Boolean = false): VodItem? = withContext(Dispatchers.IO) {
+    suspend fun resolveDetail(
+        vodId: String,
+        forceRefresh: Boolean = false,
+        refreshSources: Boolean = forceRefresh,
+    ): VodItem? = withContext(Dispatchers.IO) {
         val cached = detailCache[vodId]
         if (!forceRefresh && cached != null) return@withContext cached
         // 目录外条目兜底（实时搜索结果等）：hhkan: 前缀直接构造裸 item 走懒解析
@@ -1325,7 +1358,7 @@ class VodRepository(
                 else -> return@withContext null
             }
         if (item.detailRef.isBlank()) return@withContext item
-        val d = fetchDetailCached(item.detailRef, forceRefresh) ?: return@withContext (cached ?: item)
+        val d = fetchDetailCached(item.detailRef, forceRefresh, refreshSources) ?: return@withContext (cached ?: item)
         // 集数网格展示默认线路（第一条）的选集；全部线路在播放器内换线
         val eps = d.lines.firstOrNull()?.episodes?.mapIndexed { i, (name, _, _) ->
             Episode(i, name.ifBlank { "第${i + 1}集" }, "")

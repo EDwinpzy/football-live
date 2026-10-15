@@ -206,6 +206,8 @@ class PlayerViewModel(
         /** 连续 6 个采样（60s）稳定出画才算「这条线真的活了」——见 onSessionStarted 说明。 */
         const val HEALTH_HEALTHY_TICKS = 6
         val SPEED_STEPS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f)
+        /** 快速详情先返回后，读取三次已完成的后端线路缓存，最多再等约 9 秒。 */
+        private val EPISODE_CACHE_READ_DELAYS_MS = listOf(1_200L, 2_500L, 5_000L)
     }
 
     private val _ui = MutableStateFlow(PlayerStartupStatePolicy.initial(vodId, epStart))
@@ -2258,6 +2260,7 @@ class PlayerViewModel(
     }
 
     fun toggleControls() {
+        if (_ui.value.panel == Panel.MORE) invalidateEpisodeRefresh()
         _ui.value = _ui.value.copy(controlsVisible = !_ui.value.controlsVisible, panel = Panel.NONE)
         touch()
     }
@@ -2265,6 +2268,7 @@ class PlayerViewModel(
     /** 显示控制条（需求 影视#8：隐藏态左右快进自动弹出菜单栏） */
     fun showControls() {
         if (!_ui.value.controlsVisible) {
+            if (_ui.value.panel == Panel.MORE) invalidateEpisodeRefresh()
             _ui.value = _ui.value.copy(controlsVisible = true, panel = Panel.NONE)
         }
         touch()
@@ -2277,6 +2281,7 @@ class PlayerViewModel(
     fun setPanel(p: Panel) {
         val previous = _ui.value
         _ui.value = previous.copy(panel = p)
+        if (previous.panel == Panel.MORE && p != Panel.MORE) invalidateEpisodeRefresh()
         if (p == Panel.MORE && previous.panel != Panel.MORE && !previous.isLive) refreshEpisodesForPanel()
         touch()
     }
@@ -2287,7 +2292,10 @@ class PlayerViewModel(
         episodeRefreshJob = null
     }
 
-    /** 每次打开选集都强制回源；只更新当前线路的选集信息，不动播放和线路焦点。 */
+    /**
+     * 打开选集时强制查一次上游；若后端为快速起播先返回部分线路，面板保持打开期间再读
+     * 三次后端已完成缓存。后续读取不再要求上游刷新，避免重复启动整轮源站搜索。
+     */
     private fun refreshEpisodesForPanel() {
         if (_ui.value.isLive) return
         val item = currentItem ?: return
@@ -2313,43 +2321,74 @@ class PlayerViewModel(
                 } catch (_: Exception) {
                     null
                 } ?: return@launch
-                val latest = _ui.value
-                val latestItem = currentItem ?: return@launch
-                val latestLine = latest.lines.getOrNull(latest.activeLine)
-                val latestSourceIdentity = repo.episodeSourceIdentity(latestLine)
-                if (!EpisodeRefreshPolicy.isCurrentRequest(
-                        request = ticket,
-                        latestRequestId = episodeRefreshRequestId,
-                        vodId = latestItem.id,
-                        detailRef = latestItem.detailRef,
-                        playbackGeneration = sessionGen,
-                        episodeIndex = latest.epIndex,
-                        activeLine = latest.activeLine,
-                        sourceIdentity = latestSourceIdentity,
-                    )) return@launch
-                val incomingEpisodes = repo.episodesForLine(fresh, latestLine)
-                    ?: if (latestLine?.playRef.isNullOrBlank()) fresh.episodes else null
-                if (incomingEpisodes.isNullOrEmpty()) return@launch
-                val incomingIdentity = latestSourceIdentity ?: repo.defaultEpisodeSourceIdentity(fresh)
-                val currentNames = latest.epNames.ifEmpty { latestItem.episodes.map { it.name } }
-                if (!EpisodeRefreshPolicy.accepts(
-                        currentNames = currentNames,
-                        incomingNames = incomingEpisodes.map { it.name },
-                        currentLines = latest.lines.size,
-                        incomingLines = latest.lines.size,
-                        keepIndex = latest.epIndex,
-                        sameEpisodeSource = episodeNamesSourceIdentity == incomingIdentity,
-                    )) return@launch
-                currentItem = fresh.copy(episodes = incomingEpisodes)
-                episodeNamesSourceIdentity = incomingIdentity
-                _ui.value = latest.copy(
-                    epCount = incomingEpisodes.size,
-                    epNames = incomingEpisodes.map { it.name },
-                )
+                if (!applyEpisodeRefresh(ticket, fresh)) return@launch
+                for (waitMs in EPISODE_CACHE_READ_DELAYS_MS) {
+                    delay(waitMs)
+                    if (_ui.value.panel != Panel.MORE || !isCurrentEpisodeRefresh(ticket)) return@launch
+                    val completed = try {
+                        // Bypass this app's in-memory detail cache, but read the backend's
+                        // latest resolver cache without invalidating or restarting source searches.
+                        repo.resolveDetail(ticket.vodId, forceRefresh = true, refreshSources = false)
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        null
+                    } ?: continue
+                    if (_ui.value.panel != Panel.MORE || !isCurrentEpisodeRefresh(ticket)) return@launch
+                    applyEpisodeRefresh(ticket, completed)
+                }
             } finally {
                 if (ticket.requestId == episodeRefreshRequestId) episodeRefreshJob = null
             }
         }
+    }
+
+    private fun isCurrentEpisodeRefresh(ticket: EpisodeRefreshTicket): Boolean {
+        val latest = _ui.value
+        val latestItem = currentItem ?: return false
+        val latestLine = latest.lines.getOrNull(latest.activeLine)
+        return EpisodeRefreshPolicy.isCurrentRequest(
+            request = ticket,
+            latestRequestId = episodeRefreshRequestId,
+            vodId = latestItem.id,
+            detailRef = latestItem.detailRef,
+            playbackGeneration = sessionGen,
+            episodeIndex = latest.epIndex,
+            activeLine = latest.activeLine,
+            sourceIdentity = repo.episodeSourceIdentity(latestLine),
+        )
+    }
+
+    private fun applyEpisodeRefresh(
+        ticket: EpisodeRefreshTicket,
+        fresh: com.qiubo.optimaltv.data.model.VodItem,
+    ): Boolean {
+        if (!isCurrentEpisodeRefresh(ticket)) return false
+        val latest = _ui.value
+        val latestItem = currentItem ?: return false
+        val latestLine = latest.lines.getOrNull(latest.activeLine)
+        val latestSourceIdentity = repo.episodeSourceIdentity(latestLine)
+        val incomingEpisodes = repo.episodesForSelection(fresh, latestLine)
+            ?: if (latestLine?.playRef.isNullOrBlank()) fresh.episodes else null
+        if (incomingEpisodes.isNullOrEmpty()) return false
+        val incomingIdentity = latestSourceIdentity ?: repo.defaultEpisodeSourceIdentity(fresh)
+        val currentNames = latest.epNames.ifEmpty { latestItem.episodes.map { it.name } }
+        if (EpisodeRefreshPolicy.accepts(
+                currentNames = currentNames,
+                incomingNames = incomingEpisodes.map { it.name },
+                currentLines = latest.lines.size,
+                incomingLines = latest.lines.size,
+                keepIndex = latest.epIndex,
+                sameEpisodeSource = episodeNamesSourceIdentity == incomingIdentity,
+            )) {
+            currentItem = fresh.copy(episodes = incomingEpisodes)
+            episodeNamesSourceIdentity = incomingIdentity
+            _ui.value = latest.copy(
+                epCount = incomingEpisodes.size,
+                epNames = incomingEpisodes.map { it.name },
+            )
+        }
+        return true
     }
 
     /**

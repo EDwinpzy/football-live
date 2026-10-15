@@ -19,6 +19,11 @@ class EpisodeRefreshPolicyTest {
     }
 
     @Test
+    fun acceptsTheSixteenthEpisodeWhileKeepingTheCurrentSelection() {
+        assertTrue(episodes(current = 15, incoming = 16, keepIndex = 14))
+    }
+
+    @Test
     fun acceptsNewLineEvenWhenEpisodeCountIsUnchanged() {
         assertTrue(episodes(current = 12, incoming = 12, currentLines = 1, incomingLines = 2))
     }
