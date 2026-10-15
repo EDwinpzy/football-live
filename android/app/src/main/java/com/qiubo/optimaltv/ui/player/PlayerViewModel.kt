@@ -1250,7 +1250,7 @@ class PlayerViewModel(
                                 detail = "first frame ${elapsed}ms → line $next",
                             )
                             markAutoSwitch(next)
-                            viewModelScope.launch { startSession(next, 0L) }
+                            viewModelScope.launch { startSession(next, s.positionMs) }
                         }
                     }
                     FirstFrameRecoveryPolicy.Action.HARD_TIMEOUT -> {
@@ -1272,7 +1272,7 @@ class PlayerViewModel(
                                     detail = "first frame hard timeout ${elapsed}ms → line $next",
                                 )
                                 markAutoSwitch(next!!)
-                                viewModelScope.launch { startSession(next, 0L) }
+                                viewModelScope.launch { startSession(next, s.positionMs) }
                             }
                             FirstFrameRecoveryPolicy.HardTimeoutAction.ENGINE_FALLBACK -> {
                                 vlcFallbackTried = true
@@ -1312,10 +1312,8 @@ class PlayerViewModel(
         val s = _ui.value
         val cur = s.activeLine
         val now = android.os.SystemClock.elapsedRealtime()
-        val candidates = s.lines.indices.filter { it != cur }
-        // 先选没试过的，再退而求其次选试过的（但仍要过冷却）。
-        return candidates.firstOrNull { it !in triedLines && canAutoSwitchTo(it, now) }
-            ?: candidates.firstOrNull { canAutoSwitchTo(it, now) }
+        // Reusing exhausted sources made unavailable providers bounce forever and reset watchdogs.
+        return VodSourceAttemptPolicy.next(s.lines.size, cur, triedLines) { canAutoSwitchTo(it, now) }
     }
 
     /** 自动切线是否允许（切线冷却未挡住刚失败的那条线）。用户手动切线不受此限。 */

@@ -4,6 +4,12 @@ import com.qiubo.optimaltv.data.model.LineInfo
 
 object PlaybackPolicy { const val SEEK_STEP_MS = 10_000L }
 
+/** A failed startup visits each source once; only an explicit retry starts a new round. */
+object VodSourceAttemptPolicy {
+    fun next(lineCount: Int, activeLine: Int, tried: Set<Int>, allowed: (Int) -> Boolean): Int? =
+        (0 until lineCount).firstOrNull { it != activeLine && it !in tried && allowed(it) }
+}
+
 /** Decide whether a completed item should continue with the next VOD episode. */
 object AutoPlayPolicy {
     fun nextEpisodeIndex(isLive: Boolean, isMovie: Boolean, currentIndex: Int, episodeCount: Int): Int? =

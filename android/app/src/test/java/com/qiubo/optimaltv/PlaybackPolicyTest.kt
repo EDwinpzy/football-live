@@ -5,12 +5,37 @@ import com.qiubo.optimaltv.ui.player.EpisodeMenuPolicy
 import com.qiubo.optimaltv.ui.player.AutoPlayPolicy
 import com.qiubo.optimaltv.ui.player.PlaybackPolicy
 import com.qiubo.optimaltv.ui.player.VisibleVodLinePolicy
+import com.qiubo.optimaltv.ui.player.VodSourceAttemptPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlaybackPolicyTest {
+    @Test fun unavailableSourcesStopAfterOneRoundAndCanBeRetriedExplicitly() {
+        val tried = mutableSetOf(0)
+        var active = 0
+        val visited = mutableListOf(active)
+        repeat(17) {
+            val next = VodSourceAttemptPolicy.next(17, active, tried) { true }
+            if (next != null) {
+                active = next
+                tried += next
+                visited += next
+            }
+        }
+        assertEquals((0 until 17).toList(), visited)
+        assertEquals(null, VodSourceAttemptPolicy.next(17, active, tried) { true })
+        tried.clear()
+        assertEquals(0, VodSourceAttemptPolicy.next(17, active, tried) { true })
+    }
+
+    @Test fun blockedOrCurrentSourceIsNotAnAutomaticFallback() {
+        assertEquals(null, VodSourceAttemptPolicy.next(1, 0, setOf(0)) { true })
+        assertEquals(2, VodSourceAttemptPolicy.next(3, 0, setOf(0)) { it != 1 })
+        assertEquals(null, VodSourceAttemptPolicy.next(3, 0, setOf(0, 2)) { it != 1 })
+    }
+
     @Test fun episodeMenuUsesTwentyBoundaryAndTenEpisodeRanges() {
         assertFalse(EpisodeMenuPolicy.hasRanges(19))
         assertTrue(EpisodeMenuPolicy.hasRanges(20))
