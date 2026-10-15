@@ -70,5 +70,6 @@ class PlayerEpisodeWidthTest {
     }
 
     @Test fun elevenEpisodesKeepFiveColumnWidths() = verify(11)
+    @Test fun sixteenEpisodesAreVisibleAndSelectable() = verify(16)
     @Test fun nineteenEpisodesKeepFiveColumnWidths() = verify(19)
 }
