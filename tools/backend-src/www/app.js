@@ -138,10 +138,10 @@ function relay(u, ref) {
    所以 https 直链优先浏览器直连，直连失败再立刻回中继（同一线路只多试一次）；
    http 直链保持中继——https 页面拉 http 分片会被浏览器按混合内容拦掉。 */
 function vodDirectOk(u) { return /^https:\/\//i.test(String(u || "")); }
-function vodAttach(raw, resume) {
+function vodAttach(raw, resume, options) {
   if (!raw) return;
   const direct = vodDirectOk(raw);
-  attachPlayer(direct ? raw : relay(raw, "none"), resume, { raw, direct });
+  attachPlayer(direct ? raw : relay(raw, "none"), resume, { raw, direct, ...(options || {}) });
 }
 
 /* 影视页顶部 hero 是全宽铺图：豆瓣列表接口只给 ~240 宽的 s_ratio_poster，拉到 1920
@@ -3370,18 +3370,37 @@ function renderTvSidebar() {
  * ================================================================ */
 const MAX_RECOVERY_ATTEMPTS = 4;
 const pv = { hls: null, video: null, ctx: null, sources: [], srcIds: [], srcNames: [], sourceRefs: [], hideTimer: 0, progTimer: 0,
-  stallTimer: 0, speedIdx: 2, pausedAt: -1, controls: false, picker: false,
+  stallTimer: 0, seekGraceUntil: 0, speedIdx: 2, pausedAt: -1, controls: false, picker: false,
   recoveryGen: 0, recoveryAttempts: 0, recovering: false, loadGen: 0, playerSession: 0,
   playController: null, detailController: null, detailRequest: null,
   vodSources: [], vodLineIdx: 0, vodProvider: "", vodSourceStatus: "idle", vodSourceMessage: "", panelOpen: false,
   loadPending: false };
 /* PlayerViewModel.SPEED_STEPS */
 const SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
+const SEEK_STALL_GRACE_MS = 15000;
+function hasSeekableDuration(video) {
+  return !!video && Number.isFinite(video.duration) && video.duration > 0;
+}
+function clampPlayerSeek(video, target, minimum) {
+  const seconds = Number(target);
+  if (!hasSeekableDuration(video) || !Number.isFinite(seconds)) return null;
+  const max = Math.max(0, video.duration - 1);
+  const min = Math.max(0, Math.min(max, Number(minimum) || 0));
+  return Math.max(min, Math.min(max, seconds));
+}
+function seekPlayerTo(video, target, minimum) {
+  const seconds = clampPlayerSeek(video, target, minimum);
+  if (seconds == null) return false;
+  pv.seekGraceUntil = Date.now() + SEEK_STALL_GRACE_MS;
+  video.currentTime = seconds;
+  return true;
+}
 /* AspectMode：原始 / 裁切填充 / 16:9 / 4:3 */
 const ASPECTS = ["原始", "裁切填充", "16:9", "4:3"];
 
 function openPlayer(ctx) {
   if (pv.ctx && pv.ctx.kind === "vod") stopVodMediaPipeline();
+  pv.seekGraceUntil = 0;
   pv.playController?.abort(); pv.playController = null;
   pv.detailController?.abort(); pv.detailController = null; pv.detailRequest = null;
   pv.playerSession++;
@@ -3882,7 +3901,7 @@ function attachPlayer(url, resume, opts) {
       if (!d.fatal || gen !== pv.recoveryGen) return;
       /* 直连失败（CDN 要 Referer / 不给 CORS）→ 同一线路先回中继，别浪费一次恢复额度 */
       if (opt.direct && opt.raw) {
-        attachPlayer(relay(opt.raw, "none"), resume, { raw: opt.raw });
+        attachPlayer(relay(opt.raw, "none"), resume, { ...opt, direct: false });
         return;
       }
       recoverPlayback(`HLS ${d.type || "error"}/${d.details || "unknown"}`, gen);
@@ -3891,15 +3910,17 @@ function attachPlayer(url, resume, opts) {
     v.src = url;
     v.onerror = () => {
       if (gen !== pv.recoveryGen) return;
-      if (opt.direct && opt.raw) { attachPlayer(relay(opt.raw, "none"), resume, { raw: opt.raw }); return; }
+      if (opt.direct && opt.raw) { attachPlayer(relay(opt.raw, "none"), resume, { ...opt, direct: false }); return; }
       recoverPlayback("原生播放器错误", gen);
     };
   }
   v.onloadedmetadata = () => {
     if (gen !== pv.recoveryGen) return;
     $("#bufSpin").hidden = true;
-    if (resume > 0 && ctx.kind === "vod" && (!v.duration || resume < v.duration - 30)) {
-      v.currentTime = resume; hint("已从 " + fmtTime(resume) + " 继续播放");
+    if (resume > 0 && ctx.kind === "vod" && (!hasSeekableDuration(v)
+        || opt.restoreNearEnd || resume < v.duration - 30)) {
+      if (!seekPlayerTo(v, resume)) v.currentTime = resume;
+      hint("已从 " + fmtTime(resume) + " 继续播放");
     }
   };
   v.onplaying = () => {
@@ -3928,6 +3949,11 @@ function attachPlayer(url, resume, opts) {
   let lastPos = -1, stuckTicks = 0;
   pv.stallTimer = setInterval(() => {
     if (gen !== pv.recoveryGen || !pv.ctx || v.paused || v.ended) return;
+    if (pv.seeking || v.seeking || (pv.seekGraceUntil > 0 && Date.now() <= pv.seekGraceUntil)) {
+      stuckTicks = 0;
+      lastPos = v.currentTime;
+      return;
+    }
     const buffering = v.readyState < 3;
     /* readyState<3 = 正在缓冲；这只在起播/续播窗口内才上报，避免长视频常态抖动刷屏。 */
     if (metrics.marks.click != null) metricBuffer(buffering);
@@ -3980,7 +4006,7 @@ async function recoverPlayback(reason, expectedGen) {
       pv.srcIdx = (pv.srcIdx + 1) % pv.sources.length;
     }
     pv.recovering = false;
-    vodAttach(pv.sources[pv.srcIdx], resume);
+    vodAttach(pv.sources[pv.srcIdx], resume, { restoreNearEnd: true });
   } catch (e) {
     if (pv.ctx !== ctx || pv.recoveryGen !== recoveryGen) return;
     pv.recovering = false;
@@ -4297,7 +4323,7 @@ function setPlayerPositionText(seconds) {
   };
   const renderScrub = () => {
     scrubFrame = 0;
-    if (scrub == null || !pv.video) return;
+    if (scrub == null || !hasSeekableDuration(pv.video)) return;
     setPlayerProgress(scrub);
     setPlayerPositionText(scrub * pv.video.duration);
   };
@@ -4309,13 +4335,13 @@ function setPlayerPositionText(seconds) {
     scrubFrame = 0;
     scrub = null; trackRect = null; pv.seeking = false;
     rail.classList.remove("seeking");
-    if (pv.video && pv.video.duration) {
+    if (hasSeekableDuration(pv.video)) {
       setPlayerProgress(pv.video.currentTime / pv.video.duration);
       setPlayerPositionText(pv.video.currentTime);
     }
   };
   track.addEventListener("pointerdown", e => {
-    const v = pv.video; if (!v || !v.duration) return;
+    const v = pv.video; if (!hasSeekableDuration(v)) return;
     /* Map the actual visible rail endpoints to 0..100%; side padding only
        enlarges the hit target and naturally clamps to the nearest endpoint. */
     trackRect = rail.getBoundingClientRect();
@@ -4334,7 +4360,7 @@ function setPlayerPositionText(seconds) {
   track.addEventListener("pointerup", e => {
     if (scrub == null || !trackRect) return;
     const v = pv.video;
-    if (!v || !v.duration) { cancelScrub(); return; }
+    if (!hasSeekableDuration(v)) { cancelScrub(); return; }
     scrub = fracOf(e, trackRect);
     if (scrubFrame) cancelAnimationFrame(scrubFrame);
     scrubFrame = 0;
@@ -4342,7 +4368,7 @@ function setPlayerPositionText(seconds) {
     const targetTime = scrub * v.duration;
     scrub = null; trackRect = null; pv.seeking = false;
     rail.classList.remove("seeking");
-    v.currentTime = targetTime;
+    seekPlayerTo(v, targetTime);
     if (pv.ctx && pv.ctx.kind === "vod") showControls();
   });
   track.addEventListener("pointercancel", cancelScrub);
@@ -4534,7 +4560,7 @@ if ("mediaSession" in navigator) {
 }
 
 /* 手势层（App PlayerScreen：单击=浮层开关；双击左右 1/3=±15s、中央=播放暂停；
- * 横滑=±120s 快进预览；竖滑左半亮度/右半音量；直播仅单击+竖滑） */
+ * 横滑=±120s 快进预览；长按左/右三区渐进快退/快进、中央三区 3x；竖滑左半亮度/右半音量；直播仅单击+竖滑） */
 (function () {
   const layer = $("#video");
   let down = null, mode = null, seekStart = 0, seekCur = 0, vbKind = null, vbStart = 0.5, vbCur = 0.5;
@@ -4552,23 +4578,91 @@ if ("mediaSession" in navigator) {
   function flashInd(html) { showInd(html, true); clearTimeout(indTimer); indTimer = setTimeout(hideInd, 700); }
   function fmtT(s) { return fmtTime(s); }
   const seekInd = (fwd, sec) => (fwd ? TRI_F : TRI_B) + `<span class="gi-time">${fmtT(sec)}</span>`;
-  /* 长按倍速（2026-09-21）：按住画面左/右任一侧 ~0.45s → 3.0x 快进播放，松手回用户倍速。
-     只认触屏/手写笔（桌面鼠标按住不该改倍速）；直播不可变速（App PlaybackPolicy.LONG_PRESS_SPEED 同口径）。 */
-  const LP_SPEED = 3.0, LP_DELAY = 450;
-  let lpTimer = 0, lpActive = false;
+  /* 长按（2026-09-21）：左/右三分区指数加速快退/快进，中央三分区 3.0x；
+     只认触屏/手写笔（桌面鼠标按住不触发）；直播保持不可变速/快进。 */
+  const LP_SPEED = 3.0, LP_DELAY = 450, LP_SEEK_STEP_MS = 500;
+  const LP_SEEK_BASE_SECONDS = 10, LP_SEEK_MAX_EXPONENT = 6, LP_SEEK_REQUEST_INTERVAL_MS = 750;
+  let lpTimer = 0, lpSeekTimer = 0, lpSeekDispatchTimer = 0, lpActive = false, lpSeekActive = false;
+  let lpSeekDirection = 0, lpSeekSteps = 0, lpSeekAccumulated = 0, lpSeekBase = 0;
+  let lpSeekTarget = null, lpSeekFloor = 0, lpSeekLastDispatchAt = 0, lpSeekLastDispatchedTarget = null;
+  function lpDispatchSeekTarget() {
+    if (!lpSeekActive || lpSeekTarget == null || !hasSeekableDuration(pv.video)) return;
+    const video = pv.video;
+    const target = lpSeekTarget;
+    if (Math.abs(video.currentTime - target) < 0.01 && !video.seeking) {
+      lpSeekLastDispatchedTarget = target;
+      return;
+    }
+    if (seekPlayerTo(video, target, lpSeekFloor)) {
+      lpSeekLastDispatchAt = Date.now();
+      lpSeekLastDispatchedTarget = target;
+    }
+  }
+  function lpQueueSeekTarget(target) {
+    if (target === lpSeekTarget) return;
+    lpSeekTarget = target;
+    const wait = lpSeekLastDispatchAt
+      ? Math.max(0, LP_SEEK_REQUEST_INTERVAL_MS - (Date.now() - lpSeekLastDispatchAt)) : 0;
+    if (wait === 0) { lpDispatchSeekTarget(); return; }
+    if (!lpSeekDispatchTimer) {
+      lpSeekDispatchTimer = setTimeout(() => {
+        lpSeekDispatchTimer = 0;
+        lpDispatchSeekTarget();
+      }, wait);
+    }
+  }
+  function lpSeekStep() {
+    if (!lpSeekActive) return;
+    const video = pv.video;
+    if (!hasSeekableDuration(video)) { lpStop(); return; }
+    lpSeekSteps++;
+    const exponent = Math.min(lpSeekSteps - 1, LP_SEEK_MAX_EXPONENT);
+    const step = LP_SEEK_BASE_SECONDS * (2 ** exponent);
+    lpSeekAccumulated = Math.min(video.duration, lpSeekAccumulated + step);
+    const target = clampPlayerSeek(video, lpSeekBase + lpSeekDirection * lpSeekAccumulated, lpSeekFloor);
+    if (target == null) return;
+    showInd(seekInd(lpSeekDirection > 0, target), true);
+    lpQueueSeekTarget(target);
+  }
   function lpStart() {
     lpTimer = 0;
-    if (lpActive || !pv.video || !pv.ctx || pv.ctx.kind !== "vod") return;
+    if (lpActive || lpSeekActive || !pv.video || !pv.ctx || pv.ctx.kind !== "vod") return;
+    const third = innerWidth / 3;
+    if (down && (down.x < third || down.x > third * 2)) {
+      if (!hasSeekableDuration(pv.video)) return;
+      lpSeekDirection = down.x < third ? -1 : 1;
+      lpSeekBase = clampPlayerSeek(pv.video, pv.video.currentTime);
+      const max = Math.max(0, pv.video.duration - 1);
+      lpSeekFloor = lpSeekDirection < 0
+        ? (lpSeekBase >= 1 ? Math.min(1, max) : Math.min(lpSeekBase, max)) : 0;
+      lpSeekSteps = 0;
+      lpSeekAccumulated = 0;
+      lpSeekTarget = null;
+      lpSeekLastDispatchAt = 0;
+      lpSeekLastDispatchedTarget = null;
+      lpSeekActive = true;
+      lpSeekTimer = setInterval(lpSeekStep, LP_SEEK_STEP_MS);
+      lpSeekStep();
+      return;
+    }
     lpActive = true;
     pv.video.playbackRate = LP_SPEED;
     showInd(`<div class="gi-speed">${LP_SPEED.toFixed(1)}x</div><div class="gi-sub">倍速播放中</div>`, true);
   }
   function lpStop() {
     if (lpTimer) { clearTimeout(lpTimer); lpTimer = 0; }
-    if (!lpActive) return;
-    lpActive = false;
-    if (pv.video) pv.video.playbackRate = SPEEDS[pv.speedIdx];
-    hideInd();
+    if (lpSeekTimer) { clearInterval(lpSeekTimer); lpSeekTimer = 0; }
+    if (lpSeekDispatchTimer) { clearTimeout(lpSeekDispatchTimer); lpSeekDispatchTimer = 0; }
+    if (lpSeekActive) {
+      if (lpSeekTarget != null && lpSeekTarget !== lpSeekLastDispatchedTarget) lpDispatchSeekTarget();
+      lpSeekActive = false;
+      hideInd();
+    }
+    if (lpActive) {
+      lpActive = false;
+      if (pv.video) pv.video.playbackRate = SPEEDS[pv.speedIdx];
+      hideInd();
+    }
   }
   layer.addEventListener("pointerdown", e => {
     if (!pv.ctx || pv.ctx.kind !== "vod" && pv.ctx.kind !== "live") return;
@@ -4581,10 +4675,12 @@ if ("mediaSession" in navigator) {
     if (!down) return;
     const dx = e.clientX - down.x, dy = e.clientY - down.y;
     const v = pv.video;
+    if (lpActive || lpSeekActive) return;
     /* 长按中途滑动 = 用户要的是拖动，撤掉计时（已生效的长按保持到松手） */
     if (!lpActive && lpTimer && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) { clearTimeout(lpTimer); lpTimer = 0; }
     if (!mode) {
-      if (Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy) && pv.ctx.kind === "vod" && v && v.duration) {
+      if (Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy)
+          && pv.ctx.kind === "vod" && hasSeekableDuration(v)) {
         mode = "seek"; seekStart = v.currentTime; seekCur = seekStart;
       } else if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) {
         mode = "vb";
@@ -4593,8 +4689,8 @@ if ("mediaSession" in navigator) {
         vbCur = vbStart;
       }
     }
-    if (mode === "seek" && v && v.duration) {
-      seekCur = Math.max(0, Math.min(v.duration - 1, seekStart + dx / innerWidth * 120));
+    if (mode === "seek" && hasSeekableDuration(v)) {
+      seekCur = clampPlayerSeek(v, seekStart + dx / innerWidth * 120);
       showInd(seekInd(seekCur >= seekStart, seekCur), true);
     } else if (mode === "vb") {
       vbCur = Math.max(0.02, Math.min(1, vbStart - dy / innerHeight * 1.2));
@@ -4609,11 +4705,11 @@ if ("mediaSession" in navigator) {
   const end = e => {
     if (!down) return;
     const dx = e.clientX - down.x, dy = e.clientY - down.y;
-    /* 长按倍速已接管本次手势：还原倍速后直接收尾，不再落进单击/双击判定 */
-    const wasLongPress = lpActive;
+    /* 长按操作已接管本次手势：清理预览/还原倍速后直接收尾，不再落进单击/双击判定 */
+    const wasLongPress = lpActive || lpSeekActive;
     lpStop();
     if (wasLongPress) { down = null; mode = null; return; }
-    if (mode === "seek" && pv.video) { pv.video.currentTime = seekCur; hideInd(); }
+    if (mode === "seek" && pv.video) { seekPlayerTo(pv.video, seekCur); hideInd(); }
     else if (mode === "vb") hideInd();
     else if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
       /* 单击 / 双击判定 */
@@ -4625,11 +4721,11 @@ if ("mediaSession" in navigator) {
         if (pv.ctx && pv.ctx.kind === "vod") {
           const third = innerWidth / 3;
           if (e.clientX < third) {
-            pv.video.currentTime = Math.max(0, pv.video.currentTime - 10);
-            flashInd(seekInd(false, pv.video.currentTime));
+            if (seekPlayerTo(pv.video, pv.video.currentTime - 10))
+              flashInd(seekInd(false, pv.video.currentTime));
           } else if (e.clientX > third * 2) {
-            pv.video.currentTime = Math.min(pv.video.duration - 1, pv.video.currentTime + 10);
-            flashInd(seekInd(true, pv.video.currentTime));
+            if (seekPlayerTo(pv.video, pv.video.currentTime + 10))
+              flashInd(seekInd(true, pv.video.currentTime));
           } else { pv.video.paused ? pv.video.play().catch(() => {}) : pv.video.pause(); }
         }
       } else {

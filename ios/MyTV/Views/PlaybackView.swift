@@ -29,6 +29,7 @@ struct PlaybackView: View {
     @State private var relayFallbackAttempted = false
     @State private var playbackStartupDeadline: Date?
     @State private var hasPlaybackStarted = false
+    @State private var pendingPlaybackResume: PendingPlaybackResume?
 
     init(route: PlaybackRoute) {
         self.route = route
@@ -119,9 +120,15 @@ struct PlaybackView: View {
             tearDownPlayer()
         }
         .onReceive(playerStatusPublisher) { status in
-            guard status.status == .failed,
-                  status.item === player?.currentItem else { return }
-            recoverOrShowFailure(for: status.item)
+            guard status.item === player?.currentItem else { return }
+            switch status.status {
+            case .readyToPlay:
+                resumePendingPlayback(for: status.item)
+            case .failed:
+                recoverOrShowFailure(for: status.item)
+            default:
+                break
+            }
         }
         .onReceive(playerTimeControlPublisher) { status in
             guard status.player === player, status.status == .playing else { return }
@@ -291,21 +298,29 @@ struct PlaybackView: View {
 
     @MainActor
     private func installPlayer(url: URL, generation: Int, resumeTime: TimeInterval = 0) {
+        installPlayer(item: AVPlayerItem(url: url), generation: generation, resumeTime: resumeTime)
+    }
+
+    @MainActor
+    private func installPlayer(item: AVPlayerItem, generation: Int, resumeTime: TimeInterval = 0) {
         guard generation == requestGeneration else { return }
-        let item = AVPlayerItem(url: url)
         let newPlayer = AVPlayer(playerItem: item)
         newPlayer.automaticallyWaitsToMinimizeStalling = true
         player = newPlayer
         isLoading = false
         hasPlaybackStarted = false
         if resumeTime.isFinite, resumeTime > 0 {
-            newPlayer.seek(to: CMTime(seconds: resumeTime, preferredTimescale: 600)) { _ in
-                Task { @MainActor in
-                    guard generation == requestGeneration, player === newPlayer else { return }
-                    newPlayer.play()
-                }
+            pendingPlaybackResume = PendingPlaybackResume(
+                player: newPlayer,
+                item: item,
+                generation: generation,
+                position: resumeTime
+            )
+            if item.status == .readyToPlay {
+                resumePendingPlayback(for: item)
             }
         } else {
+            pendingPlaybackResume = nil
             newPlayer.play()
         }
         if route.detailRef != nil {
@@ -324,16 +339,50 @@ struct PlaybackView: View {
         if isDirectAttempt,
            !relayFallbackAttempted,
            let relayFallbackURL {
+            let capturedPlaybackTime = currentPlaybackTime
+            let replacementItem = AVPlayerItem(url: relayFallbackURL)
             relayFallbackAttempted = true
             isDirectAttempt = false
             self.relayFallbackURL = nil
             tearDownPlayer()
             isLoading = true
             errorMessage = nil
-            installPlayer(url: relayFallbackURL, generation: requestGeneration)
+            installPlayer(item: replacementItem, generation: requestGeneration, resumeTime: capturedPlaybackTime)
             return
         }
         presentPlaybackFailure()
+    }
+
+    @MainActor
+    private func resumePendingPlayback(for item: AVPlayerItem) {
+        guard let pending = pendingPlaybackResume,
+              pending.item === item,
+              pending.generation == requestGeneration,
+              pending.player === player,
+              item.status == .readyToPlay else { return }
+        pendingPlaybackResume = nil
+
+        let resumeTime = PlaybackRecoveryPosition.clamped(
+            pending.position,
+            toDuration: item.duration.seconds
+        )
+        guard resumeTime > 0 else {
+            pending.player.play()
+            return
+        }
+
+        pending.player.seek(
+            to: CMTime(seconds: resumeTime, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        ) { _ in
+            Task { @MainActor in
+                guard pending.generation == requestGeneration,
+                      pending.player === player,
+                      pending.player.currentItem === item else { return }
+                pending.player.play()
+            }
+        }
     }
 
     private var hasSourcePicker: Bool {
@@ -523,8 +572,11 @@ struct PlaybackView: View {
             }
             guard !Task.isCancelled,
                   generation == requestGeneration,
-                  item === player?.currentItem,
-                  player?.timeControlStatus == .waitingToPlayAtSpecifiedRate else { return }
+                  item === player?.currentItem else { return }
+            let isWaiting = player?.timeControlStatus == .waitingToPlayAtSpecifiedRate
+            let startupExpired = !hasPlaybackStarted &&
+                playbackStartupDeadline.map { Date() >= $0 } == true
+            guard isWaiting || startupExpired else { return }
             recoverOrShowFailure(for: item)
         }
     }
@@ -536,6 +588,7 @@ struct PlaybackView: View {
 
     @MainActor
     private func tearDownPlayer() {
+        pendingPlaybackResume = nil
         if let player {
             let seconds = player.currentTime().seconds
             if seconds.isFinite {
@@ -585,6 +638,22 @@ struct PlaybackView: View {
         stallCheckTask?.cancel()
         stallCheckTask = nil
         tearDownPlayer()
+    }
+}
+
+private struct PendingPlaybackResume {
+    let player: AVPlayer
+    let item: AVPlayerItem
+    let generation: Int
+    let position: TimeInterval
+}
+
+enum PlaybackRecoveryPosition {
+    static func clamped(_ position: TimeInterval, toDuration duration: TimeInterval) -> TimeInterval {
+        guard position.isFinite, position > 0 else { return 0 }
+        guard duration.isFinite, duration > 0 else { return position }
+        let endSafetyMargin = min(0.5, duration / 2)
+        return min(position, max(0, duration - endSafetyMargin))
     }
 }
 

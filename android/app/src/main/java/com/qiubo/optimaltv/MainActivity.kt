@@ -87,10 +87,12 @@ class MainActivity : ComponentActivity() {
         if (event.action == android.view.KeyEvent.ACTION_DOWN) {
             val dir = com.qiubo.optimaltv.ui.components.navDirOf(event.keyCode)
             if (dir != null) {
-                return com.qiubo.optimaltv.ui.components.OtvNav.dispatch(dir, event.repeatCount)
+                return com.qiubo.optimaltv.ui.components.OtvNav.dispatch(dir, event.repeatCount, event.downTime)
             }
         } else if (event.action == android.view.KeyEvent.ACTION_UP) {
-            if (com.qiubo.optimaltv.ui.components.navDirOf(event.keyCode) != null) {
+            val dir = com.qiubo.optimaltv.ui.components.navDirOf(event.keyCode)
+            if (dir != null) {
+                com.qiubo.optimaltv.ui.components.OtvNav.dispatchKeyUp(dir, event.downTime)
                 return true
             }
         }

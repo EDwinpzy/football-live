@@ -56,6 +56,36 @@ class PlaybackRecoveryCoordinationPolicyTest {
     }
 
     @Test
+    fun `seek hold and post-seek grace suppress stall recovery only`() {
+        assertFalse(
+            PlaybackRecoveryCoordinationPolicy.canStartRecovery(
+                startedThisSession = true,
+                awaitingPrepare = false,
+                sourceResolving = false,
+                recoveryInFlight = false,
+                seekInFlight = true,
+            ),
+        )
+        assertFalse(
+            PlaybackRecoveryCoordinationPolicy.canStartRecovery(
+                startedThisSession = true,
+                awaitingPrepare = false,
+                sourceResolving = false,
+                recoveryInFlight = false,
+                seekGraceActive = true,
+            ),
+        )
+        assertTrue(
+            PlaybackRecoveryCoordinationPolicy.canStartRecovery(
+                startedThisSession = true,
+                awaitingPrepare = false,
+                sourceResolving = false,
+                recoveryInFlight = false,
+            ),
+        )
+    }
+
+    @Test
     fun `live recovery never uses the VOD same session reload action`() {
         assertEquals(RecoveryAction.RELOAD_CURRENT, PlaybackRecoveryPolicy.action(PlaybackKind.VOD, 0))
         for (attempt in 0..5) {

@@ -233,6 +233,17 @@ final class CoreTests: XCTestCase {
         )
     }
 
+    func testPlaybackRecoveryResumePositionIsClampedOnlyByAValidNewDuration() {
+        XCTAssertEqual(PlaybackRecoveryPosition.clamped(42, toDuration: 90), 42)
+        XCTAssertEqual(PlaybackRecoveryPosition.clamped(120, toDuration: 90), 89.5)
+        XCTAssertEqual(PlaybackRecoveryPosition.clamped(90, toDuration: 90), 89.5)
+        XCTAssertEqual(PlaybackRecoveryPosition.clamped(0.2, toDuration: 0.4), 0.2)
+        XCTAssertEqual(PlaybackRecoveryPosition.clamped(42, toDuration: .infinity), 42)
+        XCTAssertEqual(PlaybackRecoveryPosition.clamped(42, toDuration: 0), 42)
+        XCTAssertEqual(PlaybackRecoveryPosition.clamped(-1, toDuration: 90), 0)
+        XCTAssertEqual(PlaybackRecoveryPosition.clamped(.nan, toDuration: 90), 0)
+    }
+
     func testRememberedVODSourcePersistsPerTitleAndMovesToTheFrontWhenAvailable() async throws {
         let suiteName = "MyTVTests.VODSourcePreference.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

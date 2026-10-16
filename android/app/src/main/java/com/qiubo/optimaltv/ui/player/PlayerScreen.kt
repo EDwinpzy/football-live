@@ -568,6 +568,28 @@ private fun VodPlayerOverlay(
         return false
     }
 
+    val seekRepeatOverride: (Int, Int, Long) -> Boolean = { dir, repeatCount, eventTimeMs ->
+        when (dir) {
+            com.qiubo.optimaltv.ui.components.NAV_LEFT,
+            com.qiubo.optimaltv.ui.components.NAV_RIGHT -> {
+                vm.seekBy(
+                    if (dir == com.qiubo.optimaltv.ui.components.NAV_LEFT) -PlaybackPolicy.SEEK_STEP_MS
+                    else PlaybackPolicy.SEEK_STEP_MS,
+                    repeatCount = repeatCount,
+                    eventTimeMs = eventTimeMs,
+                )
+                onTick()
+                true
+            }
+            else -> false
+        }
+    }
+    val seekReleaseOverride: (Int) -> Unit = { dir ->
+        if (dir == com.qiubo.optimaltv.ui.components.NAV_LEFT ||
+            dir == com.qiubo.optimaltv.ui.components.NAV_RIGHT
+        ) vm.finishSeekInput()
+    }
+
     Box(Modifier.fillMaxSize()) {
         // 隐形键宿：菜单隐藏时持有焦点，保证 OK/左右/数字响应
         Box(
@@ -578,6 +600,8 @@ private fun VodPlayerOverlay(
                     override = { dir ->
                         if (ui.controlsVisible || ui.panel != Panel.NONE) false else consumeDirKey(dir)
                     },
+                    repeatOverride = seekRepeatOverride,
+                    releaseOverride = seekReleaseOverride,
                 )
                 .onPreviewKeyEvent { e ->
                     if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
@@ -659,6 +683,8 @@ private fun VodPlayerOverlay(
                             size = 30.dp,
                             focusRequester = centerPlayFocus,
                             navGroup = CTL_NAV_GROUP,
+                            repeatOverride = seekRepeatOverride,
+                            releaseOverride = seekReleaseOverride,
                             navOverride = { dir ->
                                 when (dir) {
                                     com.qiubo.optimaltv.ui.components.NAV_LEFT -> { vm.seekBy(-PlaybackPolicy.SEEK_STEP_MS); onTick(); true }
@@ -689,6 +715,8 @@ private fun VodPlayerOverlay(
                                     drawRing = false,
                                     onFocusedChange = { scrubFocused = it },
                                     navGroup = CTL_NAV_GROUP,
+                                    repeatOverride = seekRepeatOverride,
+                                    releaseOverride = seekReleaseOverride,
                                     navOverride = { dir ->
                                         when (dir) {
                                             com.qiubo.optimaltv.ui.components.NAV_LEFT -> { vm.seekBy(-PlaybackPolicy.SEEK_STEP_MS); onTick(); true }
@@ -955,6 +983,8 @@ private fun CircleButtonBase(
     focusRequester: FocusRequester? = null,
     navGroup: String? = null,
     navOverride: ((Int) -> Boolean)? = null,
+    repeatOverride: ((Int, Int, Long) -> Boolean)? = null,
+    releaseOverride: ((Int) -> Unit)? = null,
     onClick: () -> Unit,
     content: @Composable (iconColor: Color) -> Unit,
 ) {
@@ -975,6 +1005,8 @@ private fun CircleButtonBase(
                 onFocusedChange = { btnFocused = it },
                 navGroup = navGroup,
                 navOverride = navOverride,
+                repeatOverride = repeatOverride,
+                releaseOverride = releaseOverride,
                 onClick = onClick,
             )
             .border(1.dp, Color(0x1FFFFFFF), CircleShape),

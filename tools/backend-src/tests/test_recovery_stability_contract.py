@@ -57,7 +57,12 @@ class RecoveryStabilityContractTest(unittest.TestCase):
             self.assertLess(session_body.index('sessionUrl = ""'), session_body.index('sessionUrl = playUrl'))
             self.assertIn('reuseVODSessionUrl ?: url', session_body)
             self.assertIn('sessionUrl = playUrl', session_body)
-            self.assertIn('prepare(PrepareRequest(playUrl, startPos))', session_body)
+            if client == 'android':
+                self.assertIn('pendingSeekTarget.targetOrNull()', session_body)
+                self.assertIn('val effectiveStartPos = pendingTarget ?: startPos', session_body)
+                self.assertIn('sessionEngine.prepare(PrepareRequest(playUrl, effectiveStartPos))', session_body)
+            else:
+                self.assertIn('engine.prepare(PrepareRequest(playUrl, startPos))', session_body)
 
             reuse_policy = (ROOT / client / 'app/src/main/java/com/qiubo/optimaltv/playback/PlaybackRecoveryPolicy.kt').read_text(encoding='utf-8')
             policy_start = reuse_policy.index('object ResolvedSessionUrlReusePolicy')
@@ -71,12 +76,17 @@ class RecoveryStabilityContractTest(unittest.TestCase):
             recovery_session_end = text.index('\n    private ', recovery_session + 1)
             recovery_session_body = text[recovery_session:recovery_session_end]
             self.assertIn('reuseResolvedUrl: Boolean = false', recovery_session_body)
-            self.assertIn('startSession(line, resume, reuseResolvedUrl = reuseResolvedUrl)', recovery_session_body)
+            self.assertIn('reuseResolvedUrl = reuseResolvedUrl', recovery_session_body)
+            self.assertIn('startSession(', recovery_session_body)
+            if 'preservePendingSeek: Boolean = false' in recovery_session_body:
+                self.assertIn('preservePendingSeek = preservePendingSeek', recovery_session_body)
 
         mobile = (ROOT / 'internal/mobile/app/src/main/java/com/qiubo/optimaltv/ui/player/PlayerViewModel.kt').read_text(encoding='utf-8')
         error_branch = mobile[mobile.index('st.state == EnginePlayState.ERROR &&'):mobile.index('\n                }\n            }', mobile.index('st.state == EnginePlayState.ERROR &&'))]
         self.assertIn('(startedThisSession || awaitingPrepare)', error_branch)
-        self.assertIn('startSession(cur, if (pos > 1_000) pos else 0L, reuseResolvedUrl = true)', mobile)
+        self.assertIn('pendingTarget ?: _ui.value.positionMs', mobile)
+        self.assertIn('preservePendingSeek = pendingTarget != null', mobile)
+        self.assertIn('reuseResolvedUrl = true', mobile)
 
     def test_switching_source_must_not_crash_when_the_previous_resolve_is_cancelled(self):
         """换源取消上一轮解析时，被打断的 IO 不得被包成业务异常再抛。

@@ -50,7 +50,10 @@ internal object PlaybackRecoveryCoordinationPolicy {
         awaitingPrepare: Boolean,
         sourceResolving: Boolean,
         recoveryInFlight: Boolean,
+        seekInFlight: Boolean = false,
+        seekGraceActive: Boolean = false,
     ): Boolean = startedThisSession && !awaitingPrepare && !sourceResolving && !recoveryInFlight
+        && !seekInFlight && !seekGraceActive
 
     fun nextReadyStallTicks(
         ticks: Int,
@@ -159,7 +162,7 @@ data class PlayerUiState(
     val positionMs: Long = 0,
     val durationMs: Long = 0,
     val speed: Float = 1f,
-    /** 长按倍速镜像（2026-09-21 移动端手势）：非 null = 画面左右侧被按住，值 = 临时档位；
+    /** 长按倍速镜像（移动端）：非 null = 画面中央被按住，值 = 临时档位；
      *  松手回落到 [speed]，浮层提示与倍速胶囊都以它为准。 */
     val speedBoost: Float? = null,
     val aspectOrdinal: Int = 0,
@@ -375,6 +378,20 @@ class PlayerViewModel(
     /** 当前会话的最终播放 URL（v1.21 投屏取投地址用；startSession 赋值） */
     private var sessionUrl: String = ""
 
+    /** User seek intent survives lagging engine/UI position mirrors and same-line recovery. */
+    private val pendingSeek = PendingSeekTarget()
+    private var pendingSeekDispatched = false
+    private var lastSeekDispatchedTargetMs: Long? = null
+    private var lastSeekDispatchedFromMs: Long? = null
+    private var lastSeekDispatchAtMs = 0L
+    private var lastSeekActivityAtMs = 0L
+    private var seekDispatchJob: Job? = null
+    private var pendingSeekRecoveryAttempted = false
+    private var longPressSeekDirection = 0
+    private var longPressSeekStartedAtMs = 0L
+    private var longPressSeekActive = false
+    private var longPressSeekJob: Job? = null
+
     /** 投屏进度轮询协程（GetPositionInfo 2s → state 镜像） */
     private var castPollJob: Job? = null
 
@@ -431,6 +448,8 @@ class PlayerViewModel(
      * 不停引擎，实测「卡片已弹出、背景音照常响」。重试会重新 prepare，不需要保留播放态。
      */
     private fun stopForFatal() {
+        cancelLongPressSeek(flushTarget = false)
+        clearPendingSeek(resetSeekTiming = true)
         runCatching { if (hasEngine()) engine.pause() }
         if (!_ui.value.isLive) {
             _ui.value = _ui.value.copy(sourceStatus = PlayerSourceStatus.ERROR)
@@ -504,6 +523,8 @@ class PlayerViewModel(
 
     /** Invalidate every pending selection and recovery before a new user choice starts resolving. */
     private fun beginManualPlaybackRequest(): Int {
+        cancelLongPressSeek(flushTarget = false)
+        clearPendingSeek(resetSeekTiming = true)
         cancelStallRecovery()
         manualSessionJob?.cancel()
         invalidateEpisodeRefresh()
@@ -915,6 +936,7 @@ class PlayerViewModel(
                     (st.state == EnginePlayState.READY || st.state == EnginePlayState.ENDED ||
                         st.state == EnginePlayState.ERROR)
                 ) return@collect
+                val readyForCurrentPrepare = st.state == EnginePlayState.READY && awaitingPrepare && !startedThisSession
                 // v1.19 流畅度：控制条隐藏时把进度类字段（positionMs/bufferedAheadMs，
                 // ticker 500ms 一变）量化到整秒——StateFlow 按结构相等去重，隐藏期
                 // 发射频率 2Hz→1Hz，播放页/电视页整页重组减半（可见时保持 500ms 原速，
@@ -930,6 +952,9 @@ class PlayerViewModel(
                     bufferedAheadMs = bufOut,
                     speed = st.speed,
                 )
+                if (st.state == EnginePlayState.READY) {
+                    confirmPendingSeek(st.positionMs, allowPreparedStart = readyForCurrentPrepare)
+                }
                 trackBufferState(st.state == EnginePlayState.BUFFERING, st.bufferedAheadMs)
                 when {
                     st.state == EnginePlayState.ENDED && startedThisSession && !awaitingPrepare ->
@@ -974,6 +999,8 @@ class PlayerViewModel(
     private fun handlePlaybackEnded() {
         if (handledEndedSessionGen == sessionGen) return
         handledEndedSessionGen = sessionGen
+        cancelLongPressSeek(flushTarget = false)
+        clearPendingSeek(resetSeekTiming = true)
         val current = _ui.value
         if (current.isLive) {
             when (PlaybackSessionPolicy.actionAfterLiveEnd(liveEndedRecoveries)) {
@@ -1185,7 +1212,15 @@ class PlayerViewModel(
         reuseResolvedUrl: Boolean = false,
         freshResolve: Boolean = false,
         recreateEngine: Boolean = false,
+        preservePendingSeek: Boolean = false,
     ) {
+        cancelLongPressSeek(flushTarget = false)
+        if (preservePendingSeek) {
+            seekDispatchJob?.cancel()
+            seekDispatchJob = null
+        } else {
+            clearPendingSeek(resetSeekTiming = true)
+        }
         val isVod = !_ui.value.isLive
         val reuseVODSessionUrl = if (isVod) {
             com.qiubo.optimaltv.playback.ResolvedSessionUrlReusePolicy.vodUrl(
@@ -1377,6 +1412,12 @@ class PlayerViewModel(
                 } else {
                     -1
                 }
+                if (isSeekRecoveryDeferred()) {
+                    ticks = 0
+                    lastPos = s.positionMs
+                    lastRendered = renderedFrames
+                    continue
+                }
                 if (s.playState == EnginePlayState.BUFFERING && !userPaused) {
                     ticks++
                     if (ticks >= STALL_TICKS_LIMIT) {
@@ -1500,6 +1541,7 @@ class PlayerViewModel(
      * 冷却期只观测不动手，避免「换源 → 仍在起播 → 又判卡顿 → 再换源」的自激循环。
      */
     private fun checkBufferHealth(state: EnginePlayState, bufferedAheadMs: Long): Boolean {
+        if (isSeekRecoveryDeferred()) return false
         if (state != EnginePlayState.BUFFERING || bufferingSince == 0L) return false
         val now = android.os.SystemClock.elapsedRealtime()
         val bufferingMs = now - bufferingSince
@@ -1602,11 +1644,14 @@ class PlayerViewModel(
     private fun recoverPlaybackStall(reason: String) {
         val s = _ui.value
         if (!hasEngine() || s.fatalMsg != null) return
+        val seekGraceActive = isSeekRecoveryDeferred()
         if (!PlaybackRecoveryCoordinationPolicy.canStartRecovery(
                 startedThisSession = startedThisSession,
                 awaitingPrepare = awaitingPrepare,
                 sourceResolving = s.sourceStatus == PlayerSourceStatus.LOADING,
                 recoveryInFlight = stallRecoveryJob?.isActive == true,
+                seekInFlight = longPressSeekActive,
+                seekGraceActive = seekGraceActive,
             )
         ) return
 
@@ -1639,7 +1684,9 @@ class PlayerViewModel(
                 val kind = if (state.isLive) PlaybackKind.LIVE else PlaybackKind.VOD
                 val attempt = recoveryAttempt++
                 val action = PlaybackRecoveryPolicy.action(kind, attempt)
-                val resume = PlaybackRecoveryPolicy.resumePosition(state.positionMs)
+                val pendingTarget = pendingSeek.targetMs
+                val resume = SeekRecoveryPolicy.restorePosition(pendingTarget, state.positionMs)
+                val keepSeekLine = SeekRecoveryPolicy.keepSelectedLine(state.isLive, isFootballVod, pendingTarget)
                 val current = state.activeLine
                 // 长时体检：交给恢复阶梯前先留现场（排查方案 §22 字段清单）
                 runCatching { PlaybackHealthLog.stall(healthSnapshot(reason)) }
@@ -1650,35 +1697,50 @@ class PlayerViewModel(
                         current,
                         if (state.isLive) 0L else resume,
                         reuseResolvedUrl = true,
+                        preservePendingSeek = pendingTarget != null,
                     )
                     RecoveryAction.REFRESH_CURRENT -> {
                         state.lines.getOrNull(current)?.playRef?.takeIf { it.isNotBlank() }?.let(repo::bustPlayCache)
-                        startRecoverySession(requestToken, current, if (state.isLive) 0L else resume)
+                        startRecoverySession(
+                            requestToken, current, if (state.isLive) 0L else resume,
+                            preservePendingSeek = pendingTarget != null,
+                        )
                     }
                     RecoveryAction.SWITCH_SOURCE -> {
-                        if (AutomaticSourceSwitchPolicy.maySwitch(state.isLive, isFootballVod)) {
+                        if (AutomaticSourceSwitchPolicy.maySwitch(state.isLive, isFootballVod) && !keepSeekLine) {
                             telemetry.emit(PlaybackTelemetry.Phase.AUTO_SWITCH, note = "step$attempt")
                             // 换源后进入冷却：刚换的线正在起播，缓冲中属正常，此刻再判卡顿会自激。
                             healthCooldown.arm(android.os.SystemClock.elapsedRealtime(), attempt)
                             val next = state.lines.indices.firstOrNull { it != current && it !in triedLines }
                                 ?: state.lines.indices.firstOrNull { it != current }
                             if (next != null) {
-                                startRecoverySession(requestToken, next, 0L)
+                                startRecoverySession(
+                                    requestToken, next, if (state.isLive) 0L else resume,
+                                    preservePendingSeek = pendingTarget != null,
+                                )
                             } else {
-                                recreateEngineForRecovery(current, resume, requestToken)
+                                recreateEngineForRecovery(current, resume, requestToken, pendingTarget != null)
                             }
                         } else {
                             state.lines.getOrNull(current)?.playRef?.takeIf { it.isNotBlank() }?.let(repo::bustPlayCache)
                             OtvLog.w("点播恢复保持当前信号源 line=$current；刷新后继续重试")
-                            startRecoverySession(requestToken, current, resume)
+                            startRecoverySession(
+                                requestToken, current, resume,
+                                preservePendingSeek = pendingTarget != null,
+                            )
                         }
                     }
-                    RecoveryAction.RECREATE_ENGINE -> recreateEngineForRecovery(current, resume, requestToken)
+                    RecoveryAction.RECREATE_ENGINE -> recreateEngineForRecovery(
+                        current, resume, requestToken, pendingTarget != null,
+                    )
                     RecoveryAction.RESET_RUNTIME -> {
                         com.qiubo.optimaltv.playback.StreamDecryptServer.reset()
                         com.qiubo.optimaltv.BackendService.reboot(Graph.appContext, viewModelScope)
                         delay(1_800)
-                        startRecoverySession(requestToken, current, 0L)
+                        startRecoverySession(
+                            requestToken, current, if (state.isLive) 0L else resume,
+                            preservePendingSeek = pendingTarget != null,
+                        )
                     }
                     RecoveryAction.GIVE_UP -> {
                         stopForFatal()
@@ -1708,9 +1770,13 @@ class PlayerViewModel(
         line: Int,
         resume: Long,
         reuseResolvedUrl: Boolean = false,
+        preservePendingSeek: Boolean = false,
     ) {
         if (token != stallRecoveryGeneration) return
-        startSession(line, resume, reuseResolvedUrl = reuseResolvedUrl)
+        startSession(
+            line, resume, reuseResolvedUrl = reuseResolvedUrl,
+            preservePendingSeek = preservePendingSeek,
+        )
         val generation = sessionGen
         // Keep single-flight until READY or the existing 20s watchdog/onLineFail resolves prepare.
         while (token == stallRecoveryGeneration && generation == sessionGen &&
@@ -1720,7 +1786,12 @@ class PlayerViewModel(
         }
     }
 
-    private suspend fun recreateEngineForRecovery(line: Int, resume: Long, recoveryToken: Int) {
+    private suspend fun recreateEngineForRecovery(
+        line: Int,
+        resume: Long,
+        recoveryToken: Int,
+        preservePendingSeek: Boolean = false,
+    ) {
         val id = engine.engineId
         telemetry.emit(PlaybackTelemetry.Phase.ENGINE_FALLBACK, note = id)
         runCatching { engine.release() }
@@ -1729,7 +1800,10 @@ class PlayerViewModel(
             engineId = engine.engineId, engineName = engine.displayName, engineEpoch = engineEpochCounter,
         )
         collectEngineState()
-        startRecoverySession(recoveryToken, line, if (_ui.value.isLive) 0L else resume)
+        startRecoverySession(
+            recoveryToken, line, if (_ui.value.isLive) 0L else resume,
+            preservePendingSeek = preservePendingSeek,
+        )
     }
 
     private fun cancelStallRecovery() {
@@ -1990,6 +2064,7 @@ class PlayerViewModel(
 
     private fun onLineFail(reason: String) {
         if (_ui.value.fatalMsg != null) return
+        cancelLongPressSeek(flushTarget = false)
         awaitingPrepare = false
         // 2026-09-28 故障分类：解码类换引擎、网络类换源。方向判错代价很高——
         // 解码失败反复换源只是把同一条坏线路换着花样重试，永远出不了画面。
@@ -2055,9 +2130,14 @@ class PlayerViewModel(
                 relayBroken += curLine.playRef
                 repo.bustPlayCache(curLine.playRef)
                 OtvLog.w("line fail(${_ui.value.activeLine}): 中继路径失败 → 同线直连重试")
-                val pos = _ui.value.positionMs
+                val pendingTarget = pendingSeek.targetMs
+                val pos = pendingTarget ?: _ui.value.positionMs
                 viewModelScope.launch {
-                    startSession(_ui.value.activeLine, if (pos > 1_000) pos else 0L)
+                    startSession(
+                        _ui.value.activeLine,
+                        if (pendingTarget != null) pos else if (pos > 1_000) pos else 0L,
+                        preservePendingSeek = pendingTarget != null,
+                    )
                 }
                 return
             }
@@ -2073,7 +2153,8 @@ class PlayerViewModel(
             vlcFallbackTried = true
             OtvLog.w("line fail(${_ui.value.activeLine}): 解码类故障 → 切 libVLC 重起同线")
             telemetry.emit(PlaybackTelemetry.Phase.ENGINE_FALLBACK, note = "vlc")
-            val pos = _ui.value.positionMs
+            val pendingTarget = pendingSeek.targetMs
+            val pos = pendingTarget ?: _ui.value.positionMs
             val cur = _ui.value.activeLine
             viewModelScope.launch {
                 if (hasEngine()) engine.release()
@@ -2083,7 +2164,27 @@ class PlayerViewModel(
                     engineEpoch = engineEpochCounter,
                 )
                 collectEngineState()
-                startSession(cur, if (pos > 1_000) pos else 0L, reuseResolvedUrl = true)
+                startSession(
+                    cur,
+                    if (pendingTarget != null) pos else if (pos > 1_000) pos else 0L,
+                    reuseResolvedUrl = true,
+                    preservePendingSeek = pendingTarget != null,
+                )
+            }
+            return
+        }
+        val pendingTarget = pendingSeek.targetMs
+        if (!_ui.value.isLive && !isFootballVod && pendingTarget != null && !pendingSeekRecoveryAttempted) {
+            pendingSeekRecoveryAttempted = true
+            val line = _ui.value.activeLine
+            OtvLog.w("line fail($line): seek 期间引擎错误 → 同线恢复到 pending target=${pendingTarget}ms")
+            viewModelScope.launch {
+                startSession(
+                    line,
+                    pendingTarget,
+                    reuseResolvedUrl = true,
+                    preservePendingSeek = true,
+                )
             }
             return
         }
@@ -2103,8 +2204,14 @@ class PlayerViewModel(
             stopForFatal()
             _ui.value = _ui.value.copy(fatalMsg = reason, controlsVisible = false)
         } else {
-            val pos = _ui.value.positionMs
-            viewModelScope.launch { startSession(next, if (pos > 1_000) pos else 0L) }
+            val pos = pendingTarget ?: _ui.value.positionMs
+            viewModelScope.launch {
+                startSession(
+                    next,
+                    if (pendingTarget != null) pos else if (pos > 1_000) pos else 0L,
+                    preservePendingSeek = pendingTarget != null,
+                )
+            }
         }
     }
 
@@ -2340,19 +2447,31 @@ class PlayerViewModel(
     fun seekBy(deltaMs: Long) {
         // v1.21：投屏中 seek 改道渲染器
         _ui.value.castDevice?.let { dev ->
+            val durationMs = _ui.value.castDurationMs
+            if (durationMs < LongPressSeekPolicy.MIN_DURATION_MS) return
+            val targetMs = LongPressSeekPolicy.target(
+                currentMs = _ui.value.castPositionMs,
+                durationMs = durationMs,
+                direction = if (deltaMs > 0) 1 else -1,
+                stepMs = kotlin.math.abs(deltaMs),
+            ) ?: return
             viewModelScope.launch {
-                DlnaControl.seek(dev, (_ui.value.castPositionMs + deltaMs).coerceAtLeast(0) / 1000)
+                DlnaControl.seek(dev, targetMs / 1000)
             }
             touch()
             return
         }
         if (!hasEngine()) return
         val s = _ui.value
-        if (s.durationMs <= 0) return
-        // v1.19 崩溃修复：durationMs ∈ (0,1000)（异常流/直播短暂上报）时旧区间为
-        // 0..负数，coerceIn 在 min>max 时抛 IllegalArgumentException 直接闪退
-        val maxMs = (s.durationMs - 1_000).coerceAtLeast(0)
-        engine.seekTo((s.positionMs + deltaMs).coerceIn(0, maxMs))
+        if (s.durationMs < LongPressSeekPolicy.MIN_DURATION_MS) return
+        val base = pendingSeek.base(engine.uiState.value.positionMs)
+        val targetMs = LongPressSeekPolicy.target(
+            currentMs = base,
+            durationMs = s.durationMs,
+            direction = if (deltaMs > 0) 1 else -1,
+            stepMs = kotlin.math.abs(deltaMs),
+        ) ?: return
+        requestSeekTarget(targetMs)
         touch()
     }
 
@@ -2360,15 +2479,18 @@ class PlayerViewModel(
     fun seekTo(targetMs: Long) {
         // v1.21：投屏中 seek 改道渲染器
         _ui.value.castDevice?.let { dev ->
-            viewModelScope.launch { DlnaControl.seek(dev, targetMs.coerceAtLeast(0) / 1000) }
+            val durationMs = _ui.value.castDurationMs
+            if (durationMs < LongPressSeekPolicy.MIN_DURATION_MS) return
+            val target = targetMs.coerceIn(0L, (durationMs - 1_000L).coerceAtLeast(0L))
+            viewModelScope.launch { DlnaControl.seek(dev, target / 1000) }
             touch()
             return
         }
         if (!hasEngine()) return
         val s = _ui.value
-        if (s.durationMs <= 0) return
-        val maxMs = (s.durationMs - 1_000).coerceAtLeast(0)
-        engine.seekTo(targetMs.coerceIn(0, maxMs))
+        if (s.durationMs < LongPressSeekPolicy.MIN_DURATION_MS) return
+        val boundedTarget = targetMs.coerceIn(0L, (s.durationMs - 1_000L).coerceAtLeast(0L))
+        requestSeekTarget(boundedTarget)
         touch()
     }
 
@@ -2386,8 +2508,146 @@ class PlayerViewModel(
 
     private fun applyPercent(p: Int) {
         val dur = _ui.value.durationMs
-        if (dur <= 0 || p !in 0..99) return
-        engine.seekTo(dur * p / 100)
+        if (dur < LongPressSeekPolicy.MIN_DURATION_MS || p !in 0..99 || !hasEngine()) return
+        seekTo(dur * p / 100)
+    }
+
+    /** Begin a repeat seek gesture. Left is rewind; right is forward. */
+    fun beginLongPressSeek(direction: Int): Boolean {
+        val normalizedDirection = direction.compareTo(0)
+        val state = _ui.value
+        if (normalizedDirection == 0 || !hasEngine() || state.isLive || isFootballVod || state.castDevice != null ||
+            state.fatalMsg != null || state.durationMs < LongPressSeekPolicy.MIN_DURATION_MS
+        ) return false
+        if (longPressSeekActive && longPressSeekDirection == normalizedDirection) return true
+        if (longPressSeekActive) endLongPressSeek()
+        endSpeedBoost()
+        longPressSeekDirection = normalizedDirection
+        longPressSeekStartedAtMs = android.os.SystemClock.elapsedRealtime()
+        longPressSeekActive = true
+        touch()
+        longPressSeekJob?.cancel()
+        longPressSeekJob = viewModelScope.launch {
+            while (isActive && longPressSeekActive) {
+                val now = android.os.SystemClock.elapsedRealtime()
+                val current = _ui.value
+                if (!hasEngine() || current.isLive || current.castDevice != null ||
+                    current.fatalMsg != null || current.durationMs < LongPressSeekPolicy.MIN_DURATION_MS
+                ) {
+                    cancelLongPressSeek(flushTarget = false)
+                    return@launch
+                }
+                val base = pendingSeek.base(engine.uiState.value.positionMs)
+                val target = LongPressSeekPolicy.target(
+                    currentMs = base,
+                    durationMs = current.durationMs,
+                    direction = longPressSeekDirection,
+                    stepMs = LongPressSeekPolicy.stepMs(now - longPressSeekStartedAtMs),
+                    minimumTargetMs = if (longPressSeekDirection < 0 && base > 0L) minOf(1_000L, base) else 0L,
+                )
+                if (target != null && target != pendingSeek.targetMs) requestSeekTarget(target)
+                delay(LongPressSeekPolicy.TICK_MS)
+            }
+        }
+        return true
+    }
+
+    /** Release/cancel the gesture and send its newest coalesced target immediately. */
+    fun endLongPressSeek() {
+        if (!longPressSeekActive) return
+        cancelLongPressSeek(flushTarget = true)
+        touch()
+    }
+
+    private fun cancelLongPressSeek(flushTarget: Boolean) {
+        val wasActive = longPressSeekActive
+        longPressSeekActive = false
+        longPressSeekDirection = 0
+        longPressSeekJob?.cancel()
+        longPressSeekJob = null
+        if (!flushTarget) {
+            seekDispatchJob?.cancel()
+            seekDispatchJob = null
+        }
+        if (flushTarget && wasActive && pendingSeek.targetMs != null) {
+            lastSeekActivityAtMs = android.os.SystemClock.elapsedRealtime()
+            dispatchPendingSeek(force = true)
+        }
+    }
+
+    private fun requestSeekTarget(targetMs: Long) {
+        if (!hasEngine()) return
+        val state = _ui.value
+        if (state.durationMs < LongPressSeekPolicy.MIN_DURATION_MS) return
+        val boundedTarget = targetMs.coerceIn(0L, (state.durationMs - 1_000L).coerceAtLeast(0L))
+        pendingSeek.update(boundedTarget)
+        pendingSeekDispatched = false
+        pendingSeekRecoveryAttempted = false
+        lastSeekActivityAtMs = android.os.SystemClock.elapsedRealtime()
+        dispatchPendingSeek(force = false)
+    }
+
+    private fun dispatchPendingSeek(force: Boolean) {
+        if (!hasEngine() || pendingSeek.targetMs == null) return
+        seekDispatchJob?.cancel()
+        val now = android.os.SystemClock.elapsedRealtime()
+        val delayMs = if (force) 0L else LongPressSeekPolicy.dispatchDelayMs(lastSeekDispatchAtMs, now)
+        if (delayMs == 0L) {
+            dispatchPendingSeekNow()
+        } else {
+            seekDispatchJob = viewModelScope.launch {
+                delay(delayMs)
+                dispatchPendingSeekNow()
+            }
+        }
+    }
+
+    private fun dispatchPendingSeekNow() {
+        if (!hasEngine()) return
+        val target = pendingSeek.targetMs ?: return
+        seekDispatchJob = null
+        val engineState = runCatching { engine.uiState.value }.getOrNull()
+        lastSeekDispatchedFromMs = engineState?.positionMs ?: _ui.value.positionMs
+        lastSeekDispatchedTargetMs = target
+        engine.seekTo(target)
+        pendingSeekDispatched = true
+        val now = android.os.SystemClock.elapsedRealtime()
+        lastSeekDispatchAtMs = now
+        lastSeekActivityAtMs = now
+    }
+
+    private fun confirmPendingSeek(positionMs: Long, allowPreparedStart: Boolean) {
+        if (longPressSeekActive) return
+        val target = pendingSeek.targetMs ?: return
+        val isDispatchedTarget = pendingSeekDispatched && lastSeekDispatchedTargetMs == target
+        if (!isDispatchedTarget && !allowPreparedStart) return
+        if (!LongPressSeekPolicy.positionConfirmsTarget(
+                positionMs = positionMs,
+                targetMs = target,
+                fromMs = if (isDispatchedTarget) lastSeekDispatchedFromMs else null,
+            )
+        ) return
+        clearPendingSeek()
+    }
+
+    private fun isSeekRecoveryDeferred(): Boolean = LongPressSeekPolicy.shouldDeferStallRecovery(
+        holdActive = longPressSeekActive,
+        lastSeekAtMs = lastSeekActivityAtMs,
+        nowMs = android.os.SystemClock.elapsedRealtime(),
+    )
+
+    private fun clearPendingSeek(resetSeekTiming: Boolean = false) {
+        seekDispatchJob?.cancel()
+        seekDispatchJob = null
+        pendingSeek.clear()
+        pendingSeekDispatched = false
+        lastSeekDispatchedTargetMs = null
+        lastSeekDispatchedFromMs = null
+        pendingSeekRecoveryAttempted = false
+        if (resetSeekTiming) {
+            lastSeekDispatchAtMs = 0L
+            lastSeekActivityAtMs = 0L
+        }
     }
 
     fun cycleSpeed() {
@@ -2657,6 +2917,8 @@ class PlayerViewModel(
     }
 
     override fun onCleared() {
+        cancelLongPressSeek(flushTarget = false)
+        clearPendingSeek(resetSeekTiming = true)
         // 立即落盘当前进度（同步快照，防丢）
         val s = _ui.value
         val item = currentItem

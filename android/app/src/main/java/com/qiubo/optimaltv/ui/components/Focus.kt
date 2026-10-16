@@ -253,6 +253,10 @@ fun Modifier.dpadFocusable(
     navGroup: String? = null,
     /** 节点级方向语义覆盖：返回 true = 已处理（消费），false = 落回几何搜索 */
     navOverride: ((Int) -> Boolean)? = null,
+    /** Repeat-aware override; event time uses SystemClock.uptimeMillis(). */
+    repeatOverride: ((Int, Int, Long) -> Boolean)? = null,
+    /** Direction key release callback paired with [repeatOverride]. */
+    releaseOverride: ((Int) -> Unit)? = null,
     onClick: () -> Unit,
 ): Modifier = composed {
     val interaction = remember { MutableInteractionSource() }
@@ -287,6 +291,8 @@ fun Modifier.dpadFocusable(
         bandNode.vertScroll = vertScroll
         bandNode.horzScroll = horzScroll
         bandNode.override = navOverride ?: regionOverride
+        bandNode.repeatOverride = repeatOverride
+        bandNode.releaseOverride = releaseOverride
         bandNode.autoSelectNode = autoSelect
         OtvNav.registerCard(bandId, latestNode.value)
     }
@@ -513,6 +519,10 @@ object OtvNav {
         @Volatile var vertScroll: NavScrollContainer? = null
         @Volatile var horzScroll: NavScrollContainer? = null
         @Volatile var override: ((Int) -> Boolean)? = null
+        /** Optional repeat-aware override for controls that accelerate while a key is held. */
+        @Volatile var repeatOverride: ((Int, Int, Long) -> Boolean)? = null
+        /** Called once when the corresponding direction key is released. */
+        @Volatile var releaseOverride: ((Int) -> Unit)? = null
         /** 聚焦即点击（hover-select）：自愈/就近恢复的候选必须排除——否则空页面
          *  自愈落到搜索 chip 会 autoSelect 直接劫持跳页（实测 2026-09-01） */
         @Volatile var autoSelectNode: Boolean = false
@@ -523,6 +533,14 @@ object OtvNav {
 
     @Volatile private var focusedCardId = 0
     @Volatile private var lastGroup: String? = null
+
+    private data class HeldDirectionGesture(
+        val direction: Int,
+        val downTimeMs: Long,
+        val onRelease: (Int) -> Unit,
+    )
+
+    @Volatile private var heldDirectionGesture: HeldDirectionGesture? = null
 
     /**
      * 焦点事务版本。所有延迟动作都必须带着它执行：一旦焦点已被新的事件接管，
@@ -728,11 +746,17 @@ object OtvNav {
      * 统一入口（MainActivity.dispatchKeyEvent 调用）。
      * 返回值恒 true：四方向键一律由引擎消费，绝不放行给 Compose 兜底几何搜索。
      */
-    fun dispatch(dir: Int, repeatCount: Int): Boolean {
+    fun dispatch(
+        dir: Int,
+        repeatCount: Int,
+        downTimeMs: Long = android.os.SystemClock.uptimeMillis(),
+    ): Boolean {
+        if (repeatCount == 0) releaseHeldDirectionGesture()
         if (pendingRevealToken != 0L) return true
+        val eventTimeMs = android.os.SystemClock.uptimeMillis()
         if (!TvInteractionMotion.shouldProcessDirection(
                 repeatCount = repeatCount,
-                elapsedMs = android.os.SystemClock.uptimeMillis() - lastMoveAt,
+                elapsedMs = eventTimeMs - lastMoveAt,
             )
         ) return true
 
@@ -744,7 +768,19 @@ object OtvNav {
             // 隐藏键宿（播放器 1dp sink）不参与几何、不受尺寸校验，直接可用。
             cur = healAndMove(dir)
             if (cur == null) {
-                lastMoveAt = android.os.SystemClock.uptimeMillis()
+                lastMoveAt = eventTimeMs
+                return true
+            }
+        }
+
+        if (repeatCount == 0) {
+            cur.releaseOverride?.let { release ->
+                heldDirectionGesture = HeldDirectionGesture(dir, downTimeMs, release)
+            }
+        }
+        cur.repeatOverride?.let { repeat ->
+            if (repeat(dir, repeatCount, eventTimeMs)) {
+                lastMoveAt = eventTimeMs
                 return true
             }
         }
@@ -752,7 +788,7 @@ object OtvNav {
         // 1) 节点/区域级方向语义（tab DOWN 进内容、hero 翻页、播放器 seek、浮窗封锁…）
         cur.override?.let { ov ->
             if (ov(dir)) {
-                lastMoveAt = android.os.SystemClock.uptimeMillis()
+                lastMoveAt = eventTimeMs
                 return true
             }
         }
@@ -766,7 +802,7 @@ object OtvNav {
         val target = searchGeom(origin, dir, cur.group, exclude = cur)
         if (target != null && focusNode(target)) {
             ensureVisible(target, dir)
-            lastMoveAt = android.os.SystemClock.uptimeMillis()
+            lastMoveAt = eventTimeMs
             return true
         }
 
@@ -775,7 +811,7 @@ object OtvNav {
         if (cont != null && canStep(cont, dir)) {
             val sourceId = cards.entries.firstOrNull { it.value === cur }?.key ?: focusedCardId
             launchScrollThenRetry(sourceId, cur, cont, dir)
-            lastMoveAt = android.os.SystemClock.uptimeMillis()
+            lastMoveAt = eventTimeMs
             return true
         }
 
@@ -786,8 +822,22 @@ object OtvNav {
             val c = if (navDx(dir) != 0) cur.horzScroll else cur.vertScroll
             Log.d(TAG, "OtvNav: blocked dir=$dir cur=${cur.bounds} group=${cur.group} canStep=${c?.let { canStep(it, dir) }}")
         }
-        lastMoveAt = android.os.SystemClock.uptimeMillis()
+        lastMoveAt = eventTimeMs
         return true
+    }
+
+    /** Complete only the direction gesture whose original key-down produced this key-up. */
+    fun dispatchKeyUp(dir: Int, downTimeMs: Long) {
+        val gesture = heldDirectionGesture ?: return
+        if (gesture.direction != dir || gesture.downTimeMs != downTimeMs) return
+        heldDirectionGesture = null
+        runCatching { gesture.onRelease(dir) }
+    }
+
+    private fun releaseHeldDirectionGesture() {
+        val gesture = heldDirectionGesture ?: return
+        heldDirectionGesture = null
+        runCatching { gesture.onRelease(gesture.direction) }
     }
 
     private fun canStep(cont: NavScrollContainer, dir: Int): Boolean =
@@ -934,11 +984,17 @@ object OtvNav {
 fun Modifier.navSink(
     requester: FocusRequester? = null,
     override: ((Int) -> Boolean)? = null,
+    repeatOverride: ((Int, Int, Long) -> Boolean)? = null,
+    releaseOverride: ((Int) -> Unit)? = null,
 ): Modifier = composed {
     val sinkId = remember { OtvNav.newId() }
     val fr = remember { requester ?: FocusRequester() }
     val node = remember { OtvNav.Node(fr, hidden = true) }
-    SideEffect { node.override = override }
+    SideEffect {
+        node.override = override
+        node.repeatOverride = repeatOverride
+        node.releaseOverride = releaseOverride
+    }
     DisposableEffect(sinkId) {
         OtvNav.registerCard(sinkId, node)
         onDispose { OtvNav.unregisterCard(sinkId) }

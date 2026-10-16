@@ -1,12 +1,102 @@
 package com.qiubo.optimaltv.ui.player
 
 import com.qiubo.optimaltv.data.model.LineInfo
+import com.qiubo.optimaltv.playback.PlaybackRecoveryPolicy
 
 object PlaybackPolicy {
     const val SEEK_STEP_MS = 10_000L
-    /** 长按左右两侧的临时倍速（2026-09-21 移动端手势）：按住 = 该档，松手回用户倍速。
+    /** 长按画面中央的临时倍速（移动端）：按住 = 该档，松手回用户倍速。
      *  网页版 tools/backend-src/www/app.js 同名常量 LP_SPEED 同口径。 */
     const val LONG_PRESS_SPEED = 3.0f
+}
+
+/** Keeps user-issued seek intent available while the player's position mirror catches up. */
+internal class PendingSeekTarget {
+    var targetMs: Long? = null
+        private set
+
+    fun base(positionMs: Long): Long = targetMs ?: positionMs.coerceAtLeast(0L)
+
+    fun update(positionMs: Long) {
+        targetMs = positionMs.coerceAtLeast(0L)
+    }
+
+    fun clear() {
+        targetMs = null
+    }
+}
+
+/** Pure rules for the mobile player's press-and-hold seek gesture and its recovery window. */
+internal object LongPressSeekPolicy {
+    const val MIN_DURATION_MS = 1_000L
+    const val TICK_MS = 200L
+    const val BASE_STEP_MS = 1_000L
+    const val ACCELERATION_PERIOD_MS = 1_000L
+    const val MAX_STEP_MS = 32_000L
+    const val SEEK_REQUEST_INTERVAL_MS = 750L
+    // Covers the mobile 8s stall detector plus scheduling/position-mirror lag after a seek.
+    const val RECOVERY_GRACE_MS = 15_000L
+    const val POSITION_CONFIRMATION_TOLERANCE_MS = 2_000L
+
+    /** A 1s step per 200ms tick, doubling each second, capped at 32s per tick. */
+    fun stepMs(heldMs: Long): Long {
+        val stage = (heldMs.coerceAtLeast(0L) / ACCELERATION_PERIOD_MS).coerceAtMost(5L).toInt()
+        return (BASE_STEP_MS shl stage).coerceAtMost(MAX_STEP_MS)
+    }
+
+    /** Return null when the stream has no useful seek range or the request is invalid. */
+    fun target(
+        currentMs: Long,
+        durationMs: Long,
+        direction: Int,
+        stepMs: Long,
+        minimumTargetMs: Long = 0L,
+    ): Long? {
+        if (durationMs < MIN_DURATION_MS || direction == 0 || stepMs <= 0L) return null
+        val maxMs = (durationMs - 1_000L).coerceAtLeast(0L)
+        val minMs = minimumTargetMs.coerceIn(0L, maxMs)
+        val current = currentMs.coerceIn(minMs, maxMs)
+        val target = if (direction > 0) {
+            if (stepMs > maxMs - current) maxMs else current + stepMs
+        } else {
+            if (stepMs > current - minMs) minMs else current - stepMs
+        }
+        return target.coerceIn(minMs, maxMs)
+    }
+
+    /** Zero means dispatch now; otherwise callers should wait and replace older queued targets. */
+    fun dispatchDelayMs(lastDispatchAtMs: Long, nowMs: Long): Long {
+        if (lastDispatchAtMs <= 0L) return 0L
+        val elapsed = (nowMs - lastDispatchAtMs).coerceAtLeast(0L)
+        return (SEEK_REQUEST_INTERVAL_MS - elapsed).coerceAtLeast(0L)
+    }
+
+    fun shouldDeferStallRecovery(holdActive: Boolean, lastSeekAtMs: Long, nowMs: Long): Boolean {
+        if (holdActive) return true
+        return lastSeekAtMs > 0L && nowMs >= lastSeekAtMs && nowMs - lastSeekAtMs < RECOVERY_GRACE_MS
+    }
+
+    fun positionConfirmsTarget(positionMs: Long, targetMs: Long, fromMs: Long? = null): Boolean {
+        if (kotlin.math.abs(positionMs - targetMs) > POSITION_CONFIRMATION_TOLERANCE_MS) return false
+        // A small forward seek must not be considered complete while the old position mirror
+        // is still visible. Require the engine clock to have moved in the requested direction.
+        val origin = fromMs ?: return true
+        return when {
+            targetMs > origin -> positionMs > origin
+            targetMs < origin -> positionMs < origin
+            else -> true
+        }
+    }
+}
+
+/** Recovery policy shared by seek-error and stall recovery call sites. */
+internal object SeekRecoveryPolicy {
+    fun restorePosition(pendingTargetMs: Long?, currentPositionMs: Long): Long =
+        pendingTargetMs?.coerceAtLeast(0L) ?: PlaybackRecoveryPolicy.resumePosition(currentPositionMs)
+
+    /** Seek-triggered same-line recovery is limited to ordinary VOD; live/football keep their ladder. */
+    fun keepSelectedLine(isLive: Boolean, isFootballVod: Boolean, pendingTargetMs: Long?): Boolean =
+        !isLive && !isFootballVod && pendingTargetMs != null
 }
 
 /** Decide whether a completed item should continue with the next VOD episode. */

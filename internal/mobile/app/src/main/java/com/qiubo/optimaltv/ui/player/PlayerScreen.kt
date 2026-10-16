@@ -204,9 +204,9 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
             }
         }
 
-        // 手势层（影视#1 v1.19 常规移动端手势）：单击=浮层开关；双击左右 1/3 = ±15s、
+        // 手势层（影视#1 v1.19 常规移动端手势）：单击=浮层开关；双击左右 1/3 = ±10s、
         // 双击中央=播放/暂停；水平拖动=滑动快进（带预览浮层）；竖直拖动=左半亮度/右半音量；
-        // 长按左/右任一侧=3.0x 快进播放（2026-09-21，松手回用户倍速）。
+        // 普通影视长按左右 1/3=指数递增快退/快进；足球回放与中央区域保留 3.0x 长按。
         // 必须是视频层的【兄弟节点且靠后组合】——Compose 命中测试取最前的手势分支，
         // AndroidView（Media3 PlayerView）会拦截祖先链路上的事件，兄弟置顶才收得到
         if (ui.fatalMsg == null || ui.isLive) {
@@ -226,10 +226,15 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                                 if (ui.isLive) vm.toggleSrcPicker() else vm.toggleControls()
                                 tick++
                             },
-                            // 长按左右两侧：按住期间临时 3.0x（直播不可变速；松手由下方抬手观察器还原）
-                            onLongPress = {
+                            // 普通影视长按左右连续 seek；足球回放沿用旧的 3.0x 长按语义。
+                            onLongPress = { off ->
                                 if (!ui.isLive && ui.durationMs > 0) {
-                                    vm.beginSpeedBoost()
+                                    val third = size.width / 3f
+                                    when {
+                                        off.x < third -> if (!vm.beginLongPressSeek(-1)) vm.beginSpeedBoost()
+                                        off.x > third * 2f -> if (!vm.beginLongPressSeek(1)) vm.beginSpeedBoost()
+                                        else -> vm.beginSpeedBoost()
+                                    }
                                     tick++
                                 }
                             },
@@ -321,10 +326,14 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                     .pointerInput(Unit) {
                         awaitEachGesture {
                             awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                            while (true) {
-                                if (awaitPointerEvent(PointerEventPass.Final).changes.none { it.pressed }) break
+                            try {
+                                while (true) {
+                                    if (awaitPointerEvent(PointerEventPass.Final).changes.none { it.pressed }) break
+                                }
+                            } finally {
+                                vm.endLongPressSeek()
+                                vm.endSpeedBoost()
                             }
-                            vm.endSpeedBoost()
                         }
                     },
             ) {
