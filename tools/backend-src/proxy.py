@@ -2766,6 +2766,24 @@ def relay_url(u, ref=None):
     return 200, ctype or "application/octet-stream", data, None, is_m3u8
 
 
+def _release_relay_response(resp, fully_read=False):
+    """Discard unread bodies before returning a connection to its pool."""
+    if resp is None:
+        return
+    try:
+        if not HAS_URLLIB3 or not fully_read:
+            resp.close()
+    finally:
+        if HAS_URLLIB3:
+            resp.release_conn()
+
+
+def _read_relay_chunk(resp, size):
+    # read(size) waits for the entire block on slow CDN responses. A seek loses
+    # the warm buffer, so forward available bytes instead of waiting for 128 KiB.
+    return getattr(resp, "read1", resp.read)(size)
+
+
 def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
     """
     媒体流式中继（非 m3u8）：边收边发，避免整包缓冲（直播/大文件首字节更快，低端机播放更跟手）。
@@ -2800,10 +2818,7 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
         try:
             resp, _final = _open_upstream(u, headers, read_timeout=30, preload=False)
             if resp.status >= 400:
-                if HAS_URLLIB3:
-                    resp.release_conn()
-                else:
-                    resp.close()
+                _release_relay_response(resp)
                 last_err = "HTTP %d from %s" % (resp.status, u)
                 resp = None
                 continue   # 换下一 Referer 策略再试
@@ -2818,7 +2833,13 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
     extra = {}
     try:
         ctype = resp.headers.get("Content-Type", "") or ""
-        first = resp.read(64 * 1024)
+        first = _read_relay_chunk(resp, 64 * 1024)
+        # Keep the tiny-junk check about a body, not a short TCP packet.
+        while 0 < len(first) < 64:
+            more = _read_relay_chunk(resp, 64 - len(first))
+            if not more:
+                break
+            first += more
         state["resp"], state["first"] = resp, first
         for h in ("Content-Range", "Accept-Ranges"):
             v = resp.headers.get(h)
@@ -2826,16 +2847,14 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
                 extra[h] = v
         status, detect = resp.status, ctype
     except Exception as e:
+        _release_relay_response(resp)
         return 502, "text/plain; charset=utf-8", {}, iter(
-            ("relay stream error: %s" % str(e)[:200]).encode("utf-8")), False
+            [("relay stream error: %s" % str(e)[:200]).encode("utf-8")]), False
 
     if "mpegurl" in detect.lower():
         # 罕见：无 .m3u8 后缀的清单 → 关掉流，整包重写（manifest 体积小）
         try:
-            if HAS_URLLIB3:
-                state["resp"].release_conn()
-            else:
-                state["resp"].close()
+            _release_relay_response(state["resp"])
         except Exception:
             pass
         status, ctype, body, _e, _m = relay_url(u, ref)
@@ -2855,10 +2874,7 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
     # 3 字节当分片喂给解复用器只会换来解析异常+重试循环（观感=卡顿）
     if (known_len == -1 or known_len < 64) and _is_tiny_junk(u, ctype, len(first)):
         try:
-            if HAS_URLLIB3:
-                state["resp"].release_conn()
-            else:
-                state["resp"].close()
+            _release_relay_response(state["resp"])
         except Exception:
             pass
         return 502, "text/plain; charset=utf-8", {}, iter(
@@ -2868,32 +2884,34 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
     def gen():
         resp = state["resp"]
         first = state["first"]
+        fully_read = False
         # 上游读失败必须向上抛（不得吞）：吞掉会导致响应 body 短于已发的
         # Content-Length 但连接干净收尾 → 客户端把截断分片当完整数据喂解码器
         # → hls.js worker 卡死（视频冻结、无报错、不再请求分片，实测复现）。
         # do_GET 捕获后按短包处理（掐断连接 → 客户端立刻网络错误 → hls.js 重试）
         try:
+            # Prime the finally block before handing ownership to the handler:
+            # a seek may disconnect even before response headers can be written.
+            yield None
             if first:
                 if buf is not None:
                     buf.extend(first)
                 yield first
             while True:
-                b = resp.read(chunk)
+                b = _read_relay_chunk(resp, chunk)
                 if not b:
+                    fully_read = True
                     break
                 if buf is not None and len(buf) <= 8 * 1024 * 1024:
                     buf.extend(b)
                 yield b
         finally:
             try:
-                if HAS_URLLIB3:
-                    resp.release_conn()
-                else:
-                    resp.close()
+                _release_relay_response(resp, fully_read=fully_read)
             except Exception:
                 pass
             # 仅完整收完的分片入缓存（中断/部分数据不得入缓存，防毒化）
-            if buf is not None and known_len >= 0 and len(buf) == known_len:
+            if fully_read and buf is not None and known_len >= 0 and len(buf) == known_len:
                 with _relay_lock:
                     RELAY_CACHE[_relay_cache_key(u)] = (time.time(), 200, ctype or "application/octet-stream", bytes(buf), False)
                     _trim_relay()
@@ -2925,7 +2943,9 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
         # 普通 CL 上游（点播 CDN 等）：透传 Content-Length，行为与旧版一致；
         # 真短读由 urllib3 上抛 → do_GET 短包掐断 → 客户端重试
         extra["Content-Length"] = str(known_len)
-    return status, ctype, extra, gen(), False
+    stream = gen()
+    next(stream)  # Consume the ownership marker; only media bytes reach clients.
+    return status, ctype, extra, stream, False
 
 
 # ===== VLC 兜底专用：直播 HLS → 连续 MPEG-TS 直出（/api/relayts/<matchId>?src=bb） =====
@@ -4935,6 +4955,10 @@ class Handler(SimpleHTTPRequestHandler):
                     # 直接掐断连接 → 客户端网络错误 → 既有重试链（同旧短包语义）
                     self.close_connection = True
                     return
+                finally:
+                    close_stream = getattr(it, "close", None)
+                    if close_stream is not None:
+                        close_stream()
             # ---- m3u8 播放列表：整包重写（分片/密钥指回本代理）----
             try:
                 status, ctype, body, _err, is_m3u8 = relay_url(u, ref)
