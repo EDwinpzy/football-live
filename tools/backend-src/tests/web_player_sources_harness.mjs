@@ -196,6 +196,7 @@ function makeRuntime(detailFactory = async () => ({
   const fetches = [];
   const attached = [];
   const requests = [];
+  const persisted = new Map();
   const $ = selector => {
     if (!nodes.has(selector)) nodes.set(selector, new FakeNode());
     return nodes.get(selector);
@@ -215,7 +216,11 @@ function makeRuntime(detailFactory = async () => ({
     state: { portrait: false },
     BASE: "/web",
     addEventListener: (name, callback) => windowListeners.set(name, callback),
-    store: { get: (_key, fallback) => fallback, set() {}, remove() {} },
+    store: {
+      get: (key, fallback) => persisted.has(key) ? persisted.get(key) : fallback,
+      set: (key, value) => persisted.set(key, value),
+      remove: key => persisted.delete(key),
+    },
     $,
     $$: () => [],
     fmtTime: value => String(Math.floor(value || 0)),
@@ -242,13 +247,16 @@ function makeRuntime(detailFactory = async () => ({
     dLineIdx: 0, dEpIdx: 0, dEpPage: 0,
     resolverState: { preferred: null },
     __detailFactory: detailFactory,
+    __playFactory: async () => ({ sources: [{ url: "https://media.test/play.m3u8" }] }),
+    __persisted: persisted,
     __fetches: fetches,
     __attached: attached,
     __requests: requests,
     __resolveImpl: null,
     fetchJSON: async (url, options = {}) => {
-      fetches.push({ url: String(url), signal: options.signal || null });
+      fetches.push({ url: String(url), signal: options.signal || null, timeout: options.timeout });
       if (/\/vod\/detail\/|\/hhkan\/detail\//.test(String(url))) return sandbox.__detailFactory(url, options);
+      if (/\/vod\/play\//.test(String(url))) return sandbox.__playFactory(url, options);
       throw new Error("unexpected fetch " + url);
     },
   };
@@ -280,7 +288,7 @@ function makeRuntime(detailFactory = async () => ({
     globalThis.__setPlayerSourcePanel = open => setPlayerSourcePanel(open);
     globalThis.__providerFor = (line, index, ctx) => playerSourceProvider(line, index, ctx);
   `, context);
-  return { context, nodes, fetches, attached, requests, $, windowListeners };
+  return { context, nodes, fetches, attached, requests, $, windowListeners, __persisted: persisted };
 }
 
 const flush = async () => {
@@ -323,6 +331,8 @@ console.log("== landscape VOD source groups, fixed list, retry and latest reques
     "the currently playing route remains marked inside its provider group");
   assert.equal($("#morePanel").hidden, true, "the panel remains closed until selected");
   assert.ok(fetches.some(row => row.url.endsWith("/vod/detail/1?refresh=1")));
+  assert.equal(fetches.find(row => row.url.endsWith("/vod/detail/1?refresh=1")).timeout, 300000,
+    "source-list refresh allows up to five minutes");
 
   $("#mpToggle").dispatch("click");
   assert.equal($("#morePanel").hidden, false, "the grouped source list stays in the original panel");
@@ -374,6 +384,26 @@ console.log("== landscape VOD source groups, fixed list, retry and latest reques
   assert.equal($("#mpToggle").hidden, false, "source panel can be reopened from the error state");
   $("#mpToggle").dispatch("click");
   assert.equal($("#morePanel").hidden, false);
+}
+
+console.log("== manually chosen VOD source persists by title and episode across reopens ==");
+{
+  const runtime = makeRuntime(async () => ({ title: "测试片", sources: lines() }));
+  const { context: c, __persisted: persisted } = runtime;
+  c.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", epIdx: 0,
+    epName: "第1集", epCount: 2, lineIndex: 0, sourceKey: "id:line-a",
+    playRef: { pid: "a", vid: 0 }, sources: lines() });
+  await flush();
+  assert.equal(c.selectVodLine(1), true, "manual source selection records a title preference");
+  assert.equal(persisted.get("otvw:vod:source:douban:1").sourceKey, "id:line-b");
+
+  c.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", epIdx: 1,
+    epName: "第2集", epCount: 2, lineIndex: 0, sourceKey: "id:line-a",
+    playRef: { pid: "a", vid: 1 }, sources: lines() });
+  assert.equal(c.__getPlayer().selected, 1, "reopening the title defaults to the saved source");
+  assert.equal(c.__getPlayer().ctx.playRef.pid, "b", "the saved source supplies the requested episode");
+  assert.equal(c.__getPlayer().ctx.playRef.vid, 1);
+  assert.equal(c.__getPlayer().ctx.linePinned, true, "the saved manual choice is pinned against resolver changes");
 }
 
 console.log("== Douban initial playback stays fast while manual refresh remaps the selected episode ==");
@@ -538,6 +568,31 @@ console.log("== source loading failure and empty result are visible ==");
   await flush();
   assert.ok(hhkan.fetches.some(row => row.url.endsWith("/hhkan/detail/7?refresh=1&enrich=1")),
     "HHKan refresh bypasses detail caches and waits for current episode sources");
+}
+
+console.log("== VOD resolution failure does not automatically select another line ==");
+{
+  const runtime = makeRuntime();
+  const { context: c } = runtime;
+  c.openPlayer({ kind: "vod", vid: "douban:1", title: "测试片", epIdx: 0,
+    epName: "第1集", epCount: 2, lineIndex: 0, sourceKey: "id:line-a",
+    playRef: { pid: "a", vid: 0 }, linePinned: true, sources: lines() });
+  await flush();
+  assert.equal(runtime.requests.length, 1, "the first request targets the selected line only");
+  runtime.requests[0].reject(new Error("selected line failed"));
+  await flush();
+  assert.equal(runtime.requests.length, 1, "failure does not issue a playback request for another line");
+  assert.equal(c.__getPlayer().selected, 0, "the selected source remains visible after failure");
+  assert.equal(runtime.$("#pError").hidden, false, "the user gets an explicit failure state");
+
+  c.__pv.sources = ["https://media.test/current-1.m3u8", "https://media.test/current-2.m3u8"];
+  c.__pv.recoveryAttempts = 2;
+  const selectedKey = c.__getPlayer().ctx.sourceKey;
+  await c.recoverPlayback("stalled");
+  assert.equal(c.__getPlayer().ctx.sourceKey, selectedKey, "stalled recovery keeps the same VOD line");
+  assert.equal(c.__getPlayer().selected, 0);
+  assert.equal(runtime.attached.at(-1).url, "https://media.test/current-2.m3u8",
+    "recovery can still rotate among play URLs within the selected line");
 }
 
 console.log("== reopening the episode panel forces a fresh list without interrupting playback ==");
@@ -746,7 +801,7 @@ console.log("== forced play resolution uses fresh endpoint and latest cache writ
     BASE: "/web",
     fetchJSON: (url, options) => {
       const item = deferred();
-      calls.push({ url: String(url), signal: options.signal, ...item });
+      calls.push({ url: String(url), signal: options.signal, timeout: options.timeout, ...item });
       return item.promise;
     },
   });
@@ -755,6 +810,8 @@ console.log("== forced play resolution uses fresh endpoint and latest cache writ
   const first = context.__resolve("hhkan:7", 20, 3);
   const forced = context.__resolve("hhkan:7", 20, 3, { force: true });
   assert.equal(calls.length, 2);
+  assert.equal(calls[0].timeout, 300000, "play address resolution allows up to five minutes");
+  assert.equal(calls[1].timeout, 300000, "forced play address resolution also allows up to five minutes");
   assert.equal(calls[0].url, "/web/hhkan/play/7/20/3");
   assert.equal(calls[1].url, "/web/hhkan/play/7/20/3?fresh=1");
   calls[1].resolve({ sources: [{ url: "latest" }] });

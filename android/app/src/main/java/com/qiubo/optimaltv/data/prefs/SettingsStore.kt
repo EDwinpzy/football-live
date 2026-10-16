@@ -62,6 +62,7 @@ class SettingsStore(private val context: Context) {
 
     // ---- 线路记忆（技术方案 §3.2-3：每部影片上次成功的线路，下次直选）----
     private fun lineKey(vodId: String) = stringPreferencesKey("line:$vodId")
+    private fun vodSourceKey(vodId: String) = stringPreferencesKey("vod_source:$vodId")
 
     /** 记录格式 "engineId|lineIndex" */
     suspend fun rememberLine(vodId: String, engineId: String, lineIndex: Int) {
@@ -72,6 +73,26 @@ class SettingsStore(private val context: Context) {
         context.dataStore.data.first()[lineKey(vodId)]?.split("|")?.let {
             if (it.size == 2) it[0] to (it[1].toIntOrNull() ?: 0) else null
         }
+
+    /** Stable source identity selected for a title, independent of the current line ordering. */
+    suspend fun lastVodSource(vodId: String): String? =
+        context.dataStore.data.first()[vodSourceKey(vodId)]?.takeIf(String::isNotBlank)
+
+    /** Persist an explicit picker choice immediately, even if that source has not started yet. */
+    suspend fun rememberVodSource(vodId: String, sourceIdentity: String) {
+        if (sourceIdentity.isBlank()) return
+        context.dataStore.edit { it[vodSourceKey(vodId)] = sourceIdentity }
+    }
+
+    /** Seed a default after the first successful play without replacing an existing user choice. */
+    suspend fun rememberVodSourceIfMissing(vodId: String, sourceIdentity: String) {
+        if (sourceIdentity.isBlank()) return
+        context.dataStore.edit { preferences ->
+            if (preferences[vodSourceKey(vodId)].isNullOrBlank()) {
+                preferences[vodSourceKey(vodId)] = sourceIdentity
+            }
+        }
+    }
 
     // ---- IPTV 上次观看频道（v1.15 电视页「进入即播」）----
     // 三个独立 key（分组名/频道名/URL 各存各的）：避免自行拼分隔符与频道名、URL 中的

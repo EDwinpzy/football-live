@@ -67,6 +67,25 @@ public struct MediaSource: Identifiable, Codable, Hashable {
 }
 
 enum PlaybackSourceSelection {
+    static func preferredSource(
+        matching preference: PlaybackSourcePreference?,
+        in sources: [MediaSource]
+    ) -> MediaSource? {
+        guard let preference else { return nil }
+        return refreshedSource(
+            matching: MediaSource(id: preference.id, name: preference.name, episodes: []),
+            in: sources
+        )
+    }
+
+    static func ordered(
+        _ sources: [MediaSource],
+        preferring preference: PlaybackSourcePreference?
+    ) -> [MediaSource] {
+        guard let preferred = preferredSource(matching: preference, in: sources) else { return sources }
+        return [preferred] + sources.filter { $0.id != preferred.id }
+    }
+
     static func refreshedSource(
         matching selectedSource: MediaSource,
         in refreshedSources: [MediaSource]
@@ -127,6 +146,18 @@ enum PlaybackSourceSelection {
     private static func normalized(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
+}
+
+enum PlaybackTimeout {
+    static let vodMilliseconds: UInt64 = 300_000
+    static var vodSeconds: TimeInterval { Double(vodMilliseconds) / 1_000 }
+    static var vodNanoseconds: UInt64 { vodMilliseconds * 1_000_000 }
+    static let vodStallRecoveryNanoseconds: UInt64 = 4_000_000_000
+}
+
+struct PlaybackSourcePreference: Codable, Equatable {
+    let id: String
+    let name: String
 }
 
 public struct Episode: Identifiable, Codable, Hashable {

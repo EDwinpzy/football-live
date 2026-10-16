@@ -73,6 +73,17 @@ class SettingsStore(private val context: Context) {
             if (it.size == 2) it[0] to (it[1].toIntOrNull() ?: 0) else null
         }
 
+    // ---- 点播上次选择的信号源（稳定线路标识，不依赖本次线路列表顺序）----
+    private fun vodSourceKey(vodId: String) = stringPreferencesKey("vod_source:$vodId")
+
+    suspend fun lastVodSource(vodId: String): String? =
+        context.dataStore.data.first()[vodSourceKey(vodId)]
+
+    suspend fun rememberVodSource(vodId: String, sourceIdentity: String) {
+        if (vodId.isBlank() || sourceIdentity.isBlank()) return
+        context.dataStore.edit { it[vodSourceKey(vodId)] = sourceIdentity }
+    }
+
     // ---- IPTV 上次观看频道（v1.15 电视页「进入即播」）----
     // 三个独立 key（分组名/频道名/URL 各存各的）：避免自行拼分隔符与频道名、URL 中的
     // 特殊字符打架；恢复时优先 name+url 精确匹配，次选仅 name 匹配（同频道 URL 已更新）

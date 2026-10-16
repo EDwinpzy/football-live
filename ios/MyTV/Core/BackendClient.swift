@@ -137,7 +137,7 @@ public struct BackendClient {
             ? [URLQueryItem(name: "refresh", value: "1")] +
                 (route.isHHKan ? [URLQueryItem(name: "enrich", value: "1")] : [])
             : []
-        let data = try await get(segments: route.segments, query: query)
+        let data = try await get(segments: route.segments, query: query, timeout: PlaybackTimeout.vodSeconds)
         let object = try jsonObject(data)
         let kind: MediaKind = route.isHHKan ? .hhkan : .douban
         var detailItem = parseMediaItem(object, kind: kind) ?? item
@@ -164,7 +164,7 @@ public struct BackendClient {
             ? ["hhkan", "play", route.contentID, source.id, episode.id]
             : ["vod", "play", route.contentID, source.id, episode.id]
         let query = route.isHHKan && fresh ? [URLQueryItem(name: "fresh", value: "1")] : []
-        let data = try await get(segments: segments, query: query)
+        let data = try await get(segments: segments, query: query, timeout: PlaybackTimeout.vodSeconds)
         let object = try jsonObject(data)
         let firstSource = (object["sources"] as? [[String: Any]])?.compactMap {
             Self.string($0["url"]).nilIfBlank
@@ -426,10 +426,14 @@ public struct BackendClient {
 
     private enum MediaKind { case douban, hhkan }
 
-    private func get(segments: [String], query: [URLQueryItem]) async throws -> Data {
+    private func get(
+        segments: [String],
+        query: [URLQueryItem],
+        timeout: TimeInterval = 30
+    ) async throws -> Data {
         let url = try endpointURL(segments: segments, query: query)
         var request = URLRequest(url: url)
-        request.timeoutInterval = 30
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("MyTV iOS", forHTTPHeaderField: "User-Agent")
         let data: Data

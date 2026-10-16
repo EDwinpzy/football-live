@@ -233,6 +233,70 @@ final class CoreTests: XCTestCase {
         )
     }
 
+    func testRememberedVODSourcePersistsPerTitleAndMovesToTheFrontWhenAvailable() async throws {
+        let suiteName = "MyTVTests.VODSourcePreference.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let savedSource = MediaSource(id: "line-b", name: "备用线路", episodes: [])
+        let settings = await MainActor.run { AppSettings(defaults: defaults) }
+        await MainActor.run {
+            settings.rememberVODSource(savedSource, for: "douban:1292052")
+        }
+
+        let reopenedSettings = await MainActor.run { AppSettings(defaults: defaults) }
+        let preference = await MainActor.run {
+            reopenedSettings.rememberedVODSource(for: "douban:1292052")
+        }
+        let otherTitlePreference = await MainActor.run {
+            reopenedSettings.rememberedVODSource(for: "douban:another-title")
+        }
+        let availableSources = [
+            MediaSource(id: "line-a", name: "高清线路", episodes: []),
+            MediaSource(id: "line-b-refreshed", name: "备用线路", episodes: [])
+        ]
+        let ordered = PlaybackSourceSelection.ordered(availableSources, preferring: preference)
+
+        XCTAssertEqual(preference, PlaybackSourcePreference(id: "line-b", name: "备用线路"))
+        XCTAssertEqual(ordered.map(\.name), ["备用线路", "高清线路"])
+        XCTAssertNil(otherTitlePreference)
+        XCTAssertEqual(
+            PlaybackSourceSelection.ordered(availableSources, preferring: preference).first?.id,
+            "line-b-refreshed",
+            "A renamed source ID is still recognized by its unique name."
+        )
+    }
+
+    func testVODDetailAndPlayUseFiveMinuteTimeoutWhileHomeKeepsDefaultTimeout() async throws {
+        let requests = RequestRecorder()
+        StubURLProtocol.install { request in
+            requests.append(request)
+            switch request.url?.path {
+            case "/web/vod/home":
+                return (200, Data(#"{"sections":[]}"#.utf8))
+            case "/web/vod/detail/1292052":
+                return (200, Data(#"{"id":1292052,"title":"示例影片","sources":[{"id":"12","name":"线路","episodes":[{"id":"0","name":"正片"}]}]}"#.utf8))
+            default:
+                return (200, Data(#"{"url":"https://cdn.example.test/vod.m3u8"}"#.utf8))
+            }
+        }
+        let client = makeClient()
+        let item = MediaItem(id: "douban:1292052", title: "示例影片", detailRef: "1292052")
+
+        _ = try await client.home(category: "movie")
+        let detail = try await client.detail(item: item, refresh: true)
+        let source = try XCTUnwrap(detail.sources.first)
+        _ = try await client.play(
+            detailRef: item.detailRef,
+            source: source,
+            episode: try XCTUnwrap(source.episodes.first)
+        )
+
+        XCTAssertEqual(requests.all.map(\.timeoutInterval), [30, 300, 300])
+        XCTAssertEqual(PlaybackTimeout.vodMilliseconds, 300_000)
+        XCTAssertEqual(PlaybackTimeout.vodSeconds, 300, accuracy: 0.001)
+    }
+
     func testFreshEpisodeSelectionUsesUniqueNameWhenBackendReusesReorderedIDs() {
         let selectedEpisode = Episode(id: "1", name: "第 2 集")
         let refreshed = MediaSource(

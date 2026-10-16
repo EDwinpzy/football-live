@@ -221,7 +221,7 @@ class PlayerViewModel(
 
     companion object {
         const val TAG = "OTV"
-        const val START_WATCHDOG_MS = 20_000L      // 方案 §3.2-1 jellyplay BUFFERING_TIMEOUT_MS
+        const val START_WATCHDOG_MS = PlaybackStartupTimeoutPolicy.VOD_START_WATCHDOG_MS
         const val STALL_TICKS_LIMIT = 8            // 8s 位置无推进判定卡顿中断
         const val PROGRESS_INTERVAL_MS = 5_000L
         /** 长时体检采样节拍（2026-09-16 用户需求①）：10s 一次，冻结按连续窗口累计。 */
@@ -1104,10 +1104,13 @@ class PlayerViewModel(
 
         // 线路记忆直选（方案 §3.2-3），否则用设置里的引擎偏好
         val memory = settings.lastLine(vodId)
+        val rememberedVodSource = settings.lastVodSource(vodId)
         val enginePref = memory?.first ?: settings.current().engineId
         // L0 already moved the persisted successful source to index 0; the settings index belongs
         // to the old source ordering and must not override that reordered list.
-        val initialLine = if (preferResolvedSource) 0 else memory?.second?.takeIf { it in lines.indices } ?: 0
+        val preferredSourceLine = VodSourcePreferencePolicy.preferredIndex(lines, rememberedVodSource)
+        val initialLine = preferredSourceLine
+            ?: if (preferResolvedSource) 0 else memory?.second?.takeIf { it in lines.indices } ?: 0
         val initialLineInfo = lines.getOrNull(initialLine)
         val initialEpisodes = repo.episodesForLine(effItem, initialLineInfo)
             ?.takeIf { epStart in it.indices }
@@ -1344,16 +1347,17 @@ class PlayerViewModel(
         }
     }
 
-    /** 防线一：20s 未起播 → 判定失败自动换线（方案 §3.2-1） */
+    /** 未起播到达媒体类型对应的上限后结束当前加载；普通 VOD 的上限是 5 分钟。 */
     private fun armWatchdog() {
         watchdogJob?.cancel()
+        val timeoutMs = PlaybackStartupTimeoutPolicy.timeoutMs(_ui.value.isLive, isFootballVod)
         watchdogJob = viewModelScope.launch {
-            Log.d(TAG, "watchdog armed ${START_WATCHDOG_MS}ms")
-            delay(START_WATCHDOG_MS)
+            Log.d(TAG, "watchdog armed ${timeoutMs}ms")
+            delay(timeoutMs)
             if (!startedThisSession) {
-                Log.w(TAG, "watchdog fired: no picture in 20s")
-                OtvLog.w("watchdog：20s 无画面 → 换线（起播黑屏线索）")
-                onLineFail("起播超时（${START_WATCHDOG_MS / 1000}s 无画面）")
+                Log.w(TAG, "watchdog fired: no picture in ${timeoutMs}ms")
+                OtvLog.w("watchdog：${timeoutMs / 1000}s 无画面 → 当前线路失败")
+                onLineFail("起播超时（${timeoutMs / 1000}s 无画面）")
             }
         }
     }
@@ -1652,15 +1656,21 @@ class PlayerViewModel(
                         startRecoverySession(requestToken, current, if (state.isLive) 0L else resume)
                     }
                     RecoveryAction.SWITCH_SOURCE -> {
-                        telemetry.emit(PlaybackTelemetry.Phase.AUTO_SWITCH, note = "step$attempt")
-                        // 换源后进入冷却：刚换的线正在起播，缓冲中属正常，此刻再判卡顿会自激。
-                        healthCooldown.arm(android.os.SystemClock.elapsedRealtime(), attempt)
-                        val next = state.lines.indices.firstOrNull { it != current && it !in triedLines }
-                            ?: state.lines.indices.firstOrNull { it != current }
-                        if (next != null) {
-                            startRecoverySession(requestToken, next, if (state.isLive) 0L else resume)
+                        if (AutomaticSourceSwitchPolicy.maySwitch(state.isLive, isFootballVod)) {
+                            telemetry.emit(PlaybackTelemetry.Phase.AUTO_SWITCH, note = "step$attempt")
+                            // 换源后进入冷却：刚换的线正在起播，缓冲中属正常，此刻再判卡顿会自激。
+                            healthCooldown.arm(android.os.SystemClock.elapsedRealtime(), attempt)
+                            val next = state.lines.indices.firstOrNull { it != current && it !in triedLines }
+                                ?: state.lines.indices.firstOrNull { it != current }
+                            if (next != null) {
+                                startRecoverySession(requestToken, next, 0L)
+                            } else {
+                                recreateEngineForRecovery(current, resume, requestToken)
+                            }
                         } else {
-                            recreateEngineForRecovery(current, resume, requestToken)
+                            state.lines.getOrNull(current)?.playRef?.takeIf { it.isNotBlank() }?.let(repo::bustPlayCache)
+                            OtvLog.w("点播恢复保持当前信号源 line=$current；刷新后继续重试")
+                            startRecoverySession(requestToken, current, resume)
                         }
                     }
                     RecoveryAction.RECREATE_ENGINE -> recreateEngineForRecovery(current, resume, requestToken)
@@ -1743,7 +1753,17 @@ class PlayerViewModel(
         // Persist the actual middle playRef field used by the successful request.
         val lineId = repo.lineIdForLastGood(line)
         if (lineId.isBlank()) return
+        val refParts = line.playRef.split('|')
+        val actualLine = if (refParts.size >= 3) {
+            line.copy(playRef = "${refParts.first()}|$lineId|${refParts.last()}")
+        } else {
+            line
+        }
+        val sourceIdentity = if (_ui.value.isLive || isFootballVod) null else
+            VodSourcePreferencePolicy.identity(actualLine)
+        val selectedVodId = vodId
         Graph.appScope.launch {
+            sourceIdentity?.let { source -> runCatching { settings.rememberVodSource(selectedVodId, source) } }
             repo.rememberLastGoodSource(
                 mytvId = item.mytvId,
                 epIndex = _ui.value.epIndex,
@@ -2067,6 +2087,17 @@ class PlayerViewModel(
             }
             return
         }
+        if (!AutomaticSourceSwitchPolicy.maySwitch(_ui.value.isLive, isFootballVod)) {
+            OtvLog.w("点播线路失败：保留已选择的 line=${_ui.value.activeLine}，不自动切换信号源")
+            viewModelScope.launch { saveProgress(force = false) }
+            stopForFatal()
+            _ui.value = _ui.value.copy(
+                fatalMsg = reason,
+                sourceStatus = PlayerSourceStatus.ERROR,
+                controlsVisible = false,
+            )
+            return
+        }
         if (next == null) {
             viewModelScope.launch { saveProgress(force = false) }
             stopForFatal()
@@ -2139,6 +2170,11 @@ class PlayerViewModel(
                     runCatching { Graph.settings.rememberLiveLastSrc(src) }
                         .onSuccess { OtvLog.i("直播源记忆已更新: $src") }
                 }
+            }
+        } else if (!isFootballVod) {
+            VodSourcePreferencePolicy.identity(state.lines.getOrNull(idx))?.let { source ->
+                val selectedVodId = vodId
+                Graph.appScope.launch { runCatching { settings.rememberVodSource(selectedVodId, source) } }
             }
         }
         val pos = if (_ui.value.castDevice != null) _ui.value.castPositionMs else _ui.value.positionMs
@@ -2528,6 +2564,7 @@ class PlayerViewModel(
         )
         val requestGeneration = sessionGen
         val requestLine = cur.activeLine
+        val requestSourceIdentity = VodSourcePreferencePolicy.identity(cur.lines.getOrNull(requestLine))
         val requestEngine = engine
         val requestEngineEpoch = engineEpochCounter
         val job = viewModelScope.launch {
@@ -2566,7 +2603,11 @@ class PlayerViewModel(
                 sourceStatus = PlayerSourceStatus.LOADING,
                 playState = EnginePlayState.IDLE,
             )
-            val line = requestLine.coerceIn(0, (newLines.size - 1).coerceAtLeast(0))
+            val line = if (isFootballVod) {
+                requestLine.coerceIn(0, (newLines.size - 1).coerceAtLeast(0))
+            } else {
+                VodSourcePreferencePolicy.preferredIndex(newLines, requestSourceIdentity) ?: 0
+            }
             // 换集后重建解码实例，清掉上一集留下的播放器/渲染状态。
             startSession(line, 0L, recreateEngine = true)
         }

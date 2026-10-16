@@ -67,7 +67,11 @@ struct MediaDetailView: View {
     }
 
     private func detailContent(_ detail: MediaDetail) -> some View {
-        ScrollView {
+        let orderedSources = PlaybackSourceSelection.ordered(
+            detail.sources,
+            preferring: settings.rememberedVODSource(for: detail.item.id)
+        )
+        return ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(alignment: .top, spacing: 18) {
                     PosterArtwork(item: detail.item, width: 138, height: 198)
@@ -114,7 +118,7 @@ struct MediaDetailView: View {
 
                 VStack(alignment: .leading, spacing: 16) {
                     SectionHeading(title: "选择线路")
-                    if detail.sources.isEmpty {
+                    if orderedSources.isEmpty {
                         Text("当前影片没有可播放线路。")
                             .font(.subheadline)
                             .foregroundStyle(MyTVStyle.secondaryText)
@@ -123,8 +127,8 @@ struct MediaDetailView: View {
                             .background(MyTVStyle.surface, in: RoundedRectangle(cornerRadius: 14))
                             .accessibilityIdentifier("detail-no-sources")
                     } else {
-                        ForEach(detail.sources) { source in
-                            sourceCard(source, item: detail.item, availableSources: detail.sources)
+                        ForEach(orderedSources) { source in
+                            sourceCard(source, item: detail.item, availableSources: orderedSources)
                         }
                     }
                 }

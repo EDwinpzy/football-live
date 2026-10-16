@@ -27,6 +27,8 @@ struct PlaybackView: View {
     @State private var relayFallbackURL: URL?
     @State private var isDirectAttempt = false
     @State private var relayFallbackAttempted = false
+    @State private var playbackStartupDeadline: Date?
+    @State private var hasPlaybackStarted = false
 
     init(route: PlaybackRoute) {
         self.route = route
@@ -121,6 +123,13 @@ struct PlaybackView: View {
                   status.item === player?.currentItem else { return }
             recoverOrShowFailure(for: status.item)
         }
+        .onReceive(playerTimeControlPublisher) { status in
+            guard status.player === player, status.status == .playing else { return }
+            hasPlaybackStarted = true
+            playbackStartupDeadline = nil
+            stallCheckTask?.cancel()
+            stallCheckTask = nil
+        }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemFailedToPlayToEndTime).receive(on: DispatchQueue.main)) { notification in
             guard let failedItem = notification.object as? AVPlayerItem,
                   failedItem === player?.currentItem else { return }
@@ -136,7 +145,10 @@ struct PlaybackView: View {
             guard route.detailRef != nil,
                   let stalledItem = notification.object as? AVPlayerItem,
                   stalledItem === player?.currentItem else { return }
-            scheduleStallCheck(for: stalledItem, generation: requestGeneration, after: 4_000_000_000)
+            let timeout = hasPlaybackStarted
+                ? PlaybackTimeout.vodStallRecoveryNanoseconds
+                : remainingStartupTimeoutNanoseconds
+            scheduleStallCheck(for: stalledItem, generation: requestGeneration, after: timeout)
         }
         .toolbar {
             if hasSourcePicker {
@@ -175,12 +187,17 @@ struct PlaybackView: View {
         let resumeTime = keepsEpisode ? currentPlaybackTime : 0
         selectedSource = source
         selectedEpisode = episode
+        if let item = route.item, let source {
+            settings.rememberVODSource(source, for: item.id)
+        }
         tearDownPlayer()
         if !keepsEpisode { savedPlaybackTime = 0 }
         errorMessage = nil
         relayFallbackURL = nil
         isDirectAttempt = false
         relayFallbackAttempted = false
+        playbackStartupDeadline = nil
+        hasPlaybackStarted = false
 
         guard let client = settings.client else {
             isLoading = false
@@ -224,6 +241,9 @@ struct PlaybackView: View {
                         resolvedEpisode = refreshedEpisode
                         selectedSource = refreshedSource
                         selectedEpisode = refreshedEpisode
+                        if let item = route.item {
+                            settings.rememberVODSource(refreshedSource, for: item.id)
+                        }
                     } else {
                         resolvedSource = requestedSource
                         resolvedEpisode = requestedEpisode
@@ -277,6 +297,7 @@ struct PlaybackView: View {
         newPlayer.automaticallyWaitsToMinimizeStalling = true
         player = newPlayer
         isLoading = false
+        hasPlaybackStarted = false
         if resumeTime.isFinite, resumeTime > 0 {
             newPlayer.seek(to: CMTime(seconds: resumeTime, preferredTimescale: 600)) { _ in
                 Task { @MainActor in
@@ -288,7 +309,10 @@ struct PlaybackView: View {
             newPlayer.play()
         }
         if route.detailRef != nil {
-            scheduleStallCheck(for: item, generation: generation, after: 12_000_000_000)
+            playbackStartupDeadline = Date().addingTimeInterval(PlaybackTimeout.vodSeconds)
+            scheduleStallCheck(for: item, generation: generation, after: PlaybackTimeout.vodNanoseconds)
+        } else {
+            playbackStartupDeadline = nil
         }
     }
 
@@ -505,6 +529,11 @@ struct PlaybackView: View {
         }
     }
 
+    private var remainingStartupTimeoutNanoseconds: UInt64 {
+        guard let playbackStartupDeadline else { return PlaybackTimeout.vodNanoseconds }
+        return UInt64(max(0, playbackStartupDeadline.timeIntervalSinceNow) * 1_000_000_000)
+    }
+
     @MainActor
     private func tearDownPlayer() {
         if let player {
@@ -516,6 +545,8 @@ struct PlaybackView: View {
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         player = nil
+        playbackStartupDeadline = nil
+        hasPlaybackStarted = false
     }
 
     private var playerDescription: String {
@@ -531,6 +562,16 @@ struct PlaybackView: View {
         }
         return item.publisher(for: \.status, options: [.initial, .new])
             .map { (item: item, status: $0) }
+            .receive(on: DispatchQueue.main)
+            .eraseToAnyPublisher()
+    }
+
+    private var playerTimeControlPublisher: AnyPublisher<(player: AVPlayer, status: AVPlayer.TimeControlStatus), Never> {
+        guard let player else {
+            return Empty<(player: AVPlayer, status: AVPlayer.TimeControlStatus), Never>().eraseToAnyPublisher()
+        }
+        return player.publisher(for: \.timeControlStatus, options: [.initial, .new])
+            .map { (player: player, status: $0) }
             .receive(on: DispatchQueue.main)
             .eraseToAnyPublisher()
     }
