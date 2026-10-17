@@ -233,6 +233,70 @@ final class CoreTests: XCTestCase {
         )
     }
 
+    func testRememberedVODSourcePersistsPerTitleAndMovesToTheFrontWhenAvailable() async throws {
+        let suiteName = "MyTVTests.VODSourcePreference.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let savedSource = MediaSource(id: "line-b", name: "备用线路", episodes: [])
+        let settings = await MainActor.run { AppSettings(defaults: defaults) }
+        await MainActor.run {
+            settings.rememberVODSource(savedSource, for: "douban:1292052")
+        }
+
+        let reopenedSettings = await MainActor.run { AppSettings(defaults: defaults) }
+        let preference = await MainActor.run {
+            reopenedSettings.rememberedVODSource(for: "douban:1292052")
+        }
+        let otherTitlePreference = await MainActor.run {
+            reopenedSettings.rememberedVODSource(for: "douban:another-title")
+        }
+        let availableSources = [
+            MediaSource(id: "line-a", name: "高清线路", episodes: []),
+            MediaSource(id: "line-b-refreshed", name: "备用线路", episodes: [])
+        ]
+        let ordered = PlaybackSourceSelection.ordered(availableSources, preferring: preference)
+
+        XCTAssertEqual(preference, PlaybackSourcePreference(id: "line-b", name: "备用线路"))
+        XCTAssertEqual(ordered.map(\.name), ["备用线路", "高清线路"])
+        XCTAssertNil(otherTitlePreference)
+        XCTAssertEqual(
+            PlaybackSourceSelection.ordered(availableSources, preferring: preference).first?.id,
+            "line-b-refreshed",
+            "A renamed source ID is still recognized by its unique name."
+        )
+    }
+
+    func testVODDetailAndPlayUseFiveMinuteTimeoutWhileHomeKeepsDefaultTimeout() async throws {
+        let requests = RequestRecorder()
+        StubURLProtocol.install { request in
+            requests.append(request)
+            switch request.url?.path {
+            case "/web/vod/home":
+                return (200, Data(#"{"sections":[]}"#.utf8))
+            case "/web/vod/detail/1292052":
+                return (200, Data(#"{"id":1292052,"title":"示例影片","sources":[{"id":"12","name":"线路","episodes":[{"id":"0","name":"正片"}]}]}"#.utf8))
+            default:
+                return (200, Data(#"{"url":"https://cdn.example.test/vod.m3u8"}"#.utf8))
+            }
+        }
+        let client = makeClient()
+        let item = MediaItem(id: "douban:1292052", title: "示例影片", detailRef: "1292052")
+
+        _ = try await client.home(category: "movie")
+        let detail = try await client.detail(item: item, refresh: true)
+        let source = try XCTUnwrap(detail.sources.first)
+        _ = try await client.play(
+            detailRef: item.detailRef,
+            source: source,
+            episode: try XCTUnwrap(source.episodes.first)
+        )
+
+        XCTAssertEqual(requests.all.map(\.timeoutInterval), [30, 300, 300])
+        XCTAssertEqual(PlaybackTimeout.vodMilliseconds, 300_000)
+        XCTAssertEqual(PlaybackTimeout.vodSeconds, 300, accuracy: 0.001)
+    }
+
     func testFreshEpisodeSelectionUsesUniqueNameWhenBackendReusesReorderedIDs() {
         let selectedEpisode = Episode(id: "1", name: "第 2 集")
         let refreshed = MediaSource(
@@ -325,6 +389,74 @@ final class CoreTests: XCTestCase {
 
         XCTAssertEqual(multiSourceRoute.availableSources, [source, backupSource])
         XCTAssertEqual(singleSourceRoute.availableSources, [source])
+    }
+
+    func testPlaybackRetryTargetKeepsTheSelectedSourceEpisodeAndSeekPosition() {
+        let source = MediaSource(id: "line-a", name: "高清线路", episodes: [])
+        let episode = Episode(id: "episode-3", name: "第 3 集")
+
+        let retry = PlaybackRetryPolicy.target(source: source, episode: episode, resumeTime: 1_245)
+
+        XCTAssertEqual(retry?.source, source)
+        XCTAssertEqual(retry?.episode, episode)
+        XCTAssertEqual(retry?.resumeTime, 1_245)
+        XCTAssertNil(PlaybackRetryPolicy.target(source: nil, episode: episode, resumeTime: 1_245))
+        XCTAssertNil(PlaybackRetryPolicy.target(source: source, episode: nil, resumeTime: 1_245))
+        XCTAssertEqual(PlaybackRetryPolicy.safeTime(.nan, fallback: 1_245), 1_245)
+        XCTAssertEqual(PlaybackRetryPolicy.safeTime(-1, fallback: 1_245), 1_245)
+        XCTAssertEqual(
+            PlaybackRetryPolicy.resumeTime(playerTime: 0, pendingSeekTarget: 1_245, savedPlaybackTime: 1_245),
+            1_245,
+            "A failed seek must retry from its requested target even before AVPlayer reports that position."
+        )
+        XCTAssertEqual(
+            PlaybackRetryPolicy.resumeTime(playerTime: 1_280, pendingSeekTarget: nil, savedPlaybackTime: 1_245),
+            1_280,
+            "After seek completion, the current playback position takes over as the retry point."
+        )
+    }
+
+    func testPlaybackFailureFallsBackToSameLineRelayBeforeRetryAndKeepsLivePolicy() throws {
+        let episode = Episode(id: "episode-3", name: "第 3 集")
+        let source = MediaSource(id: "line-a", name: "高清线路", episodes: [episode])
+        let relayURL = try XCTUnwrap(URL(string: "https://relay.example.invalid/play.m3u8"))
+
+        XCTAssertEqual(
+            PlaybackRetryPolicy.failureAction(
+                isVOD: true,
+                isDirectAttempt: true,
+                relayURL: relayURL,
+                source: source,
+                episode: episode,
+                resumeTime: 1_245
+            ),
+            .relay(relayURL),
+            "A failed direct request should first reuse its same-line relay URL."
+        )
+        XCTAssertEqual(
+            PlaybackRetryPolicy.failureAction(
+                isVOD: true,
+                isDirectAttempt: false,
+                relayURL: nil,
+                source: source,
+                episode: episode,
+                resumeTime: 1_245
+            ),
+            .retry(PlaybackRetryTarget(source: source, episode: episode, resumeTime: 1_245)),
+            "A relay failure should request a fresh stream for the same line and episode."
+        )
+        XCTAssertEqual(
+            PlaybackRetryPolicy.failureAction(
+                isVOD: false,
+                isDirectAttempt: true,
+                relayURL: relayURL,
+                source: source,
+                episode: episode,
+                resumeTime: 1_245
+            ),
+            .showFailure,
+            "Live playback should keep its existing failure handling."
+        )
     }
 
     func testLegacyNumericDetailRefsKeepDoubanAndHHKanRoutesDistinct() {

@@ -79,6 +79,38 @@ class HhkanPlayRefreshTest(unittest.TestCase):
         self.assertEqual(result["line"], "fresh")
         resolve.assert_called_once_with(71234, 100, 4, fresh=True)
 
+    def test_simultaneous_identical_play_requests_share_one_upstream_fetch(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def fetch(_path):
+            entered.set()
+            if not release.wait(3):
+                raise TimeoutError("test fetch was not released")
+            return payload("shared")
+
+        with patch.object(proxy, "_hhkan_origin_call", side_effect=lambda fn: fn()), \
+                patch.object(proxy.hhkan, "get_page", side_effect=fetch) as upstream, \
+                patch.object(proxy.hhkan, "parse_play_page", side_effect=lambda p: p), \
+                concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+            first = executor.submit(proxy._hhkan_native_play, 71234, 1, 0)
+            self.assertTrue(entered.wait(2))
+            others = [executor.submit(proxy._hhkan_native_play, 71234, 1, 0) for _ in range(5)]
+            release.set()
+            results = [future.result(timeout=3) for future in [first] + others]
+        self.assertTrue(all(result["line"] == "shared" for result in results))
+        self.assertEqual(upstream.call_count, 1)
+        self.assertEqual(proxy._PLAY_PARSE_PENDING, {})
+
+    def test_native_background_probe_reuses_the_play_parse_entrypoint(self):
+        lines = [{"name": "主线", "episodes": [{"pid": 1, "vid": 2189576}]}]
+        with patch.dict(proxy._NATIVE_PROBE_CACHE, {}, clear=True), \
+                patch.object(proxy, "_hhkan_breaker_open", return_value=False), \
+                patch.object(proxy, "_hhkan_native_play", return_value=payload("shared")) as parse, \
+                patch.object(proxy, "_probe_m3u8_height", return_value=(720, True)):
+            proxy._probe_native_sources(71234, lines)
+        parse.assert_called_once_with(71234, 1, 2189576)
+        self.assertEqual(lines[0]["probe_h"], 720)
+
     def test_older_inflight_parse_cannot_overwrite_new_success_or_failed_retry(self):
         for fresh_fails in (False, True):
             with self.subTest(fresh_fails=fresh_fails):

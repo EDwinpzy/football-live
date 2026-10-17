@@ -108,4 +108,27 @@ class LiveStreamPayloadParserTest {
 
         assertTrue(!relay.contains("football_vpn"))
     }
+
+    @Test
+    fun `stale source list from the backend stays playable`() {
+        // 后端在上游限流/超时时会回退上一次成功清单并标 stale:true（2026-10-17）。
+        // App 必须照常当作可用信号源，不能因为多了这个标记就当成空列表。
+        val parsed = LiveStreamPayloadParser.available(
+            JSONObject(
+                """
+                {
+                  "stale": true,
+                  "cachedAt": 1760000000,
+                  "url": "https://cdn.example/live-a.m3u8",
+                  "sources": [
+                    {"url":"https://cdn.example/live-a.m3u8","player":"m3u8","source":"88z_4","name":"线路A2","referer":"https://www.88zhibo.tv/"}
+                  ]
+                }
+                """.trimIndent(),
+            ),
+        )
+
+        assertEquals(listOf("88z_4"), parsed.map { it.source })
+        assertEquals(listOf("线路A2"), parsed.map { it.name })
+    }
 }

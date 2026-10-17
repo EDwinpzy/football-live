@@ -154,4 +154,19 @@ class PlaybackRecoveryCoordinationPolicyTest {
         assertEquals(4, PlaybackRecoveryCoordinationPolicy.nextReadyStallTicks(3, -3000L, -3000L, 10, 10))
         assertEquals(0, PlaybackRecoveryCoordinationPolicy.nextReadyStallTicks(3, -3000L, -3000L, 10, 11))
     }
+
+    @Test
+    fun `first frame grace counts from READY instead of from prepare`() {
+        // 真机实测：慢上游 prepare 后 16.5s 才 READY。旧实现从 prepare 起算，
+        // READY 后 0.6s 就判死；此时 VLC 还要 1.7s 才 vout（出画面）。
+        assertFalse(PlaybackRecoveryCoordinationPolicy.firstFrameWatchdogExpired(16_500L, 17_100L, false))
+        assertFalse(PlaybackRecoveryCoordinationPolicy.firstFrameWatchdogExpired(16_500L, 18_300L, false))
+        // 满 15s 才判死
+        assertFalse(PlaybackRecoveryCoordinationPolicy.firstFrameWatchdogExpired(16_500L, 31_499L, false))
+        assertTrue(PlaybackRecoveryCoordinationPolicy.firstFrameWatchdogExpired(16_500L, 31_500L, false))
+        // 已出画面永不判死
+        assertFalse(PlaybackRecoveryCoordinationPolicy.firstFrameWatchdogExpired(16_500L, 99_000L, true))
+        // 还没 READY：归 20s 起播看门狗管，这里不能动手
+        assertFalse(PlaybackRecoveryCoordinationPolicy.firstFrameWatchdogExpired(-1L, 99_000L, false))
+    }
 }

@@ -137,7 +137,7 @@ public struct BackendClient {
             ? [URLQueryItem(name: "refresh", value: "1")] +
                 (route.isHHKan ? [URLQueryItem(name: "enrich", value: "1")] : [])
             : []
-        let data = try await get(segments: route.segments, query: query)
+        let data = try await get(segments: route.segments, query: query, timeout: PlaybackTimeout.vodSeconds)
         let object = try jsonObject(data)
         let kind: MediaKind = route.isHHKan ? .hhkan : .douban
         var detailItem = parseMediaItem(object, kind: kind) ?? item
@@ -164,7 +164,7 @@ public struct BackendClient {
             ? ["hhkan", "play", route.contentID, source.id, episode.id]
             : ["vod", "play", route.contentID, source.id, episode.id]
         let query = route.isHHKan && fresh ? [URLQueryItem(name: "fresh", value: "1")] : []
-        let data = try await get(segments: segments, query: query)
+        let data = try await get(segments: segments, query: query, timeout: PlaybackTimeout.vodSeconds)
         let object = try jsonObject(data)
         let firstSource = (object["sources"] as? [[String: Any]])?.compactMap {
             Self.string($0["url"]).nilIfBlank
@@ -181,6 +181,32 @@ public struct BackendClient {
             url: relayURL(for: streamURL.absoluteString, ref: "none"),
             directURL: directURL
         )
+    }
+
+    /// Resolve and probe the first byte for one source/episode without starting playback.
+    public func probePlaybackSource(
+        detailRef: String,
+        source: MediaSource,
+        episode: Episode
+    ) async throws -> Int {
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        let stream = try await play(detailRef: detailRef, source: source, episode: episode, fresh: true)
+        do {
+            try await probeFirstByte(at: stream.directURL ?? stream.url)
+        } catch {
+            guard stream.directURL != nil else { throw error }
+            try await probeFirstByte(at: stream.url)
+        }
+        let elapsed = DispatchTime.now().uptimeNanoseconds - startedAt
+        return Int(elapsed / 1_000_000)
+    }
+
+    private func probeFirstByte(at url: URL) async throws {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 10
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        try await FirstByteProbe().wait(for: request)
     }
 
     public func channels() async throws -> [TVChannel] {
@@ -426,10 +452,14 @@ public struct BackendClient {
 
     private enum MediaKind { case douban, hhkan }
 
-    private func get(segments: [String], query: [URLQueryItem]) async throws -> Data {
+    private func get(
+        segments: [String],
+        query: [URLQueryItem],
+        timeout: TimeInterval = 30
+    ) async throws -> Data {
         let url = try endpointURL(segments: segments, query: query)
         var request = URLRequest(url: url)
-        request.timeoutInterval = 30
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("MyTV iOS", forHTTPHeaderField: "User-Agent")
         let data: Data

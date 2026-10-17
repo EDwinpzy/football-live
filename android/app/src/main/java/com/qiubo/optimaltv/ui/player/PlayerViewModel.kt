@@ -39,6 +39,24 @@ import kotlinx.coroutines.withContext
 
 enum class Panel { NONE, MORE }
 
+data class LineSpeedTestResult(
+    val isTesting: Boolean = false,
+    val latencyMs: Long? = null,
+    val failed: Boolean = false,
+)
+
+internal object LineSpeedTestPolicy {
+    fun key(line: LineInfo): String = line.playRef.ifBlank { line.url.ifBlank { line.vodId } }
+
+    fun resultText(result: LineSpeedTestResult?): String = when {
+        result == null -> ""
+        result.isTesting -> "测速中…"
+        result.latencyMs != null -> "${result.latencyMs}ms"
+        result.failed -> "不可用"
+        else -> ""
+    }
+}
+
 /** Small, pure coordination rules shared by the live stall watchdog and health sampler. */
 internal object PlaybackRecoveryCoordinationPolicy {
     fun canStartRecovery(
@@ -63,6 +81,25 @@ internal object PlaybackRecoveryCoordinationPolicy {
 
     fun renderedFramesAdvanced(previous: Int, current: Int): Boolean =
         previous >= 0 && current >= 0 && current > previous
+
+    /** 首帧看门狗的宽限期（READY 之后还要等多久才判「无首帧」）。 */
+    const val FIRST_FRAME_GRACE_MS = 15_000L
+
+    /**
+     * READY 之后是否已经等够宽限期、可以判定「解码器挂死无首帧」。
+     *
+     * 关键：计时起点必须是**首次 READY**，不是 prepare。上游慢时（实测 16.5s 才 READY）
+     * 若从 prepare 起算，READY 一到预算就耗尽，只剩一个轮询窗口——而 VLC 从
+     * READY（buffering 100%）到 vout 要 0.6–1.8s，于是刚起好的会话被误杀重来。
+     * 起播前的长时间等待归 20s 起播看门狗（[armWatchdog]）管，不归这里。
+     *
+     * @param readyAtMs 首次观察到 READY 的时刻（elapsedRealtime）；<0 表示还没 READY 过。
+     */
+    fun firstFrameWatchdogExpired(
+        readyAtMs: Long,
+        nowMs: Long,
+        firstFrameRendered: Boolean,
+    ): Boolean = readyAtMs >= 0 && !firstFrameRendered && nowMs - readyAtMs >= FIRST_FRAME_GRACE_MS
 
     fun hasPlaybackProgress(positionAdvanced: Boolean, renderedFramesAdvanced: Boolean): Boolean =
         positionAdvanced || renderedFramesAdvanced
@@ -136,6 +173,8 @@ data class PlayerUiState(
     val activeLine: Int = 0,
     /** Current line/detail resolution is in progress; independent of engine buffering state. */
     val sourceResolving: Boolean = false,
+    /** Manual per-source first-byte results shown in the playback sidebar. */
+    val lineSpeedTests: Map<String, LineSpeedTestResult> = emptyMap(),
     val engineId: String = "media3",
     val engineName: String = "",
     // 引擎状态镜像（驱动 UI）
@@ -192,7 +231,7 @@ class PlayerViewModel(
 
     companion object {
         const val TAG = "OTV"
-        const val START_WATCHDOG_MS = 20_000L      // 方案 §3.2-1 jellyplay BUFFERING_TIMEOUT_MS
+        const val START_WATCHDOG_MS = 20_000L      // 直播起播超时（保持原行为）
         const val STALL_TICKS_LIMIT = 8            // 8s 位置无推进判定卡顿中断
         const val PROGRESS_INTERVAL_MS = 5_000L
         /** 长时体检采样节拍（2026-09-16 用户需求①）：10s 一次，冻结按连续窗口累计。 */
@@ -227,6 +266,11 @@ class PlayerViewModel(
     private var vodSelectionGeneration = 0
     /** 当前正在解析点播地址的起播任务；手动切源/换集会立即取消并作废旧结果。 */
     private var pendingVodSessionJob: Job? = null
+    /** Ordinary VOD retries the selected source indefinitely until a user action replaces it. */
+    private var vodRetryJob: Job? = null
+    private val vodRetryGeneration = VodRetryGeneration()
+    /** A seek target wins over stale engine position until the engine confirms the target. */
+    private var pendingVodSeekTargetMs: Long? = null
     /** 防止同一引擎会话重复收到 ENDED 时重复切集。 */
     private var handledEndedSessionGen = -1
     private var stallRecoveries = 0
@@ -381,6 +425,7 @@ class PlayerViewModel(
     }
 
     private fun launchSourceBoot(fresh: Boolean) {
+        cancelVodRetryForUserAction()
         sourceBootJob?.cancel()
         _ui.value = _ui.value.copy(sourceResolving = true, fatalMsg = null)
         sourceBootJob = viewModelScope.launch { boot(fresh = fresh) }
@@ -705,7 +750,16 @@ class PlayerViewModel(
                 // 发射频率 2Hz→1Hz，播放页/电视页整页重组减半（可见时保持 500ms 原速，
                 // 进度条依旧平滑）。VM 内部 stall 检测（8×1s 窗口）/进度落盘（5s）精度无损。
                 val hide = !_ui.value.controlsVisible
-                val posOut = if (hide) st.positionMs / 1_000 * 1_000 else st.positionMs
+                val pendingSeek = pendingVodSeekTargetMs.takeIf { retriesCurrentVodUntilUserLeaves() }
+                val positionForUi = if (
+                    pendingSeek != null && !VodRetryPolicy.reachedSeekTarget(st.positionMs, pendingSeek)
+                ) {
+                    pendingSeek
+                } else {
+                    if (pendingSeek != null) pendingVodSeekTargetMs = null
+                    st.positionMs
+                }
+                val posOut = if (hide) positionForUi / 1_000 * 1_000 else positionForUi
                 val bufOut = if (hide) st.bufferedAheadMs / 1_000 * 1_000 else st.bufferedAheadMs
                 _ui.value = _ui.value.copy(
                     playState = st.state,
@@ -727,6 +781,14 @@ class PlayerViewModel(
                         // ③ VLC 也报错 → 交回常规失败链。
                         // 均不占换线/同线重解析配额（解码器问题换线也没用）
                         val decodeFail = st.errorMsg?.contains("DECODING_FAILED") == true
+                        if (retriesCurrentVodUntilUserLeaves() && decodeFail &&
+                            engine.engineId == "media3" && !vlcFallbackTried
+                        ) {
+                            vlcFallbackTried = true
+                            OtvLog.w("点播 Media3 解码失败 → 切 libVLC，保留当前影视源")
+                            switchEngine("vlc")
+                            return@collect
+                        }
                         if (_ui.value.isLive && decodeFail && hasEngine()) {
                             when {
                                 !softwareFallbackTried && engine.engineId == "media3" -> {
@@ -786,6 +848,43 @@ class PlayerViewModel(
     }
 
     private suspend fun boot(fresh: Boolean = false) {
+        var retryFresh = fresh
+        while (currentCoroutineContext().isActive) {
+            var attemptFailed = false
+            try {
+                bootAttempt(retryFresh)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                currentCoroutineContext().ensureActive()
+                if (!VodRetryPolicy.shouldRetry(_ui.value.isLive)) throw failure
+                attemptFailed = true
+                OtvLog.w("VOD 启播流程异常，保留当前影片并继续重试: ${failure.message}")
+                _ui.value = _ui.value.copy(
+                    fatalMsg = null,
+                    sourceResolving = true,
+                    playState = EnginePlayState.BUFFERING,
+                )
+            }
+            val failureReason = _ui.value.fatalMsg
+            if (!VodRetryPolicy.shouldRetryBootAfterAttempt(
+                    isLive = _ui.value.isLive,
+                    hasFatalMessage = failureReason != null,
+                    attemptFailed = attemptFailed,
+                )
+            ) return
+            OtvLog.w("VOD 暂时无法解析或启动，保留当前影片并继续重试: ${failureReason ?: "启播流程异常"}")
+            _ui.value = _ui.value.copy(
+                fatalMsg = null,
+                sourceResolving = true,
+                playState = EnginePlayState.BUFFERING,
+            )
+            delay(VodRetryPolicy.RETRY_DELAY_MS)
+            retryFresh = true
+        }
+    }
+
+    private suspend fun bootAttempt(fresh: Boolean) {
         invalidateEpisodeRefresh()
         // v1.14：冷启动秒进播放器时先等内置后端就绪（最多 ~15s）——backend 未监听时
         // 详情请求连接拒绝被 runCatching 吞掉，直接假性「该集没有可用线路」
@@ -905,14 +1004,12 @@ class PlayerViewModel(
             return
         }
 
-        // 线路记忆直选（方案 §3.2-3），否则用设置里的引擎偏好
+        // 按稳定源标识恢复上次选择；解析器首选只作为没有历史选择时的默认线路。
         val memory = settings.lastLine(vodId)
+        val rememberedSource = if (isFootballVod) null else settings.lastVodSource(vodId)
         val enginePref = memory?.first ?: settings.current().engineId
-        // 阶梯选中的线路优先于历史记忆——last_good/resolver 刚给出的那条是「当前最可能
-        // 能播」的，历史记忆可能已经失效（签名轮换、线路下线）。
-        val initialLine = pick.preferredIndex.takeIf { it in lines.indices && pick.hasImmediate }
-            ?: memory?.second?.takeIf { it in lines.indices }
-            ?: 0
+        val preferredLine = pick.preferredIndex.takeIf { pick.hasImmediate } ?: 0
+        val initialLine = VodSourceSelectionPolicy.initialIndex(lines, rememberedSource, preferredLine)
         val initialLineInfo = lines.getOrNull(initialLine)
         val initialEpisodes = repo.episodesForLine(effItem, initialLineInfo)
             ?.takeIf { epStart in it.indices }
@@ -1069,11 +1166,16 @@ class PlayerViewModel(
         } catch (unavailable: SelectedSourceRefreshException) {
             currentCoroutineContext().ensureActive()
             if (!isCurrentPlaybackRequest(gen, lineIdx, sessionEngine, sessionEngineEpoch)) return
-            stopForFatal()
             _ui.value = _ui.value.copy(
                 sourceResolving = false,
-                fatalMsg = unavailable.message ?: "无法刷新所选信号源，请重试",
             )
+            onLineFail(unavailable.message ?: "无法刷新所选信号源，请重试")
+            return
+        } catch (failure: Exception) {
+            currentCoroutineContext().ensureActive()
+            if (!isCurrentPlaybackRequest(gen, lineIdx, sessionEngine, sessionEngineEpoch)) return
+            _ui.value = _ui.value.copy(sourceResolving = false)
+            onLineFail("所选影视源解析失败（${failure.message ?: "未知错误"}）")
             return
         }
         currentCoroutineContext().ensureActive()
@@ -1113,8 +1215,18 @@ class PlayerViewModel(
         )
         currentCoroutineContext().ensureActive()
         if (!isCurrentPlaybackRequest(gen, lineIdx, sessionEngine, sessionEngineEpoch)) return
-        sessionEngine.prepare(PrepareRequest(playUrl, startPos))
         awaitingPrepare = true
+        try {
+            sessionEngine.prepare(PrepareRequest(playUrl, startPos))
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            awaitingPrepare = false
+            throw cancelled
+        } catch (failure: Exception) {
+            awaitingPrepare = false
+            startedThisSession = false
+            onLineFail("引擎起播失败: ${failure.message ?: "未知错误"}")
+            return
+        }
         armWatchdog()
         armFirstFrameWatchdog()
         startStallMonitor()
@@ -1151,16 +1263,39 @@ class PlayerViewModel(
 
     private fun armFirstFrameWatchdog() {
         firstFrameJob?.cancel()
+        if (retriesCurrentVodUntilUserLeaves()) {
+            vodLadderJob?.cancel()
+            return
+        }
         armVodFirstFrameLadder()
         firstFrameJob = viewModelScope.launch {
-            delay(15_000)
+            // 2026-10-17：宽限从「首次 READY」起算，不再从 prepare 起算。
+            // 真机实测（慢上游，prepare→READY 用了 16.5s）：旧实现 READY 那一刻预算已耗尽，
+            // 0.6s 后就判「无首帧」把会话杀掉，而 VLC 1.7s 后 vout 已经出画面——
+            // 代价是黑屏多 11s、多一次上游解析、给该线路多记一次失败。
+            var readyAt = -1L
             while (isActive) {
                 val s = _ui.value
                 if (!s.isLive || s.fatalMsg != null) return@launch
-                if (s.playState != EnginePlayState.READY) { delay(2_000); continue }
+                if (s.playState == EnginePlayState.ERROR || s.playState == EnginePlayState.ENDED) return@launch
                 val ff = if (hasEngine()) engine.uiState.value.firstFrameRendered else true
                 if (ff) return@launch
-                OtvLog.w("首帧看门狗：READY 15s 无首帧渲染（解码器挂死形态）→ 引擎回退/失败链")
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (s.playState != EnginePlayState.READY) {
+                    // 起播前/回到缓冲：宽限还没开始，或（换线重建后）重新计时。
+                    readyAt = -1L
+                    delay(500)
+                    continue
+                }
+                if (readyAt < 0) readyAt = now
+                if (!PlaybackRecoveryCoordinationPolicy.firstFrameWatchdogExpired(readyAt, now, ff)) {
+                    delay(500)
+                    continue
+                }
+                OtvLog.w(
+                    "首帧看门狗：READY ${PlaybackRecoveryCoordinationPolicy.FIRST_FRAME_GRACE_MS / 1000}s " +
+                        "无首帧渲染（解码器挂死形态）→ 引擎回退/失败链",
+                )
                 if (hasEngine() && engine.engineId == "media3" && !vlcFallbackTried) {
                     OtvLog.w("→ 切 libVLC 兜底引擎（自带软解）")
                     switchEngine("vlc")
@@ -1173,14 +1308,8 @@ class PlayerViewModel(
     }
 
     /**
-     * 点播首帧分级看门狗（2026-09-28）。
-     *
-     * 旧的 [armFirstFrameWatchdog] 只管直播且只有一个 15s 硬超时；点播根本没有首帧
-     * 看门狗（注释里写「有进度语义，黑屏可由用户 seek 感知」），于是点播黑屏只能等
-     * 20s 起播看门狗兜底——用户盯着 20s 黑屏。
-     *
-     * 这里按 [FirstFrameRecoveryPolicy] 的四档渐进处置（3s 预备 / 5s 切 / 15s 硬超时），
-     * 每档只做一次、只升不降，避免同一起播反复折腾。
+     * 点播首帧恢复：等待阶段保留当前线路；必要时只在同一线路回退播放引擎。
+     * 点播不设置终止时限，播放器上报错误后由同线路重试循环继续恢复。
      */
     private fun armVodFirstFrameLadder() {
         if (_ui.value.isLive) return
@@ -1205,98 +1334,28 @@ class PlayerViewModel(
                 }
                 val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
                 val onMedia3 = hasEngine() && engine.engineId == "media3"
-                val action = FirstFrameRecoveryPolicy.action(
-                    elapsedMs = elapsed,
-                    hasBackup = s.lines.indices.any { it != s.activeLine },
-                    onMedia3 = onMedia3,
-                    vlcAlreadyTried = vlcFallbackTried,
-                )
+                val hasBackup = s.lines.indices.any { it != s.activeLine }
+                val action = if (isFootballVod) {
+                    FirstFrameRecoveryPolicy.footballAction(elapsed, hasBackup, onMedia3, vlcFallbackTried)
+                } else {
+                    FirstFrameRecoveryPolicy.action(elapsed, hasBackup, onMedia3, vlcFallbackTried)
+                }
                 // 只在档位变严重时动作（阶梯单调升档）。
                 if (!firstFrameLadder.acceptEscalation(generation, action)) continue
                 when (action) {
                     FirstFrameRecoveryPolicy.Action.WAIT -> Unit
                     FirstFrameRecoveryPolicy.Action.PREP_BACKUP ->
-                        OtvLog.i("点播首帧 ${elapsed}ms 未出 → 预备备用线（不打断）")
+                        OtvLog.i("点播首帧 ${elapsed}ms 未出 → 保留当前线路继续等待")
                     FirstFrameRecoveryPolicy.Action.ENGINE_FALLBACK -> {
-                        // 只剩一条线（或换线更可能无效）且还在 media3：换引擎。
+                        // 仅回退当前线路的播放引擎，不改变用户选中的片源。
                         vlcFallbackTried = true
-                        OtvLog.w("点播首帧 ${elapsed}ms 未出且无备用线 → 切 libVLC 兜底引擎")
+                        OtvLog.w("点播首帧 ${elapsed}ms 未出 → 同线切 libVLC 兜底引擎")
                         telemetry.mark(
                             PlaybackTelemetry.Stage.ENGINE_FALLBACK,
                             errorClass = PlaybackTelemetry.ErrorClass.DECODE,
-                            detail = "first frame ${elapsed}ms → vlc",
+                            detail = "first frame ${elapsed}ms same line → vlc",
                         )
                         switchEngine("vlc")
-                    }
-                    FirstFrameRecoveryPolicy.Action.SWITCH -> {
-                        val next = pickNextLineForVod()
-                        if (next == null) {
-                            // 没有可切的线了，但阶梯还没到硬超时：换引擎再试一次
-                            // （media3 硬解挂死而线路只有一条是常见组合）。
-                            if (onMedia3 && !vlcFallbackTried) {
-                                vlcFallbackTried = true
-                                OtvLog.w("点播首帧 ${elapsed}ms 未出且无线可切 → 切 libVLC 兜底引擎")
-                                telemetry.mark(
-                                    PlaybackTelemetry.Stage.ENGINE_FALLBACK,
-                                    errorClass = PlaybackTelemetry.ErrorClass.DECODE,
-                                    detail = "first frame ${elapsed}ms no line → vlc",
-                                )
-                                switchEngine("vlc")
-                            } else {
-                                OtvLog.w("点播首帧 ${elapsed}ms 未出且已无线可切 → 等硬超时收口")
-                            }
-                        } else {
-                            OtvLog.w("点播首帧 ${elapsed}ms 未出 → 切备用线 #$next")
-                            telemetry.mark(
-                                PlaybackTelemetry.Stage.AUTO_SWITCH,
-                                detail = "first frame ${elapsed}ms → line $next",
-                            )
-                            markAutoSwitch(next)
-                            viewModelScope.launch { startSession(next, s.positionMs) }
-                        }
-                    }
-                    FirstFrameRecoveryPolicy.Action.HARD_TIMEOUT -> {
-                        // 硬超时不再直接走 onLineFail：那条链第一步是「同线直连重试」，
-                        // 而 15s 一个画面都没出恰恰说明同线重试没有意义（地址没取到，
-                        // 或者取到了也解不出来帧），只会让用户再白等一轮 15s。
-                        // 这里按策略先换线、再换引擎，都用尽才判死。
-                        val next = pickNextLineForVod()
-                        val action = FirstFrameRecoveryPolicy.hardTimeoutAction(
-                            hasBackupLine = next != null,
-                            onMedia3 = onMedia3,
-                            vlcAlreadyTried = vlcFallbackTried,
-                        )
-                        when (action) {
-                            FirstFrameRecoveryPolicy.HardTimeoutAction.SWITCH_LINE -> {
-                                OtvLog.e("点播首帧 ${elapsed}ms 硬超时 → 换备用线 #$next")
-                                telemetry.mark(
-                                    PlaybackTelemetry.Stage.AUTO_SWITCH,
-                                    detail = "first frame hard timeout ${elapsed}ms → line $next",
-                                )
-                                markAutoSwitch(next!!)
-                                viewModelScope.launch { startSession(next, s.positionMs) }
-                            }
-                            FirstFrameRecoveryPolicy.HardTimeoutAction.ENGINE_FALLBACK -> {
-                                vlcFallbackTried = true
-                                OtvLog.e("点播首帧 ${elapsed}ms 硬超时且无线可切 → 切 libVLC 兜底引擎")
-                                telemetry.mark(
-                                    PlaybackTelemetry.Stage.ENGINE_FALLBACK,
-                                    errorClass = PlaybackTelemetry.ErrorClass.DECODE,
-                                    detail = "first frame hard timeout ${elapsed}ms → vlc",
-                                )
-                                switchEngine("vlc")
-                            }
-                            FirstFrameRecoveryPolicy.HardTimeoutAction.GIVE_UP -> {
-                                OtvLog.e("点播首帧 ${elapsed}ms 硬超时且已无线可切/换引擎 → 判死")
-                                telemetry.mark(
-                                    PlaybackTelemetry.Stage.FATAL,
-                                    errorClass = PlaybackTelemetry.ErrorClass.DECODE,
-                                    detail = "first frame hard timeout ${elapsed}ms exhausted",
-                                )
-                                onLineFail("画面无输出（首帧超时 ${elapsed}ms）")
-                            }
-                        }
-                        return@launch
                     }
                     FirstFrameRecoveryPolicy.Action.DONE -> return@launch
                 }
@@ -1338,16 +1397,18 @@ class PlayerViewModel(
         lastAutoSwitchAt = android.os.SystemClock.elapsedRealtime()
     }
 
-    /** 防线一：20s 未起播 → 判定失败自动换线（方案 §3.2-1） */
+    /** 直播保留原有看门狗；影视点播失败后持续重试当前线路。 */
     private fun armWatchdog() {
         watchdogJob?.cancel()
+        if (retriesCurrentVodUntilUserLeaves()) return
         watchdogJob = viewModelScope.launch {
-            Log.d(TAG, "watchdog armed ${START_WATCHDOG_MS}ms")
-            delay(START_WATCHDOG_MS)
+            val timeoutMs = START_WATCHDOG_MS
+            Log.d(TAG, "watchdog armed ${timeoutMs}ms")
+            delay(timeoutMs)
             if (!startedThisSession) {
-                Log.w(TAG, "watchdog fired: no picture in 20s")
-                OtvLog.w("watchdog：20s 无画面 → 换线（起播黑屏线索）")
-                onLineFail("起播超时（${START_WATCHDOG_MS / 1000}s 无画面）")
+                Log.w(TAG, "watchdog fired: no picture in ${timeoutMs}ms")
+                OtvLog.w("watchdog：${timeoutMs / 1000}s 无画面 → 起播失败")
+                onLineFail("起播超时（${timeoutMs / 1000}s 无画面）", allowSameLineRetry = isFootballVod)
             }
         }
     }
@@ -1655,6 +1716,10 @@ class PlayerViewModel(
     /** Bounded live/VOD recovery ladder shared with the mobile client. */
     private fun recoverPlaybackStall(reason: String) {
         val s = _ui.value
+        if (VodRetryPolicy.shouldRetry(s.isLive)) {
+            scheduleVodRetry("playback stall: $reason", s.activeLine, resumePositionForVodRetry())
+            return
+        }
         if (!hasEngine() || s.fatalMsg != null) return
         if (!PlaybackRecoveryCoordinationPolicy.canStartRecovery(
                 startedThisSession = startedThisSession,
@@ -1696,11 +1761,16 @@ class PlayerViewModel(
                         startRecoverySession(requestToken, current, if (state.isLive) 0L else resume)
                     }
                     RecoveryAction.SWITCH_SOURCE -> {
-                        val next = pickNextLineForVod()
-                        if (next != null) {
-                            markAutoSwitch(next)
-                            startRecoverySession(requestToken, next, if (state.isLive) 0L else resume)
+                        if (state.isLive || isFootballVod) {
+                            val next = pickNextLineForVod()
+                            if (next != null) {
+                                markAutoSwitch(next)
+                                startRecoverySession(requestToken, next, if (state.isLive) 0L else resume)
+                            } else {
+                                recreateEngineForRecovery(current, resume, requestToken)
+                            }
                         } else {
+                            // 点播恢复继续使用当前影视源；只重建引擎，不跳到另一条源。
                             recreateEngineForRecovery(current, resume, requestToken)
                         }
                     }
@@ -1774,6 +1844,9 @@ class PlayerViewModel(
 
     /** Manual VOD selection invalidates any older resolver before it can prepare a stale URL. */
     private fun supersedePendingVodSession(): Int {
+        cancelVodRetryForUserAction()
+        sourceBootJob?.cancel()
+        sourceBootJob = null
         cancelStallRecovery()
         val request = ++vodSelectionGeneration
         sessionGen++
@@ -1789,6 +1862,103 @@ class PlayerViewModel(
         vodLadderJob?.cancel()
         startedThisSession = false
         return request
+    }
+
+    private fun retriesCurrentVodUntilUserLeaves(): Boolean =
+        VodRetryPolicy.shouldRetry(_ui.value.isLive)
+
+    private fun resumePositionForVodRetry(): Long = VodRetryPolicy.resumePositionMs(
+        pendingSeekMs = pendingVodSeekTargetMs,
+        currentPositionMs = _ui.value.positionMs,
+    )
+
+    /** Stable identity across episode line-list reorderings. */
+    private fun vodSourceIdentity(line: LineInfo?): String? = when {
+        line == null -> null
+        line.playRef.isNotBlank() -> repo.episodeSourceIdentity(line)
+        else -> line.vodId.takeIf(String::isNotBlank)
+    }
+
+    private fun cancelVodRetryForUserAction() {
+        vodRetryGeneration.invalidate()
+        vodRetryJob?.cancel()
+        vodRetryJob = null
+    }
+
+    /** Retry this exact VOD line with a fresh URL until it starts or user intent changes. */
+    private fun scheduleVodRetry(
+        reason: String,
+        lineIndex: Int = _ui.value.activeLine,
+        failurePositionMs: Long? = null,
+    ) {
+        if (!retriesCurrentVodUntilUserLeaves() || vodRetryJob?.isActive == true) return
+        val state = _ui.value
+        if (lineIndex !in state.lines.indices) {
+            OtvLog.w("VOD 重试时没有有效线路索引，重新解析线路表并继续等待: $reason")
+            _ui.value = state.copy(
+                sourceResolving = true,
+                fatalMsg = null,
+                playState = EnginePlayState.BUFFERING,
+            )
+            launchSourceBoot(fresh = true)
+            return
+        }
+
+        val token = vodRetryGeneration.begin()
+        val sourceIdentity = vodSourceIdentity(state.lines[lineIndex])
+        var firstPosition = failurePositionMs
+        _ui.value = state.copy(
+            sourceResolving = true,
+            fatalMsg = null,
+            playState = EnginePlayState.BUFFERING,
+            isPlaying = false,
+        )
+        OtvLog.w("VOD 保持当前影视源，开始持续重试 line=$lineIndex ep=${state.epIndex}: $reason")
+        val job = viewModelScope.launch {
+            try {
+                while (isActive && vodRetryGeneration.isCurrent(token) && retriesCurrentVodUntilUserLeaves()) {
+                    delay(VodRetryPolicy.RETRY_DELAY_MS)
+                    if (!isActive || !vodRetryGeneration.isCurrent(token) || !retriesCurrentVodUntilUserLeaves()) {
+                        return@launch
+                    }
+                    val current = _ui.value
+                    if (current.activeLine != lineIndex ||
+                        vodSourceIdentity(current.lines.getOrNull(lineIndex)) != sourceIdentity
+                    ) return@launch
+                    val resumeMs = VodRetryPolicy.resumePositionMs(
+                        pendingSeekMs = pendingVodSeekTargetMs ?: firstPosition,
+                        currentPositionMs = current.positionMs,
+                    )
+                    firstPosition = null
+                    OtvLog.w("VOD 同线路 fresh 重试 line=$lineIndex pos=${resumeMs}ms")
+                    try {
+                        startSession(lineIndex, resumeMs, forceFresh = true)
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        awaitingPrepare = false
+                        startedThisSession = false
+                        OtvLog.w("VOD 同线路重试起播异常 line=$lineIndex: ${failure.message}")
+                    }
+                    if (!isActive || !vodRetryGeneration.isCurrent(token) || !retriesCurrentVodUntilUserLeaves()) {
+                        return@launch
+                    }
+                    if (startedThisSession) return@launch
+                    val attemptSession = sessionGen
+                    while (
+                        isActive && vodRetryGeneration.isCurrent(token) && attemptSession == sessionGen &&
+                        awaitingPrepare && !startedThisSession && _ui.value.fatalMsg == null
+                    ) {
+                        delay(200)
+                    }
+                    if (startedThisSession) return@launch
+                    // Engine errors clear awaitingPrepare; loop back and freshly resolve this same line.
+                }
+            } finally {
+                if (vodRetryGeneration.isCurrent(token)) vodRetryJob = null
+            }
+        }
+        vodRetryJob = job
     }
 
     private fun isCurrentVodSelection(
@@ -1814,6 +1984,13 @@ class PlayerViewModel(
     private suspend fun onSessionStarted(posMs: Long) {
         startedThisSession = true
         awaitingPrepare = false
+        if (retriesCurrentVodUntilUserLeaves()) {
+            pendingVodSeekTargetMs?.let { target ->
+                if (VodRetryPolicy.reachedSeekTarget(posMs, target)) pendingVodSeekTargetMs = null
+            }
+            // Let a later playback error schedule a new retry after this attempt reaches READY.
+            vodRetryJob = null
+        }
         watchdogJob?.cancel()
         liveAutoRetries = 0   // 成功起播：自动重试计数归零（下次故障重新计 5 次）
         liveAutoRetryJob?.cancel()
@@ -1840,6 +2017,11 @@ class PlayerViewModel(
         // 点播线路记忆；足球直播的手动选择单独存入 liveLastSrc。
         if (!_ui.value.isLive) {
             runCatching { settings.rememberLine(vodId, engine.engineId, _ui.value.activeLine) }
+            if (!isFootballVod) {
+                VodSourceSelectionPolicy.identity(_ui.value.lines.getOrNull(_ui.value.activeLine))?.let { source ->
+                    runCatching { settings.rememberVodSourceIfMissing(vodId, source) }
+                }
+            }
             // L0 last_good 记忆：这次成功起播的线路，下次优先直接用它（省掉整轮匹配）。
             // 只存 {mytv_id, episode_index, source_id, content_id}，不存任何地址或凭证。
             runCatching {
@@ -1992,7 +2174,7 @@ class PlayerViewModel(
         viewModelScope.launch { bootIptv() }
     }
 
-    private fun onLineFail(reason: String) {
+    private fun onLineFail(reason: String, allowSameLineRetry: Boolean = true) {
         if (_ui.value.fatalMsg != null) return
         awaitingPrepare = false
         // v1.16：IPTV 频道内备用线路优先（换线路 ≠ 换频道，观众无感）
@@ -2042,11 +2224,25 @@ class PlayerViewModel(
             }
             return
         }
+        if (retriesCurrentVodUntilUserLeaves()) {
+            val lineIndex = _ui.value.activeLine
+            val line = _ui.value.lines.getOrNull(lineIndex)
+            // Keep the relay-to-direct escape hatch, then retry the same selected source forever.
+            if (line != null && line.playRef.isNotBlank() &&
+                line.playRef !in relayBroken && sessionViaRelay
+            ) {
+                relayBroken += line.playRef
+                repo.bustPlayCache(line.playRef)
+                OtvLog.w("VOD 中继失败，标记直连后继续同源重试 line=$lineIndex")
+            }
+            scheduleVodRetry(reason, lineIndex, resumePositionForVodRetry())
+            return
+        }
         sameLineRetries = 0
         // v1.14 点播阶梯第一级：中继路径失败 → 同线直连重试一次。
         // python 网络栈被 CDN 拒（防盗链/TLS 指纹）≠ ExoPlayer 直连也不行；
         // 直连救活的线路记入 relayBroken，本会话后续直接走直连不再撞墙。
-        if (!_ui.value.isLive) {
+        if (!_ui.value.isLive && allowSameLineRetry) {
             val curLine = _ui.value.lines.getOrNull(_ui.value.activeLine)
             if (curLine != null && curLine.playRef.isNotBlank() &&
                 curLine.playRef !in relayBroken && sessionViaRelay
@@ -2061,18 +2257,21 @@ class PlayerViewModel(
                 return
             }
         }
-        val next = pickNextLineForVod()
-        Log.w(TAG, "line fail(${_ui.value.activeLine}): $reason → ${next ?: "no more lines"}")
-        OtvLog.w("line fail(${_ui.value.activeLine}): $reason → ${next?.let { "换线 $it" } ?: "全部失败"}")
-        if (next == null) {
-            viewModelScope.launch { saveProgress(force = false) }
-            stopForFatal()
-            _ui.value = _ui.value.copy(fatalMsg = reason, controlsVisible = false)
-        } else {
-            val pos = _ui.value.positionMs
-            markAutoSwitch(next)
-            viewModelScope.launch { startSession(next, if (pos > 1_000) pos else 0L) }
+        if (isFootballVod) {
+            val next = pickNextLineForVod()
+            if (next != null) {
+                Log.w(TAG, "football VOD line fail(${_ui.value.activeLine}): $reason → switch $next")
+                markAutoSwitch(next)
+                val pos = _ui.value.positionMs
+                viewModelScope.launch { startSession(next, if (pos > 1_000) pos else 0L) }
+                return
+            }
         }
+        Log.w(TAG, "VOD line fail(${_ui.value.activeLine}): $reason; selected source remains active")
+        OtvLog.w(if (isFootballVod) "足球回放线路失败：没有备用线路" else "点播线路失败：保留当前影视源，显示错误并等待手动重试或切换")
+        viewModelScope.launch { saveProgress(force = false) }
+        stopForFatal()
+        _ui.value = _ui.value.copy(fatalMsg = reason, controlsVisible = false)
     }
 
     // ---------- 用户操作 ----------
@@ -2145,6 +2344,13 @@ class PlayerViewModel(
                         .onSuccess { OtvLog.i("直播源记忆已更新: $src") }
                 }
             }
+        } else if (!isFootballVod) {
+            VodSourceSelectionPolicy.identity(state.lines.getOrNull(idx))?.let { source ->
+                Graph.appScope.launch {
+                    runCatching { settings.rememberVodSource(vodId, source) }
+                        .onSuccess { OtvLog.i("点播影视源记忆已更新: $source") }
+                }
+            }
         }
         touch()
         val requestGeneration = sessionGen
@@ -2162,6 +2368,27 @@ class PlayerViewModel(
             if (state.isLive) startLiveRenewal()
         }
         if (!state.isLive) pendingVodSessionJob = job
+    }
+
+    /** Measure a source without attaching it to the player or changing the current selection. */
+    fun testLineSpeed(idx: Int) {
+        val line = _ui.value.lines.getOrNull(idx) ?: return
+        val key = LineSpeedTestPolicy.key(line)
+        if (_ui.value.lineSpeedTests[key]?.isTesting == true) return
+        _ui.value = _ui.value.copy(
+            lineSpeedTests = _ui.value.lineSpeedTests + (key to LineSpeedTestResult(isTesting = true)),
+        )
+        viewModelScope.launch {
+            val result = try {
+                LineSpeedTestResult(latencyMs = repo.probeLineFirstByte(line))
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                OtvLog.w("线路测速失败 ${line.label}: ${failure.message}")
+                LineSpeedTestResult(failed = true)
+            }
+            _ui.value = _ui.value.copy(lineSpeedTests = _ui.value.lineSpeedTests + (key to result))
+        }
     }
 
     // ---- 直播信号源选择条（直播播放器唯一控件，需求 足球#14）----
@@ -2400,7 +2627,10 @@ class PlayerViewModel(
     fun switchEpisode(ep: Int) {
         val cur = _ui.value
         if (ep !in 0 until cur.epCount || ep == cur.epIndex || cur.isLive) return
+        val selectedSourceIdentity = vodSourceIdentity(cur.lines.getOrNull(cur.activeLine))
+            ?: episodeNamesSourceIdentity
         val selectionRequest = supersedePendingVodSession()
+        pendingVodSeekTargetMs = null
         runCatching { if (hasEngine()) engine.pause() }
         recreateEngineForManualSourceChange()
         _ui.value = _ui.value.copy(
@@ -2420,44 +2650,73 @@ class PlayerViewModel(
                     selectionRequest, requestGeneration, requestLine, requestEngine, requestEngineEpoch,
                 )) return@launch
             val item = currentItem ?: return@launch
-            val resolvedLines = try {
-                repo.resolveLines(item, ep)
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (failure: Exception) {
-                OtvLog.w("换集解析失败 ep=$ep: ${failure.message}")
-                null
+            var refreshedItem = item
+            var newLines: List<LineInfo> = emptyList()
+            var lineIndex: Int? = null
+            while (lineIndex == null) {
+                if (!isCurrentVodSelection(
+                        selectionRequest, requestGeneration, requestLine, requestEngine, requestEngineEpoch,
+                    )) return@launch
+                try {
+                    refreshedItem = repo.resolveDetail(item.id, forceRefresh = true) ?: item
+                    newLines = VisibleVodLinePolicy.apply(repo.resolveLines(refreshedItem, ep))
+                    lineIndex = VodRetryPolicy.matchingSourceIndex(
+                        selectedSourceIdentity,
+                        newLines.map(::vodSourceIdentity),
+                    )
+                    if (lineIndex == null) {
+                        currentItem = refreshedItem
+                        episodeNamesSourceIdentity = selectedSourceIdentity
+                        _ui.value = _ui.value.copy(
+                            epIndex = ep,
+                            epCount = refreshedItem.episodes.size.coerceAtLeast(1),
+                            epNames = refreshedItem.episodes.map { it.name },
+                            lines = newLines,
+                            activeLine = -1,
+                            sourceResolving = true,
+                            playState = EnginePlayState.BUFFERING,
+                            fatalMsg = null,
+                            panel = Panel.MORE,
+                            controlsVisible = true,
+                        )
+                        OtvLog.w("换集 ep=$ep 当前影视源暂缺对应线路，保留选择并持续重试: $selectedSourceIdentity")
+                    }
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    OtvLog.w("换集映射失败 ep=$ep，保留原片源并 fresh 重试: ${failure.message}")
+                    _ui.value = _ui.value.copy(
+                        sourceResolving = true,
+                        fatalMsg = null,
+                        panel = Panel.MORE,
+                        controlsVisible = true,
+                        playState = EnginePlayState.BUFFERING,
+                    )
+                }
+                if (lineIndex == null) delay(VodRetryPolicy.RETRY_DELAY_MS)
             }
-            if (!isCurrentVodSelection(
-                    selectionRequest, requestGeneration, requestLine, requestEngine, requestEngineEpoch,
-                )) return@launch
-            val newLines = VisibleVodLinePolicy.apply(resolvedLines.orEmpty())
-            if (newLines.isEmpty()) {
-                _ui.value = _ui.value.copy(
-                    epIndex = ep,
-                    epCount = item.episodes.size.coerceAtLeast(1),
-                    epNames = item.episodes.map { it.name },
-                    sourceResolving = false,
-                    playState = EnginePlayState.IDLE,
-                    fatalMsg = "这一集暂时没有可用片源，请重试或切换线路",
-                )
-                return@launch
-            }
+            val matchedLineIndex = lineIndex
             stallRecoveries = 0
             triedLines.clear()
             // 换集是用户显式动作：上一集的切线冷却不该连累新的一集。
             lastAutoSwitchAt = -1L
             _ui.value = _ui.value.copy(
                 epIndex = ep,
-                epCount = item.episodes.size.coerceAtLeast(1),
-                epNames = item.episodes.map { it.name },
+                epCount = refreshedItem.episodes.size.coerceAtLeast(1),
+                epNames = refreshedItem.episodes.map { it.name },
                 lines = newLines,
+                activeLine = matchedLineIndex,
                 fatalMsg = null,
                 sourceResolving = true,
                 playState = EnginePlayState.IDLE,
+                panel = Panel.NONE,
+                controlsVisible = false,
             )
-            val line = cur.activeLine.coerceIn(0, (newLines.size - 1).coerceAtLeast(0))
-            startSession(line, 0L)
+            val selectedLine = newLines[matchedLineIndex]
+            val sourceEpisodes = repo.episodesForLine(refreshedItem, selectedLine)?.takeIf { ep in it.indices }
+            currentItem = sourceEpisodes?.let { refreshedItem.copy(episodes = it) } ?: refreshedItem
+            episodeNamesSourceIdentity = vodSourceIdentity(selectedLine)
+            startSession(matchedLineIndex, 0L)
         }
         pendingVodSessionJob = job
     }

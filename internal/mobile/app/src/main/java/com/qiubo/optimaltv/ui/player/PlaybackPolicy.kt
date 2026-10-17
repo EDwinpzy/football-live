@@ -36,3 +36,38 @@ object VisibleVodLinePolicy {
         if (line.label.isBlank()) line.copy(label = "信号源${i + 1}") else line
     }
 }
+
+/** Stable point-in-time source selection for VOD; the list index can change between episodes. */
+internal object VodSourcePreferencePolicy {
+    fun identity(line: LineInfo?): String? {
+        if (line == null) return null
+        val refId = line.playRef.split('|').getOrNull(1)?.trim().orEmpty()
+        if (refId.isNotBlank()) return "ref:$refId"
+        return line.vodId.trim().takeIf(String::isNotBlank)?.let { "vod:$it" }
+            ?: line.label.substringBefore(" · ").trim().takeIf(String::isNotBlank)?.let { "label:$it" }
+    }
+
+    /** Exact ref wins; if episode-specific IDs changed, retain the same provider when possible. */
+    fun preferredIndex(lines: List<LineInfo>, rememberedIdentity: String?): Int? {
+        val remembered = rememberedIdentity?.takeIf(String::isNotBlank) ?: return null
+        lines.indexOfFirst { identity(it) == remembered }.takeIf { it >= 0 }?.let { return it }
+
+        val rememberedProvider = providerId(remembered) ?: return null
+        return lines.indexOfFirst { line ->
+            providerId(identity(line).orEmpty()) == rememberedProvider
+        }.takeIf { it >= 0 }
+    }
+
+    /** Direct/sibling sources use their stable vod ID; resolver-backed lines use source ID. */
+    private fun providerId(identity: String): String? = when {
+        identity.startsWith("ref:") -> identity.removePrefix("ref:").substringBefore(':').takeIf(String::isNotBlank)
+        identity.startsWith("vod:") -> identity.removePrefix("vod:").takeIf(String::isNotBlank)
+        identity.startsWith("label:") -> identity.removePrefix("label:").takeIf(String::isNotBlank)
+        else -> null
+    }
+}
+
+/** Failure recovery may rotate live sources, but VOD always stays on the selected source. */
+internal object AutomaticSourceSwitchPolicy {
+    fun maySwitch(isLive: Boolean, @Suppress("UNUSED_PARAMETER") isFootballVod: Boolean = false): Boolean = isLive
+}

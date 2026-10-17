@@ -18,15 +18,17 @@ struct PlaybackView: View {
     @State private var selectedEpisode: Episode?
     @State private var isSourcePickerPresented = false
     @State private var savedPlaybackTime: TimeInterval = 0
+    @State private var pendingSeekTarget: TimeInterval?
     @State private var resolutionTask: Task<Void, Never>?
-    @State private var stallCheckTask: Task<Void, Never>?
+    @State private var retryTask: Task<Void, Never>?
     @State private var pickerRefreshTask: Task<Void, Never>?
     @State private var pickerRefreshGeneration = 0
     @State private var isRefreshingSources = false
     @State private var sourceRefreshMessage = ""
     @State private var relayFallbackURL: URL?
     @State private var isDirectAttempt = false
-    @State private var relayFallbackAttempted = false
+    @State private var sourceSpeedResults: [String: String] = [:]
+    @State private var sourceSpeedTestTasks: [String: Task<Void, Never>] = [:]
 
     init(route: PlaybackRoute) {
         self.route = route
@@ -106,11 +108,13 @@ struct PlaybackView: View {
             requestGeneration += 1
             resolutionTask?.cancel()
             resolutionTask = nil
-            stallCheckTask?.cancel()
-            stallCheckTask = nil
+            retryTask?.cancel()
+            retryTask = nil
             pickerRefreshGeneration += 1
             pickerRefreshTask?.cancel()
             pickerRefreshTask = nil
+            sourceSpeedTestTasks.values.forEach { $0.cancel() }
+            sourceSpeedTestTasks.removeAll()
             isSourcePickerPresented = false
             relayFallbackURL = nil
             isDirectAttempt = false
@@ -131,12 +135,6 @@ struct PlaybackView: View {
                   let failedItem = notification.object as? AVPlayerItem,
                   failedItem === player?.currentItem else { return }
             recoverOrShowFailure(for: failedItem)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemPlaybackStalled).receive(on: DispatchQueue.main)) { notification in
-            guard route.detailRef != nil,
-                  let stalledItem = notification.object as? AVPlayerItem,
-                  stalledItem === player?.currentItem else { return }
-            scheduleStallCheck(for: stalledItem, generation: requestGeneration, after: 4_000_000_000)
         }
         .toolbar {
             if hasSourcePicker {
@@ -164,10 +162,10 @@ struct PlaybackView: View {
 
     @MainActor
     private func startPlayback(source: MediaSource?, episode: Episode?, refresh: Bool = false) {
+        retryTask?.cancel()
+        retryTask = nil
         resolutionTask?.cancel()
         resolutionTask = nil
-        stallCheckTask?.cancel()
-        stallCheckTask = nil
         requestGeneration += 1
         let generation = requestGeneration
         let previousSources = availableSources
@@ -175,12 +173,17 @@ struct PlaybackView: View {
         let resumeTime = keepsEpisode ? currentPlaybackTime : 0
         selectedSource = source
         selectedEpisode = episode
+        if let item = route.item, let source {
+            settings.rememberVODSource(source, for: item.id)
+        }
         tearDownPlayer()
-        if !keepsEpisode { savedPlaybackTime = 0 }
+        if !keepsEpisode {
+            pendingSeekTarget = nil
+            savedPlaybackTime = 0
+        }
         errorMessage = nil
         relayFallbackURL = nil
         isDirectAttempt = false
-        relayFallbackAttempted = false
 
         guard let client = settings.client else {
             isLoading = false
@@ -192,6 +195,8 @@ struct PlaybackView: View {
         resolutionTask = Task { @MainActor in
             do {
                 let upstreamURL: URL
+                var directFallbackURL: URL?
+                var startsWithDirectURL = false
                 if let channelURL = route.channelURL {
                     upstreamURL = URL(string: channelURL).map { client.relayURL(for: $0.absoluteString) }
                         ?? client.relayURL(for: channelURL)
@@ -224,6 +229,9 @@ struct PlaybackView: View {
                         resolvedEpisode = refreshedEpisode
                         selectedSource = refreshedSource
                         selectedEpisode = refreshedEpisode
+                        if let item = route.item {
+                            settings.rememberVODSource(refreshedSource, for: item.id)
+                        }
                     } else {
                         resolvedSource = requestedSource
                         resolvedEpisode = requestedEpisode
@@ -240,8 +248,8 @@ struct PlaybackView: View {
                     }
                     if let directURL {
                         upstreamURL = directURL
-                        relayFallbackURL = stream.url
-                        isDirectAttempt = true
+                        directFallbackURL = stream.url
+                        startsWithDirectURL = true
                     } else {
                         upstreamURL = stream.url
                     }
@@ -255,6 +263,8 @@ struct PlaybackView: View {
                 }
                 try Task.checkCancellation()
                 guard generation == requestGeneration else { return }
+                relayFallbackURL = directFallbackURL
+                isDirectAttempt = startsWithDirectURL
                 installPlayer(url: upstreamURL, generation: generation, resumeTime: resumeTime)
                 if let item = route.item {
                     library.recordWatching(item: item)
@@ -263,6 +273,15 @@ struct PlaybackView: View {
                 return
             } catch {
                 guard !Task.isCancelled, generation == requestGeneration else { return }
+                if route.detailRef != nil,
+                   let target = PlaybackRetryPolicy.target(
+                    source: selectedSource,
+                    episode: selectedEpisode,
+                    resumeTime: currentPlaybackTime
+                   ) {
+                    scheduleSameSourceRetry(target)
+                    return
+                }
                 errorMessage = (error as? PlaybackError)?.errorDescription ?? userFacingNetworkMessage(error)
                 isLoading = false
             }
@@ -278,38 +297,76 @@ struct PlaybackView: View {
         player = newPlayer
         isLoading = false
         if resumeTime.isFinite, resumeTime > 0 {
-            newPlayer.seek(to: CMTime(seconds: resumeTime, preferredTimescale: 600)) { _ in
+            pendingSeekTarget = resumeTime
+            savedPlaybackTime = resumeTime
+            newPlayer.seek(to: CMTime(seconds: resumeTime, preferredTimescale: 600)) { finished in
                 Task { @MainActor in
                     guard generation == requestGeneration, player === newPlayer else { return }
+                    if finished {
+                        pendingSeekTarget = nil
+                        savedPlaybackTime = PlaybackRetryPolicy.safeTime(
+                            newPlayer.currentTime().seconds,
+                            fallback: resumeTime
+                        )
+                    } else {
+                        pendingSeekTarget = resumeTime
+                        savedPlaybackTime = resumeTime
+                    }
                     newPlayer.play()
                 }
             }
         } else {
+            pendingSeekTarget = nil
             newPlayer.play()
-        }
-        if route.detailRef != nil {
-            scheduleStallCheck(for: item, generation: generation, after: 12_000_000_000)
         }
     }
 
     @MainActor
     private func recoverOrShowFailure(for failedItem: AVPlayerItem) {
         guard failedItem === player?.currentItem else { return }
-        stallCheckTask?.cancel()
-        stallCheckTask = nil
-        if isDirectAttempt,
-           !relayFallbackAttempted,
-           let relayFallbackURL {
-            relayFallbackAttempted = true
-            isDirectAttempt = false
+        let failureAction = PlaybackRetryPolicy.failureAction(
+            isVOD: route.detailRef != nil,
+            isDirectAttempt: isDirectAttempt,
+            relayURL: relayFallbackURL,
+            source: selectedSource,
+            episode: selectedEpisode,
+            resumeTime: currentPlaybackTime
+        )
+        switch failureAction {
+        case .relay(let relayURL):
+            let resumeTime = currentPlaybackTime
             self.relayFallbackURL = nil
-            tearDownPlayer()
-            isLoading = true
+            isDirectAttempt = false
             errorMessage = nil
-            installPlayer(url: relayFallbackURL, generation: requestGeneration)
-            return
+            isLoading = true
+            tearDownPlayer()
+            savedPlaybackTime = resumeTime
+            installPlayer(url: relayURL, generation: requestGeneration, resumeTime: resumeTime)
+        case .retry(let target):
+            scheduleSameSourceRetry(target)
+        case .showFailure:
+            presentPlaybackFailure()
         }
-        presentPlaybackFailure()
+    }
+
+    @MainActor
+    private func scheduleSameSourceRetry(_ target: PlaybackRetryTarget) {
+        guard retryTask == nil else { return }
+        let generation = requestGeneration
+        errorMessage = nil
+        isLoading = true
+        tearDownPlayer()
+        savedPlaybackTime = target.resumeTime
+        retryTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: PlaybackRetryPolicy.retryDelayNanoseconds)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, generation == requestGeneration else { return }
+            retryTask = nil
+            startPlayback(source: target.source, episode: target.episode, refresh: true)
+        }
     }
 
     private var hasSourcePicker: Bool {
@@ -322,9 +379,12 @@ struct PlaybackView: View {
     }
 
     private var currentPlaybackTime: TimeInterval {
-        guard let player else { return savedPlaybackTime }
-        let seconds = player.currentTime().seconds
-        return seconds.isFinite ? max(0, seconds) : savedPlaybackTime
+        let seconds = player?.currentTime().seconds
+        return PlaybackRetryPolicy.resumeTime(
+            playerTime: seconds,
+            pendingSeekTarget: pendingSeekTarget,
+            savedPlaybackTime: savedPlaybackTime
+        )
     }
 
     private func isSameEpisode(_ lhs: Episode?, _ rhs: Episode?, in nextSource: MediaSource?) -> Bool {
@@ -356,33 +416,58 @@ struct PlaybackView: View {
                     }
                     ForEach(availableSources) { source in
                         VStack(alignment: .leading, spacing: 11) {
-                            Button {
-                                guard let episode = PlaybackSourceSelection.episode(
-                                    in: source,
-                                    matching: selectedEpisode,
-                                    from: selectedSource
-                                ) else { return }
-                                select(source: source, episode: episode)
-                            } label: {
-                                HStack {
-                                    Label(
-                                        source.name,
-                                        systemImage: source.id == selectedSource?.id
-                                            ? "checkmark.circle.fill"
-                                            : "dot.radiowaves.left.and.right"
-                                    )
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.white)
-                                    Spacer()
-                                    Text("\(source.episodes.count) 集")
-                                        .font(.caption)
-                                        .foregroundStyle(MyTVStyle.secondaryText)
+                            HStack(spacing: 9) {
+                                Button {
+                                    guard let episode = PlaybackSourceSelection.episode(
+                                        in: source,
+                                        matching: selectedEpisode,
+                                        from: selectedSource
+                                    ) else { return }
+                                    select(source: source, episode: episode)
+                                } label: {
+                                    HStack {
+                                        Label(
+                                            source.name,
+                                            systemImage: source.id == selectedSource?.id
+                                                ? "checkmark.circle.fill"
+                                                : "dot.radiowaves.left.and.right"
+                                        )
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.white)
+                                        Spacer()
+                                        Text("\(source.episodes.count) 集")
+                                            .font(.caption)
+                                            .foregroundStyle(MyTVStyle.secondaryText)
+                                    }
+                                    .contentShape(Rectangle())
                                 }
-                                .contentShape(Rectangle())
+                                .buttonStyle(.plain)
+                                .disabled(source.episodes.isEmpty)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier("player-source-\(source.id)")
+
+                                Button {
+                                    testSourceSpeed(source)
+                                } label: {
+                                    Text(sourceSpeedTestTasks[source.id] == nil ? "测速" : "测速中…")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 11)
+                                        .padding(.vertical, 8)
+                                        .background(MyTVStyle.background, in: RoundedRectangle(cornerRadius: 9))
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(source.episodes.isEmpty || sourceSpeedTestTasks[source.id] != nil)
+                                .accessibilityIdentifier("player-source-speed-\(source.id)")
+
+                                Text(sourceSpeedResults[source.id] ?? "")
+                                    .font(.caption2)
+                                    .foregroundStyle(sourceSpeedResults[source.id] == "不可用"
+                                        ? Color.red.opacity(0.85) : MyTVStyle.secondaryText)
+                                    .lineLimit(1)
+                                    .frame(minWidth: 54, alignment: .trailing)
+                                    .accessibilityIdentifier("player-source-speed-result-\(source.id)")
                             }
-                            .buttonStyle(.plain)
-                            .disabled(source.episodes.isEmpty)
-                            .accessibilityIdentifier("player-source-\(source.id)")
 
                             if source.episodes.isEmpty {
                                 Text("这条线路暂时没有集数。")
@@ -489,25 +574,41 @@ struct PlaybackView: View {
     }
 
     @MainActor
-    private func scheduleStallCheck(for item: AVPlayerItem, generation: Int, after delay: UInt64) {
-        stallCheckTask?.cancel()
-        stallCheckTask = Task { @MainActor in
+    private func testSourceSpeed(_ source: MediaSource) {
+        guard sourceSpeedTestTasks[source.id] == nil,
+              let client = settings.client,
+              let detailRef = route.detailRef,
+              let episode = PlaybackSourceSelection.episode(
+                in: source,
+                matching: selectedEpisode,
+                from: selectedSource
+              ) ?? source.episodes.first else { return }
+        sourceSpeedResults[source.id] = nil
+        let task = Task { @MainActor in
+            defer { sourceSpeedTestTasks[source.id] = nil }
             do {
-                try await Task.sleep(nanoseconds: delay)
-            } catch {
+                let latency = try await client.probePlaybackSource(
+                    detailRef: detailRef,
+                    source: source,
+                    episode: episode
+                )
+                guard !Task.isCancelled else { return }
+                sourceSpeedResults[source.id] = "\(latency)ms 首包"
+            } catch is CancellationError {
                 return
+            } catch {
+                guard !Task.isCancelled else { return }
+                sourceSpeedResults[source.id] = "不可用"
             }
-            guard !Task.isCancelled,
-                  generation == requestGeneration,
-                  item === player?.currentItem,
-                  player?.timeControlStatus == .waitingToPlayAtSpecifiedRate else { return }
-            recoverOrShowFailure(for: item)
         }
+        sourceSpeedTestTasks[source.id] = task
     }
 
     @MainActor
     private func tearDownPlayer() {
-        if let player {
+        if let pendingSeekTarget {
+            savedPlaybackTime = PlaybackRetryPolicy.safeTime(pendingSeekTarget, fallback: savedPlaybackTime)
+        } else if let player {
             let seconds = player.currentTime().seconds
             if seconds.isFinite {
                 savedPlaybackTime = max(0, seconds)
@@ -539,10 +640,6 @@ struct PlaybackView: View {
     private func presentPlaybackFailure() {
         errorMessage = "当前线路无法播放或已中断。返回后可以选择其他线路。"
         isLoading = false
-        relayFallbackURL = nil
-        isDirectAttempt = false
-        stallCheckTask?.cancel()
-        stallCheckTask = nil
         tearDownPlayer()
     }
 }

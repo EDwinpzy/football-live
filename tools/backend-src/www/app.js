@@ -1586,6 +1586,7 @@ function vodIdentity(vid) {
   return hhkan ? { kind: "hhkan", id: hhkan[1] }
     : { kind: "douban", id: value.replace(/^douban:/, "") };
 }
+const VOD_SOURCE_TIMEOUT_MS = 300000;
 function vodDetailPath(vid) {
   const ref = vodIdentity(vid);
   return ref.kind === "hhkan" ? `/hhkan/detail/${ref.id}` : `/vod/detail/${ref.id}`;
@@ -2073,7 +2074,7 @@ function renderVodHero() {
 /* 历史卡直进播放（App 路由 player/{vodId}/{epIndex}：默认线路 0 + 该集续播） */
 async function playFromHistory(h) {
   try {
-    const d = await fetchJSON(BASE + vodDetailPath(h.id), { timeout: 60000 });
+    const d = await fetchJSON(BASE + vodDetailPath(h.id), { timeout: VOD_SOURCE_TIMEOUT_MS });
     if (!d.title) throw new Error(d.error || "未找到该影片");
     const src = (d.sources || []).map(line => ({ ...line, episodes: (line.episodes || []).map((ep, index) => ({
       ...ep, ep: ep.ep || ep.name || `第${index + 1}集`, pid: ep.pid != null ? ep.pid : line.id,
@@ -2480,37 +2481,10 @@ function startResolverRace(vid, episode) {
     });
 }
 
-/* 快速起播：已有 resolver 候选就直接用，不再等所有线路。 */
+/* 快速起播：始终解析当前选中的线路；resolver 只在后台预热，不自动换源。 */
 async function resolveFirstSource(ctx, options = {}) {
-  /* 用户在详情页/「更多」面板手动选过线路（dLineIdx 变了、或续播集落在
-     非第 1 集）时，playRef 才是他的明确选择——这时 resolver 只能预热，
-     不能把播放目标换成 preferred 那条。只有「默认线路 + 默认集」才让
-     resolver 决定起播线路，否则「当前播放 线路2/5」会悄悄播成另一条。 */
   const lines = pv.ctx === ctx ? pv.vodSources
     : (detail && String(detail.vid) === String(ctx.vid) ? detail.sources : ctx.sources || []);
-  const userPicked = ctx.linePinned === true;
-  const hit = !userPicked && resolverState.preferred
-    ? findCandidateLine(lines, resolverState.preferred, ctx.epIdx + 1)
-    : null;
-  if (hit) {
-    if (hit.epIdx !== ctx.epIdx) ctx.resume = 0;
-    ctx.epIdx = hit.epIdx;
-    ctx.epCount = (hit.line.episodes || []).length;
-    ctx.epName = hit.ep.ep || hit.ep.name || `第${hit.epIdx + 1}集`;
-    ctx.playRef = { pid: hit.ep.pid, vid: hit.ep.vid };
-    ctx.lineIndex = hit.lineIdx;
-    ctx.sourceKey = playerVodSourceKey(lines[hit.lineIdx], hit.lineIdx);
-    if (pv.ctx === ctx) {
-      pv.vodLineIdx = hit.lineIdx;
-      if (detail && String(detail.vid) === String(ctx.vid)) {
-        dLineIdx = hit.lineIdx; dEpIdx = hit.epIdx;
-      }
-      renderMorePanel();
-    }
-    return resolvePlayCached(ctx.vid, hit.ep.pid, hit.ep.vid, {
-      force: !!options.force, signal: pv.playController && pv.playController.signal,
-    });
-  }
   const lineIndex = playerVodLineIndex(lines, ctx.playRef, ctx.sourceKey, ctx.lineIndex);
   const line = lines[lineIndex];
   if (line) {
@@ -2610,7 +2584,7 @@ async function openDetail(vid, cardHint, autoplay) {
     painted = true;
     const rawDetail = await fetchJSON(
       BASE + (ref.kind === "hhkan" ? vodDetailPath(vid) : vodDetailPath(vid) + "?refresh=1"),
-      { timeout: 90000, signal: controller.signal });
+      { timeout: VOD_SOURCE_TIMEOUT_MS, signal: controller.signal });
     if (!current()) return;
     const d = normalizeDetail(rawDetail);
     if (!d.title) throw new Error(d.error || "未找到该影片");
@@ -2748,8 +2722,6 @@ function startPlayAt(idx, resumePos) {
     epIdx: idx, epName: ep.ep || `第${idx + 1}集`, epCount: eps.length,
     lineName: s.name, playRef: { pid: ep.pid, vid: ep.vid }, resume,
     lineIndex: dLineIdx, sourceKey: playerVodSourceKey(s, dLineIdx), sources: detail.sources,
-    /* 详情页默认线路仍可由 resolver 优选；播放器内手动换线才锁定线路。 */
-    linePinned: false,
   });
   /* v1.32 换集提速：起播同时预解析下一集（本线路），连播/手动换集秒切 */
   const nxt = eps[idx + 1];
@@ -3368,10 +3340,12 @@ function renderTvSidebar() {
  * 播放器（PlayerScreen 复刻：影视 tvOS 控制层 + 直播信号源条 + 手势）
  * ================================================================ */
 const MAX_RECOVERY_ATTEMPTS = 4;
+const VOD_RETRY_DELAY_MS = 1000;
 const pv = { hls: null, video: null, ctx: null, sources: [], srcIds: [], srcNames: [], sourceRefs: [], hideTimer: 0, progTimer: 0,
   stallTimer: 0, speedIdx: 2, pausedAt: -1, controls: false, picker: false,
   recoveryGen: 0, recoveryAttempts: 0, recovering: false, loadGen: 0, playerSession: 0,
   playController: null, detailController: null, detailRequest: null,
+  vodRetryTimer: 0, pendingVodResume: null,
   vodSources: [], vodLineIdx: 0, vodProvider: "", vodSourceStatus: "idle", vodSourceMessage: "", panelOpen: false,
   loadPending: false };
 /* PlayerViewModel.SPEED_STEPS */
@@ -3394,9 +3368,30 @@ function openPlayer(ctx) {
   pv.loadGen++;
   pv.aspectIdx = store.get("otvw:aspect", 0);
   pv.controls = false; pv.picker = false;
+  cancelVodSourceSpeedTests();
+  pv.vodSpeedTests = Object.create(null);
   pv.vodSources = sources;
   if (ctx.kind === "vod") pv.sources = [];
-  pv.vodLineIdx = playerVodLineIndex(sources, pv.ctx.playRef, pv.ctx.sourceKey, pv.ctx.lineIndex);
+  const rememberedIndex = ctx.kind === "vod" ? rememberedVodSourceIndex(sources, ctx.vid) : -1;
+  if (rememberedIndex >= 0) {
+    const line = sources[rememberedIndex];
+    const episodes = line.episodes || [];
+    const byName = playerVodEpisodeIndexByName(line, ctx.epName);
+    const epIndex = byName >= 0 ? byName
+      : Math.max(0, Math.min(Number(ctx.epIdx) || 0, episodes.length - 1));
+    const ep = episodes[epIndex];
+    pv.ctx = { ...pv.ctx,
+      lineIndex: rememberedIndex,
+      sourceKey: playerVodSourceKey(line, rememberedIndex),
+      lineName: playerSourceName(line, rememberedIndex),
+      epIdx: epIndex,
+      epCount: episodes.length,
+      epName: ep.ep || ep.name || `第${epIndex + 1}集`,
+      playRef: { pid: ep.pid, vid: ep.vid },
+    };
+  }
+  pv.vodLineIdx = rememberedIndex >= 0 ? rememberedIndex
+    : playerVodLineIndex(sources, pv.ctx.playRef, pv.ctx.sourceKey, pv.ctx.lineIndex);
   pv.vodProvider = "";
   pv.vodSourceStatus = ctx.kind === "vod" ? (sources.length ? "refreshing" : "loading") : "idle";
   pv.vodSourceMessage = ctx.kind === "vod"
@@ -3436,6 +3431,72 @@ function playerVodSourceKey(line, index) {
   return [line.source_id || "", line.source_name || line.name || "", first ? first.pid : index]
     .map(value => String(value == null ? "" : value)).join("|");
 }
+function vodSourcePreferenceKey(vid) { return "otvw:vod:source:" + String(vid == null ? "" : vid); }
+function rememberedVodSourceIndex(lines, vid) {
+  const preference = store.get(vodSourcePreferenceKey(vid), null);
+  if (!preference) return -1;
+  if (typeof preference === "string") return exactPlayerVodLineIndex(lines, null, preference);
+  return exactPlayerVodLineIndex(lines, null, preference.sourceKey || "", preference.line || preference);
+}
+function rememberVodSource(vid, line, index) {
+  const sourceKey = playerVodSourceKey(line, index);
+  if (vid == null || !sourceKey || sourceKey.startsWith("id:current:")) return;
+  store.set(vodSourcePreferenceKey(vid), {
+    sourceKey,
+    line: {
+      id: line.id,
+      source_id: line.source_id,
+      name: line.name,
+      source_name: line.source_name,
+    },
+  });
+}
+function cancelVodSourceSpeedTests() {
+  if (!pv.speedTestControllers) return;
+  for (const controller of pv.speedTestControllers.values()) controller.abort();
+  pv.speedTestControllers.clear();
+}
+async function testVodSourceSpeed(index) {
+  const ctx = pv.ctx;
+  const source = pv.vodSources[index];
+  const episode = source && source.episodes && source.episodes[ctx && ctx.epIdx];
+  if (!ctx || ctx.kind !== "vod" || !source || !episode || episode.pid == null || episode.vid == null) return;
+  const key = playerVodSourceKey(source, index);
+  if (!pv.vodSpeedTests) pv.vodSpeedTests = Object.create(null);
+  if (pv.vodSpeedTests[key] === "testing") return;
+  const session = pv.playerSession;
+  const controller = new AbortController();
+  if (!pv.speedTestControllers) pv.speedTestControllers = new Map();
+  pv.speedTestControllers.get(key)?.abort();
+  pv.speedTestControllers.set(key, controller);
+  pv.vodSpeedTests[key] = "testing";
+  renderMorePanel();
+  const startedAt = performance.now();
+  try {
+    const resolved = await resolvePlayCached(ctx.vid, episode.pid, episode.vid,
+      { force: true, signal: controller.signal });
+    if (controller.signal.aborted || session !== pv.playerSession || ctx !== pv.ctx) return;
+    const playable = (resolved.sources || []).map(item => item && item.url).find(Boolean) || resolved.url;
+    if (!playable) throw new Error("未解析到播放地址");
+    const probeUrl = BASE + "/api/relay?u=" + encodeURIComponent(playable) + "&ref=none";
+    const response = await fetch(probeUrl, {
+      headers: { Range: "bytes=0-0" }, signal: controller.signal,
+    });
+    if (!response.ok || !response.body) throw new Error(`HTTP ${response.status || 0}`);
+    const reader = response.body.getReader();
+    const first = await reader.read();
+    try { await reader.cancel(); } catch (_) {}
+    if (first.done || !first.value || !first.value.byteLength) throw new Error("线路没有返回媒体数据");
+    if (controller.signal.aborted || session !== pv.playerSession || ctx !== pv.ctx) return;
+    pv.vodSpeedTests[key] = `${Math.max(1, Math.round(performance.now() - startedAt))}ms 首包`;
+  } catch (error) {
+    if (controller.signal.aborted || session !== pv.playerSession || ctx !== pv.ctx) return;
+    pv.vodSpeedTests[key] = "不可用";
+  } finally {
+    if (pv.speedTestControllers.get(key) === controller) pv.speedTestControllers.delete(key);
+    if (session === pv.playerSession && ctx === pv.ctx) renderMorePanel();
+  }
+}
 function playerVodEpisodeIndex(line, playRef) {
   const episodes = (line && line.episodes) || [];
   if (!playRef) return -1;
@@ -3464,12 +3525,14 @@ function playerVodEpisodeIndexForRefresh(line, playRef, epName) {
   return byRef >= 0 && referencedName === name ? byRef : -1;
 }
 function exactPlayerVodLineIndex(lines, playRef, sourceKey, referenceLine) {
+  let sourceKeyMatches = null;
   if (sourceKey) {
-    const byKey = lines.reduce((matches, line, index) => {
+    sourceKeyMatches = lines.reduce((matches, line, index) => {
       if (playerVodSourceKey(line, index) === sourceKey) matches.push(index);
       return matches;
     }, []);
-    if (byKey.length === 1) return byKey[0];
+    if (sourceKeyMatches.length === 1) return sourceKeyMatches[0];
+    if (!sourceKeyMatches.length && !referenceLine) return -1;
   }
   if (referenceLine) {
     const referenceName = String(referenceLine.name || "").trim();
@@ -3489,19 +3552,30 @@ function exactPlayerVodLineIndex(lines, playRef, sourceKey, referenceLine) {
       }, []);
       if (sourceMatches.length === 1) return sourceMatches[0];
     }
+    if (referenceName || referenceSource) return -1;
+    if (sourceKeyMatches && !sourceKeyMatches.length) return -1;
   }
   const byPlayRef = lines.reduce((matches, line, index) => {
     if (playerVodEpisodeIndex(line, playRef) >= 0) matches.push(index);
     return matches;
   }, []);
-  if (byPlayRef.length === 1) return byPlayRef[0];
+  if (byPlayRef.length === 1
+      && (!sourceKeyMatches || sourceKeyMatches.includes(byPlayRef[0]))) return byPlayRef[0];
   return -1;
 }
 function playerVodLineIndex(lines, playRef, sourceKey, preferredIndex) {
   const exact = exactPlayerVodLineIndex(lines, playRef, sourceKey);
   if (exact >= 0) return exact;
+  if (sourceKey) {
+    /* Duplicate source IDs are disambiguated by the still-matching selected
+       index. A stale key must never turn that old index into a different line. */
+    if (Number.isInteger(preferredIndex) && preferredIndex >= 0 && preferredIndex < lines.length
+        && playerVodSourceKey(lines[preferredIndex], preferredIndex) === sourceKey) return preferredIndex;
+    return -1;
+  }
+  if (playRef && (playRef.pid != null || playRef.vid != null)) return -1;
   return Number.isInteger(preferredIndex) && preferredIndex >= 0 && preferredIndex < lines.length
-    ? preferredIndex : 0;
+    ? preferredIndex : (lines.length ? 0 : -1);
 }
 function normalizePlayerVodSources(raw) {
   return (raw.sources || []).map(line => ({
@@ -3536,6 +3610,8 @@ function playerSessionIsCurrent(session, ctx) {
 }
 function stopVodMediaPipeline() {
   pv.playController?.abort(); pv.playController = null;
+  clearTimeout(pv.vodRetryTimer); pv.vodRetryTimer = 0;
+  pv.pendingVodResume = null;
   pv.recoveryGen++;
   pv.recovering = false;
   pv.loadPending = false;
@@ -3547,7 +3623,7 @@ function stopVodMediaPipeline() {
   if (!v) return;
   try { v.pause(); } catch (e) {}
   v.controls = false;
-  v.onloadedmetadata = v.onplaying = v.onpause = v.onended = v.ontimeupdate = v.onerror = null;
+  v.onloadedmetadata = v.onplaying = v.onpause = v.onended = v.ontimeupdate = v.onseeking = v.onseeked = v.onerror = null;
   try { v.removeAttribute("src"); v.load(); } catch (e) {}
 }
 function refreshPlayerEpisodes(options = {}) {
@@ -3571,7 +3647,7 @@ function refreshPlayerEpisodes(options = {}) {
   const path = vodDetailPath(ctx.vid) + (ref.kind === "hhkan"
     ? "?refresh=1&enrich=1" : "?refresh=1");
   let request = null;
-  request = fetchJSON(BASE + path, { timeout: 90000, signal: controller.signal })
+  request = fetchJSON(BASE + path, { timeout: VOD_SOURCE_TIMEOUT_MS, signal: controller.signal })
     .then(raw => {
       if (!isCurrentRequest(request) || !pv.ctx || pv.ctx.kind !== "vod") return null;
       if (!raw || !raw.title) throw new Error((raw && raw.error) || "信号源详情不可用");
@@ -3601,7 +3677,11 @@ function refreshPlayerEpisodes(options = {}) {
           pv.vodSources = [...fresh.sources, oldLine];
           pv.vodLineIdx = pv.vodSources.length - 1;
           pv.vodSourceMessage = "线路列表已更新，保留当前播放线路";
-        } else pv.vodLineIdx = 0;
+        } else if (pv.ctx.sourceKey || (pv.ctx.playRef
+            && (pv.ctx.playRef.pid != null || pv.ctx.playRef.vid != null))) {
+          currentLineMissing = true;
+          pv.vodLineIdx = -1;
+        } else pv.vodLineIdx = fresh.sources.length ? 0 : -1;
       } else if (!oldLines.length) pv.vodSources = [];
       pv.vodSourceStatus = fresh.sources.length ? "ready" : (oldHasRealLines ? "error" : "empty");
       if (fresh.sources.length && !pv.vodSourceMessage.startsWith("线路列表已更新"))
@@ -3707,7 +3787,7 @@ function resolvePlayCached(vid, pid, evid, options = {}) {
   if (options.force) playResolve.map.delete(key);
   const token = ++playResolve.seq;
   const playPath = vodPlayPath(vid, pid, evid) + (options.force ? "?fresh=1" : "");
-  const p = fetchJSON(BASE + playPath, { timeout: 60000, signal: options.signal })
+  const p = fetchJSON(BASE + playPath, { timeout: VOD_SOURCE_TIMEOUT_MS, signal: options.signal })
     .then(d => {
       if (d && d.url && !d.sources) d.sources = [{ name: d.name || "自动优选", url: d.url }];
       if (!d || !d.sources || !d.sources.length) throw new Error((d && d.error) || "未解析到播放地址");
@@ -3739,7 +3819,7 @@ async function resolveVodAndPlay(ctx, loadGen = pv.loadGen, options = {}) {
   metricMark("prepare");
   telemetryEmit(TELEMETRY_EVENTS.PLAYER_PREPARE, { kind: "prepare" });
   try {
-    /* resolver 已给出首选线路时直接用它起播，不再等所有线路（方案 §5 快速起播）。 */
+    /* Resolve the selected line; resolver suggestions never replace its identity. */
     const d = await resolveFirstSource(ctx, options);
     if (!playerSessionIsCurrent(pv.playerSession, ctx) || pv.loadGen !== loadGen) return;
     pv.loadPending = false;
@@ -3750,35 +3830,114 @@ async function resolveVodAndPlay(ctx, loadGen = pv.loadGen, options = {}) {
     pv.srcIdx = 0;
     renderMorePanel();
     vodAttach(pv.sources[0], ctx.resume || 0);
-    pushHistory({ id: ctx.vid, title: ctx.title, cover: ctx.cover || "", epIndex: ctx.epIdx || 0 });
-    if ("mediaSession" in navigator)
-      navigator.mediaSession.metadata = new MediaMetadata({ title: ctx.title, artist: ctx.epName || "" });
+    recordVodPlayback(ctx);
   } catch (e) {
     if (!playerSessionIsCurrent(pv.playerSession, ctx) || pv.loadGen !== loadGen) return;
     pv.loadPending = false;
-    const lines = pv.vodSources || [];
-    const next = chooseNextVodLine(ctx, lines);
-    if (next) {
-      const failedIndex = playerVodLineIndex(lines, ctx.playRef, ctx.sourceKey, ctx.lineIndex);
-      const failedKey = playerVodSourceKey(lines[failedIndex], failedIndex);
-      const nextLine = lines[next.index];
-      const nextCtx = {
-        ...ctx,
-        failedLineIds: [...(ctx.failedLineIds || []), failedKey],
-        playRef: next.playRef,
-        sourceKey: playerVodSourceKey(nextLine, next.index),
-        lineIndex: next.index,
-        linePinned: true,
-      };
-      pv.ctx = nextCtx;
-      pv.vodLineIdx = next.index;
-      pv.loadPending = true;
-      dLineIdx = next.index;
-      renderMorePanel();
-      resolveVodAndPlay(nextCtx, loadGen, { force: true });
+    scheduleVodRetry(e, pv.recoveryGen, loadGen);
+  }
+}
+
+function recordVodPlayback(ctx) {
+  if (!ctx || ctx.kind !== "vod") return;
+  pushHistory({ id: ctx.vid, title: ctx.title, cover: ctx.cover || "", epIndex: ctx.epIdx || 0 });
+  if ("mediaSession" in navigator)
+    navigator.mediaSession.metadata = new MediaMetadata({ title: ctx.title, artist: ctx.epName || "" });
+}
+
+function vodRetryIsCurrent(ctx, session, loadGen, recoveryGen) {
+  return pv.playerSession === session && pv.ctx === ctx && pv.ctx && pv.ctx.kind === "vod"
+    && pv.loadGen === loadGen && pv.recoveryGen === recoveryGen
+    && !(pv.playController && pv.playController.signal.aborted);
+}
+
+function vodResumePosition(ctx) {
+  const saved = Number(ctx && ctx.resume);
+  if (Number.isFinite(pv.pendingVodResume) && pv.pendingVodResume >= 0)
+    return pv.pendingVodResume;
+  const video = pv.video;
+  const current = video && Number(video.currentTime);
+  if (Number.isFinite(current) && current > 0) return current;
+  return Number.isFinite(saved) ? Math.max(0, saved) : 0;
+}
+
+function ensureVodPlayRef(ctx) {
+  if (ctx.playRef && ctx.playRef.pid != null && ctx.playRef.vid != null) return true;
+  const line = pv.vodSources[pv.vodLineIdx];
+  const episodes = (line && line.episodes) || [];
+  const wantedName = String(ctx.epName || "").trim();
+  const namedIndex = wantedName
+    ? episodes.findIndex(ep => String(ep.ep || ep.name || "").trim() === wantedName) : -1;
+  const epIndex = namedIndex >= 0 ? namedIndex
+    : (Number.isInteger(ctx.epIdx) && ctx.epIdx >= 0 ? ctx.epIdx : 0);
+  const ep = episodes[epIndex];
+  if (!ep || ep.pid == null || ep.vid == null) return false;
+  ctx.epIdx = epIndex;
+  ctx.epCount = episodes.length;
+  ctx.epName = ep.ep || ep.name || `第${epIndex + 1}集`;
+  ctx.playRef = { pid: ep.pid, vid: ep.vid };
+  ctx.lineIndex = pv.vodLineIdx;
+  ctx.sourceKey = playerVodSourceKey(line, pv.vodLineIdx);
+  return true;
+}
+
+function scheduleVodRetry(reason, expectedRecoveryGen = pv.recoveryGen, expectedLoadGen = pv.loadGen) {
+  const ctx = pv.ctx;
+  if (!ctx || ctx.kind !== "vod" || expectedRecoveryGen !== pv.recoveryGen
+      || expectedLoadGen !== pv.loadGen || pv.vodRetryTimer || pv.recovering) return;
+  const session = pv.playerSession;
+  const recoveryGen = pv.recoveryGen;
+  const loadGen = pv.loadGen;
+  pv.recovering = true;
+  pv.loadPending = false;
+  pv.vodSourceStatus = "loading";
+  pv.vodSourceMessage = "连接中断，正在重试当前信号源…";
+  $("#pError").hidden = true;
+  $("#bufSpin").hidden = false;
+  renderMorePanel();
+  syncPlayerSourcePanel();
+  pv.vodRetryTimer = setTimeout(() => {
+    pv.vodRetryTimer = 0;
+    if (!vodRetryIsCurrent(ctx, session, loadGen, recoveryGen)) {
+      pv.recovering = false;
       return;
     }
-    playerFatal(e, loadGen);
+    retryVodPlayback(ctx, session, loadGen, recoveryGen);
+  }, VOD_RETRY_DELAY_MS);
+}
+
+async function retryVodPlayback(ctx, session, loadGen, recoveryGen) {
+  if (!vodRetryIsCurrent(ctx, session, loadGen, recoveryGen)) return;
+  const resume = vodResumePosition(ctx);
+  ctx.resume = resume;
+  try {
+    if (!ensureVodPlayRef(ctx)) {
+      const fresh = await refreshPlayerEpisodes({
+        session, force: true, loadGen, allowPendingRemap: true,
+      });
+      if (!vodRetryIsCurrent(ctx, session, loadGen, recoveryGen)) return;
+      if (!fresh || !ensureVodPlayRef(ctx)) throw new Error("当前信号源暂不可用");
+    }
+    const d = await resolvePlayCached(ctx.vid, ctx.playRef.pid, ctx.playRef.vid, {
+      force: true, signal: pv.playController && pv.playController.signal,
+    });
+    if (!vodRetryIsCurrent(ctx, session, loadGen, recoveryGen)) return;
+    const urls = (d.sources || []).filter(x => x && x.url && x.alive !== false).map(x => x.url);
+    if (!urls.length) throw new Error("未解析到播放地址");
+    pv.sources = urls;
+    pv.srcIdx = 0;
+    pv.loadPending = false;
+    pv.recovering = false;
+    pv.vodSourceStatus = "ready";
+    pv.vodSourceMessage = playerVodReadyMessage();
+    renderMorePanel();
+    syncPlayerSourcePanel();
+    vodAttach(urls[0], resume);
+    recordVodPlayback(ctx);
+  } catch (e) {
+    if (!vodRetryIsCurrent(ctx, session, loadGen, recoveryGen)) return;
+    pv.recovering = false;
+    scheduleVodRetry(e, recoveryGen, loadGen);
   }
 }
 
@@ -3848,6 +4007,9 @@ function attachPlayer(url, resume, opts) {
   const gen = ++pv.recoveryGen;
   const opt = opts || {};
   pv.recovering = false;
+  pv.pendingVodResume = ctx && ctx.kind === "vod" && Number.isFinite(Number(resume)) && Number(resume) > 0
+    ? Math.max(0, Number(resume)) : null;
+  if (ctx && ctx.kind === "vod" && pv.pendingVodResume != null) ctx.resume = pv.pendingVodResume;
   /* 起播瞬间引擎降级（hls.js 不可用 → 原生 HLS，或直连 → 中继）都记一笔。 */
   const engine = window.Hls && Hls.isSupported() ? "hlsjs" : "native";
   telemetryEmit(TELEMETRY_EVENTS.ENGINE_FALLBACK, { engine: engine, kind: "player" });
@@ -3879,7 +4041,8 @@ function attachPlayer(url, resume, opts) {
   v.onloadedmetadata = () => {
     if (gen !== pv.recoveryGen) return;
     $("#bufSpin").hidden = true;
-    if (resume > 0 && ctx.kind === "vod" && (!v.duration || resume < v.duration - 30)) {
+    if (resume > 0 && ctx.kind === "vod" && (!v.duration || resume < v.duration)) {
+      ctx.resume = resume;
       v.currentTime = resume; hint("已从 " + fmtTime(resume) + " 继续播放");
     }
   };
@@ -3901,26 +4064,61 @@ function attachPlayer(url, resume, opts) {
   };
   v.onpause = () => { if (gen === pv.recoveryGen) setPlayIcon(false); };
   v.onended = () => { if (gen === pv.recoveryGen) onEnded(); };
-  v.ontimeupdate = () => { if (gen === pv.recoveryGen) updatePb(); };
+  v.onseeking = () => {
+    if (gen !== pv.recoveryGen || ctx.kind !== "vod") return;
+    if (Number.isFinite(v.currentTime)) {
+      pv.pendingVodResume = Math.max(0, v.currentTime);
+      ctx.resume = pv.pendingVodResume;
+    }
+    /* A fresh seek supersedes an in-flight same-line recovery and starts it
+       again from the new target. Healthy playback only records the position. */
+    if (pv.recovering || pv.vodRetryTimer) {
+      const target = vodResumePosition(ctx);
+      startVodPlayback(ctx, { resume: target, force: true, skipSave: true });
+    }
+  };
+  v.onseeked = () => {
+    if (gen !== pv.recoveryGen || ctx.kind !== "vod" || pv.pendingVodResume == null) return;
+    if (Number.isFinite(v.currentTime) && Math.abs(v.currentTime - pv.pendingVodResume) <= 1) {
+      ctx.resume = Math.max(0, v.currentTime);
+      pv.pendingVodResume = null;
+    }
+  };
+  v.ontimeupdate = () => {
+    if (gen !== pv.recoveryGen) return;
+    if (ctx.kind === "vod" && Number.isFinite(v.currentTime) && v.currentTime > 0
+        && (pv.pendingVodResume == null || Math.abs(v.currentTime - pv.pendingVodResume) <= 1)) {
+      ctx.resume = Math.max(0, v.currentTime);
+      pv.pendingVodResume = null;
+    }
+    updatePb();
+  };
   v.play().catch(() => {});
   clearInterval(pv.progTimer);
   pv.progTimer = setInterval(() => saveCurProgress(), 5000);
   clearInterval(pv.stallTimer);
-  let lastPos = -1, stuckTicks = 0;
-  pv.stallTimer = setInterval(() => {
-    if (gen !== pv.recoveryGen || !pv.ctx || v.paused || v.ended) return;
-    const buffering = v.readyState < 3;
-    /* readyState<3 = 正在缓冲；这只在起播/续播窗口内才上报，避免长视频常态抖动刷屏。 */
-    if (metrics.marks.click != null) metricBuffer(buffering);
-    stuckTicks = buffering || Math.abs(v.currentTime - lastPos) < 0.05 ? stuckTicks + 1 : 0;
-    lastPos = v.currentTime;
-    if (stuckTicks >= 8) { stuckTicks = 0; recoverPlayback("播放 8 秒无进展", gen); }
-  }, 1000);
+  pv.stallTimer = 0;
+  if (ctx.kind !== "vod") {
+    let lastPos = -1, stuckTicks = 0;
+    pv.stallTimer = setInterval(() => {
+      if (gen !== pv.recoveryGen || !pv.ctx || v.paused || v.ended) return;
+      const buffering = v.readyState < 3;
+      if (metrics.marks.click != null) metricBuffer(buffering);
+      stuckTicks = buffering || Math.abs(v.currentTime - lastPos) < 0.05 ? stuckTicks + 1 : 0;
+      lastPos = v.currentTime;
+      if (stuckTicks >= 8) { stuckTicks = 0; recoverPlayback("播放 8 秒无进展", gen); }
+    }, 1000);
+  }
   applyAspect();
 }
 
 async function recoverPlayback(reason, expectedGen) {
-  if (!pv.ctx || pv.recovering || (expectedGen != null && expectedGen !== pv.recoveryGen)) return;
+  if (!pv.ctx || (expectedGen != null && expectedGen !== pv.recoveryGen)) return;
+  if (pv.ctx.kind === "vod") {
+    scheduleVodRetry(reason, pv.recoveryGen, pv.loadGen);
+    return;
+  }
+  if (pv.recovering) return;
   const recoveryGen = pv.recoveryGen;
   const ctx = pv.ctx;
   pv.recovering = true;
@@ -3929,14 +4127,13 @@ async function recoverPlayback(reason, expectedGen) {
     attempt: attempt + 1, error_class: classifyTelemetryError(new Error(reason)),
     kind: "recovery",
   });
-  const recoveryLimit = ctx.kind === "vod"
-    ? Math.max(MAX_RECOVERY_ATTEMPTS, pv.vodSources.length + 2) : MAX_RECOVERY_ATTEMPTS;
+  const recoveryLimit = MAX_RECOVERY_ATTEMPTS;
   if (attempt >= recoveryLimit) {
     pv.recovering = false;
     playerFatal("播放持续卡顿，自动恢复已达上限");
     return;
   }
-  const resume = ctx.kind === "vod" && pv.video ? Math.max(0, pv.video.currentTime - 2) : 0;
+  const resume = 0;
   hint(`正在恢复播放（${attempt + 1}/${recoveryLimit}）`);
   try {
     if (ctx.kind === "live") {
@@ -3948,49 +4145,6 @@ async function recoverPlayback(reason, expectedGen) {
       renderSrcPicker();
       return;
     }
-    if (attempt >= 2) {
-      const lines = pv.vodSources || [];
-      const next = chooseNextVodLine(ctx, lines);
-      if (next) {
-        const failedIndex = playerVodLineIndex(lines, ctx.playRef, ctx.sourceKey, ctx.lineIndex);
-        const failedKey = playerVodSourceKey(lines[failedIndex], failedIndex);
-        const nextLine = lines[next.index];
-        const nextCtx = { ...ctx,
-          failedLineIds: [...(ctx.failedLineIds || []), failedKey],
-          playRef: next.playRef, linePinned: true, lineIndex: next.index,
-          sourceKey: playerVodSourceKey(nextLine, next.index),
-        };
-        if (pv.ctx !== ctx || pv.recoveryGen !== recoveryGen) return;
-        pv.ctx = nextCtx;
-        pv.vodLineIdx = next.index;
-        dLineIdx = next.index;
-        bustResolvedPlay(ctx);
-        const switched = await resolvePlayCached(ctx.vid, next.playRef.pid, next.playRef.vid,
-          { force: true, signal: pv.playController && pv.playController.signal });
-        if (pv.ctx !== nextCtx || pv.recoveryGen !== recoveryGen) return;
-        const urls = (switched.sources || []).filter(x => x && x.url && x.alive !== false).map(x => x.url);
-        if (!urls.length) throw new Error("下一线路没有播放地址");
-        pv.sources = urls; pv.srcIdx = 0;
-        pv.recovering = false;
-        renderMorePanel();
-        vodAttach(urls[0], resume);
-        return;
-      }
-    }
-    if (attempt === 0 || attempt === 1) {
-      bustResolvedPlay(ctx);
-      const d = await resolvePlayCached(ctx.vid, ctx.playRef.pid, ctx.playRef.vid,
-        { force: true, signal: pv.playController && pv.playController.signal });
-      if (pv.ctx !== ctx || pv.recoveryGen !== recoveryGen) return;
-      const fresh = (d.sources || []).filter(x => x && x.url && x.alive !== false).map(x => x.url);
-      if (!fresh.length) throw new Error("未解析到播放地址");
-      pv.sources = fresh;
-      if (attempt === 1 && fresh.length > 1) pv.srcIdx = (pv.srcIdx + 1) % fresh.length;
-    } else if (attempt === 2 && pv.sources.length > 1) {
-      pv.srcIdx = (pv.srcIdx + 1) % pv.sources.length;
-    }
-    pv.recovering = false;
-    vodAttach(pv.sources[pv.srcIdx], resume);
   } catch (e) {
     if (pv.ctx !== ctx || pv.recoveryGen !== recoveryGen) return;
     pv.recovering = false;
@@ -3998,39 +4152,19 @@ async function recoverPlayback(reason, expectedGen) {
   }
 }
 
-function chooseNextVodLine(ctx, lines) {
-  if (!ctx || !ctx.playRef || !Array.isArray(lines)) return null;
-  const currentIndex = playerVodLineIndex(lines, ctx.playRef, ctx.sourceKey, ctx.lineIndex);
-  const tried = new Set([...(ctx.failedLineIds || []).map(String)]);
-  if (currentIndex >= 0) tried.add(playerVodSourceKey(lines[currentIndex], currentIndex));
-  else tried.add(String(ctx.playRef.pid));
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index];
-    if (!line) continue;
-    const episodes = line.episodes || [];
-    const lineId = playerVodSourceKey(line, index);
-    if (tried.has(lineId)) continue;
-    const ep = episodes[ctx.epIdx] || episodes[0];
-    if (ep && ep.pid != null && ep.vid != null)
-      return { index, playRef: { pid: ep.pid, vid: ep.vid } };
-  }
-  return null;
-}
-
 function nextSource() {
+  if (pv.ctx && pv.ctx.kind === "vod") {
+    recoverPlayback("当前信号源播放中断", pv.recoveryGen);
+    return;
+  }
   pv.srcIdx++;
   telemetryEmit(TELEMETRY_EVENTS.AUTO_SWITCH, {
     attempt: pv.srcIdx + 1, kind: "source_switch",
   });
   if (pv.srcIdx < pv.sources.length) {
     hint("线路失效，切换下一个源");
-    if (pv.ctx.kind === "vod") vodAttach(pv.sources[pv.srcIdx], 0);
-    else attachPlayer(relay(pv.sources[pv.srcIdx], pv.sourceRefs[pv.srcIdx]), 0);
+    attachPlayer(relay(pv.sources[pv.srcIdx], pv.sourceRefs[pv.srcIdx]), 0);
     if (pv.ctx.kind === "live") renderSrcPicker();
-  } else if (pv.ctx.kind === "vod" && pv.ctx.epIdx < pv.ctx.epCount - 1) {
-    hint("本集所有源失败，尝试下一集");
-    pv.ctx.epIdx++;
-    startPlayFromCtx();
   } else {
     playerFatal("播放失败：所有线路均不可用");
   }
@@ -4038,13 +4172,24 @@ function nextSource() {
 /* 换集/换线：openPlayer 复位会清 srcIdx——换线保进度（App 跨线路续播） */
 function startPlayFromCtx(keepPos) {
   const c = pv.ctx;
+  if (!c || c.kind !== "vod") return false;
   const pos = keepPos && pv.video && pv.video.duration && pv.video.currentTime > 1 &&
     pv.video.currentTime < pv.video.duration - 30 ? pv.video.currentTime : 0;
   const line = pv.vodSources[pv.vodLineIdx];
   const ep = line && line.episodes && line.episodes[c.epIdx];
+  if (!ep || ep.pid == null || ep.vid == null) {
+    const message = `当前信号源没有${c.epName || `第${c.epIdx + 1}集`}，请手动切换信号源`;
+    pv.vodSourceStatus = "error";
+    pv.vodSourceMessage = message;
+    hint(message);
+    renderMorePanel();
+    return false;
+  }
   openPlayer({ ...c, sources: pv.vodSources, lineIndex: pv.vodLineIdx,
     sourceKey: playerVodSourceKey(line, pv.vodLineIdx),
-    playRef: ep ? { pid: ep.pid, vid: ep.vid } : c.playRef, resume: pos });
+    epCount: line.episodes.length, epName: ep.ep || ep.name || `第${c.epIdx + 1}集`,
+    playRef: { pid: ep.pid, vid: ep.vid }, resume: pos });
+  return true;
 }
 function playerSourceName(line, index) {
   return String((line && (line.name || line.source_name)) || `信号源${index + 1}`);
@@ -4086,7 +4231,8 @@ function startVodPlayback(ctx, options = {}) {
   pv.vodLineIdx = playerVodLineIndex(pv.vodSources, pv.ctx.playRef,
     pv.ctx.sourceKey, pv.ctx.lineIndex);
   pv.ctx.lineIndex = pv.vodLineIdx;
-  pv.ctx.sourceKey = playerVodSourceKey(pv.vodSources[pv.vodLineIdx], pv.vodLineIdx);
+  const selectedLine = pv.vodSources[pv.vodLineIdx];
+  if (selectedLine) pv.ctx.sourceKey = playerVodSourceKey(selectedLine, pv.vodLineIdx);
   if (detail && String(detail.vid) === String(pv.ctx.vid)) {
     dLineIdx = pv.vodLineIdx;
     dEpIdx = pv.ctx.epIdx;
@@ -4103,18 +4249,9 @@ function startVodPlayback(ctx, options = {}) {
     const session = pv.playerSession;
     refreshPlayerEpisodes({ session, force: true, loadGen, allowPendingRemap: true }).then(fresh => {
       if (!playerSessionIsCurrent(session, playCtx) || pv.loadGen !== loadGen) return;
-      /* A manual retry must not silently use a removed or stale selection when
-         detail refresh failed. An empty source list can still use an explicit
-         current-line reference, but a failed/ambiguous remap must stop here. */
-      if (!fresh || pv.vodSourceStatus === "error") {
-        const message = pv.vodSourceMessage || "信号源详情刷新失败，请重试";
-        playerFatal(message, loadGen);
-        pv.vodSourceStatus = "error";
-        pv.vodSourceMessage = message;
-        renderMorePanel();
-        return;
-      }
-      pv.vodSourceStatus = "loading";
+      /* A stale or unavailable catalog must not cancel playback retries for
+         the user's existing line and episode reference. */
+      pv.vodSourceStatus = pv.vodSources.length ? "refreshing" : "loading";
       pv.vodSourceMessage = `正在解析 ${playerSourceName(pv.vodSources[pv.vodLineIdx], pv.vodLineIdx)}…`;
       renderMorePanel();
       resolveVodAndPlay(playCtx, loadGen, { force: true });
@@ -4153,9 +4290,9 @@ function selectVodLine(index) {
     epCount: episodes.length,
     epName: ep.ep || ep.name || `第${epIdx + 1}集`,
     playRef: { pid: ep.pid, vid: ep.vid },
-    linePinned: true,
     failedLineIds: [],
   };
+  rememberVodSource(current.vid, line, index);
   pv.vodLineIdx = index;
   pv.vodProvider = playerSourceProvider(line, index);
   pv.vodSourceStatus = "loading";
@@ -4167,12 +4304,9 @@ function selectVodLine(index) {
 function playerFatal(msg, expectedLoadGen) {
   if (expectedLoadGen != null && expectedLoadGen !== pv.loadGen) return;
   if (pv.ctx && pv.ctx.kind === "vod") {
-    const v = pv.video;
-    if (v && v.duration && v.currentTime > 1 && v.currentTime < v.duration - 30)
-      pv.ctx.resume = v.currentTime;
-    saveCurProgress();
-    stopVodMediaPipeline();
-    pv.loadPending = false;
+    pv.ctx.resume = vodResumePosition(pv.ctx);
+    scheduleVodRetry(msg, pv.recoveryGen, pv.loadGen);
+    return;
   }
   /* 埋点只取错误分类，不取原始文案（可能含上游拓扑）。 */
   const errClass = msg instanceof Error ? classifyTelemetryError(msg) : "unknown";
@@ -4182,16 +4316,8 @@ function playerFatal(msg, expectedLoadGen) {
   $("#pError").hidden = false;
   $("#controls").hidden = true;
   $("#ctlBack").hidden = true; $("#srcPickerWrap").hidden = true;
-  if (pv.ctx && pv.ctx.kind === "vod") {
-    pv.vodSourceStatus = "error";
-    pv.vodSourceMessage = "当前播放失败，可切换信号源或重试当前线路";
-    if (state.portrait) pv.panelOpen = true;
-    renderMorePanel();
-    syncPlayerSourcePanel();
-  } else {
-    $("#morePanel").hidden = true;
-    $("#mpToggle").hidden = true;
-  }
+  $("#morePanel").hidden = true;
+  $("#mpToggle").hidden = true;
 }
 $("#peRetry").addEventListener("click", () => {
   const c = pv.ctx;
@@ -4199,7 +4325,7 @@ $("#peRetry").addEventListener("click", () => {
     const v = pv.video;
     const resume = v && v.duration && v.currentTime > 1 && v.currentTime < v.duration - 30
       ? v.currentTime : (c.resume || 0);
-    startVodPlayback({ ...c, linePinned: true }, { resume, force: true });
+    startVodPlayback(c, { resume, force: true });
   } else if (c) openPlayer(c);
 });
 $("#peBack").addEventListener("click", closePlayer);
@@ -4207,8 +4333,34 @@ $("#peBack").addEventListener("click", closePlayer);
 function onEnded() {
   saveCurProgress(true);
   const c = pv.ctx;
-  if (c.kind === "vod" && c.epIdx < c.epCount - 1) { hint("自动播放下一集"); pv.ctx.epIdx++; startPlayFromCtx(); }
-  else closePlayer();
+  if (!c) return;
+  if (c.kind !== "vod") { closePlayer(); return; }
+  const line = pv.vodSources[pv.vodLineIdx];
+  const episodes = (line && line.episodes) || [];
+  const nextIndex = c.epIdx + 1;
+  const next = episodes[nextIndex];
+  if (next && next.pid != null && next.vid != null) {
+    hint("自动播放下一集");
+    pv.ctx = { ...c, epIdx: nextIndex, epCount: episodes.length,
+      epName: next.ep || next.name || `第${nextIndex + 1}集`,
+      playRef: { pid: next.pid, vid: next.vid },
+      lineIndex: pv.vodLineIdx, sourceKey: playerVodSourceKey(line, pv.vodLineIdx) };
+    startPlayFromCtx();
+    return;
+  }
+  const anotherLineHasNext = pv.vodSources.some((candidate, index) => {
+    if (index === pv.vodLineIdx || !candidate || !Array.isArray(candidate.episodes)) return false;
+    const candidateEpisode = candidate.episodes[nextIndex];
+    return !!candidateEpisode && candidateEpisode.pid != null && candidateEpisode.vid != null;
+  });
+  if (anotherLineHasNext) {
+    const message = `当前信号源没有第${nextIndex + 1}集，请手动切换信号源`;
+    pv.vodSourceMessage = message;
+    hint(message);
+    renderMorePanel();
+    return;
+  }
+  closePlayer();
 }
 
 function saveCurProgress(clear) {
@@ -4216,7 +4368,7 @@ function saveCurProgress(clear) {
   if (!c || c.kind !== "vod" || !pv.video || !pv.video.duration) return;
   if (clear) { localStorage.removeItem("otvw:prog:vod:" + c.vid); return; }
   store.set("otvw:ep:" + c.vid, c.epIdx);
-  saveProgress("vod:" + c.vid, pv.video.currentTime, pv.video.duration);
+  saveProgress("vod:" + c.vid, vodResumePosition(c), pv.video.duration);
 }
 document.addEventListener("visibilitychange", () => { if (document.hidden) saveCurProgress(); });
 addEventListener("pagehide", () => saveCurProgress());
@@ -4397,6 +4549,7 @@ function closePlayer() {
   $("#ctlBack").hidden = true;
   document.body.style.overflow = "";
   pv.recoveryGen++; pv.loadGen++; pv.playerSession++; pv.ctx = null;
+  cancelVodSourceSpeedTests();
   pv.controls = false; pv.picker = false; pv.recovering = false; pv.panelOpen = false;
   pv.vodSources = []; pv.vodLineIdx = 0; pv.vodProvider = ""; pv.vodSourceStatus = "idle"; pv.vodSourceMessage = "";
 }
@@ -4432,7 +4585,6 @@ function mpApplyEpisode(idx) {
     playRef: { pid: ep.pid, vid: ep.vid },
     lineIndex: pv.vodLineIdx,
     sourceKey: playerVodSourceKey(s, pv.vodLineIdx),
-    linePinned: true,
   };
   if (detail && String(detail.vid) === String(pv.ctx.vid)) {
     dLineIdx = pv.vodLineIdx;
@@ -4490,12 +4642,19 @@ function renderMorePanel() {
       const source = pv.vodSources[i];
       const name = playerSourceName(source, i);
       const selected = i === pv.vodLineIdx;
-      return `<button class="lchip ${selected ? "on" : ""}" data-i="${i}"
-        aria-pressed="${selected ? "true" : "false"}" aria-current="${selected ? "true" : "false"}"
-        aria-label="${esc(selected ? `${name}，当前信号源，再次点击重试` : `切换到${name}`)}"
-        title="${esc(selected ? "再次点击重试当前信号源" : `切换到${name}`)}">${esc(name)}</button>`;
+      const speed = pv.vodSpeedTests && pv.vodSpeedTests[playerVodSourceKey(source, i)] || "";
+      return `<div class="mp-route-row">
+        <button class="lchip mp-route-select ${selected ? "on" : ""}" data-i="${i}"
+          aria-pressed="${selected ? "true" : "false"}" aria-current="${selected ? "true" : "false"}"
+          aria-label="${esc(selected ? `${name}，当前信号源，再次点击重试` : `切换到${name}`)}"
+          title="${esc(selected ? "再次点击重试当前信号源" : `切换到${name}`)}">${esc(name)}</button>
+        <button class="mp-route-speed" type="button" data-speed-i="${i}"
+          aria-label="测速：${esc(name)}" ${speed === "testing" ? "disabled" : ""}>测速</button>
+        <span class="mp-route-result" role="status" aria-live="polite">${esc(speed === "testing" ? "测速中…" : speed)}</span>
+      </div>`;
     }).join("");
-    $$("#mpLines .lchip").forEach(ch => ch.addEventListener("click", () => selectVodLine(+ch.dataset.i)));
+    $$("#mpLines .mp-route-select").forEach(ch => ch.addEventListener("click", () => selectVodLine(+ch.dataset.i)));
+    $$("#mpLines .mp-route-speed").forEach(ch => ch.addEventListener("click", () => testVodSourceSpeed(+ch.dataset.speedI)));
     routes.scrollTop = previousProvider === selectedProvider ? previousScrollTop : 0;
     const activeRoute = routes.querySelector(".lchip.on");
     if (selectedProvider === activeProvider && activeRoute && activeRoute.scrollIntoView)

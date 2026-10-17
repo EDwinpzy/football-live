@@ -1508,6 +1508,47 @@ def _stream_via_cloud(match_id, src, fresh):
 
 STREAM_SUCCESS_TTL = 60
 
+# 直播「信号源清单」短缓存（2026-10-17 用户报障「足球直播经常显示无法查找到可用信号源，
+# 彻底退出 app 再进又可以播放」）：
+# 一次打开播放器 = 源站清单 1 次 + 每条线路 3~4 次探测（大场次 10+ 线 = 40+ 次上游请求）。
+# 用户重试/反复进出播放器时这份探测风暴会被源站按 IP 限流/拦爬，之后**每次**解析都拿不到
+# 线路 → 播放器「无可用信号源」；过一段时间（或重启进程后）限流窗口过去才自愈，用户感知
+# 就是「退出 app 重进就好了」。三层保护：
+#   ① 20s 内重复打开直接复用上一次清单（fresh=1 绕过，续签/换源照旧实时）；
+#   ② 同一场比赛并发请求单飞（重试风暴不再叠加成更多上游探测）；
+#   ③ 解析失败（限流/超时/清单读取失败）时回退最近一次成功清单（180s 内），
+#      把上游抖动挡在播放器之外；「所有线路确实都没流」仍如实返回空，不拿旧数据骗用户。
+STREAM_ALL_TTL = 20.0
+STREAM_ALL_STALE_TTL = 180.0
+# fresh=1 的合并窗口（2026-10-17 实测：同场 3 个并发 fresh=1 会串行重解析 3 次，
+# 3.5s×3=10.6s，用户连点重试等于把等待叠加）。3 秒内刚完成的解析已经是「刚刚的现场」，
+# 直接复用既不影响 fresh 语义，也不会让重试风暴放大成更多上游探测。
+STREAM_ALL_FRESH_COALESCE = 3.0
+STREAM_ALL_CACHE_MAX = 48
+_stream_all_cache = {}
+_stream_all_lock = threading.Lock()
+_stream_all_locks = {}
+_stream_all_locks_guard = threading.Lock()
+# 源站线路清单缓存（同一场比赛的清单在一次播放会话里被反复请求：all 枚举 + 单线续签）
+_88Z_SOURCE_LINKS_TTL = 20.0
+_88z_source_links_cache = {}
+
+
+def _stream_all_match_lock(match_id):
+    """同场解析单飞用的锁（按场次隔离；表超过上限时清掉未持有的旧锁）。"""
+    with _stream_all_locks_guard:
+        lock = _stream_all_locks.get(match_id)
+        if lock is not None:
+            return lock
+        if len(_stream_all_locks) >= STREAM_ALL_CACHE_MAX:
+            for key in [k for k, v in _stream_all_locks.items() if not v.locked()]:
+                _stream_all_locks.pop(key, None)
+                if len(_stream_all_locks) < STREAM_ALL_CACHE_MAX // 2:
+                    break
+        lock = threading.Lock()
+        _stream_all_locks[match_id] = lock
+        return lock
+
 
 def _decode_88zhibo_source_links(response_text):
     """解开 /live/{id}/source 的前后包装 Base64 数据并返回 links 列表。"""
@@ -1752,12 +1793,21 @@ def _88z_generic_embed_hls_url(page_url, depth=0, seen=None):
     raise ValueError("播放器页面没有可静态解析的 HLS 地址")
 
 
-def _88z_source_links(match_id):
+def _88z_source_links(match_id, fresh=False):
     if not str(match_id).isdigit():
         raise ValueError("invalid_match_id")
+    key = str(match_id)
+    now = time.time()
+    if not fresh:
+        hit = _88z_source_links_cache.get(key)
+        if hit and now - hit[0] < _88Z_SOURCE_LINKS_TTL:
+            return hit[1]
     endpoint = "https://www.88zhibo.tv/live/%s/source" % match_id
     raw = fetch_url(endpoint, referer=SOURCE_URL, timeout=20)
-    return _decode_88zhibo_source_links(raw)
+    links = _decode_88zhibo_source_links(raw)
+    _trim_cache(_88z_source_links_cache, STREAM_ALL_CACHE_MAX)
+    _88z_source_links_cache[key] = (time.time(), links)
+    return links
 
 
 def _88z_source_link_for_src(src, links):
@@ -1809,9 +1859,9 @@ def _resolve_88zhibo_link(source_link, label):
     return stream_url, embed_referer, label
 
 
-def _resolve_88zhibo_direct(match_id, src, source_links=None):
+def _resolve_88zhibo_direct(match_id, src, source_links=None, fresh=False):
     """解析源站源清单中的一个线路；line IDs 对应本次清单的原始下标。"""
-    links = source_links if source_links is not None else _88z_source_links(match_id)
+    links = source_links if source_links is not None else _88z_source_links(match_id, fresh=fresh)
     source_link, label = _88z_source_link_for_src(src, links)
     stream_url, referer, _label = _resolve_88zhibo_link(source_link, label)
     return stream_url, referer, label
@@ -1831,7 +1881,7 @@ def resolve_88zhibo_stream(match_id, src="a2", fresh=False, source_links=None):
             return cached["data"], True
     try:
         stream_url, embed_referer, label = _resolve_88zhibo_direct(
-            str(match_id), src, source_links=source_links,
+            str(match_id), src, source_links=source_links, fresh=fresh,
         )
         if not _probe_88z_hls_playable(stream_url, embed_referer):
             raise ValueError("%s清单或媒体分片当前不可用" % label)
@@ -1852,14 +1902,20 @@ def resolve_88zhibo_stream(match_id, src="a2", fresh=False, source_links=None):
         return payload, False
 
 
-def resolve_88zhibo_streams(match_id, fresh=False):
+def _resolve_88zhibo_streams_uncached(match_id, fresh=False):
     """按源站本场清单枚举线路，只返回 HLS 解析并通过上游探测的线路。"""
     if not str(match_id).isdigit():
         return {"url": None, "sources": [], "error": "invalid_match_id"}, False
     try:
         links = _88z_source_links(str(match_id))
     except Exception as exc:
-        return {"url": None, "sources": [], "error": str(exc)[:160] or "88zhibo 线路列表读取失败"}, False
+        # retryable=True：清单读取失败是上游/网络抖动（限流、超时），调用方可以复用
+        # 上一次成功清单（见 resolve_88zhibo_streams 的 stale 回退），而不是直接空手。
+        return {
+            "url": None, "sources": [],
+            "error": str(exc)[:160] or "88zhibo 线路列表读取失败",
+            "retryable": True,
+        }, False
 
     # 保留源站原顺序，同时压掉完全重复的条目。A2/migu/Q3/C4 仍按用户先前
     # 指定的顺序优先，其余每场比赛实际返回的线路紧随其后。
@@ -2007,6 +2063,48 @@ def resolve_88zhibo_streams(match_id, fresh=False):
         "error": error,
         "retryable": retryable,
     }, False
+
+
+def resolve_88zhibo_streams(match_id, fresh=False):
+    """src=all 入口：短缓存 + 同场单飞 + 失败回退上一次成功清单。
+
+    见 STREAM_ALL_TTL 头注释。返回 (payload, cached)；cached=True 表示本次没有重新
+    探测上游（20s 内复用或 stale 回退）。stale 回退的 payload 带 "stale": True，
+    客户端可据此提示「正在更新信号源」，也可以完全忽略（字段向后兼容）。"""
+    key = str(match_id)
+    if not fresh:
+        with _stream_all_lock:
+            hit = _stream_all_cache.get(key)
+            if hit and time.time() - hit["ts"] < STREAM_ALL_TTL:
+                return hit["data"], True
+    lock = _stream_all_match_lock(key)
+    lock.acquire()
+    try:
+        with _stream_all_lock:
+            hit = _stream_all_cache.get(key)
+            ttl = STREAM_ALL_TTL if not fresh else STREAM_ALL_FRESH_COALESCE
+            if hit and time.time() - hit["ts"] < ttl:
+                return hit["data"], True
+        payload, cached = _resolve_88zhibo_streams_uncached(key, fresh)
+        now = time.time()
+        with _stream_all_lock:
+            if payload.get("sources"):
+                _trim_cache(_stream_all_cache, STREAM_ALL_CACHE_MAX)
+                _stream_all_cache[key] = {"ts": now, "data": payload}
+                return payload, cached
+            # 只有「上游抖动型」失败才复用旧清单；「所有线路都没流」是真实无信号，
+            # 继续如实返回空（否则会把已结束的比赛伪装成可播）。
+            hit = _stream_all_cache.get(key)
+            if payload.get("retryable") and hit and now - hit["ts"] < STREAM_ALL_STALE_TTL:
+                stale = dict(hit["data"])
+                stale["stale"] = True
+                stale["cachedAt"] = int(hit["ts"])
+                print("[88z] match=%s 解析失败（%s）→ 复用 %ds 前的信号源清单"
+                      % (key, payload.get("error"), int(now - hit["ts"])))
+                return stale, True
+        return payload, cached
+    finally:
+        lock.release()
 
 
 def resolve_stream(match_id, src="bb", fresh=False):
@@ -5348,6 +5446,8 @@ class Handler(SimpleHTTPRequestHandler):
         ckey = p + ("?" + parsed.query if parsed.query else "")
 
         def respond(obj, from_cache=False):
+            if p.startswith("/hhkan/detail/") and obj.get("title"):
+                _hhkan_remember_detail(obj)
             if cacheable and not from_cache and obj.get("ok", True) is not False and "error" not in obj:
                 # detail 存深拷贝：respond 之后启动的后台补线线程会原地改 d，
                 # 共享引用会让并发读缓存与后台插键产生 dict-changed-during-
@@ -5548,7 +5648,10 @@ class Handler(SimpleHTTPRequestHandler):
                         lambda: hhkan.get_page("/detail/%d.html" % vid)), vid)
                 except Exception as live_error:
                     print("hhkan detail %s live failed: %s" % (vid, str(live_error)[:160]))
-                    d = _HHKAN_SNAPSHOT.detail(vid) or {}
+                    d = _hhkan_cached_detail(vid)
+                    if d.get("title"):
+                        d.setdefault("source", "hhkan-snapshot")
+                        d.setdefault("stale", True)
                 if not d.get("title"):
                     return respond({"ok": False, "error": "未找到该影片"})
                 # 需求⑮：mcms 池同名影片补线（≥720p 实测清晰度线路插最前）。
@@ -5579,17 +5682,9 @@ class Handler(SimpleHTTPRequestHandler):
                         return respond(_ppayload)
                 except Exception as live_error:
                     print("hhkan play %s live failed: %s" % (vodid, str(live_error)[:160]))
-                # 旧缓存/旧客户端仍可能请求好好看 pid；源站受风控时按同片同集切到
-                # 补充播放源。卡片与详情元数据仍来自快照中的好好看数据。
-                fallback_detail = _HHKAN_SNAPSHOT.detail(int(vodid)) or {}
-                enrich_detail_sources(fallback_detail, int(vodid))
-                for line in fallback_detail.get("sources") or []:
-                    episodes = line.get("episodes") or []
-                    if episodes and int(episodes[0].get("pid", 0)) >= 100:
-                        episode = episodes[max(0, min(int(vid), len(episodes) - 1))]
-                        return respond(mcms_enriched_play(
-                            int(vodid), int(episode["pid"]), int(episode["vid"]), **fresh_args))
-                return respond({"line": "", "sources": [], "error": "可用播放线路暂不可达"})
+                # A failed selected source must remain selected. Clients retry this
+                # exact reference; only the user may choose a supplemental source.
+                return respond({"line": "", "sources": [], "error": "当前所选线路暂不可达"})
             if p == "/hhkan/search":
                 k = q("k", "")
                 if not k:
@@ -6693,7 +6788,106 @@ def _enrich_find_sites(title, fresh=False):
     return found
 
 
+_HHKAN_METADATA_LOCK = threading.Lock()
+
+
+def _hhkan_metadata_cache():
+    root = Path(os.environ.get("OTV_DATA_DIR") or _vod_data_dir())
+    return douban_catalog.JsonDiskCache(root / "hhkan_metadata")
+
+
+def _hhkan_remember_detail(detail):
+    """Keep episode identities across restarts; never persist signed play URLs."""
+    if not detail.get("id") or not detail.get("title"):
+        return
+    native = {"id": int(detail["id"]), "title": detail["title"], "sources": []}
+    for line in detail.get("sources") or []:
+        eps = [{"ep": e.get("ep", ""), "pid": e["pid"], "vid": e["vid"]}
+               for e in line.get("episodes") or []
+               if "pid" in e and "vid" in e and int(e["pid"]) < 100]
+        if eps:
+            native["sources"].append({"name": line.get("name", ""), "episodes": eps})
+    # A thin response must not erase a previously saved episode map.
+    if not native["sources"]:
+        return
+    try:
+        with _HHKAN_METADATA_LOCK:
+            cache = _hhkan_metadata_cache()
+            if cache.get(str(native["id"]), ttl=86400) == native:
+                return
+            cache.put(str(native["id"]), native)
+            paths = sorted(cache.directory.glob("*.json"), key=lambda p: p.stat().st_mtime)
+            for path in paths[:-200]:
+                path.unlink(missing_ok=True)
+    except OSError:
+        pass  # Read-only/full disks must not prevent playback.
+
+
+def _hhkan_cached_detail(vodid):
+    """Stale metadata is usable for identity, never as a cached media URL."""
+    candidates = []
+    with _detail_ranked_lock:
+        hit = _DETAIL_RANKED_CACHE.get(vodid)
+        if hit:
+            candidates.append(copy.deepcopy(hit[1]))
+    for key, (_, value) in list(_HHKAN_PAGE_CACHE.items()):
+        if key.split("?", 1)[0] == "/hhkan/detail/%d" % vodid:
+            candidates.append(copy.deepcopy(value))
+    for detail in candidates:
+        if detail.get("title") and any(
+                int(e.get("pid", 100)) < 100
+                for s in detail.get("sources") or [] for e in s.get("episodes") or []):
+            return detail
+    try:
+        with _HHKAN_METADATA_LOCK:
+            stored = _hhkan_metadata_cache().get(str(vodid), ttl=30 * 86400)
+        if stored:
+            candidates.append(stored)
+    except (OSError, ValueError):
+        pass
+    candidates.append(_HHKAN_SNAPSHOT.detail(vodid) or {})
+    valid = [d for d in candidates if d.get("title")]
+    return copy.deepcopy(next((d for d in valid if d.get("sources")), valid[0] if valid else {}))
+
+
+def _hhkan_episode_key(label):
+    label = str(label or "").strip()
+    match = re.fullmatch(r"(?:第\s*)?(\d+)\s*(?:集|话|期)?", label)
+    return ("number", int(match.group(1))) if match else ("label", label)
+
+
+def _hhkan_fallback_play(vodid, pid, vid, fresh=False):
+    detail = _hhkan_cached_detail(vodid)
+    original = next((e for s in detail.get("sources") or []
+                     for e in s.get("episodes") or []
+                     if str(e.get("pid")) == str(pid) and str(e.get("vid")) == str(vid)), None)
+    if not original or not original.get("ep"):
+        return {"line": "", "sources": [], "error": "无法确认原播放集数，请重新打开影片详情"}
+    wanted = _hhkan_episode_key(original["ep"])
+    enrich_detail_sources(detail, vodid, refresh=fresh)
+    tried = set()
+    for source in detail.get("sources") or []:
+        for episode in source.get("episodes") or []:
+            ep_pid, ep_vid = int(episode.get("pid", 0)), int(episode.get("vid", 0))
+            if ep_pid < 100 or _hhkan_episode_key(episode.get("ep")) != wanted:
+                continue
+            key = (ep_pid, ep_vid)
+            if key in tried:
+                continue
+            tried.add(key)
+            try:
+                result = mcms_enriched_play(vodid, ep_pid, ep_vid, fresh=fresh)
+                if result.get("sources"):
+                    return result
+            except Exception:
+                continue
+    return {"line": "", "sources": [], "error": "该集的备用播放线路暂不可达"}
+
+
 def _hhkan_title_of(vodid):
+    cached = _hhkan_cached_detail(vodid)
+    if cached.get("title"):
+        return cached["title"].strip()
     now = time.time()
     with _enrich_lock:
         hit = _enrich_vid_title.get(vodid)
@@ -6794,8 +6988,15 @@ def _hhkan_native_play(vodid, pid, vid, fresh=False):
             hit = _PLAY_PARSE_CACHE.get(key)
             if hit and time.time() - hit[0] < _PLAY_PARSE_TTL:
                 return copy.deepcopy(hit[1])
-        ticket = object()
-        _PLAY_PARSE_PENDING[key] = ticket
+        ticket = None if fresh else _PLAY_PARSE_PENDING.get(key)
+        owner = ticket is None
+        if owner:
+            ticket = concurrent.futures.Future()
+            _PLAY_PARSE_PENDING[key] = ticket
+    if not owner:
+        # Share one upstream request. Explicit fresh retries start a new
+        # generation, while existing waiters keep the result they joined.
+        return copy.deepcopy(ticket.result(timeout=_HHKAN_PROBE_TIMEOUT + 2.0))
     payload = None
     try:
         parsed = hhkan.parse_play_page(_hhkan_origin_call(
@@ -6803,6 +7004,9 @@ def _hhkan_native_play(vodid, pid, vid, fresh=False):
         if parsed.get("sources"):
             payload = {"line": parsed["line"], "sources": parsed["sources"]}
         return payload
+    except Exception as error:
+        ticket.set_exception(error)
+        raise
     finally:
         with _play_parse_lock:
             # A slow older parse may still finish, but must not overwrite the
@@ -6815,6 +7019,8 @@ def _hhkan_native_play(vodid, pid, vid, fresh=False):
                         oldest = sorted(_PLAY_PARSE_CACHE, key=lambda k: _PLAY_PARSE_CACHE[k][0])[:120]
                         for old_key in oldest:
                             _PLAY_PARSE_CACHE.pop(old_key, None)
+        if not ticket.done():
+            ticket.set_result(copy.deepcopy(payload))
 
 
 def _first_pid(s):
@@ -6876,10 +7082,8 @@ def _probe_native_sources(vodid, sources, budget=6.0):
             h, alive = 0, True
             try:
                 ep = (group[0].get("episodes") or [{}])[0]
-                page = hhkan.get_page(
-                    "/play/%s-%s-%s.html" % (vodid, pid, ep.get("vid", 0)))
-                parsed = hhkan.parse_play_page(page)
-                url = next((x["url"] for x in parsed["sources"]
+                parsed = _hhkan_native_play(vodid, pid, int(ep.get("vid", 0))) or {}
+                url = next((x["url"] for x in parsed.get("sources") or []
                             if ".m3u8" in x["url"].lower()), "")
                 if url:
                     h, alive = _probe_m3u8_height(url)
@@ -6997,7 +7201,8 @@ def mcms_enriched_play(vodid, pid, vid, fresh=False):
     if li >= len(groups):
         raise RuntimeError("补线不存在")
     g = groups[li]
-    vid = max(0, min(vid, len(g["eps"]) - 1))
+    if not 0 <= vid < len(g["eps"]):
+        raise RuntimeError("补线中没有所选集数")
     e = g["eps"][vid]
     line = MCMS_SITES[si]["name"] + "·" + g["name"]
     return {"line": line,

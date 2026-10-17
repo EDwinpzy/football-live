@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -80,6 +81,7 @@ internal fun PlayerMoreSections(
     ui: PlayerUiState,
     onPickEpisode: (Int) -> Unit,
     onSwitchLine: (Int) -> Unit,
+    onTestLineSpeed: (Int) -> Unit = {},
     onRetrySources: () -> Unit = {},
     onSetSpeed: (Float) -> Unit,
     onSetAspect: (Int) -> Unit,
@@ -261,7 +263,9 @@ internal fun PlayerMoreSections(
                 title = ui.title,
                 lines = ui.lines,
                 activeLine = sourceFocusIndex,
+                speedResults = ui.lineSpeedTests,
                 onSwitchLine = onSwitchLine,
+                onTestLineSpeed = onTestLineSpeed,
                 focusRequester = sourceFocusRequester.takeIf { autoFocusSource },
             )
         } else if (ui.sourceStatus != PlayerSourceStatus.LOADING) {
@@ -466,7 +470,9 @@ private fun VodSourceLineSelector(
     title: String,
     lines: List<LineInfo>,
     activeLine: Int,
+    speedResults: Map<String, LineSpeedTestResult>,
     onSwitchLine: (Int) -> Unit,
+    onTestLineSpeed: (Int) -> Unit,
     focusRequester: FocusRequester?,
 ) {
     val groups = remember(lines) { PlayerSourceGroupingPolicy.groups(lines) }
@@ -523,29 +529,57 @@ private fun VodSourceLineSelector(
         ) {
             items(selectedGroup.lineIndices, key = { "${title}:$it" }) { globalIndex ->
                 val active = globalIndex == activeLine
+                val line = lines[globalIndex]
+                val probe = speedResults[LineSpeedTestPolicy.key(line)]
                 val sourceFocusModifier = if (focusRequester != null && active) {
                     Modifier.focusRequester(focusRequester)
                 } else Modifier
                 val name = PlayerSourceGroupingPolicy.displayLabel(lines[globalIndex].label, selectedGroup.provider)
-                Box(
-                    contentAlignment = Alignment.CenterStart,
-                    modifier = Modifier
-                        .then(sourceFocusModifier)
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .tapCard { onSwitchLine(globalIndex) }
-                        .background(
-                            if (active) AccentBlue else Color(0x24FFFFFF),
-                            RoundedCornerShape(10.dp),
-                        )
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
+                    Box(
+                        contentAlignment = Alignment.CenterStart,
+                        modifier = Modifier
+                            .weight(1f)
+                            .then(sourceFocusModifier)
+                            .clip(RoundedCornerShape(10.dp))
+                            .tapCard { onSwitchLine(globalIndex) }
+                            .background(if (active) AccentBlue else Color(0x24FFFFFF), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                    ) {
+                        Text(
+                            if (active) "$name · 当前" else name,
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(9.dp))
+                            .tapCard { onTestLineSpeed(globalIndex) }
+                            .background(Color(0x24FFFFFF), RoundedCornerShape(9.dp))
+                            .padding(horizontal = 10.dp, vertical = 10.dp)
+                            .testTag("vod-source-speed-$globalIndex"),
+                    ) {
+                        Text("测速", color = TextPrimary, style = MaterialTheme.typography.labelSmall)
+                    }
                     Text(
-                        if (active) "$name · 当前" else name,
-                        color = Color.White,
-                        style = MaterialTheme.typography.labelMedium,
+                        LineSpeedTestPolicy.resultText(probe),
+                        color = when {
+                            probe?.isTesting == true -> TextPrimary.copy(alpha = 0.7f)
+                            probe?.failed == true -> Color(0xFFFF8A80)
+                            probe?.latencyMs != null -> Color(0xFF8FE3AD)
+                            else -> TextPrimary.copy(alpha = 0.5f)
+                        },
+                        style = MaterialTheme.typography.labelSmall,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(min = 48.dp),
                     )
                 }
             }

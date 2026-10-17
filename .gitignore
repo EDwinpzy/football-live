@@ -73,3 +73,7 @@ env/
 # OS files
 Thumbs.db
 .DS_Store
+
+# 临时工作目录（不入库）
+.tmp-test/
+tools/backend-src/.test-data/

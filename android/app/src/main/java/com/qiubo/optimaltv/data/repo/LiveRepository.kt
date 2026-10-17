@@ -103,13 +103,32 @@ class LiveRepository(
             .build()
     }
 
-    /** 足球源在本地后端解析，但超时不应继承搜索抓取的 75 秒宽限。 */
+    /**
+     * 足球源在本地后端解析，但超时不应继承搜索抓取的 75 秒宽限。
+     *
+     * 2026-10-17（用户报障「足球直播经常找不到可用信号源，退出 app 重进又好了」）：
+     * 旧版由 [okHttp] newBuilder 派生，**沿用同一个 Dispatcher**。生产请求走
+     * `liveHttpResponse`（异步 enqueue），而 OkHttp 的 `maxRequestsPerHost`（默认 5）
+     * 只约束异步调用；赛程/战报/集锦/新闻/信号源全部打到同一个 127.0.0.1:8090，
+     * 进足球页瞬间几路并发就能占满 5 个名额。更糟的是**排队期间 callTimeout 不生效**
+     * （OkHttp 在 call 真正开始跑时才 enter 超时），信号源请求会在 ready 队列里无限期
+     * 挂着——播放器停在「正在查找片源…」，用户退出重进（新会话、新队列）才恢复。
+     * 实测证据：`LiveSourceDispatcherQueueTest` 用本地桩服务占满 5 个名额后，第 6 个
+     * 异步请求 1.5s 内既无回调也未到达服务端；换独立 Dispatcher 后立刻 200。
+     * 这里给信号源请求独立 Dispatcher：它永远不排在其它接口后面。
+     */
     private val liveSourceHttp by lazy {
         okHttp.newBuilder()
             .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(40, java.util.concurrent.TimeUnit.SECONDS)
             .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
             .proxy(java.net.Proxy.NO_PROXY)
+            .dispatcher(
+                okhttp3.Dispatcher().apply {
+                    maxRequests = 24
+                    maxRequestsPerHost = 24
+                }
+            )
             .build()
     }
 
@@ -395,6 +414,7 @@ class LiveRepository(
     suspend fun liveStreamSources(matchId: String, fresh: Boolean = true): List<LiveStreamSource> =
         withContext(Dispatchers.IO) {
             val selectionJob = currentCoroutineContext()[Job]
+            val startedAt = System.currentTimeMillis()
             runCatching {
                 selectionJob?.let { if (!it.isActive) throw CancellationException("stream request cancelled") }
                 val base = baseUrl()
@@ -410,9 +430,20 @@ class LiveRepository(
                 }
             }.onFailure {
                 if (it is CancellationException) throw it
-                android.util.Log.w(TAG, "stream $matchId all 线路解析失败: ${it.message}")
+                // 带上耗时：排队超时（≈45s）与上游解析失败（几秒）的现场指标不同，
+                // 「无可用信号源」再发生时一眼能分辨是本地排队还是源站问题。
+                android.util.Log.w(
+                    TAG,
+                    "stream $matchId all 线路解析失败（${System.currentTimeMillis() - startedAt}ms）: ${it.message}",
+                )
             }
                 .getOrDefault(emptyList())
+                .also {
+                    android.util.Log.i(
+                        TAG,
+                        "stream $matchId all → ${it.size} 条（${System.currentTimeMillis() - startedAt}ms）",
+                    )
+                }
         }
 
     /** Resolve one previously listed source again, preserving its source-specific referer if the

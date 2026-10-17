@@ -48,6 +48,17 @@ function makeSandbox(fetchImpl) {
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     fetch: fetchImpl,
     addEventListener() {}, removeEventListener() {},
+    pv: { ctx: null, vodSources: [], vodLineIdx: 0 },
+    playerVodSourceKey: (line, index) => line && line.id != null ? "id:" + line.id : "line:" + index,
+    playerVodLineIndex: (lines, playRef, sourceKey, preferredIndex) => {
+      const exact = sourceKey ? lines.findIndex((line, index) =>
+        (line && line.id != null ? "id:" + line.id : "line:" + index) === sourceKey) : -1;
+      if (exact >= 0) return exact;
+      const byRef = lines.findIndex(line => (line.episodes || []).some(ep =>
+        ep && String(ep.pid) === String(playRef && playRef.pid)
+          && String(ep.vid) === String(playRef && playRef.vid)));
+      return byRef >= 0 ? byRef : (Number.isInteger(preferredIndex) ? preferredIndex : 0);
+    },
     Hls: undefined, window: undefined,
   };
   sandbox.window = sandbox;
@@ -139,7 +150,7 @@ console.log("== resolver fallback behaviour ==");
   ok("content_id overrides positional episode", r5 && r5.ep.pid === "c2", String(r5 && r5.ep.pid));
 }
 
-console.log("== fast start respects an explicit line pick ==");
+console.log("== every start respects the selected line ==");
 {
   const calls = [];
   const ctx = makeSandbox(async () => ({ ok: true, json: async () => ({}) }));
@@ -162,17 +173,23 @@ console.log("== fast start respects an explicit line pick ==");
   const preferred = { source_id: "s2", source_name: "好好看", content_id: "c3", episode_index: 1 };
   ctx.__setState({ status: "MATCHED", mytvId: 1, preferred, backups: [] });
 
-  /* Defaulted: the resolver may pick the line. */
-  await x.resolveFirstSource({ vid: "douban:1", epIdx: 0, playRef: { pid: "c1", vid: 0 } });
-  ok("defaulted start follows the resolver candidate", calls[0] === "c3", calls.join(","));
+  /* Even with a preferred resolver candidate, the selected default line stays active. */
+  const defaulted = {
+    vid: "douban:1", epIdx: 0, lineIndex: 0, sourceKey: "id:s1",
+    playRef: { pid: "c1", vid: 0 },
+  };
+  await x.resolveFirstSource(defaulted);
+  ok("defaulted start stays on the selected line", calls[0] === "c1", calls.join(","));
+  ok("resolver preference does not rewrite the selected episode",
+    defaulted.playRef.pid === "c1" && defaulted.lineIndex === 0);
 
-  /* User picked a line in the detail page / 更多 panel: honour it. */
+  /* A manually chosen second line is honoured as well. */
   calls.length = 0;
   await x.resolveFirstSource({
-    vid: "douban:1", epIdx: 0, linePinned: true,
-    playRef: { pid: "c1", vid: 0 },
+    vid: "douban:1", epIdx: 0, lineIndex: 1, sourceKey: "id:s2",
+    playRef: { pid: "c3", vid: 0 },
   });
-  ok("pinned line is not overridden by the resolver", calls[0] === "c1", calls.join(","));
+  ok("manual source choice stays selected", calls[0] === "c3", calls.join(","));
 }
 
 console.log("== a superseded resolve cannot touch the current film ==");
@@ -345,22 +362,6 @@ console.log("== a misconfigured endpoint degrades silently ==");
   } catch (e) { threw = e; }
   await new Promise(r => setImmediate(r));
   ok("a rejecting endpoint does not throw into the player", threw === null, String(threw));
-}
-
-console.log("== playback failure moves to an untried film line ==");
-{
-  const start = app.indexOf("function chooseNextVodLine(");
-  const end = app.indexOf("\n}", start) + 2;
-  const ctx = vm.createContext({ Set, Array, String });
-  vm.runInContext(app.slice(start, end) + "\n;globalThis.choose = chooseNextVodLine;", ctx);
-  const lines = [
-    { id: "dead", episodes: [{ pid: "dead", vid: 0 }] },
-    { id: "good", episodes: [{ pid: "good", vid: 0 }] },
-  ];
-  const first = ctx.choose({ playRef: { pid: "dead", vid: 0 }, epIdx: 0 }, lines);
-  ok("untried line selected", first?.playRef.pid === "good");
-  const exhausted = ctx.choose({ playRef: { pid: "good", vid: 0 }, epIdx: 0, failedLineIds: ["dead"] }, lines);
-  ok("already failed line is not retried", exhausted === null);
 }
 
 console.log(failures ? "\nFAILURES: " + failures : "\nAll harness checks passed.");

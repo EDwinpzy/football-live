@@ -10,6 +10,26 @@ object VodSourceAttemptPolicy {
         (0 until lineCount).firstOrNull { it != activeLine && it !in tried && allowed(it) }
 }
 
+/** Remembers a VOD source by a stable provider line id instead of its mutable display index. */
+object VodSourceSelectionPolicy {
+    fun identity(line: LineInfo?): String? {
+        if (line == null) return null
+        val sourceLineId = line.playRef.split('|').getOrNull(1)?.takeIf(String::isNotBlank)
+        if (sourceLineId != null) return "playRef:${line.label.trim()}|$sourceLineId"
+        return line.vodId.takeIf(String::isNotBlank)?.let { "vodId:$it" }
+    }
+
+    fun matchingIndex(lines: List<LineInfo>, sourceIdentity: String?): Int? {
+        if (sourceIdentity.isNullOrBlank()) return null
+        return lines.indexOfFirst { identity(it) == sourceIdentity }.takeIf { it >= 0 }
+    }
+
+    fun initialIndex(lines: List<LineInfo>, rememberedIdentity: String?, preferredIndex: Int): Int =
+        matchingIndex(lines, rememberedIdentity)
+            ?: preferredIndex.takeIf { it in lines.indices }
+            ?: 0
+}
+
 /** Decide whether a completed item should continue with the next VOD episode. */
 object AutoPlayPolicy {
     fun nextEpisodeIndex(isLive: Boolean, isMovie: Boolean, currentIndex: Int, episodeCount: Int): Int? =

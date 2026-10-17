@@ -11,7 +11,9 @@ import sys
 import threading
 import time
 import unittest
+import urllib.request
 from datetime import datetime
+from http.server import ThreadingHTTPServer
 from unittest import mock
 
 
@@ -493,6 +495,200 @@ class ZhiBo88StreamBudgetTest(unittest.TestCase):
         self.assertEqual([], payload["sources"])
         self.assertTrue(payload["retryable"])
         self.assertIn("繁忙", payload["error"])
+
+
+class ZhiBo88StreamAllCacheTest(unittest.TestCase):
+    """src=all 的短缓存 / 单飞 / 失败回退契约（2026-10-17「经常找不到可用信号源」）。"""
+
+    MATCH = "880801"
+
+    def setUp(self):
+        proxy._stream_all_cache.clear()
+        proxy._88z_source_links_cache.clear()
+        self._clear_stream_cache()
+
+    def tearDown(self):
+        proxy._stream_all_cache.clear()
+        proxy._88z_source_links_cache.clear()
+        self._clear_stream_cache()
+
+    def _clear_stream_cache(self):
+        for key in list(proxy.STREAM_CACHE):
+            if key.endswith("-" + self.MATCH):
+                proxy.STREAM_CACHE.pop(key, None)
+
+    @staticmethod
+    def _links():
+        return [
+            {"name": "线路A2", "url": "https://media.example/live/a2.m3u8"},
+            {"name": "线路Q3", "url": "https://media.example/live/q3.m3u8"},
+        ]
+
+    def _age_all_cache(self, seconds):
+        """把本场缓存时间戳往前拨，模拟「若干秒之后」的请求。"""
+        proxy._stream_all_cache[self.MATCH]["ts"] -= seconds
+
+    def test_repeat_open_reuses_recent_list_without_reprobing_upstream(self):
+        with mock.patch.object(proxy, "_88z_source_links", return_value=self._links()) as links, \
+                mock.patch.object(proxy, "_probe_88z_hls_playable", return_value=True) as probe:
+            first, first_cached = proxy.resolve_88zhibo_streams(self.MATCH)
+            second, second_cached = proxy.resolve_88zhibo_streams(self.MATCH)
+
+        self.assertFalse(first_cached)
+        self.assertTrue(second_cached)
+        self.assertEqual(first, second)
+        self.assertEqual(1, links.call_count)     # 第二次打开不再打源站清单
+        self.assertEqual(2, probe.call_count)     # 也没有再探测上游
+
+    def test_fresh_request_bypasses_the_short_cache(self):
+        with mock.patch.object(proxy, "_88z_source_links", return_value=self._links()) as links, \
+                mock.patch.object(proxy, "_probe_88z_hls_playable", return_value=True):
+            proxy.resolve_88zhibo_streams(self.MATCH)
+            # 模拟「几秒之后」：越过 fresh 合并窗口，fresh=1 必须重新解析。
+            self._age_all_cache(proxy.STREAM_ALL_FRESH_COALESCE + 1)
+            payload, cached = proxy.resolve_88zhibo_streams(self.MATCH, fresh=True)
+
+        self.assertFalse(cached)
+        self.assertEqual(["线路A2", "线路Q3"], [item["name"] for item in payload["sources"]])
+        self.assertEqual(2, links.call_count)
+
+    def test_fresh_requests_inside_the_coalesce_window_share_one_resolve(self):
+        with mock.patch.object(proxy, "_88z_source_links", return_value=self._links()) as links, \
+                mock.patch.object(proxy, "_probe_88z_hls_playable", return_value=True) as probe:
+            first, first_cached = proxy.resolve_88zhibo_streams(self.MATCH)
+            second, second_cached = proxy.resolve_88zhibo_streams(self.MATCH, fresh=True)
+
+        self.assertFalse(first_cached)
+        self.assertTrue(second_cached)
+        self.assertEqual(first, second)
+        self.assertEqual(1, links.call_count)   # 连点重试不再叠加成第二次解析
+        self.assertEqual(2, probe.call_count)
+
+    def test_list_read_failure_reuses_last_good_sources_instead_of_going_empty(self):
+        with mock.patch.object(proxy, "_88z_source_links", return_value=self._links()), \
+                mock.patch.object(proxy, "_probe_88z_hls_playable", return_value=True):
+            proxy.resolve_88zhibo_streams(self.MATCH)
+
+        self._age_all_cache(proxy.STREAM_ALL_FRESH_COALESCE + 1)
+        with mock.patch.object(proxy, "_88z_source_links", side_effect=ValueError("HTTP 429")), \
+                mock.patch.object(proxy, "_probe_88z_hls_playable", return_value=True) as probe:
+            payload, cached = proxy.resolve_88zhibo_streams(self.MATCH, fresh=True)
+
+        self.assertTrue(cached)
+        self.assertTrue(payload["stale"])
+        self.assertEqual(["线路A2", "线路Q3"], [item["name"] for item in payload["sources"]])
+        self.assertFalse(probe.called)
+
+    def test_every_route_dead_is_still_reported_as_no_signal(self):
+        with mock.patch.object(proxy, "_88z_source_links", return_value=self._links()), \
+                mock.patch.object(proxy, "_probe_88z_hls_playable", return_value=True):
+            proxy.resolve_88zhibo_streams(self.MATCH)
+
+        self._age_all_cache(proxy.STREAM_ALL_FRESH_COALESCE + 1)
+        with mock.patch.object(proxy, "_88z_source_links", return_value=self._links()), \
+                mock.patch.object(proxy, "_probe_88z_hls_playable", return_value=False):
+            payload, cached = proxy.resolve_88zhibo_streams(self.MATCH, fresh=True)
+
+        self.assertFalse(cached)
+        self.assertEqual([], payload["sources"])
+        self.assertFalse(payload.get("stale"))
+        self.assertFalse(payload["retryable"])
+
+    def test_source_link_list_is_shared_across_calls_for_the_same_match(self):
+        with mock.patch.object(proxy, "fetch_url", return_value=_source_response(self._links())) as fetch:
+            first = proxy._88z_source_links("880802")
+            second = proxy._88z_source_links("880802")
+
+        self.assertEqual(self._links(), first)
+        self.assertEqual(first, second)
+        self.assertEqual(1, fetch.call_count)
+
+
+class ZhiBo88StreamHttpTest(unittest.TestCase):
+    """走真实 HTTP 路由（ThreadingHTTPServer + Handler）验证 /api/stream/{id}?src=all。
+
+    单元测试只覆盖函数层；这里补的是「播放器真正打的那条路径」：路由参数解析、
+    X-Cache 头、JSON 序列化后的 sources 形状。上游仍全部 mock，无网络依赖。
+    """
+
+    MATCH = "880803"
+
+    def setUp(self):
+        proxy._stream_all_cache.clear()
+        proxy._88z_source_links_cache.clear()
+        self._clear_stream_cache()
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = "http://127.0.0.1:%d/api/stream/%s?src=all" % (
+            self.server.server_port, self.MATCH,
+        )
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        proxy._stream_all_cache.clear()
+        proxy._88z_source_links_cache.clear()
+        self._clear_stream_cache()
+
+    def _clear_stream_cache(self):
+        for key in list(proxy.STREAM_CACHE):
+            if key.endswith("-" + self.MATCH):
+                proxy.STREAM_CACHE.pop(key, None)
+
+    @staticmethod
+    def _links():
+        return [
+            {"name": "线路A2", "url": "https://media.example/live/a2.m3u8"},
+            {"name": "线路Q3", "url": "https://media.example/live/q3.m3u8"},
+        ]
+
+    def _get(self, url):
+        with urllib.request.urlopen(url, timeout=10) as response:
+            return response.status, response.headers.get("X-Cache"), json.loads(response.read())
+
+    def test_second_open_is_served_from_cache_without_new_upstream_probes(self):
+        with mock.patch.object(proxy, "_88z_source_links", return_value=self._links()) as links, \
+                mock.patch.object(proxy, "_probe_88z_hls_playable", return_value=True) as probe:
+            first_status, first_cache, first = self._get(self.base)
+            second_status, second_cache, second = self._get(self.base)
+
+        self.assertEqual((200, "MISS"), (first_status, first_cache))
+        self.assertEqual((200, "HIT"), (second_status, second_cache))
+        self.assertEqual(["线路A2", "线路Q3"], [item["name"] for item in first["sources"]])
+        self.assertEqual(first, second)
+        self.assertEqual(1, links.call_count)
+        self.assertEqual(2, probe.call_count)
+        # 播放器拿到的是可中继的原始地址 + 来源名，字段没在路由层被改写
+        self.assertEqual("https://media.example/live/a2.m3u8", first["sources"][0]["url"])
+        self.assertEqual("88z_0", first["sources"][0]["source"])
+
+    def test_fresh_retry_after_coalesce_window_reprobes_and_reports_miss(self):
+        with mock.patch.object(proxy, "_88z_source_links", return_value=self._links()) as links, \
+                mock.patch.object(proxy, "_probe_88z_hls_playable", return_value=True):
+            self._get(self.base)
+            proxy._stream_all_cache[self.MATCH]["ts"] -= proxy.STREAM_ALL_FRESH_COALESCE + 1
+            status, cache, payload = self._get(self.base + "&fresh=1")
+
+        self.assertEqual((200, "MISS"), (status, cache))
+        self.assertEqual(2, len(payload["sources"]))
+        self.assertEqual(2, links.call_count)
+
+    def test_rate_limited_list_read_still_answers_with_playable_sources(self):
+        with mock.patch.object(proxy, "_88z_source_links", return_value=self._links()), \
+                mock.patch.object(proxy, "_probe_88z_hls_playable", return_value=True):
+            self._get(self.base)
+
+        proxy._stream_all_cache[self.MATCH]["ts"] -= proxy.STREAM_ALL_FRESH_COALESCE + 1
+        with mock.patch.object(proxy, "_88z_source_links", side_effect=ValueError("HTTP 429")), \
+                mock.patch.object(proxy, "_probe_88z_hls_playable", return_value=True) as probe:
+            status, cache, payload = self._get(self.base + "&fresh=1")
+
+        self.assertEqual((200, "HIT"), (status, cache))
+        self.assertTrue(payload["stale"])
+        self.assertEqual(["线路A2", "线路Q3"], [item["name"] for item in payload["sources"]])
+        self.assertFalse(probe.called)
 
 
 if __name__ == "__main__":

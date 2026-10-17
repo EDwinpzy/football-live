@@ -6,6 +6,7 @@ import com.qiubo.optimaltv.ui.player.AutoPlayPolicy
 import com.qiubo.optimaltv.ui.player.PlaybackPolicy
 import com.qiubo.optimaltv.ui.player.VisibleVodLinePolicy
 import com.qiubo.optimaltv.ui.player.VodSourceAttemptPolicy
+import com.qiubo.optimaltv.ui.player.VodSourceSelectionPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -59,6 +60,33 @@ class PlaybackPolicyTest {
         val lines = (1..8).map { LineInfo("v$it", "private-$it", "u$it") }
         assertEquals((1..8).map { "private-$it" }, VisibleVodLinePolicy.apply(lines).map { it.label })
         assertEquals("信号源1", VisibleVodLinePolicy.apply(listOf(LineInfo("v", "  ", "u"))).single().label)
+    }
+
+    @Test fun rememberedVodSourceWinsOverResolverOrderAndCanBeMatchedOnTheNextEpisode() {
+        val firstEpisode = listOf(
+            LineInfo("hhkan:film", "源甲", "", "hhkan:film|source-a|episode-1"),
+            LineInfo("hhkan:film", "源乙", "", "hhkan:film|source-b|episode-1"),
+        )
+        val remembered = VodSourceSelectionPolicy.identity(firstEpisode[1])
+
+        assertEquals(1, VodSourceSelectionPolicy.initialIndex(firstEpisode, remembered, preferredIndex = 0))
+
+        val nextEpisode = listOf(
+            LineInfo("hhkan:film", "源甲", "", "hhkan:film|source-a|episode-2"),
+            LineInfo("hhkan:film", "源乙", "", "hhkan:film|source-b|episode-2"),
+        )
+        assertEquals(1, VodSourceSelectionPolicy.matchingIndex(nextEpisode, remembered))
+    }
+
+    @Test fun rememberedVodSourceFallsBackToPreferredOnlyWhenItIsUnavailable() {
+        val lines = listOf(
+            LineInfo("douban:1", "源甲 · 第 1 集", "url-a"),
+            LineInfo("douban:2", "源乙 · 第 1 集", "url-b"),
+        )
+
+        assertEquals("vodId:douban:1", VodSourceSelectionPolicy.identity(lines[0]))
+        assertEquals(1, VodSourceSelectionPolicy.initialIndex(lines, "vodId:offline-source", preferredIndex = 1))
+        assertEquals(0, VodSourceSelectionPolicy.initialIndex(lines, "vodId:offline-source", preferredIndex = 99))
     }
 
     @Test fun seekStepIsTenSeconds() = assertEquals(10_000L, PlaybackPolicy.SEEK_STEP_MS)

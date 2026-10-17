@@ -125,26 +125,37 @@ process.stdout.write(JSON.stringify({q:search.q,seq:search.seq,loading:search.lo
             "timer": 0, "page": 0, "hasMore": False, "input": "", "cleared": 1,
         })
 
-    def test_hhkan_line_failover_uses_episode_pid_when_line_has_no_id(self):
-        line_helpers = self.source[
-            self.source.index("function playerVodSourceKey("):
-            self.source.index("function normalizePlayerVodSources(")
+    def test_vod_failure_recovery_does_not_select_another_line(self):
+        start = self.source.index("async function recoverPlayback(")
+        end = self.source.index("\nfunction nextSource(", start)
+        recovery = self.source[start:end]
+        self.assertNotIn("chooseNextVodLine", self.source)
+        self.assertNotIn("selectVodLine(", recovery)
+        self.assertNotRegex(recovery, r"pv\.vodLineIdx\s*=")
+
+    def test_vod_failure_retries_same_reference_without_failing_over(self):
+        resolve = self.source[
+            self.source.index("async function resolveVodAndPlay("):
+            self.source.index("/* 后端解析并探测当前比赛", self.source.index("async function resolveVodAndPlay("))
         ]
-        function = self.source[
-            self.source.index("function chooseNextVodLine("):
-            self.source.index("function nextSource(")
+        retry = self.source[
+            self.source.index("async function retryVodPlayback("):
+            self.source.index("/* 后端解析并探测当前比赛", self.source.index("async function retryVodPlayback("))
         ]
-        result = run_node(line_helpers + function + """
-const selected = chooseNextVodLine(
-  {playRef:{pid:35,vid:2},epIdx:2,failedLineIds:[]},
-  [
-    {name:'线路一',episodes:[{pid:35,vid:0},{pid:35,vid:1},{pid:35,vid:2}]},
-    {name:'线路二',episodes:[{pid:102,vid:0},{pid:102,vid:1},{pid:102,vid:2}]},
-  ]
-);
-process.stdout.write(JSON.stringify(selected));
-""")
-        self.assertEqual(result, {"index": 1, "playRef": {"pid": 102, "vid": 2}})
+        attach = self.source[
+            self.source.index("function attachPlayer("):
+            self.source.index("function recoverPlayback(", self.source.index("function attachPlayer("))
+        ]
+        self.assertIn("scheduleVodRetry(e", resolve)
+        self.assertNotIn("chooseNextVodLine", resolve)
+        self.assertIn("ctx.playRef.pid", retry)
+        self.assertIn("ctx.playRef.vid", retry)
+        self.assertIn("force: true", retry)
+        self.assertNotIn("chooseNextVodLine", retry)
+        self.assertIn('if (ctx.kind !== "vod")', attach,
+                      "the application-level stalled timer remains limited to live streams")
+        live_stall = attach[attach.index('if (ctx.kind !== "vod")'):]
+        self.assertIn("播放 8 秒无进展", live_stall)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -105,6 +106,8 @@ import com.qiubo.optimaltv.ui.components.dpadFocusable
 import com.qiubo.optimaltv.ui.components.navSink
 import com.qiubo.optimaltv.ui.components.scrollNavContainer
 import com.qiubo.optimaltv.ui.components.NAV_DOWN
+import com.qiubo.optimaltv.ui.components.NAV_LEFT
+import com.qiubo.optimaltv.ui.components.NAV_RIGHT
 import com.qiubo.optimaltv.ui.components.NAV_UP
 import com.qiubo.optimaltv.ui.detail.simpleFactory
 import com.qiubo.optimaltv.ui.theme.AccentBlue
@@ -891,7 +894,8 @@ private fun PlayerSourceSection(ui: PlayerUiState, vm: PlayerViewModel) {
             val lineScroll = rememberScrollState()
             val lineNav = remember(lineScroll) { scrollNavContainer(lineScroll) }
             val scope = rememberCoroutineScope()
-            val requesters = remember(indices) { indices.map { FocusRequester() } }
+            val sourceRequesters = remember(indices) { indices.map { FocusRequester() } }
+            val testRequesters = remember(indices) { indices.map { FocusRequester() } }
             val revealers = remember(indices) { indices.map { BringIntoViewRequester() } }
             ProvideNavScrolls(vertical = lineNav) {
                 Column(
@@ -901,37 +905,90 @@ private fun PlayerSourceSection(ui: PlayerUiState, vm: PlayerViewModel) {
                     indices.forEachIndexed { position, index ->
                         val line = ui.lines[index]
                         val active = index == ui.activeLine
-                        Box(
+                        Row(
                             Modifier.fillMaxWidth().height(56.dp)
-                                .focusRequester(requesters[position])
                                 .bringIntoViewRequester(revealers[position])
                                 .background(if (active) AccentBlue else Color(0x24FFFFFF), RoundedCornerShape(12.dp))
-                                .dpadFocusable(navGroup = PANEL_NAV_GROUP, scaleFocused = 1.02f,
-                                    navOverride = { direction ->
-                                        val next = when (direction) {
-                                            NAV_UP -> position - 1
-                                            NAV_DOWN -> position + 1
-                                            else -> -1
-                                        }
-                                        if (direction in listOf(NAV_UP, NAV_DOWN) && next in indices.indices) {
-                                            scope.launch {
-                                                revealers[next].bringIntoView()
-                                                requesters[next].requestFocus()
-                                            }
-                                            true
-                                        } else false
-                                    }) { vm.switchLine(index) }
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(line.label, color = Color.White, style = MaterialTheme.typography.labelLarge,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                if (active) {
-                                    Spacer(Modifier.width(10.dp))
-                                    Text(if (ui.fatalMsg != null) "播放失败" else if (ui.sourceResolving || ui.playState == EnginePlayState.BUFFERING) "加载中" else "正在播放",
-                                        color = Color.White, style = MaterialTheme.typography.labelSmall)
+                            Box(
+                                Modifier.weight(1f).fillMaxHeight()
+                                    .focusRequester(sourceRequesters[position])
+                                    .dpadFocusable(navGroup = PANEL_NAV_GROUP, scaleFocused = 1.02f,
+                                        navOverride = { direction ->
+                                            when {
+                                                direction == NAV_RIGHT -> {
+                                                    scope.launch { testRequesters[position].requestFocus() }
+                                                    true
+                                                }
+                                                direction == NAV_UP || direction == NAV_DOWN -> {
+                                                    val next = if (direction == NAV_UP) position - 1 else position + 1
+                                                    if (next in indices.indices) {
+                                                        scope.launch {
+                                                            revealers[next].bringIntoView()
+                                                            sourceRequesters[next].requestFocus()
+                                                        }
+                                                        true
+                                                    } else false
+                                                }
+                                                else -> false
+                                            }
+                                        }) { vm.switchLine(index) },
+                                contentAlignment = Alignment.CenterStart,
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 8.dp)) {
+                                    Text(line.label, color = Color.White, style = MaterialTheme.typography.labelLarge,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                    if (active) {
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(if (ui.fatalMsg != null) "播放失败" else if (ui.sourceResolving || ui.playState == EnginePlayState.BUFFERING) "加载中" else "正在播放",
+                                            color = Color.White, style = MaterialTheme.typography.labelSmall)
+                                    }
                                 }
                             }
+                            Box(
+                                Modifier.width(66.dp).fillMaxHeight()
+                                    .focusRequester(testRequesters[position])
+                                    .dpadFocusable(navGroup = PANEL_NAV_GROUP, scaleFocused = 1.02f,
+                                        navOverride = { direction ->
+                                            when {
+                                                direction == NAV_LEFT -> {
+                                                    scope.launch { sourceRequesters[position].requestFocus() }
+                                                    true
+                                                }
+                                                direction == NAV_UP || direction == NAV_DOWN -> {
+                                                    val next = if (direction == NAV_UP) position - 1 else position + 1
+                                                    if (next in indices.indices) {
+                                                        scope.launch {
+                                                            revealers[next].bringIntoView()
+                                                            testRequesters[next].requestFocus()
+                                                        }
+                                                        true
+                                                    } else false
+                                                }
+                                                else -> false
+                                            }
+                                        }) { vm.testLineSpeed(index) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text("测速", color = Color.White, style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1)
+                            }
+                            Text(
+                                LineSpeedTestPolicy.resultText(ui.lineSpeedTests[LineSpeedTestPolicy.key(line)]),
+                                color = when {
+                                    ui.lineSpeedTests[LineSpeedTestPolicy.key(line)]?.isTesting == true -> TextPrimary.copy(alpha = 0.7f)
+                                    ui.lineSpeedTests[LineSpeedTestPolicy.key(line)]?.failed == true -> Color(0xFFFF8A80)
+                                    ui.lineSpeedTests[LineSpeedTestPolicy.key(line)]?.latencyMs != null -> Color(0xFF8FE3AD)
+                                    else -> TextPrimary.copy(alpha = 0.5f)
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                modifier = Modifier.widthIn(min = 48.dp),
+                            )
                         }
                     }
                 }

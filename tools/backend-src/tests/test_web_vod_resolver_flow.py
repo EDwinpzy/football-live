@@ -120,19 +120,24 @@ class WebVodResolverFlowTest(unittest.TestCase):
         self.assertIn("content_id", block)
         self.assertIn("episode_index", block)
 
-    def test_playback_can_start_from_a_resolved_candidate(self):
-        """Fast start: a resolved candidate is used without waiting for all lines."""
+    def test_playback_can_start_without_waiting_for_resolver_selection(self):
+        """Fast start resolves the selected play reference without a line switch."""
         self.assertIn("resolveFirstSource", self.source)
         block = function_body(self.source, "resolveFirstSource")
         self.assertIn("resolvePlayCached", block,
                       "fast start must reuse the existing play resolver")
 
-    def test_default_play_does_not_pin_the_initial_line(self):
-        block = function_body(self.source, "startPlayAt")
-        self.assertIn("linePinned: false", block)
-        picked = function_body(self.source, "selectVodLine")
-        self.assertIn("linePinned: true", picked,
-                      "manual source selection must pin the chosen line")
+    def test_playback_always_uses_the_selected_source(self):
+        block = function_body(self.source, "resolveFirstSource")
+        self.assertIn(
+            "playerVodLineIndex(lines, ctx.playRef, ctx.sourceKey, ctx.lineIndex)",
+            block,
+            "the current source/episode reference must determine playback",
+        )
+        self.assertNotIn("resolverState.preferred", block,
+                         "resolver results must not select a playback source")
+        self.assertNotIn("linePinned", self.source,
+                         "source choice is represented by the selected play reference")
 
     def test_detail_open_starts_the_resolver_alongside_the_detail_request(self):
         """The resolver must be a parallel request, not an extra serial hop."""
@@ -222,22 +227,6 @@ class WebVodResolverFlowTest(unittest.TestCase):
         race = function_body(self.source, "startResolverRace")
         self.assertIn("prefetchPlay", race,
                       "a late resolver hit must still preheat its line")
-
-    def test_fast_start_never_overrides_an_explicit_line_pick(self):
-        """A manual line choice (dLineIdx) outranks the resolver's suggestion.
-
-        `ctx.playRef` is what the user picked via the detail page or the
-        "更多" panel's line switcher. Honouring `preferred` unconditionally
-        would silently play a different line than the one highlighted.
-        """
-        block = function_body(self.source, "resolveFirstSource")
-        self.assertIn("playRef", block,
-                      "the selected playRef must stay on the fast path")
-        self.assertRegex(
-            block, r"(userPicked|explicitLine|linePinned|selectedByUser)",
-            "fast start must be able to tell a user-picked line apart from a "
-            "defaulted one, and only override the latter",
-        )
 
     def test_retry_does_not_repaint_a_poisoned_unavailable_cache(self):
         """retryDetail() re-enters openDetail(), which paints the SWR cache

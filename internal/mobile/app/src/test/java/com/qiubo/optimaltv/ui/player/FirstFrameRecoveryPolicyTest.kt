@@ -31,16 +31,9 @@ class FirstFrameRecoveryPolicyTest {
     }
 
     @Test
-    fun escalatesBetween7And15Seconds() {
-        // 7s 之后仍可再升级一次（第二次换线/降级），到 15s 才硬放弃。
+    fun keepsRecoveringWithoutAStartupDeadline() {
         assertEquals(FirstFrameRecoveryPolicy.Action.ESCALATE, FirstFrameRecoveryPolicy.actionFor(7_000L))
-        assertEquals(FirstFrameRecoveryPolicy.Action.ESCALATE, FirstFrameRecoveryPolicy.actionFor(14_999L))
-    }
-
-    @Test
-    fun givesUpAtHardTimeout() {
-        assertEquals(FirstFrameRecoveryPolicy.Action.GIVE_UP, FirstFrameRecoveryPolicy.actionFor(15_000L))
-        assertEquals(FirstFrameRecoveryPolicy.Action.GIVE_UP, FirstFrameRecoveryPolicy.actionFor(40_000L))
+        assertEquals(FirstFrameRecoveryPolicy.Action.ESCALATE, FirstFrameRecoveryPolicy.actionFor(Long.MAX_VALUE))
     }
 
     @Test

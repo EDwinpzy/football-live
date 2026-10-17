@@ -1719,6 +1719,24 @@ class VodRepository(
         }
     }
 
+    /** Resolve the requested line and measure its first byte through the same local relay as playback. */
+    suspend fun probeLineFirstByte(line: LineInfo): Long = withContext(Dispatchers.IO) {
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        val playUrl = resolvePlayUrl(line, preferRelay = true, fresh = true)
+        if (playUrl.isBlank()) throw java.io.IOException("当前线路没有返回播放地址")
+        val request = okhttp3.Request.Builder()
+            .url(playUrl)
+            .header("Range", "bytes=0-0")
+            .get()
+            .build()
+        okHttp.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code}")
+            val firstByte = response.body?.byteStream()?.read() ?: -1
+            if (firstByte < 0) throw java.io.IOException("线路没有返回媒体数据")
+        }
+        (android.os.SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+    }
+
     // ---------- 目录磁盘快照（v1.10 低端机秒开，2026-08-31） ----------
     // 冷启动链路：内置 python 后端起 2~5s + 目录冷抓 5~20s → 影视页转圈久。
     // 快照把上次成功目录立即上屏（loading=false），后台 refresh 拿到新数据自动替换。

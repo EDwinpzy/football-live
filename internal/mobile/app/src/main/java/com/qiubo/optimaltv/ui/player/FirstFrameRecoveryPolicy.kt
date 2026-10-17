@@ -3,17 +3,16 @@ package com.qiubo.optimaltv.ui.player
 /**
  * 起播首帧阶梯（方案 §首帧恢复）。
  *
- * 与 [LongPlaybackHealthPolicy] 分工：这里管「点播放之后多久还没出画面」，
- * 那是网络 + 准备阶段，阈值必须短（用户还盯着黑屏）。
+ * 与 [LongPlaybackHealthPolicy] 分工：这里描述起播等待阶段；点播持续等待并在实际错误时
+ * 重试当前线路，不因经过时长结束播放。
  *
- * 阶段：0–3s 正常等待 → 3–5s 预热备用 → 5–7s 切备用线/换引擎 → 15s 硬超时。
+ * 阶段：0–3s 正常等待 → 3–5s 记录等待状态 → 5s 后保持恢复状态。
  */
 object FirstFrameRecoveryPolicy {
 
     const val HEALTHY_MS = 3_000L
     const val PREPARE_BACKUP_MS = 5_000L
     const val SWITCH_SOURCE_MS = 7_000L
-    const val HARD_TIMEOUT_MS = 15_000L
 
     enum class Action {
         /** 还在正常范围内，继续等。 */
@@ -22,19 +21,14 @@ object FirstFrameRecoveryPolicy {
         /** 预热备用线路：不动当前会话，只是让下一手更快。 */
         PREPARE_BACKUP,
 
-        /** 换备用线 / 换引擎。 */
+        /** 继续在当前线路恢复。 */
         ESCALATE,
-
-        /** 硬超时，放弃并交错误态。 */
-        GIVE_UP,
     }
 
     fun actionFor(elapsedMs: Long): Action = when {
         elapsedMs < HEALTHY_MS -> Action.WAIT
         elapsedMs < PREPARE_BACKUP_MS -> Action.PREPARE_BACKUP
-        elapsedMs < SWITCH_SOURCE_MS -> Action.ESCALATE
-        elapsedMs < HARD_TIMEOUT_MS -> Action.ESCALATE
-        else -> Action.GIVE_UP
+        else -> Action.ESCALATE
     }
 
     /**
