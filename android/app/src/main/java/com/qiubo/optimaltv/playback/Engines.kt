@@ -292,12 +292,23 @@ class Media3Engine(context: Context) : MediaEngine {
         }
 
         override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
-            com.qiubo.optimaltv.OtvLog.i("engine 视频轨道 ${videoSize.width}x${videoSize.height}")
+            com.qiubo.optimaltv.OtvLog.i(
+                "engine 视频轨道 ${videoSize.width}x${videoSize.height} fps=${player?.videoFormat?.frameRate}",
+            )
         }
     }
 
     /** 丢帧统计（AnalyticsListener 才有该回调）：解码/供给不足的量化证据 */
     private val analyticsListener = object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+        override fun onVideoDecoderInitialized(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            decoderName: String,
+            initializedTimestampMs: Long,
+            initializationDurationMs: Long,
+        ) {
+            com.qiubo.optimaltv.OtvLog.i("engine 视频解码器 $decoderName init=${initializationDurationMs}ms")
+        }
+
         override fun onDroppedVideoFrames(
             eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
             droppedFrames: Int,
@@ -410,12 +421,16 @@ class Media3Engine(context: Context) : MediaEngine {
                     )
                     // 播放心跳（每 10s 一条）：黑屏事后排查的核心证据链——
                     // state=READY 但持续 isPlaying=true 且首帧日志缺失 = 渲染层黑屏；
-                    // buffered 持续走低 + 丢帧 = 网络/供给层问题
+                    // 结合缓冲、实际输出与丢帧计数区分供给不足和解码/渲染压力。
                     if (++beat % 20 == 0) {
                         val st = _ui.value
                         com.qiubo.optimaltv.OtvLog.i(
                             "hb ${st.state} playing=${st.isPlaying} pos=${st.positionMs / 1000}s " +
-                                "buf=${st.bufferedAheadMs / 1000}s dropped=$droppedFramesTotal rbuf=$rebufferCount",
+                                "buf=${st.bufferedAheadMs / 1000}s " +
+                                "dropped=${p.videoDecoderCounters?.droppedBufferCount ?: droppedFramesTotal} rbuf=$rebufferCount " +
+                                "rendered=${p.videoDecoderCounters?.renderedOutputBufferCount ?: -1} " +
+                                "skipped=${p.videoDecoderCounters?.skippedOutputBufferCount ?: -1} " +
+                                "speed=${p.playbackParameters.speed} liveOffsetMs=${p.currentLiveOffset}",
                         )
                     }
                 }

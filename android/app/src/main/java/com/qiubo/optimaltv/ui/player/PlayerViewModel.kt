@@ -271,6 +271,8 @@ class PlayerViewModel(
     private val vodRetryGeneration = VodRetryGeneration()
     /** A seek target wins over stale engine position until the engine confirms the target. */
     private var pendingVodSeekTargetMs: Long? = null
+    private var remoteSeekJob: Job? = null
+    private var remoteSeekNeedsRetry = false
     /** 防止同一引擎会话重复收到 ENDED 时重复切集。 */
     private var handledEndedSessionGen = -1
     private var stallRecoveries = 0
@@ -516,11 +518,18 @@ class PlayerViewModel(
             lines.forEach { line ->
                 if (!isActive || generation != sessionGen) return@launch
                 if (line.playRef.isNotBlank() && line.url.isBlank()) {
-                    repo.resolvePlayUrl(line)
+                    optionalPlaybackWork("备用线路预解析") { repo.resolvePlayUrl(line) }
                     delay(400)
                 }
             }
         }
+    }
+
+    private suspend fun optionalPlaybackWork(label: String, block: suspend () -> Unit) {
+        isolatePlaybackSideEffect(
+            onFailure = { failure -> OtvLog.w("$label 失败，保持当前播放：${failure.javaClass.simpleName}") },
+            block = block,
+        )
     }
 
     /** 首次打开复用 60 秒内已探活的结果；显式重试时重新解析，线路表只保留可播放 HLS。 */
@@ -752,7 +761,8 @@ class PlayerViewModel(
                 val hide = !_ui.value.controlsVisible
                 val pendingSeek = pendingVodSeekTargetMs.takeIf { retriesCurrentVodUntilUserLeaves() }
                 val positionForUi = if (
-                    pendingSeek != null && !VodRetryPolicy.reachedSeekTarget(st.positionMs, pendingSeek)
+                    pendingSeek != null && (remoteSeekJob?.isActive == true ||
+                        !VodRetryPolicy.reachedSeekTarget(st.positionMs, pendingSeek))
                 ) {
                     pendingSeek
                 } else {
@@ -765,12 +775,14 @@ class PlayerViewModel(
                     playState = st.state,
                     isPlaying = st.isPlaying,
                     positionMs = posOut,
-                    durationMs = st.durationMs,
+                    durationMs = if (pendingSeek != null &&
+                        (st.durationMs <= 1_000L || st.durationMs < pendingSeek)
+                    ) _ui.value.durationMs else st.durationMs,
                     bufferedAheadMs = bufOut,
                     speed = st.speed,
                 )
                 when {
-                    st.state == EnginePlayState.ENDED && startedThisSession -> handlePlaybackEnded()
+                    st.state == EnginePlayState.ENDED && startedThisSession && pendingVodSeekTargetMs == null -> handlePlaybackEnded()
                     st.state == EnginePlayState.READY && awaitingPrepare && !startedThisSession -> onSessionStarted(st.positionMs)
                     st.state == EnginePlayState.ERROR && (startedThisSession || awaitingPrepare) -> {
                         OtvLog.e("engine ERROR: ${st.errorMsg}")
@@ -1567,6 +1579,7 @@ class PlayerViewModel(
                 } else {
                     frozenTicks = 0
                 }
+                val positionMoving = lastPos >= 0 && es.positionMs > lastPos
                 val positionAdvanced = lastPos >= 0 && es.positionMs - lastPos >= HEALTH_FREEZE_MIN_ADVANCE_MS
                 val playbackProgressed = PlaybackRecoveryCoordinationPolicy.hasPlaybackProgress(
                     positionAdvanced = positionAdvanced,
@@ -1598,7 +1611,7 @@ class PlayerViewModel(
                     // RELOAD_CURRENT（原地重试同一条线）——对解码/渲染管线挂死毫无意义，
                     // 只会让用户多等一轮。改为按 LongPlaybackHealthPolicy 的 DECODE 判定降级引擎。
                     val isFrozen = LongPlaybackHealthPolicy.isFrozen(
-                        positionMoving = es.positionMs > lastPos,
+                        positionMoving = positionMoving,
                         renderedNotIncreasingForMs = frozenMs,
                     )
                     OtvLog.e("画面冻结：位置前进但渲染帧数 ${secs}s 不增 → 交给既有恢复阶梯")
@@ -1844,6 +1857,9 @@ class PlayerViewModel(
 
     /** Manual VOD selection invalidates any older resolver before it can prepare a stale URL. */
     private fun supersedePendingVodSession(): Int {
+        remoteSeekJob?.cancel()
+        remoteSeekJob = null
+        remoteSeekNeedsRetry = false
         cancelVodRetryForUserAction()
         sourceBootJob?.cancel()
         sourceBootJob = null
@@ -2035,18 +2051,20 @@ class PlayerViewModel(
         }
         if (_ui.value.isLive || isFootballVod) return  // 直播/足球回放不进观看历史/进度库
         // 历史
-        currentItem?.let { item ->
-            db.vodDao().upsertHistory(
-                HistoryEntity(
-                    vodId = item.id,
-                    title = item.title,
-                    posterUrl = item.posterUrl,
-                    epIndex = epStart,
-                    positionMs = posMs,
-                    durationMs = _ui.value.durationMs,
-                    updatedAt = System.currentTimeMillis(),
-                ),
-            )
+        optionalPlaybackWork("起播历史保存") {
+            currentItem?.let { item ->
+                db.vodDao().upsertHistory(
+                    HistoryEntity(
+                        vodId = item.id,
+                        title = item.title,
+                        posterUrl = item.posterUrl,
+                        epIndex = epStart,
+                        positionMs = posMs,
+                        durationMs = _ui.value.durationMs,
+                        updatedAt = System.currentTimeMillis(),
+                    ),
+                )
+            }
         }
         startProgressSaverIfNeeded()
     }
@@ -2088,29 +2106,31 @@ class PlayerViewModel(
         val valid = s.playState == EnginePlayState.READY && s.durationMs > 0 &&
                 (force || (s.isPlaying && s.positionMs > 1_000))
         if (!valid) return
-        db.vodDao().upsertProgress(
-            ProgressEntity(
-                vodKey = item.vodKey(s.epIndex),
-                vodId = item.id,
-                epIndex = s.epIndex,
-                positionMs = s.positionMs,
-                durationMs = s.durationMs,
-                updatedAt = System.currentTimeMillis(),
-            ),
-        )
-        // 需求 我的#1/影视#6：观看历史同步实时位置与总时长——旧版只在起播时写一次历史
-        // （position=起始位置、duration=0），「最近观看/历史记录」的进度条永远为空、时间停在开头
-        db.vodDao().upsertHistory(
-            HistoryEntity(
-                vodId = item.id,
-                title = item.title,
-                posterUrl = item.posterUrl,
-                epIndex = s.epIndex,
-                positionMs = s.positionMs,
-                durationMs = s.durationMs,
-                updatedAt = System.currentTimeMillis(),
-            ),
-        )
+        optionalPlaybackWork("观看进度保存") {
+            db.vodDao().upsertProgress(
+                ProgressEntity(
+                    vodKey = item.vodKey(s.epIndex),
+                    vodId = item.id,
+                    epIndex = s.epIndex,
+                    positionMs = s.positionMs,
+                    durationMs = s.durationMs,
+                    updatedAt = System.currentTimeMillis(),
+                ),
+            )
+            // 需求 我的#1/影视#6：观看历史同步实时位置与总时长——旧版只在起播时写一次历史
+            // （position=起始位置、duration=0），「最近观看/历史记录」的进度条永远为空、时间停在开头
+            db.vodDao().upsertHistory(
+                HistoryEntity(
+                    vodId = item.id,
+                    title = item.title,
+                    posterUrl = item.posterUrl,
+                    epIndex = s.epIndex,
+                    positionMs = s.positionMs,
+                    durationMs = s.durationMs,
+                    updatedAt = System.currentTimeMillis(),
+                ),
+            )
+        }
     }
 
     /** 失败 → 自动换下一条未试过的线路；全试过 → ErrorWidget 兜底（防线三）。
@@ -2422,21 +2442,70 @@ class PlayerViewModel(
     fun seekBy(deltaMs: Long) {
         if (!hasEngine()) return
         val s = _ui.value
-        if (s.durationMs <= 0) return
-        // v1.19 崩溃修复：durationMs ∈ (0,1000)（异常流/直播短暂上报）时旧区间为
-        // 0..负数，coerceIn 在 min>max 时抛 IllegalArgumentException 直接闪退
-        val maxMs = (s.durationMs - 1_000).coerceAtLeast(0)
-        engine.seekTo((s.positionMs + deltaMs).coerceIn(0, maxMs))
+        val target = RemoteSeekPolicy.target(s.positionMs, pendingVodSeekTargetMs, deltaMs, s.durationMs) ?: return
+        seekTo(target)
+    }
+
+    /** Remote repeats update the preview; commit once the last repeat has settled. */
+    fun seekFromRemote(deltaMs: Long) {
+        if (!hasEngine() || _ui.value.isLive) return
+        val s = _ui.value
+        val step = RemoteSeekPolicy.acceleratedDelta(
+            deltaMs, com.qiubo.optimaltv.ui.components.OtvNav.directionHeldMs,
+        )
+        val target = RemoteSeekPolicy.target(s.positionMs, pendingVodSeekTargetMs, step, s.durationMs) ?: return
+        remoteSeekJob?.cancel()
+        remoteSeekNeedsRetry = noteVodSeekTarget(target) || remoteSeekNeedsRetry
+        val expectedEngine = engine
+        val expectedEpoch = engineEpochCounter
+        remoteSeekJob = viewModelScope.launch {
+            delay(RemoteSeekPolicy.SETTLE_MS)
+            if (engine !== expectedEngine || engineEpochCounter != expectedEpoch) {
+                remoteSeekJob = null
+                remoteSeekNeedsRetry = false
+                return@launch
+            }
+            remoteSeekJob = null
+            val needsRetry = remoteSeekNeedsRetry
+            remoteSeekNeedsRetry = false
+            commitVodSeek(target, needsRetry)
+        }
         touch()
+    }
+
+    private fun noteVodSeekTarget(targetMs: Long): Boolean {
+        val wasRetrying = vodRetryJob?.isActive == true
+        if (wasRetrying) {
+            cancelVodRetryForUserAction()
+            sessionGen++
+        }
+        pendingVodSeekTargetMs = targetMs
+        _ui.value = _ui.value.copy(positionMs = targetMs)
+        return wasRetrying
+    }
+
+    private fun commitVodSeek(targetMs: Long, wasRetrying: Boolean) {
+        try {
+            engine.seekTo(targetMs)
+            if (wasRetrying) scheduleVodRetry("用户更新了快进目标", _ui.value.activeLine, targetMs)
+        } catch (failure: Exception) {
+            OtvLog.w("点播跳转失败: ${failure.message}")
+            scheduleVodRetry("点播跳转失败", _ui.value.activeLine, targetMs)
+        }
     }
 
     /** 绝对位置跳转（移动版进度条拖动/点轨道跳转调用；TV 版暂未使用） */
     fun seekTo(targetMs: Long) {
         if (!hasEngine()) return
         val s = _ui.value
-        if (s.durationMs <= 0) return
+        if (s.durationMs <= 1_000L || s.isLive) return
         val maxMs = (s.durationMs - 1_000).coerceAtLeast(0)
-        engine.seekTo(targetMs.coerceIn(0, maxMs))
+        remoteSeekJob?.cancel()
+        remoteSeekJob = null
+        val target = targetMs.coerceIn(0, maxMs)
+        val needsRetry = noteVodSeekTarget(target) || remoteSeekNeedsRetry
+        remoteSeekNeedsRetry = false
+        commitVodSeek(target, needsRetry)
         touch()
     }
 
@@ -2455,7 +2524,7 @@ class PlayerViewModel(
     private fun applyPercent(p: Int) {
         val dur = _ui.value.durationMs
         if (dur <= 0 || p !in 0..99) return
-        engine.seekTo(dur * p / 100)
+        seekTo(dur * p / 100)
     }
 
     fun cycleSpeed() {
@@ -2764,6 +2833,8 @@ class PlayerViewModel(
     }
 
     override fun onCleared() {
+        remoteSeekJob?.cancel()
+        remoteSeekJob = null
         // 立即落盘当前进度（同步快照，防丢）
         val s = _ui.value
         val item = currentItem

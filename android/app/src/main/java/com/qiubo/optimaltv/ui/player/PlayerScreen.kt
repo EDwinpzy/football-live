@@ -227,7 +227,13 @@ fun PlayerScreen(nav: NavController, vodIdArg: String, epIndex: Int, resumeMs: L
                         if (!ui.srcPickerVisible) vm.toggleSrcPicker()
                         tick++; true
                     }
-                    else -> { vm.showControls(); tick++; true }   // 影视：唤出控制条
+                    else -> {
+                        vm.showControls()
+                        if (dir == NAV_LEFT || dir == NAV_RIGHT) {
+                            vm.seekFromRemote(if (dir == NAV_LEFT) -PlaybackPolicy.SEEK_STEP_MS else PlaybackPolicy.SEEK_STEP_MS)
+                        }
+                        tick++; true
+                    }
                 }
             }
             .onPreviewKeyEvent { e ->
@@ -552,7 +558,7 @@ private fun VodPlayerOverlay(
             com.qiubo.optimaltv.ui.components.NAV_LEFT, com.qiubo.optimaltv.ui.components.NAV_RIGHT -> {
                 // 需求 影视#8：菜单隐藏时左右快进自动弹出菜单栏
                 if (!ui.controlsVisible) vm.showControls()
-                vm.seekBy(if (dir == com.qiubo.optimaltv.ui.components.NAV_LEFT) -PlaybackPolicy.SEEK_STEP_MS else PlaybackPolicy.SEEK_STEP_MS)
+                vm.seekFromRemote(if (dir == com.qiubo.optimaltv.ui.components.NAV_LEFT) -PlaybackPolicy.SEEK_STEP_MS else PlaybackPolicy.SEEK_STEP_MS)
                 onTick(); return true
             }
             com.qiubo.optimaltv.ui.components.NAV_UP, com.qiubo.optimaltv.ui.components.NAV_DOWN -> {
@@ -664,8 +670,8 @@ private fun VodPlayerOverlay(
                             navGroup = CTL_NAV_GROUP,
                             navOverride = { dir ->
                                 when (dir) {
-                                    com.qiubo.optimaltv.ui.components.NAV_LEFT -> { vm.seekBy(-PlaybackPolicy.SEEK_STEP_MS); onTick(); true }
-                                    com.qiubo.optimaltv.ui.components.NAV_RIGHT -> { vm.seekBy(PlaybackPolicy.SEEK_STEP_MS); onTick(); true }
+                                    com.qiubo.optimaltv.ui.components.NAV_LEFT -> { vm.seekFromRemote(-PlaybackPolicy.SEEK_STEP_MS); onTick(); true }
+                                    com.qiubo.optimaltv.ui.components.NAV_RIGHT -> { vm.seekFromRemote(PlaybackPolicy.SEEK_STEP_MS); onTick(); true }
                                     com.qiubo.optimaltv.ui.components.NAV_UP -> { runCatching { moreFocus.requestFocus() }; onTick(); true }
                                     else -> false
                                 }
@@ -694,8 +700,8 @@ private fun VodPlayerOverlay(
                                     navGroup = CTL_NAV_GROUP,
                                     navOverride = { dir ->
                                         when (dir) {
-                                            com.qiubo.optimaltv.ui.components.NAV_LEFT -> { vm.seekBy(-PlaybackPolicy.SEEK_STEP_MS); onTick(); true }
-                                            com.qiubo.optimaltv.ui.components.NAV_RIGHT -> { vm.seekBy(PlaybackPolicy.SEEK_STEP_MS); onTick(); true }
+                                            com.qiubo.optimaltv.ui.components.NAV_LEFT -> { vm.seekFromRemote(-PlaybackPolicy.SEEK_STEP_MS); onTick(); true }
+                                            com.qiubo.optimaltv.ui.components.NAV_RIGHT -> { vm.seekFromRemote(PlaybackPolicy.SEEK_STEP_MS); onTick(); true }
                                             com.qiubo.optimaltv.ui.components.NAV_UP -> { runCatching { moreFocus.requestFocus() }; onTick(); true }
                                             else -> false
                                         }

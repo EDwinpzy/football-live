@@ -58,6 +58,36 @@ WWW_ROOT = Path(__file__).parent / "www"
 def _relay_cache_key(url):
     return url
 
+
+def _cached_byte_range(value, size):
+    """Parse one RFC-style byte range for a cached complete representation.
+
+    Return (status, start, end), None for malformed/multiple ranges that must
+    be forwarded upstream, or (416, None, None) for a valid unsatisfiable range.
+    """
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", (value or "").strip(), re.I)
+    if not match or (not match.group(1) and not match.group(2)):
+        return None
+    try:
+        if not match.group(1):
+            suffix_length = int(match.group(2))
+            if suffix_length == 0:
+                return None
+            if size == 0:
+                return 416, None, None
+            start = max(0, size - suffix_length)
+            return 206, start, size - 1
+
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else size - 1
+    except ValueError:
+        return None
+    if match.group(2) and end < start:
+        return None
+    if start >= size:
+        return 416, None, None
+    return 206, start, min(end, size - 1)
+
 # ---- 网页静态资源缓存合同（内容寻址资源 immutable）----
 # tools/build_web_assets.py 生成的 manifest.json 里的 cacheControl 才是
 # 缓存策略的唯一真实来源：它知道哪个文件名是内容哈希、哪个是 HTML。
@@ -2771,6 +2801,8 @@ def relay_url(u, ref=None):
     last_err = None
     data = ctype = final = None
     for headers in strategies:
+        resp = None
+        fully_read = False
         try:
             resp, final = _open_upstream(u, headers, read_timeout=12, preload=True)
             status = resp.status
@@ -2779,6 +2811,7 @@ def relay_url(u, ref=None):
                 # 直接返回 502 让前端进入「信号尚未开播」自动重试。
                 raise RuntimeError("HTTP %d from %s" % (status, u))
             data = resp.data if HAS_URLLIB3 else resp.read()
+            fully_read = True
             ctype = resp.headers.get("Content-Type", "") or ""
             break  # 成功
         except Exception as e:
@@ -2789,6 +2822,16 @@ def relay_url(u, ref=None):
             # 可看、App 全挂的根因）。落到下一策略（无 Referer）再试；两策略
             # 都 403 才按未开播 502 上抛（多付一次 0.1~0.3s 快速请求）。
             continue
+        finally:
+            if resp is not None:
+                # urllib3 preload=True has already consumed even an error body;
+                # return it to the pool. The stdlib branch is not preloaded, so
+                # an unsuccessful response must be closed without being drained.
+                try:
+                    _release_relay_response(
+                        resp, fully_read=(fully_read or HAS_URLLIB3))
+                except Exception:
+                    pass
     if data is None:
         err = ("relay error: %s" % str(last_err)[:200]).encode("utf-8")
         return 502, "text/plain; charset=utf-8", err, str(last_err), False
@@ -2810,13 +2853,21 @@ def relay_url(u, ref=None):
         except (ValueError, OverflowError):
             return 502, "text/plain; charset=utf-8", b"invalid live media playlist", "invalid live media playlist", False
 
+        # Segment requests and their background prefetches must use the same
+        # anti-hotlink Referer. A media playlist's ordinary parent ref points
+        # at its master playlist, while its segment requests use this playlist
+        # URL itself. 88zhibo embeds retain their validated embed-page ref, and
+        # the explicit "none" mode remains Referer-free.
+        segment_ref = (ref if ref == "none" or _is_88z_player_embed_referer(ref)
+                       else u)
+
         def rw(uri):
             full = urljoin(base, uri)
             q = quote(full, safe="").replace("+", "%2B")
-            # v1.14：点播链路（ref=none）把 none 传导给分片/子清单请求。
-            # 88zhibo m3u8.html 来源则必须保留原 embed Referer；其他旧线路沿用当前清单 URL。
-            relay_ref = ref if _is_88z_player_embed_referer(ref) else u
-            rq = "none" if ref == "none" else quote(relay_ref, safe="").replace("+", "%2B")
+            # 点播无 Referer 与 88zhibo embed 特例都由 segment_ref 保留；
+            # 普通线路以当前清单 URL 作为后续分片/子清单 Referer。
+            rq = ("none" if segment_ref == "none" else
+                  quote(segment_ref, safe="").replace("+", "%2B"))
             # v1.21 相对形式「relay?...」：以清单 URL（…/api/relay?u=…）所在目录解析
             # → 同目录 /api/relay；绝对路径 /api/relay 在「网关子路径部署」（网页版
             # https://…/web/）下会被浏览器解析到网关根而 404。设备端（根部署）
@@ -2846,7 +2897,7 @@ def relay_url(u, ref=None):
         ctype = "application/vnd.apple.mpegurl"
         # 媒体清单 → 记录分片顺序表供预取，并预热头 2 片加速首帧
         if has_extinf and raw_segs:
-            _remember_manifest(u, raw_segs, ref)
+            _remember_manifest(u, raw_segs, segment_ref)
     else:
         # 防盗链拦截形态（200 + "OK\n"）：按 502 上抛，播放器快速换线路/直连重试，
         # 而不是把 3 字节当分片喂给解复用器（解析异常 + 反复重试 = 卡顿形态）
@@ -2858,7 +2909,7 @@ def relay_url(u, ref=None):
         # 防 hls.js 重试风暴重复请求 CDN；大文件（直链视频）走流式转发不缓存，
         # 否则内存缓存会吞掉整部影片。
         with _relay_lock:
-            if len(data) <= 8 * 1024 * 1024:
+            if status == 200 and len(data) <= 8 * 1024 * 1024:
                 RELAY_CACHE[cache_key] = (time.time(), 200, ctype or "application/octet-stream", data, is_m3u8)
                 _trim_relay()
     return 200, ctype or "application/octet-stream", data, None, is_m3u8
@@ -3009,7 +3060,8 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
             except Exception:
                 pass
             # 仅完整收完的分片入缓存（中断/部分数据不得入缓存，防毒化）
-            if fully_read and buf is not None and known_len >= 0 and len(buf) == known_len:
+            if (fully_read and status == 200 and not extra.get("Content-Range")
+                    and buf is not None and known_len >= 0 and len(buf) == known_len):
                 with _relay_lock:
                     RELAY_CACHE[_relay_cache_key(u)] = (time.time(), 200, ctype or "application/octet-stream", bytes(buf), False)
                     _trim_relay()
@@ -4968,27 +5020,56 @@ class Handler(SimpleHTTPRequestHandler):
             # that Range as a media request made players parse the short m3u8 body
             # as a TS segment and fail before the first frame.
             if not is_m3u8_url:
-                if not rng:
-                    served_body = None
-                    cache_key = _relay_cache_key(u)
-                    with _relay_lock:
-                        hit = RELAY_CACHE.get(cache_key)
-                        if hit and time.time() - hit[0] < RELAY_CACHE_TTL:
-                            served_body = hit[3]
-                    if served_body is not None:
+                cache_key = _relay_cache_key(u)
+                with _relay_lock:
+                    hit = RELAY_CACHE.get(cache_key)
+                    if hit and time.time() - hit[0] >= RELAY_CACHE_TTL:
+                        hit = None
+
+                # RELAY_CACHE stores only complete, status-200 non-manifest bodies.
+                # Serve valid single byte ranges from those bodies; malformed or
+                # multi-range requests continue through the upstream Range path.
+                if hit and hit[1] == 200 and not hit[4]:
+                    cached_body = hit[3]
+                    status = 200
+                    body = cached_body
+                    range_headers = {}
+                    can_serve_cache = not rng
+                    if rng:
+                        # The compact cache tuple has no validators to compare
+                        # with If-Range, so let the origin evaluate that request.
+                        parsed_range = (None if self.headers.get("If-Range") else
+                                        _cached_byte_range(rng, len(cached_body)))
+                        if parsed_range is not None:
+                            status, start, end = parsed_range
+                            can_serve_cache = True
+                            range_headers["Accept-Ranges"] = "bytes"
+                            if status == 416:
+                                body = b""
+                                range_headers["Content-Range"] = "bytes */%d" % len(cached_body)
+                            else:
+                                body = cached_body[start:end + 1]
+                                range_headers["Content-Range"] = (
+                                    "bytes %d-%d/%d" % (start, end, len(cached_body)))
+
+                    if can_serve_cache:
                         # 注意：_prefetch_after 绝不能在 _relay_lock 内调用——
                         # Lock 不可重入，其内部的缓存查询会同线程死锁，
                         # 拖死整个中继（实测复现：全站分片请求超时）
-                        self.send_response(200)
+                        self.send_response(status)
                         self.send_header("Content-Type", hit[2])
                         self.send_header("Cache-Control", "max-age=10")
-                        self.send_header("Content-Length", str(len(served_body)))
+                        self.send_header("Content-Length", str(len(body)))
+                        for name, value in range_headers.items():
+                            self.send_header(name, value)
                         self.end_headers()
                         try:
-                            self.wfile.write(served_body)
+                            if body:
+                                self.wfile.write(body)
                         except (BrokenPipeError, ConnectionResetError):
                             return
-                        _prefetch_after(u, ref)  # 锁外触发：命中即按序消费 → 预取后继片
+                        if status != 416:
+                            _prefetch_after(u, ref)  # 锁外触发：继续预取后继片
                         return
                 try:
                     status, ctype, extra, it, _m = relay_stream(u, ref, rng)

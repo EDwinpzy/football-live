@@ -33,7 +33,13 @@ class FocusHarnessActivity : ComponentActivity() {
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
         if (event.action == android.view.KeyEvent.ACTION_DOWN) {
             val dir = navDirOf(event.keyCode)
-            if (dir != null) return OtvNav.dispatch(dir, event.repeatCount)
+            if (dir != null) {
+                return OtvNav.dispatch(
+                    dir,
+                    event.repeatCount,
+                    (event.eventTime - event.downTime).coerceAtLeast(0L),
+                )
+            }
         } else if (event.action == android.view.KeyEvent.ACTION_UP) {
             // 与 MainActivity 同构：方向键 UP 半事件也消费（乱跑根因修复，见其注释）
             if (navDirOf(event.keyCode) != null) return true

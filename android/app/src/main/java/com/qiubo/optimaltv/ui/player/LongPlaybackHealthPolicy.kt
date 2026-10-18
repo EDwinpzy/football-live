@@ -18,9 +18,9 @@ import com.qiubo.optimaltv.data.analytics.PlaybackTelemetry
  *
  * 处置阶梯（缓冲中累计卡顿时长）：
  *  - 0–3.5s    HEALTHY        正常缓冲，不干预；
- *  - 3.5–6s    PREP_BACKUP    后台预备备用线（还不打断）；
- *  - 6–12s     SWITCH         切备用线；
- *  - 12–20s    DEGRADE_ENGINE 引擎降级（换 VLC，弱网+硬解组合常挂死）；
+ *  - 3.5–6s    PREP_BACKUP    有备用线时后台预备（还不打断）；无备用线继续观察；
+ *  - 6–20s     SWITCH         交给有界恢复阶梯处理网络/未知停滞；
+ *  - DECODE    DEGRADE_ENGINE 仅有明确解码证据时降级引擎；
  *  - >=20s     GIVE_UP        长时间卡死，触发失败链。
  *
  * **20–30s 切线冷却**：一次恢复动作后，同一条线在冷却窗口内不再被自动切换选中——
@@ -49,7 +49,7 @@ object LongPlaybackHealthPolicy {
         /** 切备用线。 */
         SWITCH,
 
-        /** 引擎降级（换 VLC）。 */
+        /** 有明确 DECODE 证据时降级引擎（换 VLC）。 */
         DEGRADE_ENGINE,
 
         /** 长时间卡死：放弃当前线，触发失败链。 */
@@ -63,7 +63,7 @@ object LongPlaybackHealthPolicy {
      * @param bufferGrowing 缓冲区是否还在增长（true = 正常补片，不是卡死）。
      * @param positionMoving 播放位置是否还在前进。
      * @param hasBackup 是否有可用备用线。
-     * @param errorClass 错误分类；DECODE 类直接降级引擎（换源无效）。
+     * @param errorClass 错误分类；只有明确 DECODE 类才降级引擎，网络/未知类走恢复阶梯。
      */
     fun action(
         bufferingMs: Long,
@@ -87,9 +87,8 @@ object LongPlaybackHealthPolicy {
         return when {
             bufferingMs < 0L -> Action.HEALTHY
             bufferingMs < PREP_BACKUP_MS -> Action.HEALTHY
-            bufferingMs < SWITCH_MS -> if (hasBackup) Action.PREP_BACKUP else Action.DEGRADE_ENGINE
-            bufferingMs < DEGRADE_ENGINE_MS -> Action.SWITCH
-            bufferingMs < HARD_TIMEOUT_MS -> Action.DEGRADE_ENGINE
+            bufferingMs < SWITCH_MS -> if (hasBackup) Action.PREP_BACKUP else Action.HEALTHY
+            bufferingMs < HARD_TIMEOUT_MS -> Action.SWITCH
             else -> Action.GIVE_UP
         }
     }

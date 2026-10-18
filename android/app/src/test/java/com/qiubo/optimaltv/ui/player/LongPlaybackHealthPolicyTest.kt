@@ -68,18 +68,15 @@ class LongPlaybackHealthPolicyTest {
         assertEquals(LongPlaybackHealthPolicy.Action.PREP_BACKUP, at(Spec.SWITCH_MS - 1))
         assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.SWITCH_MS))
         assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.DEGRADE_ENGINE_MS - 1))
-        assertEquals(LongPlaybackHealthPolicy.Action.DEGRADE_ENGINE, at(Spec.DEGRADE_ENGINE_MS))
-        assertEquals(
-            LongPlaybackHealthPolicy.Action.DEGRADE_ENGINE,
-            at(Spec.HARD_TIMEOUT_MS - 1),
-        )
+        assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.DEGRADE_ENGINE_MS))
+        assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.HARD_TIMEOUT_MS - 1))
         assertEquals(LongPlaybackHealthPolicy.Action.GIVE_UP, at(Spec.HARD_TIMEOUT_MS))
     }
 
-    @Test fun `with no backup line a dead buffer degrades the engine instead of preparing nothing`() {
-        // 没有备用线时 PREP_BACKUP 无意义，直接降级引擎。
+    @Test fun `with no backup line network stall waits for the recovery threshold`() {
+        // 没有备用线时不应把网络停滞误判成解码故障，更不能 3.5s 就切 VLC。
         assertEquals(
-            LongPlaybackHealthPolicy.Action.DEGRADE_ENGINE,
+            LongPlaybackHealthPolicy.Action.HEALTHY,
             LongPlaybackHealthPolicy.action(
                 bufferingMs = Spec.PREP_BACKUP_MS,
                 bufferGrowing = false,
@@ -87,6 +84,61 @@ class LongPlaybackHealthPolicyTest {
                 hasBackup = false,
             ),
         )
+        assertEquals(
+            LongPlaybackHealthPolicy.Action.HEALTHY,
+            LongPlaybackHealthPolicy.action(
+                bufferingMs = Spec.SWITCH_MS - 1,
+                bufferGrowing = false,
+                positionMoving = false,
+                hasBackup = false,
+            ),
+        )
+        assertEquals(
+            LongPlaybackHealthPolicy.Action.SWITCH,
+            LongPlaybackHealthPolicy.action(
+                bufferingMs = Spec.SWITCH_MS,
+                bufferGrowing = false,
+                positionMoving = false,
+                hasBackup = false,
+            ),
+        )
+    }
+
+    @Test fun `network and unknown stalls never degrade the engine`() {
+        listOf(
+            PlaybackTelemetry.ErrorClass.NETWORK,
+            PlaybackTelemetry.ErrorClass.SERVER,
+            PlaybackTelemetry.ErrorClass.UNKNOWN,
+            PlaybackTelemetry.ErrorClass.NONE,
+        ).forEach { errorClass ->
+            listOf(Spec.PREP_BACKUP_MS, Spec.SWITCH_MS, Spec.DEGRADE_ENGINE_MS, Spec.HARD_TIMEOUT_MS - 1)
+                .forEach { ms ->
+                    val action = LongPlaybackHealthPolicy.action(
+                        bufferingMs = ms,
+                        bufferGrowing = false,
+                        positionMoving = false,
+                        hasBackup = false,
+                        errorClass = errorClass,
+                    )
+                    assertFalse(
+                        "$errorClass at ${ms}ms must not degrade the engine",
+                        action == LongPlaybackHealthPolicy.Action.DEGRADE_ENGINE,
+                    )
+                }
+        }
+    }
+
+    @Test fun `network stall escalates through switch to the hard timeout`() {
+        fun at(ms: Long) = LongPlaybackHealthPolicy.action(
+            bufferingMs = ms,
+            bufferGrowing = false,
+            positionMoving = false,
+            errorClass = PlaybackTelemetry.ErrorClass.NETWORK,
+        )
+        assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.SWITCH_MS))
+        assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.DEGRADE_ENGINE_MS))
+        assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.HARD_TIMEOUT_MS - 1))
+        assertEquals(LongPlaybackHealthPolicy.Action.GIVE_UP, at(Spec.HARD_TIMEOUT_MS))
     }
 
     @Test fun `decode failure degrades the engine without wasting a source switch`() {
@@ -104,6 +156,18 @@ class LongPlaybackHealthPolicyTest {
                 bufferingMs = Spec.DEGRADE_ENGINE_MS,
                 bufferGrowing = false,
                 positionMoving = false,
+                errorClass = PlaybackTelemetry.ErrorClass.DECODE,
+            ),
+        )
+    }
+
+    @Test fun `decode evidence is not swallowed by a growing buffer or moving position`() {
+        assertEquals(
+            LongPlaybackHealthPolicy.Action.DEGRADE_ENGINE,
+            LongPlaybackHealthPolicy.action(
+                bufferingMs = 0L,
+                bufferGrowing = true,
+                positionMoving = true,
                 errorClass = PlaybackTelemetry.ErrorClass.DECODE,
             ),
         )

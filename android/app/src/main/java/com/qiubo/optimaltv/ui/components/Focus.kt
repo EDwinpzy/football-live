@@ -728,7 +728,11 @@ object OtvNav {
      * 统一入口（MainActivity.dispatchKeyEvent 调用）。
      * 返回值恒 true：四方向键一律由引擎消费，绝不放行给 Compose 兜底几何搜索。
      */
-    fun dispatch(dir: Int, repeatCount: Int): Boolean {
+    var directionHeldMs: Long = 0L
+        private set
+
+    fun dispatch(dir: Int, repeatCount: Int, heldMs: Long = 0L): Boolean {
+        directionHeldMs = if (repeatCount > 0) heldMs.coerceAtLeast(0L) else 0L
         if (pendingRevealToken != 0L) return true
         if (!TvInteractionMotion.shouldProcessDirection(
                 repeatCount = repeatCount,
