@@ -137,19 +137,20 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
         hero = _source_block(self.tv_home, "private fun VodHeroBand(", "private fun LibrarySectionPage(")
         self.assertNotIn("listState.scrollBy(", hero)
 
-    def test_mobile_page_is_two_rows_of_current_column_count(self):
-        pager = _source_block(
+    def test_mobile_library_section_uses_two_synchronized_horizontal_rows(self):
+        page = _source_block(
             self.mobile_home,
-            "private fun PagedMobileLibSection(",
-            "/** 片库竖卡",
+            "private fun MobileLibrarySectionPage(",
+            "@Composable\nprivate fun HistoryCard(",
         )
-        self.assertIn("items.chunked(cols * 2)", pager, "移动端每页应为列数×2 张")
-        self.assertIn("HorizontalPager(state = pager", pager, "移动端应横向翻页")
-        self.assertIn("repeat(2) { row ->", pager, "移动端分页必须始终绘制两行")
-        self.assertIn("repeat(cols) { col ->", pager)
-        self.assertIn('Text("${pager.currentPage + 1} / ${pages.size}"', pager)
-        self.assertIn('Text("上一页"', pager)
-        self.assertIn('Text("下一页"', pager)
+        self.assertIn("index % 2 == 0", page)
+        self.assertIn("index % 2 == 1", page)
+        self.assertIn("repeat(2) { row ->", page)
+        self.assertIn("LazyRow(", page)
+        self.assertIn("count = alignedColumnCount", page)
+        self.assertIn("alignment-spacer:", page)
+        self.assertIn("snapshotFlow { positions() }", page)
+        self.assertIn("rowStates[targetRow].scrollBy(delta)", page)
 
     def test_all_three_android_sections_use_the_paged_renderer(self):
         self.assertIn('listOf("最近热门", "最近更新", "豆瓣高分")', self.tv_home)
@@ -161,8 +162,9 @@ class HomeLibraryPaginationContractTest(unittest.TestCase):
         self.assertEqual(names, EXPECTED_TV_SECTIONS)
         self.assertIn("completeBlocks(sections)", self.tv_repo)
 
-        self.assertIn("sections.forEachIndexed", self.mobile_home)
-        self.assertIn("PagedMobileLibSection(nav, sec.items", self.mobile_home)
+        self.assertIn("VerticalPager(", self.mobile_home)
+        self.assertIn("sectionPages[page]", self.mobile_home)
+        self.assertIn("MobileLibrarySectionPage(", self.mobile_home)
         order = re.search(r"blockOrder\s*=\s*listOf\(([^)]*)\)", self.mobile_repo)
         self.assertIsNotNone(order, "移动端仓库未声明固定三栏顺序")
         names = tuple(re.findall(r'"([^"]+)"', order.group(1)))
