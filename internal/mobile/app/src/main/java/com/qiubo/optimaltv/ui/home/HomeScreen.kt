@@ -1,8 +1,11 @@
 package com.qiubo.optimaltv.ui.home
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +25,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.PagerSnapDistance
+import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,6 +38,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,6 +47,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -96,7 +104,16 @@ private const val VOD_HERO_TEXT_MAX = 222f
 private const val VOD_HERO_BTN_BOTTOM_LAND = 60f
 private const val VOD_HERO_BTN_BOTTOM_PORT = 50f
 
+/** Keep the mobile library page order aligned with the TV home library pager. */
+private val MOBILE_LIBRARY_SECTION_TITLES = listOf("最近热门", "最近更新", "豆瓣高分")
+private val MOBILE_LIBRARY_SECTION_SOURCE_ALIASES = listOf(
+    listOf("最近热门", "近期热门"),
+    listOf("最近更新", "最新上映", "最新上线"),
+    listOf("豆瓣高分"),
+)
+
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun VodScreen(nav: NavController) {
     val catalogState by Graph.repo.state.collectAsStateWithLifecycle()
     val historyFlow = remember { Graph.db.vodDao().historyFlow(12) }
@@ -181,6 +198,21 @@ fun VodScreen(nav: NavController) {
                 val sections = if (selCid == null) emptyList() else doubanSections[selCid].orEmpty()
 
                 val showLibLoading = sectionLoading && sections.isEmpty()
+                val sectionPages = remember(sections) {
+                    MOBILE_LIBRARY_SECTION_TITLES.mapIndexed { index, title ->
+                        title to MOBILE_LIBRARY_SECTION_SOURCE_ALIASES[index]
+                            .firstNotNullOfOrNull { alias -> sections.firstOrNull { it.name == alias }?.items }
+                            .orEmpty()
+                    }
+                }
+                val libraryPagerState = rememberPagerState(pageCount = { MOBILE_LIBRARY_SECTION_TITLES.size })
+                val libraryRowStates = List(MOBILE_LIBRARY_SECTION_TITLES.size) {
+                    List(2) { rememberLazyListState() }
+                }
+                LaunchedEffect(selCid) {
+                    libraryPagerState.scrollToPage(0)
+                    libraryRowStates.forEach { rows -> rows.forEach { it.scrollToItem(0) } }
+                }
 
                 LazyColumn(
                     state = vodListState,
@@ -233,7 +265,7 @@ fun VodScreen(nav: NavController) {
                             }
                         }
                     }
-                    // 片库 lib-section（扁平化逐行 item：视口外行不组合，低端机滚动性能，与 TV 版同构）
+                    // 片库三栏目纵向分页；每页两条同步横向浏览的海报行，与 TV 版顺序一致。
                     item(key = "lib-chips") {
                         VodCategorySelector(
                             categories = categories,
@@ -250,38 +282,40 @@ fun VodScreen(nav: NavController) {
                             onAll = { nav.navigate("all") },
                         )
                     }
-                    if (showLibLoading) {
-                        // 需求④：板块就绪前的轻量占位（高度稳定，不参与结构顶替）
-                        item(key = "lib-loading") {
-                            Text(
-                                "— 片库板块加载中 …",
-                                color = OtvColors.White50, fontSize = 26f.sxs(s),
-                                modifier = Modifier.padding(start = homePad, top = 40f.sx(s)),
-                            )
-                        }
-                    } else if (sections.isNotEmpty()) {
-                        // lib-grid（column gap44 mt26）× lib-block（column gap18）：标题 38 Bold .92白 + wrap 行 34/28
-                        // 2026-09-07 需求①（与 TV 版同步）：item key 用【板块名】而非序号——晚到板块
-                        // 插入后序号 key 全体重排 = LazyColumn 整体重建，滚动位置漂移；名字 key 稳定
-                        sections.forEachIndexed { si, sec ->
-                            item(key = "lib-sec-h-${sec.name}") {
-                                Text(
-                                    (if (sec.name == "最新上映") "最近更新" else sec.name), color = OtvColors.White.copy(alpha = 0.92f),
-                                    fontSize = 38f.sxs(s), fontWeight = FontWeight.Bold,
-                                    modifier = Modifier
-                                        .padding(start = homePad, end = homePad)
-                                        .padding(top = (if (si == 0) 26f else 44f).sx(s))
-                                        .padding(bottom = 18f.sx(s)),
+                    item(key = "lib-vertical-three-pages") {
+                        androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth()) {
+                            val cardWidth = (maxWidth - homePad * 2 - libGap.sx(s) * (libCols - 1)) / libCols
+                            val rowHeight = cardWidth * (352f / 232f) + 42f.sx(s)
+                            val pagerHeight = rowHeight * 2 + 120f.sx(s)
+                            VerticalPager(
+                                state = libraryPagerState,
+                                beyondBoundsPageCount = 1,
+                                userScrollEnabled = true,
+                                modifier = Modifier.fillMaxWidth().height(pagerHeight),
+                                key = { page -> "vod-library-page-${MOBILE_LIBRARY_SECTION_TITLES[page]}" },
+                                flingBehavior = PagerDefaults.flingBehavior(
+                                    state = libraryPagerState,
+                                    pagerSnapDistance = PagerSnapDistance.atMost(1),
+                                    snapAnimationSpec = spring(
+                                        dampingRatio = Spring.DampingRatioNoBouncy,
+                                        stiffness = Spring.StiffnessMediumLow,
+                                    ),
+                                ),
+                            ) { page ->
+                                val (title, pageItems) = sectionPages[page]
+                                MobileLibrarySectionPage(
+                                    nav = nav,
+                                    title = title,
+                                    items = pageItems,
+                                    loading = showLibLoading,
+                                    s = s,
+                                    compact = portrait,
+                                    cols = libCols,
+                                    gap = libGap,
+                                    sidePadding = homePad,
+                                    rowStates = libraryRowStates[page],
                                 )
                             }
-                            item(key = "lib-pages-$selCid-${sec.name}") {
-                                PagedMobileLibSection(nav, sec.items, s, portrait, libCols, libGap, homePad)
-                            }
-                        }
-                    } else {
-                        item(key = "lib-empty") {
-                            Text("暂无豆瓣栏目内容", color = OtvColors.White50, fontSize = 26f.sxs(s),
-                                modifier = Modifier.padding(start = homePad, top = 26f.sx(s)))
                         }
                     }
                     item(key = "lib-pad") { Spacer(Modifier.height(80f.sx(s))) }
@@ -510,57 +544,94 @@ private fun VodHeroBand(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PagedMobileLibSection(nav: NavController, items: List<VodItem>, s: Float, compact: Boolean, cols: Int, gap: Float, sidePadding: androidx.compose.ui.unit.Dp) {
-    val pages = remember(items, cols) { items.chunked(cols * 2) }
-    val pager = rememberPagerState(pageCount = { pages.size })
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
-    if (pages.isEmpty()) return
-    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = sidePadding)) {
-        val cardWidth = (maxWidth - gap.sx(s) * (cols - 1)) / cols
+private fun MobileLibrarySectionPage(
+    nav: NavController,
+    title: String,
+    items: List<VodItem>,
+    loading: Boolean,
+    s: Float,
+    compact: Boolean,
+    cols: Int,
+    gap: Float,
+    sidePadding: androidx.compose.ui.unit.Dp,
+    rowStates: List<androidx.compose.foundation.lazy.LazyListState>,
+) {
+    val rows = remember(items) {
+        listOf(
+            items.filterIndexed { index, _ -> index % 2 == 0 },
+            items.filterIndexed { index, _ -> index % 2 == 1 },
+        )
+    }
+    val alignedColumnCount = rows.maxOfOrNull { it.size } ?: 0
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+        val cardWidth = (maxWidth - sidePadding * 2 - gap.sx(s) * (cols - 1)) / cols
         val rowHeight = cardWidth * (352f / 232f) + 42f.sx(s)
-        Column {
-            HorizontalPager(state = pager, modifier = Modifier.fillMaxWidth()) { page ->
-                Column(verticalArrangement = Arrangement.spacedBy(24f.sx(s))) {
-                    repeat(2) { row ->
-                        Row(Modifier.fillMaxWidth().height(rowHeight), horizontalArrangement = Arrangement.spacedBy(gap.sx(s))) {
-                            repeat(cols) { col ->
-                                val item = pages[page].getOrNull(row * cols + col)
-                                if (item == null) Spacer(Modifier.weight(1f)) else LibCard(nav, item, s, compact)
+        val rowItemPitchPx = with(LocalDensity.current) { (cardWidth + gap.sx(s)).toPx() }
+        LaunchedEffect(rowStates, alignedColumnCount, rowItemPitchPx) {
+            fun positions() = rowStates.map { state ->
+                state.firstVisibleItemIndex * rowItemPitchPx + state.firstVisibleItemScrollOffset
+            }
+            var lastPositions = positions()
+            snapshotFlow { positions() }.collect { currentPositions ->
+                val changedRows = currentPositions.indices.filter { currentPositions[it] != lastPositions[it] }
+                if (changedRows.size == 1) {
+                    val sourceRow = changedRows.single()
+                    val targetRow = 1 - sourceRow
+                    val delta = currentPositions[sourceRow] - lastPositions[sourceRow]
+                    if (delta != 0f && alignedColumnCount > 1) {
+                        rowStates[targetRow].scrollBy(delta)
+                        lastPositions = positions()
+                    } else {
+                        lastPositions = currentPositions
+                    }
+                } else {
+                    lastPositions = currentPositions
+                }
+            }
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(OtvColors.Bg)
+                .padding(horizontal = sidePadding, vertical = 16f.sx(s)),
+            verticalArrangement = Arrangement.spacedBy(18f.sx(s), Alignment.CenterVertically),
+        ) {
+            Text(title, color = OtvColors.White.copy(alpha = 0.92f), fontSize = 34f.sxs(s), fontWeight = FontWeight.Bold)
+            if (items.isEmpty()) {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Text(if (loading) "正在加载…" else "暂无${title}内容", color = OtvColors.White50, fontSize = 26f.sxs(s))
+                }
+            } else {
+                repeat(2) { row ->
+                    val rowItems = rows[row]
+                    LazyRow(
+                        state = rowStates[row],
+                        modifier = Modifier.fillMaxWidth().height(rowHeight),
+                        horizontalArrangement = Arrangement.spacedBy(gap.sx(s)),
+                    ) {
+                        items(
+                            count = alignedColumnCount,
+                            key = { column -> rowItems.getOrNull(column)?.id ?: "lib:$title:alignment-spacer:$row:$column" },
+                        ) { column ->
+                            val item = rowItems.getOrNull(column)
+                            if (item == null) {
+                                Spacer(Modifier.width(cardWidth).height(rowHeight))
+                            } else {
+                                MobileVodCard(
+                                    item = item,
+                                    s = s,
+                                    compact = compact,
+                                    modifier = Modifier.width(cardWidth),
+                                    onClick = { nav.navigate("detail/" + URLEncoder.encode(item.id, "UTF-8")) },
+                                )
                             }
                         }
                     }
                 }
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                Text("上一页", color = if (pager.currentPage > 0) OtvColors.White else OtvColors.White30, fontSize = 24f.sxs(s),
-                    modifier = Modifier.tapCard { scope.launch { if (pager.currentPage > 0) pager.animateScrollToPage(pager.currentPage - 1) } }.padding(16f.sx(s)))
-                Text("${pager.currentPage + 1} / ${pages.size}", color = OtvColors.White, fontSize = 24f.sxs(s))
-                Text("下一页", color = if (pager.currentPage < pages.lastIndex) OtvColors.White else OtvColors.White30, fontSize = 24f.sxs(s),
-                    modifier = Modifier.tapCard { scope.launch { if (pager.currentPage < pages.lastIndex) pager.animateScrollToPage(pager.currentPage + 1) } }.padding(16f.sx(s)))
-            }
         }
     }
-}
-
-/** 片库竖卡（原版 libCardHtml/.vcard：poster 232×352 r12 + remark 右下 + vname 24 白 + vmeta 20 .5白）
- *  需求 影视#11：remark 徽章高度降为 2/3。触控：点卡进详情。
- *  竖屏优化：weight(1f) 均分满宽（海报比例/字号不变；横屏均分≈232 与 TV 版 1:1） */
-@Composable
-private fun androidx.compose.foundation.layout.RowScope.LibCard(
-    nav: NavController,
-    item: VodItem,
-    s: Float,
-    compact: Boolean,
-) {
-    MobileVodCard(
-        item = item,
-        s = s,
-        compact = compact,
-        modifier = Modifier.weight(1f),
-        onClick = { nav.navigate("detail/" + URLEncoder.encode(item.id, "UTF-8")) },
-    )
 }
 
 /**
