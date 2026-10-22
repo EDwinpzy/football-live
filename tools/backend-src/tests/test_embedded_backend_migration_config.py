@@ -25,7 +25,7 @@ class EmbeddedBackendMigrationConfigTests(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
-    def test_embedded_python_uses_the_apk_origin_for_every_cloud_route_and_adds_ca(self):
+    def test_embedded_python_sets_only_the_hotupdate_object_origin_and_adds_ca(self):
         for app_dir in (ROOT / "android" / "app", ROOT / "internal" / "mobile" / "app"):
             with self.subTest(app=app_dir):
                 runner = self._load_runner(app_dir)
@@ -34,16 +34,17 @@ class EmbeddedBackendMigrationConfigTests(unittest.TestCase):
                 previous_opener = urllib.request._opener
                 system_cas = set(ssl.create_default_context().get_ca_certs(binary_form=True))
                 try:
+                    for key in ENVIRONMENT_KEYS:
+                        os.environ.pop(key, None)
                     with self.assertRaisesRegex(ValueError, "required"):
                         runner.start(str(app_dir), 8090)
                     runner.configure_api_environment(MIGRATION_ORIGIN, str(ca_path))
-                    self.assertEqual(os.environ["OTV_CLOUD_BASE"], MIGRATION_ORIGIN + "/web")
-                    self.assertEqual(os.environ["OTV_LICENSE_ENDPOINT"], MIGRATION_ORIGIN + "/activate")
-                    self.assertEqual(os.environ["OTV_IPTV_LATEST_URL"], MIGRATION_ORIGIN + "/iptv/latest")
                     self.assertEqual(
                         os.environ["OTV_APK_UPDATE_OBJECT_BASE"],
                         MIGRATION_ORIGIN + "/v1/storages/object/hotupdate",
                     )
+                    for key in ENVIRONMENT_KEYS[:-1]:
+                        self.assertNotIn(key, os.environ)
                     handler = next(
                         item for item in urllib.request._opener.handlers
                         if isinstance(item, urllib.request.HTTPSHandler)

@@ -1,4 +1,4 @@
-"""HTTP clients and URL policy for the self-hosted My TV services."""
+"""HTTP clients and URL policy for FootballLive update services."""
 
 from __future__ import annotations
 
@@ -21,8 +21,7 @@ class EndpointConfig:
     public_base_url: str
     public_web_base_url: str
     hotupdate_endpoint: str
-    activate_endpoint: str
-    environment_name: str = "mytv-selfhosted"
+    environment_name: str = "football-live-selfhosted"
     self_hosted: bool = True
 
     @property
@@ -32,14 +31,14 @@ class EndpointConfig:
     @staticmethod
     def _object_key(key: str) -> str:
         if not isinstance(key, str) or not key or "\\" in key or "\x00" in key:
-            raise ValueError("invalid My TV object key")
+            raise ValueError("invalid FootballLive object key")
         if key.startswith("/") or any(part in ("", ".", "..") for part in key.split("/")):
-            raise ValueError("invalid My TV object key")
+            raise ValueError("invalid FootballLive object key")
         return urllib.parse.quote(key, safe="/")
 
     def public_object_url(self, bucket: str, key: str) -> str:
         if bucket != "hotupdate" or not self.public_base_url:
-            raise ValueError("public My TV origin is not configured")
+            raise ValueError("FootballLive public origin is not configured")
         return f"{self.public_base_url}/v1/storages/object/{bucket}/{self._object_key(key)}"
 
     def storage_object_url(self, key: str) -> str:
@@ -47,7 +46,7 @@ class EndpointConfig:
 
     def public_web_url(self, path: str) -> str:
         if not self.public_web_base_url:
-            raise ValueError("public My TV origin is not configured")
+            raise ValueError("FootballLive public origin is not configured")
         return f"{self.public_web_base_url}/web/{self._object_key(path)}"
 
     def check_url(self, url: str) -> None:
@@ -74,8 +73,7 @@ class EndpointConfig:
         ):
             raise ValueError("target URL is not on the service allowlist")
         if parsed.hostname == "business-api" and not (
-            parsed.path == "/activate"
-            or parsed.path == "/hotupdate"
+            parsed.path == "/hotupdate"
             or parsed.path.startswith("/hotupdate/")
         ):
             raise ValueError("target URL is not on the service allowlist")
@@ -115,14 +113,12 @@ def load_endpoint_config(environ=None) -> EndpointConfig:
         public_base_url=public,
         public_web_base_url=public,
         hotupdate_endpoint=env.get("OTV_HOTUPDATE_ENDPOINT", "http://business-api:8082/hotupdate").rstrip("/"),
-        activate_endpoint=env.get("OTV_ACTIVATE_ENDPOINT", "http://business-api:8082/activate").rstrip("/"),
     )
     for endpoint in (
         config.auth_url,
         config.rest_base,
         config.storage_base,
         config.hotupdate_endpoint,
-        config.activate_endpoint,
     ):
         config.check_url(endpoint)
     return config
@@ -181,7 +177,6 @@ STORAGE_BASE_URL = ENDPOINTS.storage_base
 PUBLIC_BASE_URL = ENDPOINTS.public_base_url
 PUBLIC_WEB_BASE_URL = ENDPOINTS.public_web_base_url
 HOTUPDATE_ENDPOINT = ENDPOINTS.hotupdate_endpoint
-ACTIVATE_ENDPOINT = ENDPOINTS.activate_endpoint
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

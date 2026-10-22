@@ -12,5 +12,5 @@ plugins {
 // 目录必须跟随当前 checkout：固定到主工作树会让 worktree 构建共用同一份
 // KSP/CMake 中间产物（2026-09-02 与 2026-09-24 均实测到 KSP 缓存损坏）。
 allprojects {
-    buildDir = new File(rootDir, "build/optimal-tv/${project.name}")
+    buildDir = new File(rootDir, "build/football-live/${project.name}")
 }

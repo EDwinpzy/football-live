@@ -8,30 +8,17 @@ RUN python /build/build_web_assets.py /build/www /build/web-dist
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app/vendor
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Copy the API modules and their adjacent configuration without copying the
-# raw Web tree. The generated, content-addressed dist replaces /app/www, which
-# remains the static root used by proxy.py.
-COPY tools/backend-src/*.py tools/backend-src/*.json /app/
-COPY tools/selfhosted/web_asset_archive.py tools/selfhosted/web_entrypoint.py /app/
-# proxy.py prefers `node decrypt_stream.js` for live-stream decryption. This
-# image is python:3.12-slim and has no node, so that call always raises and
-# proxy.py falls back to decrypt_python (quickjs). The vendored extension now
-# lives in tools/backend-src/vendor/ — it used to be unpacked from the retired
-# cloudfunctions/otv-web tree, which no longer exists.
-COPY tools/backend-src/decrypt_stream.js /app/
+# The server image contains only the football API, HLS relay and team artwork.
+COPY tools/backend-src/proxy.py tools/backend-src/vlc_hls.py tools/backend-src/team_backdrop.py /app/
+COPY tools/backend-src/team_icon_cache.json /app/
 COPY tools/backend-src/svg_icon_cache/ /app/svg_icon_cache/
 COPY tools/backend-src/transparent_icon_cache/ /app/transparent_icon_cache/
+COPY tools/selfhosted/web_asset_archive.py tools/selfhosted/web_entrypoint.py /app/
 COPY --from=web-assets /build/web-dist/ /app/www/
-COPY tools/backend-src/vendor/ /app/vendor/
-
-# The pinned QuickJS extension was built for CPython 3.11. Normalize its
-# filename for the loader in this Python 3.12 image.
-RUN cp /app/vendor/_quickjs.cpython-311-x86_64-linux-gnu.so /app/vendor/_quickjs.so
 
 EXPOSE 8090
 CMD ["python", "web_entrypoint.py"]

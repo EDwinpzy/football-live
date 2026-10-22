@@ -60,7 +60,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-optimal_tv}
       POSTGREST_DB_PASSWORD: ${POSTGREST_DB_PASSWORD:?set POSTGREST_DB_PASSWORD}
-      LICENSE_IMPORTER_PASSWORD_FILE: /run/secrets/license-importer-db-password
     volumes:
       - ../../tools/selfhosted/apply_schema_migrations.sh:/app/tools/selfhosted/apply_schema_migrations.sh:ro
       - ../../tools/selfhosted/apply_schema_migrations.psql:/app/tools/selfhosted/apply_schema_migrations.psql:ro
@@ -68,7 +67,6 @@ services:
       - ../../tools/selfhosted/iptv_publish_lock.sql:/app/tools/selfhosted/iptv_publish_lock.sql:ro
       - ../../tools/selfhosted/base_schema.sql:/app/tools/selfhosted/base_schema.sql:ro
       - ../../tools/selfhosted/license_importer_role.sql:/app/tools/selfhosted/license_importer_role.sql:ro
-      - ../../tools/selfhosted/license_importer_smoke.psql:/app/tools/selfhosted/license_importer_smoke.psql:ro
       - ../../tools/selfhosted/rpc_grants_repair.sql:/app/tools/selfhosted/rpc_grants_repair.sql:ro
       - ../../tools/selfhosted/migrations/license_restore_v1.sql:/app/tools/selfhosted/migrations/license_restore_v1.sql:ro
       - ../../tools/selfhosted/migrations/vod_sources_replace_v1.sql:/app/tools/selfhosted/migrations/vod_sources_replace_v1.sql:ro
@@ -82,7 +80,6 @@ services:
       - ../../tools/iptv_migration.sql:/app/tools/iptv_migration.sql:ro
       - ../../tools/vod_sources_migration.sql:/app/tools/vod_sources_migration.sql:ro
       - ../../tools/pg_cu_optimization_migration.sql:/app/tools/pg_cu_optimization_migration.sql:ro
-      - ${LICENSE_IMPORT_PASSWORD_HOST_PATH:-/srv/mytv/secrets/license-importer-db-password}:/run/secrets/license-importer-db-password:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -129,7 +126,7 @@ services:
       OTV_STORAGE_BIND: 0.0.0.0
       OTV_STORAGE_PORT: "8092"
       OTV_STORAGE_BUCKETS: hotupdate
-      OTV_STORAGE_ADMIN_SUBJECTS: "2094843486709620737"
+      OTV_STORAGE_WRITER_SUBJECTS: "2094843486709620737"
       OTV_JWT_SECRET_FILE: /run/secrets/jwt-signing-key
     volumes:
       - ../../tools/selfhosted/storage_service.py:/app/storage_service.py:ro
@@ -212,26 +209,16 @@ services:
     environment:
       PORT: "8090"
       OTV_BIND: 0.0.0.0
-      OTV_VOD_LINE_INDEX_URL: http://storage:8092/v1/storages/object/hotupdate/vod-lines.json
-      OTV_VOD_LINE_INDEX_MAX_AGE_DAYS: "30"
-      OTV_HHKAN_SNAPSHOT_FIRST: "1"
-      OTV_LICENSE_ENDPOINT: http://business-api:8082/activate
       OTV_APK_UPDATE_OBJECT_BASE: http://storage:8092/v1/storages/object/hotupdate
-      OTV_IPTV_LATEST_URL: http://business-api:8082/iptv/latest
-      OTV_METADATA_API_URL: http://metadata-api:8094
-      OTV_VOD_SOURCE_CONFIG_URL: http://business-api:8082/internal/vod-sources
       OTV_WEB_ASSET_ARCHIVE: /var/lib/mytv/web-assets
-      # CloudBase is retired: the relay and the vod source fallback stay off.
+      # The live relay uses direct upstream requests; do not enable the retired cloud relay.
       # CLOUD_RELAY_ENABLED in proxy.py defaults to "1" when the variable is absent,
       # so this must be set explicitly rather than merely omitted.
       OTV_CLOUD_RELAY: "0"
-      OTV_VOD_CLOUD_FALLBACK: "0"
     depends_on:
       business-api:
         condition: service_started
       storage:
-        condition: service_started
-      metadata-api:
         condition: service_started
     volumes:
       - ${WEB_ASSET_ARCHIVE_HOST_PATH:-./data/web-assets}:/var/lib/mytv/web-assets
@@ -252,85 +239,6 @@ services:
     networks:
       - backend
 
-  admin:
-    image: selfhosted-admin:latest
-    build:
-      context: ../..
-      dockerfile: deploy/selfhosted/Dockerfile.admin
-    restart: unless-stopped
-    environment:
-      PORT: "8791"
-      OTV_SELFHOSTED_MODE: "1"
-      OTV_IPTV_SCHEDULER_ENABLED: "1"
-      OTV_IPTV_DAILY_TIME: "06:30"
-      OTV_LICENSE_IMPORT_DB: ${POSTGRES_DB:-optimal_tv}
-      OTV_LICENSE_IMPORT_USER: license_importer
-      OTV_LICENSE_IMPORT_PASSWORD_FILE: /run/secrets/license-importer-db-password
-      OTV_ADMIN_CREDENTIALS_FILE: /run/secrets/admin-credentials.json
-      OTV_ADMIN_SECRET_FILE: /run/secrets/admin-session-secret
-      OTV_AUTH_CREDENTIALS_FILE: /run/secrets/admin-api-credentials.json
-      OTV_REST_BASE: http://postgrest:3000
-      OTV_STORAGE_BASE: http://storage:8092/v1/storages/object/hotupdate
-      OTV_HOTUPDATE_ENDPOINT: http://business-api:8082/hotupdate
-      OTV_ACTIVATE_ENDPOINT: http://business-api:8082/activate
-      OTV_PRIV_KEY_FILE: /run/secrets/license/private_key.pem
-      OTV_PUBLIC_BASE_URL: ${OTV_PUBLIC_BASE_URL:-https://103.236.97.137:35208}
-      OTV_HU_OFF: ${OTV_HU_OFF:-0}
-      OTV_OUT_DIR: /tmp/out
-      OTV_ADMIN_NOAUTH: "1"
-      # 影视源测速走设备侧中继：本 VPS 只有中国大陆出口，直连 Cloudflare 段的
-      # 源必然超时，测出来的「失败」全是假的。中继由用户机器经 SSH 反向隧道
-      # 提供（见 tools/selfhosted/vod_probe_relay.py），端口绑在 docker 网桥上，
-      # 不对公网开放。没开隧道时这个地址连不上，测速会明确报中继不可达。
-      OTV_VOD_PROBE_RELAY_URL: http://192.168.16.1:18765
-      # 定时体检 + 自动降级：每 6 小时一轮，连续 3 轮不可用则自动停用该源
-      # （停用不是删除，可随时在后台恢复）。只在配了中继时生效。
-      OTV_VOD_HEALTH_ENABLED: "1"
-      OTV_VOD_HEALTH_INTERVAL: "21600"
-      OTV_VOD_HEALTH_FAILURES: "3"
-      # 失败计数必须活过容器重启：放 /tmp 的话每次重建 admin 容器都会把
-      # 所有源的连续失败清零，「连续 3 轮才降级」就永远攒不满。
-      OTV_VOD_HEALTH_STATE: /var/lib/mytv/vod-source-health.json
-      PYTHONDONTWRITEBYTECODE: "1"
-    volumes:
-      - ../../tools/admin_server.py:/app/tools/admin_server.py:ro
-      - ../../tools/admin.html:/app/tools/admin.html:ro
-      - ../../tools/apk_update.py:/app/tools/apk_update.py:ro
-      - ../../tools/license_gen.py:/app/tools/license_gen.py:ro
-      - ../../tools/selfhosted/admin_config.py:/app/tools/selfhosted/admin_config.py:ro
-      - ../../tools/selfhosted/runtime_client.py:/app/tools/selfhosted/runtime_client.py:ro
-      - ../../tools/selfhosted/scheduler.py:/app/tools/selfhosted/scheduler.py:ro
-      - ../../tools/selfhosted/vod_probe_relay.py:/app/tools/selfhosted/vod_probe_relay.py:ro
-      - ../../tools/selfhosted/vod_source_health.py:/app/tools/selfhosted/vod_source_health.py:ro
-      - ${VOD_HEALTH_STATE_HOST_PATH:-./data/vod-health}:/var/lib/mytv
-      - ../../tools/selfhosted/import_licenses.py:/app/tools/selfhosted/import_licenses.py:ro
-      - ../../tools/backend-src:/app/tools/backend-src:ro
-      - ${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}/admin-credentials.json:/run/secrets/admin-credentials.json:ro
-      - ${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}/admin-session-secret:/run/secrets/admin-session-secret:ro
-      - ${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}/admin-api-credentials.json:/run/secrets/admin-api-credentials.json:ro
-      - ${LICENSE_SECRETS_HOST_PATH:-/srv/mytv/secrets/license}:/run/secrets/license:ro
-      - ${LICENSE_IMPORT_PASSWORD_HOST_PATH:-/srv/mytv/secrets/license-importer-db-password}:/run/secrets/license-importer-db-password:ro
-    depends_on:
-      postgrest:
-        condition: service_started
-      storage:
-        condition: service_started
-      business-api:
-        condition: service_started
-    expose:
-      - "8791"
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,size=256m
-    mem_limit: 384m
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
-    networks:
-      - backend
-
   apk-publisher:
     image: python:3.12-slim
     profiles: ["ops"]
@@ -341,14 +249,14 @@ services:
       OTV_AUTH_URL: http://auth:8081/auth/v1/signin
       OTV_REST_BASE: http://postgrest:3000
       OTV_STORAGE_BASE: http://storage:8092/v1/storages/object/hotupdate
-      OTV_AUTH_CREDENTIALS_FILE: /run/secrets/admin-api-credentials.json
+      OTV_AUTH_CREDENTIALS_FILE: /run/secrets/release-publisher-credentials.json
       PYTHONDONTWRITEBYTECODE: "1"
     volumes:
       - ../../tools/publish_apk_update.py:/app/tools/publish_apk_update.py:ro
       - ../../tools/apk_update.py:/app/tools/apk_update.py:ro
       - ../../tools/selfhosted/runtime_client.py:/app/tools/selfhosted/runtime_client.py:ro
       - ${RELEASE_APK_HOST_PATH:-./releases}:/releases:ro
-      - ${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}/admin-api-credentials.json:/run/secrets/admin-api-credentials.json:ro
+      - ${RELEASE_SECRETS_HOST_PATH:-${ADMIN_SECRETS_HOST_PATH:-/srv/mytv/secrets}}/admin-api-credentials.json:/run/secrets/release-publisher-credentials.json:ro
     depends_on:
       auth:
         condition: service_started
@@ -362,92 +270,6 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    logging:
-      driver: json-file
-      options:
-        max-size: 5m
-        max-file: "2"
-    networks:
-      - backend
-
-  metadata-api:
-    image: python:3.12-alpine
-    restart: unless-stopped
-    working_dir: /app/tools
-    command: ["python", "-m", "metadata_center.read_api"]
-    environment:
-      PYTHONPATH: /app/tools
-      PYTHONDONTWRITEBYTECODE: "1"
-      OTV_METADATA_DIR: /srv/metadata
-      OTV_METADATA_PUBLIC_DIR: /srv/objects/hotupdate/metadata
-      OTV_METADATA_BIND: 0.0.0.0
-      OTV_METADATA_PORT: "8094"
-    volumes:
-      - ../../tools/metadata_center:/app/tools/metadata_center:ro
-      - ../../tools/backend-src/pinyin_map.json:/app/tools/backend-src/pinyin_map.json:ro
-      - ${METADATA_HOST_PATH:-./data/metadata}:/srv/metadata:ro
-      - ${OBJECTS_HOST_PATH:-./data/objects}:/srv/objects:ro
-    expose:
-      - "8094"
-    mem_limit: 256m
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: json-file
-      options:
-        max-size: 5m
-        max-file: "2"
-    networks:
-      - backend
-
-  metadata-builder:
-    image: python:3.12-alpine
-    profiles: ["ops"]
-    working_dir: /app/tools
-    entrypoint: ["python", "-m", "metadata_center.cli"]
-    environment:
-      PYTHONPATH: /app/tools
-      PYTHONDONTWRITEBYTECODE: "1"
-      OTV_METADATA_DIR: /srv/metadata
-      OTV_METADATA_PUBLIC_DIR: /srv/objects/hotupdate/metadata
-      OTV_METADATA_SNAPSHOT: /srv/metadata/snapshots/douban_snapshot.json
-    volumes:
-      - ../../tools/metadata_center:/app/tools/metadata_center:ro
-      - ../../tools/backend-src/pinyin_map.json:/app/tools/backend-src/pinyin_map.json:ro
-      - ${METADATA_HOST_PATH:-./data/metadata}:/srv/metadata
-      - ${OBJECTS_HOST_PATH:-./data/objects}:/srv/objects
-    mem_limit: 512m
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: json-file
-      options:
-        max-size: 5m
-        max-file: "2"
-    networks:
-      - backend
-
-  metadata-refresh:
-    image: python:3.12-alpine
-    profiles: ["ops"]
-    working_dir: /app/tools
-    entrypoint: ["/bin/sh", "/app/tools/metadata_center/refresh.sh"]
-    environment:
-      PYTHONPATH: /app/tools
-      PYTHONDONTWRITEBYTECODE: "1"
-      OTV_METADATA_DIR: /srv/metadata
-      OTV_METADATA_PUBLIC_DIR: /srv/objects/hotupdate/metadata
-      OTV_METADATA_SNAPSHOT: /srv/metadata/snapshots/douban_snapshot.json
-      OTV_METADATA_SOURCE_SNAPSHOT: /app/tools/backend-src/douban_snapshot.json
-    volumes:
-      - ../../tools/metadata_center:/app/tools/metadata_center:ro
-      - ../../tools/build_douban_snapshot.py:/app/tools/build_douban_snapshot.py:ro
-      - ../../tools/backend-src:/app/tools/backend-src
-      - ${METADATA_HOST_PATH:-./data/metadata}:/srv/metadata
-      - ${OBJECTS_HOST_PATH:-./data/objects}:/srv/objects
-    mem_limit: 512m
-    security_opt:
-      - no-new-privileges:true
     logging:
       driver: json-file
       options:
@@ -471,13 +293,9 @@ services:
         condition: service_started
       web-api:
         condition: service_healthy
-      admin:
-        condition: service_started
       storage:
         condition: service_started
       business-api:
-        condition: service_started
-      metadata-api:
         condition: service_started
     mem_limit: 128m
     logging:

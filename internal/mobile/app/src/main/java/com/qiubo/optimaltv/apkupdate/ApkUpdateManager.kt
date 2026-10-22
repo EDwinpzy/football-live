@@ -99,6 +99,8 @@ object ApkUpdateManager {
     private var initialized = false
     private val downloadLock = Any()
     private var activeDownload: DownloadRun? = null
+    private val checkGate = ApkCheckGate()
+    private val checkHttp = http.newBuilder().callTimeout(20, TimeUnit.SECONDS).build()
 
     private class DownloadRun {
         @Volatile
@@ -126,31 +128,42 @@ object ApkUpdateManager {
         if (initialized) return
         initialized = true
         appContext = context.applicationContext
-        if (!BuildConfig.APK_UPDATE_ENABLED) return
-        scope.launch {
-            runCatching { checkLatest(manual = false) }
-                .onFailure { OtvLog.w("apk update: 检查失败（静默跳过）: ${it.message}") }
-        }
+        // MainActivity foreground entry starts the check, including warm reopenings.
     }
 
-    /**
-     * 我的页「检查更新」：用户主动触发，结果写进 [checkState]；
-     * 与启动时的静默检查不同，这里忽略「稍后更新」记忆并回报失败原因。
-     */
+    /** User-triggered update check. It ignores a dismissed prompt and reports failures. */
     fun checkForUpdatesManually() {
-        if (!initialized || _checkState.value is ApkCheckState.Checking) return
+        startCheck(manual = true)
+    }
+
+    private fun startCheck(manual: Boolean) {
+        if (!initialized || !checkGate.tryStartCheck()) return
         _checkState.value = ApkCheckState.Checking
         scope.launch {
-            runCatching { checkLatest(manual = true) }
-                .onFailure {
-                    OtvLog.w("apk update: 手动检查失败: ${it.message}")
-                    _checkState.value = ApkCheckState.Failed(it.message ?: "检查失败，请稍后重试")
+            try {
+                OtvLog.i("apk update: 开始检查 source=${if (manual) "manual" else "foreground"}")
+                val attempts = if (manual) 1 else MAX_ATTEMPTS
+                for (attempt in 1..attempts) {
+                    try {
+                        checkLatest(manual)
+                        return@launch
+                    } catch (t: Exception) {
+                        if (t is CancellationException) throw t
+                        OtvLog.w("apk update: 检查失败 attempt=$attempt/$attempts: ${t.message}")
+                        if (attempt == attempts) {
+                            _checkState.value = ApkCheckState.Failed(t.message ?: "检查失败，请稍后重试")
+                        } else delay(attempt * 1000L)
+                    }
                 }
+            } finally {
+                checkGate.finishCheck()
+            }
         }
     }
 
     /** 从未知来源设置返回后自动继续；用户无需再次按一次更新。 */
     fun onForegroundChanged(isForeground: Boolean) {
+        val entered = checkGate.onForegroundChanged(isForeground)
         if (!isForeground || !initialized) return
         if (_state.value is ApkUpdateState.Installing) {
             _state.value = null
@@ -158,6 +171,11 @@ object ApkUpdateManager {
         }
         if (_state.value is ApkUpdateState.PermissionRequired && canInstallUnknownApps()) {
             acceptUpdate()
+            return
+        }
+        val isDownloading = synchronized(downloadLock) { activeDownload != null }
+        if (entered && !isDownloading && _state.value !is ApkUpdateState.PermissionRequired) {
+            startCheck(manual = false)
         }
     }
 
@@ -308,7 +326,7 @@ object ApkUpdateManager {
         }
         if (!opened) {
             _state.value = ApkUpdateState.Error(
-                "未能打开系统设置，请在系统设置中手动允许 My TV 安装未知应用后重试",
+                "未能打开系统设置，请在系统设置中手动允许 足球直播 安装未知应用后重试",
             )
         }
     }
@@ -322,12 +340,12 @@ object ApkUpdateManager {
 
     private suspend fun checkLatest(manual: Boolean) {
         if (!BuildConfig.APK_UPDATE_ENABLED) {
-            if (manual) _checkState.value = ApkCheckState.Failed("当前安装包未启用应用内更新")
+            _checkState.value = ApkCheckState.Failed("当前安装包未启用应用内更新")
             return
         }
         val endpoint = BuildConfig.APK_UPDATE_URL.trim()
         if (endpoint.isBlank()) {
-            if (manual) _checkState.value = ApkCheckState.Failed("未配置应用内更新地址")
+            _checkState.value = ApkCheckState.Failed("未配置应用内更新地址")
             return
         }
         val uri = Uri.parse(endpoint)
@@ -338,34 +356,26 @@ object ApkUpdateManager {
             .header("Accept", "application/json")
             .header("Cache-Control", "no-cache")
             .build()
-        http.newCall(request).execute().use { response ->
+        checkHttp.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw IllegalStateException("HTTP ${response.code}")
             val body = response.body?.string().orEmpty()
             val manifest = parseManifest(JSONObject(body))
             if (manifest.packageName != appContext.packageName) {
-                if (manual) _checkState.value = ApkCheckState.Failed("更新清单与当前安装包渠道不匹配")
+                _checkState.value = ApkCheckState.Failed("更新清单与当前安装包渠道不匹配")
                 return
             }
             val localVersion = appContext.packageManager
                 .getPackageInfo(appContext.packageName, 0).longVersionCode
             val decision = ApkUpdatePolicy.decide(localVersion, manifest)
+            OtvLog.i("apk update: 检查完成 local=$localVersion remote=${manifest.versionCode} decision=$decision")
+            _checkState.value = if (decision == ApkUpdateDecision.NONE) {
+                ApkCheckState.UpToDate(installedVersionName(), localVersion)
+            } else ApkCheckState.UpdateFound(manifest.versionName, manifest.versionCode)
             if (!ApkUpdatePolicy.shouldPrompt(decision, isDismissed(manifest.versionCode), manual)) {
-                if (manual && decision == ApkUpdateDecision.NONE) {
-                    _checkState.value = ApkCheckState.UpToDate(
-                        localVersionName = installedVersionName(),
-                        localVersionCode = localVersion,
-                    )
-                }
                 return
             }
-            verifiedApk = null
+            if (_offer.value?.manifest?.apk?.sha256 != manifest.apk.sha256) verifiedApk = null
             _offer.value = ApkUpdateOffer(manifest, decision)
-            if (manual) {
-                _checkState.value = ApkCheckState.UpdateFound(
-                    versionName = manifest.versionName,
-                    versionCode = manifest.versionCode,
-                )
-            }
         }
     }
 

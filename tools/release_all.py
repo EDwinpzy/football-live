@@ -24,9 +24,6 @@ def script_path(root, *parts):
 def required_scripts(root=ROOT):
     """发布器会用到的仓库内脚本；缺任何一个都要在启动前说清楚。"""
     return [
-        script_path(root, "build_douban_snapshot.py"),
-        script_path(root, "probe_douban_filter_matrix.py"),
-        script_path(root, "build_catalog_seed.py"),
         script_path(root, "build_web_assets.py"),
         script_path(root, "build_backend_zip.py"),
     ]
@@ -88,6 +85,7 @@ def selfhosted_deploy_command(root=ROOT):
         "up",
         "-d",
         "--build",
+        "--remove-orphans",
     ]
 
 
@@ -95,7 +93,7 @@ def selfhosted_nginx_reload_command(root=ROOT):
     """nginx.conf 是 bind mount，改它不会让 nginx 进程重读配置。
 
     与 schema-migrations 同源的问题：容器一直活着，配置已经变了但旧配置
-    仍在生效。实际踩过一次 —— /admin/ 路由已写进 nginx.conf，线上却仍然
+    仍在生效。实际踩过一次 —— 路由配置与运行中入口不一致，线上仍然
     404，因为 nginx 从 2026-09-23 起就没 reload 过。
     """
     return selfhosted_compose_base(root) + [
@@ -117,15 +115,6 @@ def main():
     require_files(required_scripts(ROOT), "发布器")
     if args.deploy:
         require_files(required_deploy_files(ROOT), "自建部署入口")
-
-    # Refresh source data when possible; a transient upstream failure preserves the
-    # checked-in snapshot and does not block a local build.
-    if not run([PY, os.path.join(ROOT, "tools", "build_douban_snapshot.py")], ROOT):
-        print("[WARN] 豆瓣快照未刷新，沿用现有 douban_snapshot.json 继续构建")
-    if not run([PY, os.path.join(ROOT, "tools", "probe_douban_filter_matrix.py")], ROOT):
-        print("[WARN] 筛选能力矩阵未刷新，沿用现有 douban_filter_matrix.json 继续构建")
-    if not run([PY, os.path.join(ROOT, "tools", "build_catalog_seed.py")], ROOT):
-        raise SystemExit("build_catalog_seed 失败（首装离线目录种子会缺失或过期）")
 
     # The Web task owns this static asset builder and its no-argument interface.
     if not run([PY, os.path.join(ROOT, "tools", "build_web_assets.py")], ROOT):

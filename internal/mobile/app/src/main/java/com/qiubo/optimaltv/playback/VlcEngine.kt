@@ -49,9 +49,6 @@ class VlcEngine(context: Context) : MediaEngine {
     private val _ui = MutableStateFlow(EngineUiState())
     override val uiState: StateFlow<EngineUiState> = _ui.asStateFlow()
 
-    /** v1.17 IPTV 大缓冲档：network-caching 1.5s → 6s（远端源抖动平滑） */
-    @Volatile private var largeBuffer = false
-
     // VLC player/libVLC 所有 JNI 操作都在 vlcOps 串行执行；volatile 只用于轻量的存活检查。
     @Volatile private var libvlc: LibVLC? = null
     @Volatile private var player: MediaPlayer? = null
@@ -131,44 +128,11 @@ class VlcEngine(context: Context) : MediaEngine {
         }
     }
 
-    override fun setLargeBufferPreferred(on: Boolean) {
-        if (released.get()) return
-        if (largeBuffer == on) return
-        largeBuffer = on
-        // LibVLC 参数在实例创建时固定：已建实例则标记重建（下次 prepare 生效）
-        if (libvlc != null) {
-            enqueueVlcOp {
-                val oldVout = activeVout
-                val oldCallback = surfaceCallback
-                if (oldVout != null && oldCallback != null) {
-                    runCatching { oldVout.removeCallback(oldCallback) }
-                }
-                activeVout = null
-                surfaceCallback = null
-                voutAttached = false
-                clearVoutWindowSize()
-                val oldPlayer = player
-                player = null
-                oldPlayer?.let { p ->
-                    runCatching { p.setEventListener(null) }
-                    runCatching { p.stop() }
-                    runCatching { p.detachViews() }
-                    runCatching { p.release() }
-                }
-                val oldLibVlc = libvlc
-                libvlc = null
-                runCatching { oldLibVlc?.release() }
-            }
-        }
-    }
-
     private fun ensureLibVlc(): LibVLC {
         libvlc?.let { return it }
         val options = arrayListOf(
-            // 直播链路（经 127.0.0.1:8090 中继）抖动大：加大网络缓存换稳定；
-            // v1.17 IPTV 远端源用 6s 大缓存档；
-            // v1.22 足球直播兜底档 1500ms→3000ms：上游 CDN 瞬时抖动直接穿透 1.5s 缓存
-            "--network-caching=${if (largeBuffer) 6000 else 3000}",
+            // Football stream relay jitter is smoothed by a three second network cache.
+            "--network-caching=3000",
             // 关掉 VLC 的 mediacodec/iomx 硬解尝试：MuMu 等环境下这些 codec 就是故障源
             "--no-mediacodec-dr",
             "--no-omxil",
@@ -302,10 +266,6 @@ class VlcEngine(context: Context) : MediaEngine {
                 p.stop()
                 p.media = buildMedia(VlcRelaySession.playbackUrl(request.url))
                 attachVout(p)
-                // v1.19 断点续播修复：旧版丢弃 request.startMs——Media3 引擎有 seekTo(startMs)
-                // 而 VLC 没有，切 VLC 后点播续播/卡顿原位恢复全部从 0 重播。
-                // play() 前 setTime 在起播前定位（等效 Media3 的 seekTo(startPos)）
-                if (request.startMs > 0) p.time = request.startMs
                 if (released.get()) return@enqueueVlcOp
                 p.play()
             } catch (failure: Throwable) {
@@ -330,13 +290,13 @@ class VlcEngine(context: Context) : MediaEngine {
         // VLC 无真正热切换：换源=重开（冻结约 1s，仅直播续签换签名时发生）。
         // autoplay=false 的暂停静默续签不会走到本引擎（PlayerViewModel 已拦：VLC 重开必播）
         OtvLog.i("vlc 换源（重开, autoplay=$autoplay）: ${url.take(100)}")
-        prepare(PrepareRequest(url, 0L))
+        prepare(PrepareRequest(url))
     }
 
     override fun seekToLiveEdge() {
         // 直播卡顿追边：VLC 对 HLS 直播重开即从直播边缘起播
         OtvLog.w("vlc 追直播边缘（重开当前源）")
-        currentUrl?.let { prepare(PrepareRequest(it, 0L)) }
+        currentUrl?.let { prepare(PrepareRequest(it)) }
     }
 
     override fun setSoftwareDecoderPreferred(on: Boolean) {
@@ -358,10 +318,6 @@ class VlcEngine(context: Context) : MediaEngine {
             runCatching { p.pause() }
             _ui.value = _ui.value.copy(isPlaying = false)
         }
-    }
-
-    override fun seekTo(ms: Long) {
-        enqueueVlcOp { runCatching { player?.setTime(ms.coerceAtLeast(0)) } }
     }
 
     override fun setSpeed(v: Float) {

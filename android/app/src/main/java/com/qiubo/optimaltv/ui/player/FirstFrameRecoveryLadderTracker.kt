@@ -3,7 +3,7 @@ package com.qiubo.optimaltv.ui.player
 /**
  * 首帧恢复阶梯的「代次」跟踪器（2026-09-28）。
  *
- * 修的是这样一个真实故障：`armVodFirstFrameLadder` 用 `viewModelScope.launch` 起协程却
+ * 修的是这样一个真实故障：首帧恢复阶梯用 `viewModelScope.launch` 起协程却
  * **没有持有 Job**，于是换线时旧阶梯协程不会被取消，仍然按自己的计时继续跑。它会在
  * 新线路刚起播的 500ms 采样里判定「已等 7s」→ 立刻把新线路切走，用户看到的就是
  * 「刚切成功就被切走、反复横跳」。而新线路自己又起了一条阶梯，多个阶梯互相踩。

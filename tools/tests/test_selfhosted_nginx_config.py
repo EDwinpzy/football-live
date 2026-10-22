@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "deploy" / "selfhosted"
 
 
-class SelfHostedIngressConfigTests(unittest.TestCase):
+class FootballLiveIngressConfigTests(unittest.TestCase):
     def require(self, needle: str, content: str, label: str) -> None:
         self.assertIn(needle, content, f"missing ingress contract: {label}")
 
@@ -14,7 +14,7 @@ class SelfHostedIngressConfigTests(unittest.TestCase):
         compose = (DEPLOY / "compose.yaml").read_text(encoding="utf-8")
         nginx = (DEPLOY / "nginx.conf").read_text(encoding="utf-8")
         for value, label in (
-            ("${TLS_HOST_PORT:-8443}:8443", "NAT HTTPS target"),
+            ("${TLS_HOST_PORT:-8443}:8443", "TLS host port"),
             ("/run/secrets/server.crt:ro", "read-only server certificate"),
             ("/run/secrets/server.key:ro", "read-only server key"),
         ):
@@ -27,82 +27,71 @@ class SelfHostedIngressConfigTests(unittest.TestCase):
         ):
             self.require(value, nginx, label)
 
-    def test_my_tv_routes_reach_the_right_private_services(self):
+    def test_only_live_web_health_and_update_routes_are_public(self):
         nginx = (DEPLOY / "nginx.conf").read_text(encoding="utf-8")
-        expected = (
-            ("location = /activate", "proxy_pass http://business-api:8082/activate;"),
-            ("location = /hotupdate", "proxy_pass http://business-api:8082/hotupdate;"),
-            ("location ^~ /hotupdate/", "proxy_pass http://business-api:8082;"),
-            ("location ^~ /iptv/", "proxy_pass http://business-api:8082;"),
-            ("location ^~ /v1/storages/object/", "proxy_pass http://storage:8092;"),
-            ("location = /web", "return 308 /web/;"),
-            ("location ^~ /web/", "proxy_pass http://web-api:8090/;"),
-            ("location /", "proxy_pass http://admin:8791;"),
-        )
-        for location, target in expected:
-            with self.subTest(location=location):
-                self.require(location, nginx, location)
-                self.require(target, nginx, target)
-
-    def test_admin_root_and_prefixed_routes_preserve_static_and_api_paths(self):
-        nginx = (DEPLOY / "nginx.conf").read_text(encoding="utf-8")
-        server = (ROOT / "tools" / "admin_server.py").read_text(encoding="utf-8")
-        html = (ROOT / "tools" / "admin.html").read_text(encoding="utf-8")
-
-        # Root requests keep their paths; the alias strips /admin/ so the same
-        # server handlers serve /admin/ static assets and /admin/api/* requests.
         for value, label in (
-            ("location = /admin", "prefix base redirect"),
-            ("return 308 /admin/;", "trailing slash redirect for relative assets"),
-            ("location ^~ /admin/", "admin subpath alias"),
-            ("proxy_pass http://admin:8791/;", "strip /admin/ before proxying"),
-            ("location /", "existing root route"),
-            ("proxy_pass http://admin:8791;", "preserve root request paths"),
+            ("location = /health", "health endpoint"),
+            ("location = /hotupdate", "runtime update check"),
+            ("proxy_pass http://business-api:8082/hotupdate;", "runtime update API"),
+            ("location ^~ /hotupdate/", "runtime update reports"),
+            ("location ^~ /v1/storages/object/", "update object storage"),
+            ("location = /web", "web root redirect"),
+            ("location ^~ /web/", "football live web app"),
+            ("location / {\n        return 404;", "unknown routes rejected"),
         ):
             self.require(value, nginx, label)
-        for value, label in (
-            ('API_BASE="/"', "root API prefix"),
-            ('API_BASE="/admin/"', "prefixed API prefix"),
-            ('href="logo.png"', "relative static asset URL"),
-            ('const API_BASE = (location.pathname.endsWith("/") ? location.pathname', "path-derived API base"),
-        ):
-            self.require(value, html, label)
-        self.require('if self.path in ("/favicon.ico", "/logo.png"):', server, "root and alias static assets")
-        self.require('if self.path == "/api/whoami":', server, "root and alias session API")
-        self.require('if path == "/api/login":', server, "root and alias login API")
-        self.require('fetch(API_BASE + "api/whoami"', html, "prefix-aware API request")
+        for removed_route in ("/activate", "/iptv/", "/metadata/", "/admin/"):
+            self.assertNotIn(removed_route, nginx)
 
-    def test_web_proxy_uses_the_self_hosted_business_and_file_services(self):
+    def test_runtime_services_contain_only_football_and_update_dependencies(self):
         compose = (DEPLOY / "compose.yaml").read_text(encoding="utf-8")
-        compose_config = yaml.safe_load(compose)
-        web_api_environment = compose_config["services"]["web-api"]["environment"]
+        config = yaml.safe_load(compose)
+        services = config["services"]
+        self.assertNotIn("admin", services)
+        self.assertFalse(any(name.startswith("metadata-") for name in services))
+        web_env = services["web-api"]["environment"]
+        self.assertEqual(
+            web_env["OTV_APK_UPDATE_OBJECT_BASE"],
+            "http://storage:8092/v1/storages/object/hotupdate",
+        )
+        self.assertEqual(web_env["OTV_CLOUD_RELAY"], "0")
+        for key in web_env:
+            self.assertFalse(
+                any(part in key for part in ("VOD", "IPTV", "LICENSE", "METADATA")),
+                f"obsolete runtime setting remains: {key}",
+            )
         dockerfile = (DEPLOY / "Dockerfile.web").read_text(encoding="utf-8")
-        for value, label in (
-            ("web-api:", "web API service"),
-            ("dockerfile: deploy/selfhosted/Dockerfile.web", "web API image"),
-            ("OTV_LICENSE_ENDPOINT: http://business-api:8082/activate", "local activation API"),
-            ("OTV_APK_UPDATE_OBJECT_BASE: http://storage:8092/v1/storages/object/hotupdate", "local file storage"),
-            ("OTV_IPTV_LATEST_URL: http://business-api:8082/iptv/latest", "local IPTV API"),
-            ("OTV_METADATA_API_URL: http://metadata-api:8094", "private metadata API"),
-            ("OTV_VOD_SOURCE_CONFIG_URL: http://business-api:8082/internal/vod-sources", "private published VOD configuration"),
-        ):
-            self.require(value, compose, label)
-        self.assertEqual(web_api_environment["OTV_CLOUD_RELAY"], "0")
-        self.assertEqual(web_api_environment["OTV_VOD_CLOUD_FALLBACK"], "0")
-        self.require("python:3.12-slim", dockerfile, "Python 3.12 runtime")
-        self.require("COPY tools/backend-src/vendor/ /app/vendor/", dockerfile, "vendored QuickJS runtime")
-        # The static tree is content-addressed and built inside the image by the
-        # web-assets stage, so no prebuilt dist/ directory is required in the
-        # build context or on the host.
+        for module in ("proxy.py", "vlc_hls.py", "team_backdrop.py"):
+            self.require(module, dockerfile, f"football runtime module {module}")
+        self.assertNotIn("quickjs", dockerfile.lower())
+        self.assertNotIn("decrypt_stream.js", dockerfile)
+        self.assertNotIn("vendor/", dockerfile)
         self.require("RUN python /build/build_web_assets.py /build/www /build/web-dist",
                      dockerfile, "content-addressed web assets built in-image")
         self.require("COPY --from=web-assets /build/web-dist/ /app/www/",
                      dockerfile, "generated assets copied into the runtime image")
-        self.require("cp /app/vendor/_quickjs.cpython-311-x86_64-linux-gnu.so /app/vendor/_quickjs.so", dockerfile,
-                     "QuickJS extension loader name")
         proxy = (ROOT / "tools" / "backend-src" / "proxy.py").read_text(encoding="utf-8")
-        self.require("OTV_IPTV_LATEST_URL", proxy, "self-hosted IPTV endpoint override")
-        self.require('host == "business-api"', proxy, "private Compose IPTV source allowlist")
+        for setting in ("OTV_IPTV_LATEST_URL", "OTV_LICENSE_ENDPOINT", "OTV_METADATA_API_URL"):
+            self.assertNotIn(setting, proxy)
+
+    def test_database_api_grants_only_football_hotupdate_rpcs(self):
+        repair = (ROOT / "tools" / "selfhosted" / "rpc_grants_repair.sql").read_text(encoding="utf-8")
+        for statement in (
+            "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC, anon, authenticated;",
+            "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC, anon, authenticated;",
+            "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, anon, authenticated;",
+            "GRANT EXECUTE ON FUNCTION public.hotupdate_check(integer, integer) TO anon, authenticated;",
+            "GRANT EXECUTE ON FUNCTION public.hotupdate_report(text, integer, integer, integer, text, text)",
+        ):
+            self.require(statement, repair, statement)
+        for removed_rpc in ("activate_code", "admin_", "announcement_", "iptv_", "vod_source"):
+            self.assertNotIn(removed_rpc, repair)
+        migration_runner = (ROOT / "tools" / "selfhosted" / "apply_schema_migrations.sh").read_text(encoding="utf-8")
+        self.assertNotIn("LICENSE_IMPORTER_PASSWORD_FILE", migration_runner)
+        self.assertNotIn("license_importer_smoke.psql", migration_runner)
+        retired_role = (ROOT / "tools" / "selfhosted" / "license_importer_role.sql").read_text(encoding="utf-8")
+        self.require("NOLOGIN", retired_role, "retired importer account disabled")
+        self.assertNotIn("GRANT ", retired_role)
 
     def test_tv_and_mobile_apps_trust_the_same_private_ca(self):
         tv_ca = ROOT / "android" / "app" / "src" / "main" / "res" / "raw" / "mytv_migration_ca.pem"

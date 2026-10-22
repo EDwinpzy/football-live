@@ -10,15 +10,15 @@ MOBILE_CONFIG = ROOT / "internal" / "mobile" / "app"
 
 
 class EndpointMigrationContractTests(unittest.TestCase):
-    def test_both_apks_accept_one_https_origin_for_backend_endpoints(self):
+    def test_both_apks_keep_only_football_and_update_endpoints(self):
         for module in (APP_CONFIG, MOBILE_CONFIG):
             with self.subTest(module=module):
                 gradle = (module / "build.gradle").read_text(encoding="utf-8")
                 self.assertIn("apiBaseUrl", gradle)
-                self.assertIn("LICENSE_ENDPOINT", gradle)
                 self.assertIn("HOTUPDATE_ENDPOINT", gradle)
-                self.assertIn("IPTV_LATEST_URL", gradle)
                 self.assertIn("APK_UPDATE_URL", gradle)
+                self.assertNotIn("LICENSE_ENDPOINT", gradle)
+                self.assertNotIn("IPTV_LATEST_URL", gradle)
 
     def test_release_defaults_require_the_vps_opt_in_and_do_not_regress_migration_version(self):
         for module in (APP_CONFIG, MOBILE_CONFIG):
@@ -90,17 +90,6 @@ class EndpointMigrationContractTests(unittest.TestCase):
                     [item.attrib.get("src")
                      for item in release_hosts[0].findall("trust-anchors/certificates")],
                 )
-
-    def test_both_iptv_latest_sources_use_the_configured_backend_origin(self):
-        for module in (APP_CONFIG, MOBILE_CONFIG):
-            with self.subTest(module=module):
-                repository = (
-                    module / "src" / "main" / "java" / "com" / "qiubo" / "optimaltv"
-                    / "data" / "repo" / "IptvRepository.kt"
-                ).read_text(encoding="utf-8")
-                self.assertIn("BuildConfig.IPTV_LATEST_URL", repository)
-                self.assertNotIn("tcloudbase.com", repository)
-
 
 if __name__ == "__main__":
     unittest.main()

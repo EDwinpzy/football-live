@@ -85,8 +85,11 @@ object OtvLog {
     fun e(msg: String) = log(Log.ERROR, msg)
 
     private fun log(priority: Int, msg: String) {
-        // logcat 仍是同步（FD 写便宜且排查主通道）；文件侧只入队
-        Log.println(priority, TAG, msg)
+        // logcat 仍是同步（FD 写便宜且排查主通道）；文件侧只入队。
+        // 纯 JVM 单测（无 Robolectric / android.jar stub）里 android.util.Log 会抛
+        // "not mocked"——埋点 Session.emit 走的就是这里，测试直接 RuntimeException。
+        // 日志永不影响业务，所以此处兜住：单测要断言的是 emit 的口径，不是 logcat 输出。
+        runCatching { Log.println(priority, TAG, msg) }
         if (started) {
             val line = "${ts.get()!!.format(Date())} ${priorityChar(priority)}/$TAG: $msg"
             if (queue.size < 8_192) queue.add(line)   // 防异常风暴撑爆内存
@@ -94,6 +97,8 @@ object OtvLog {
     }
 
     private fun priorityChar(p: Int) = when (p) {
-        Log.INFO -> 'I'; Log.WARN -> 'W'; Log.ERROR -> 'E'; else -> 'D'
+        // 用字面量而非 Log.* 常量：这些是 android.util.Log 的 int 常量，纯 JVM 单测里
+        // 读它们同样会触发 stub 类的 "not mocked"（常量不会被 inline）。
+        4 -> 'I'; 5 -> 'W'; 6 -> 'E'; else -> 'D'
     }
 }

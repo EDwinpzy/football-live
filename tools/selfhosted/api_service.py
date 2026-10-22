@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""My TV public API adapter for the self-hosted PostgreSQL and object store."""
+"""Public football-client health and hot-update API."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -23,26 +23,25 @@ CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
 }
-RPC_ALLOWLIST = frozenset({
-    "activate_code",
-    "announcement_latest",
-    "hotupdate_check",
-    "hotupdate_report",
-    "vod_source_public_check",
-})
+RPC_ALLOWLIST = frozenset({"hotupdate_check", "hotupdate_report"})
 MAX_BODY_BYTES = 64 * 1024
-ANNOUNCE_CACHE_SECONDS = 300
 CHECK_CACHE_SECONDS = 120
-VOD_SOURCE_CACHE_SECONDS = 120
-WEB_VOD_SOURCE_CACHE_SECONDS = 30
 
 
 def _json_response(data: object, *, cache_control: str = "no-store") -> tuple[int, object, dict[str, str]]:
-    return 200, data, {"Content-Type": "application/json; charset=utf-8", "Cache-Control": cache_control, **CORS_HEADERS}
+    return 200, data, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": cache_control,
+        **CORS_HEADERS,
+    }
 
 
 def _not_found() -> tuple[int, object, dict[str, str]]:
-    return _json_response({"ret": 404, "msg": "not_found"})
+    return 404, {"ret": 404, "msg": "not_found"}, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+        **CORS_HEADERS,
+    }
 
 
 def _js_string(value: object) -> str:
@@ -78,7 +77,7 @@ def _to_int(value: object, default: int | None) -> int | None:
 
 
 class PostgrestRpcClient:
-    """Call only the public My TV RPCs over the private Compose network."""
+    """Call only the hot-update RPCs over the private Compose network."""
 
     def __init__(self, rpc_base_url: str, *, timeout: float = 10.0):
         parsed = urlsplit(rpc_base_url)
@@ -116,7 +115,7 @@ class PostgrestRpcClient:
 
 
 class BusinessApi:
-    """Dispatch the existing public activation, hot-update, and IPTV protocols."""
+    """Expose only football-client health and hot-update protocols."""
 
     def __init__(
         self,
@@ -125,15 +124,11 @@ class BusinessApi:
         object_root: str | Path = "/srv/objects",
         public_base_url: str = "",
         hotupdate_off: bool = False,
-        refresh_token: str = "",
-        refresh: Callable[[], object] | None = None,
     ):
         self.rpc = rpc
         self.object_root = Path(object_root).resolve()
         self.public_base_url = self._validate_public_base(public_base_url)
         self.hotupdate_off = bool(hotupdate_off)
-        self.refresh_token = refresh_token
-        self.refresh = refresh
         self._cache: dict[tuple[object, ...], tuple[float, object]] = {}
         self._cache_lock = threading.Lock()
 
@@ -151,11 +146,11 @@ class BusinessApi:
             raise ValueError("public API origin must not contain a path")
         return value
 
-    def _cached_rpc(self, key: tuple[object, ...], ttl: int, name: str, payload: Mapping[str, object]) -> object:
+    def _cached_rpc(self, key: tuple[object, ...], name: str, payload: Mapping[str, object]) -> object:
         now = time.monotonic()
         with self._cache_lock:
             cached = self._cache.get(key)
-            if cached and now - cached[0] < ttl:
+            if cached and now - cached[0] < CHECK_CACHE_SECONDS:
                 return copy.deepcopy(cached[1])
         result = self.rpc(name, payload)
         with self._cache_lock:
@@ -178,21 +173,6 @@ class BusinessApi:
         path.relative_to(self.object_root)
         return path
 
-    def _iptv_file(self, key: str, content_type: str) -> tuple[int, object, dict[str, str]]:
-        try:
-            payload = self._object_path(key).read_bytes()
-        except FileNotFoundError:
-            return _json_response({"ret": 404, "msg": "not_built_yet"})
-        except (OSError, ValueError):
-            return _json_response({"ret": 502, "msg": "upstream_error"})
-        headers = {"Content-Type": content_type, "Cache-Control": "no-store", **CORS_HEADERS}
-        if key.endswith(".json"):
-            try:
-                return 200, json.loads(payload.decode("utf-8")), headers
-            except (UnicodeError, json.JSONDecodeError):
-                return _json_response({"ret": 502, "msg": "upstream_error"})
-        return 200, payload, headers
-
     def handle(
         self,
         method: str,
@@ -200,151 +180,71 @@ class BusinessApi:
         body: Mapping[str, object] | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> tuple[int, object, dict[str, str]]:
+        del headers  # Forwarding headers are not used by the retained public protocols.
         method = method.upper()
-        parsed_path = urlsplit(path)
-        path = parsed_path.path
-        query = parse_qs(parsed_path.query, keep_blank_values=True)
-        request_headers = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
+        path = urlsplit(path).path
         if method == "OPTIONS":
             return 204, b"", dict(CORS_HEADERS)
+        if path in ("/health", "/healthz"):
+            return _json_response({"status": "ok"}) if method == "GET" else _not_found()
 
-        # Private Compose-only endpoint consumed by the migrated web proxy.
-        # Nginx deliberately does not expose this path publicly.
-        if path == "/internal/vod-sources":
-            if method != "GET":
-                return _not_found()
+        if path not in ("/hotupdate/check", "/check", "/hotupdate/report", "/report") or method != "POST":
+            return _not_found()
+        if body is None or not isinstance(body, Mapping):
+            return _json_response({"ret": 400, "msg": "bad_json"})
+        device_id = self._device_id(body)
+        if device_id is None:
+            return _json_response({"ret": 400, "msg": "bad_device"})
+
+        if path in ("/hotupdate/check", "/check"):
+            apk_version = _to_int(body.get("apkVersion"), 0)
+            if apk_version <= 0:
+                return _json_response({"ret": 400, "msg": "bad_apk"})
+            if self.hotupdate_off:
+                return _json_response({"ret": 0, "hasUpdate": False, "blackout": True})
+            hot_version = _to_int(body.get("hotVersion"), 0)
             try:
-                result = self._cached_rpc(
-                    ("web-vod-sources",),
-                    WEB_VOD_SOURCE_CACHE_SECONDS,
-                    "vod_source_public_check",
-                    {"p_version": 0},
-                )
-                return _json_response(result, cache_control="private, max-age=30")
+                out = copy.deepcopy(self._cached_rpc(
+                    ("check", hot_version, apk_version),
+                    "hotupdate_check",
+                    {"p_hot_version": hot_version, "p_apk_version": apk_version},
+                ))
+                if isinstance(out, dict) and out.get("hasUpdate") and isinstance(out.get("pkg"), dict):
+                    key = out["pkg"].get("objectKey")
+                    if isinstance(key, str) and key:
+                        self._object_path(key)
+                        if self.public_base_url:
+                            out["pkg"]["url"] = (
+                                f"{self.public_base_url}/v1/storages/object/hotupdate/"
+                                f"{quote(key, safe='/')}"
+                            )
+                return _json_response(out)
             except Exception:
                 return _json_response({"ret": 502, "msg": "upstream_error"})
 
-        if path in ("/", "/activate"):
-            if method != "POST":
-                return _not_found()
-            if body is None or not isinstance(body, Mapping):
-                return _json_response({"ret": 400, "msg": "bad_json"})
-            protocol = _to_int(body.get("protocol") or 0, 0)
-            action = _js_string(body.get("action", "")).strip().lower()
-            code = _js_string(body.get("code", "")).strip().upper()
-            current_code = _js_string(body.get("currentCode", "")).strip().upper()
-            device_id = _js_string(body.get("deviceId", "")).strip().lower()
-            if protocol != 2:
-                return _json_response({"ret": 426, "msg": "upgrade_required"})
-            if action not in ("activate", "verify", "renew", "restore"):
-                return _json_response({"ret": 400, "msg": "bad_action"})
-            code_pattern = r"OTV-[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}"
-            if action != "restore" and not re.fullmatch(code_pattern, code):
-                return _json_response({"ret": 400, "msg": "bad_code"})
-            if not re.fullmatch(r"[a-f0-9]{64}", device_id):
-                return _json_response({"ret": 400, "msg": "bad_device"})
-            if action == "renew" and (not re.fullmatch(code_pattern, current_code) or current_code == code):
-                return _json_response({"ret": 400, "msg": "bad_current_code"})
-            forwarded_for = request_headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
-            payload = {
-                "p_protocol": protocol,
-                "p_action": action,
-                "p_code": None if action == "restore" else code,
-                "p_device": device_id,
-                "p_current_code": current_code if action == "renew" else None,
-                "p_ip": forwarded_for or None,
-            }
-            try:
-                data = self.rpc("activate_code", payload)
-                if not isinstance(data, dict) or not isinstance(data.get("ret"), (int, float)):
-                    data = {"ret": 500, "msg": "upstream_error"}
-                return _json_response(data)
-            except Exception:
-                return _json_response({"ret": 502, "msg": "upstream_error"})
-
-        if path in ("/hotupdate/announce", "/announce") and method == "GET":
-            try:
-                out = self._cached_rpc(("announcement_latest",), ANNOUNCE_CACHE_SECONDS, "announcement_latest", {})
-                result = {"ret": 0, **out} if isinstance(out, dict) else {"ret": 0}
-                return _json_response(result, cache_control="public, max-age=60, stale-while-revalidate=300")
-            except Exception:
-                return _json_response({"ret": 502, "msg": "upstream_error"})
-
-        if path.startswith("/hotupdate/") or path in ("/check", "/report", "/vod-sources/check"):
-            if method != "POST":
-                return _json_response({"ret": 404, "msg": "not_found"})
-            if body is None or not isinstance(body, Mapping):
-                return _json_response({"ret": 400, "msg": "bad_json"})
-            device_id = self._device_id(body)
-            if device_id is None:
-                return _json_response({"ret": 400, "msg": "bad_device"})
-            local_path = path.removeprefix("/hotupdate") or "/"
-            try:
-                if local_path == "/vod-sources/check":
-                    version = _to_int(body.get("version"), 0)
-                    return _json_response(self._cached_rpc(("vod", version), VOD_SOURCE_CACHE_SECONDS,
-                                                            "vod_source_public_check", {"p_version": version}))
-                if local_path in ("/", "/check"):
-                    apk_version = _to_int(body.get("apkVersion"), 0)
-                    if apk_version <= 0:
-                        return _json_response({"ret": 400, "msg": "bad_apk"})
-                    if self.hotupdate_off:
-                        return _json_response({"ret": 0, "hasUpdate": False, "blackout": True})
-                    hot_version = _to_int(body.get("hotVersion"), 0)
-                    out = copy.deepcopy(self._cached_rpc(
-                        ("check", hot_version, apk_version), CHECK_CACHE_SECONDS, "hotupdate_check",
-                        {"p_hot_version": hot_version, "p_apk_version": apk_version},
-                    ))
-                    if isinstance(out, dict) and out.get("hasUpdate") and isinstance(out.get("pkg"), dict):
-                        key = out["pkg"].get("objectKey")
-                        if isinstance(key, str) and key:
-                            self._object_path(key)
-                            if self.public_base_url:
-                                out["pkg"]["url"] = f"{self.public_base_url}/v1/storages/object/hotupdate/{quote(key, safe='/')}"
-                    return _json_response(out)
-                if local_path == "/report":
-                    payload = {
-                        "p_device": device_id,
-                        "p_apk_version": _to_int(body.get("apkVersion"), None),
-                        "p_from_version": _to_int(body.get("fromVersion"), None),
-                        "p_to_version": _to_int(body.get("toVersion"), None),
-                        "p_result": _js_string(body.get("result", ""))[:32],
-                        "p_detail": _js_string(body.get("detail", ""))[:500],
-                    }
-                    return _json_response(self.rpc("hotupdate_report", payload))
-                return _json_response({"ret": 404, "msg": "not_found"})
-            except Exception:
-                return _json_response({"ret": 502, "msg": "upstream_error"})
-
-        if path in ("/iptv/latest", "/latest") and method == "GET":
-            return self._iptv_file("iptv/iptv-latest.m3u", "audio/x-mpegurl; charset=utf-8")
-        if path in ("/iptv/status", "/status") and method == "GET":
-            return self._iptv_file("iptv/version.json", "application/json; charset=utf-8")
-        if path in ("/iptv/refresh", "/refresh") and method == "POST":
-            supplied = request_headers.get("x-otv-token", "")
-            if not supplied:
-                supplied = (query.get("token") or [""])[0]
-            if not self.refresh_token or supplied != self.refresh_token:
-                return 403, {"ret": 403, "msg": "forbidden"}, {"Content-Type": "application/json; charset=utf-8", **CORS_HEADERS}
-            if not self.refresh:
-                return 503, {"ret": 1, "msg": "scheduler_unavailable"}, {"Content-Type": "application/json; charset=utf-8", **CORS_HEADERS}
-            try:
-                return _json_response(self.refresh())
-            except Exception:
-                return _json_response({"ret": 502, "msg": "upstream_error"})
-        return 404, {"error": "not_found"}, {"Content-Type": "application/json; charset=utf-8", **CORS_HEADERS}
+        payload = {
+            "p_device": device_id,
+            "p_apk_version": _to_int(body.get("apkVersion"), None),
+            "p_from_version": _to_int(body.get("fromVersion"), None),
+            "p_to_version": _to_int(body.get("toVersion"), None),
+            "p_result": _js_string(body.get("result", ""))[:32],
+            "p_detail": _js_string(body.get("detail", ""))[:500],
+        }
+        try:
+            return _json_response(self.rpc("hotupdate_report", payload))
+        except Exception:
+            return _json_response({"ret": 502, "msg": "upstream_error"})
 
 
 def create_server(api: BusinessApi, host: str = "0.0.0.0", port: int = 8082) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "MyTVBusinessApi/1.0"
+        server_version = "FootballLiveBusinessApi/1.0"
 
         def _dispatch(self) -> None:
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 if length < 0 or length > MAX_BODY_BYTES:
-                    result = _json_response({"ret": 413, "msg": "body_too_large"})
-                    self._write(*result)
+                    self._write(*_json_response({"ret": 413, "msg": "body_too_large"}))
                     return
                 raw = self.rfile.read(length) if length else b""
                 body = json.loads(raw.decode("utf-8")) if raw else {}
@@ -396,8 +296,7 @@ def main() -> int:
     )
     host = os.environ.get("OTV_API_BIND", "0.0.0.0")
     port = int(os.environ.get("OTV_API_PORT", "8082"))
-    server = create_server(api, host, port)
-    server.serve_forever()
+    create_server(api, host, port).serve_forever()
     return 0
 
 

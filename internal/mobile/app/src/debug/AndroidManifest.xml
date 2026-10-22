@@ -1,14 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 仅 debug 构建追加：调试广播接收器 + 移动组件测试 harness。 -->
+<!-- Debug-only mobile UI test harness. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
-        <receiver
-            android:name=".DebugQueryReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.qiubo.optimaltv.DEBUG_QUERY" />
-            </intent-filter>
-        </receiver>
         <activity
             android:name="com.qiubo.optimaltv.mobileui.MobileUiHarnessActivity"
             android:exported="true" />

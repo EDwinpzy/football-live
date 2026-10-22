@@ -1,7 +1,7 @@
 {
-  "name": "My TV",
-  "short_name": "My TV",
-  "description": "My TV 网页版 — 影视点播 · 电视直播",
+  "name": "足球直播",
+  "short_name": "足球直播",
+  "description": "足球赛事赛程与多线路直播",
   "start_url": ".",
   "display": "standalone",
   "orientation": "any",

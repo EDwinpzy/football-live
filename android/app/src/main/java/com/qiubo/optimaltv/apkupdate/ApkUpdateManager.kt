@@ -14,18 +14,20 @@ import com.qiubo.optimaltv.OtvLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -64,9 +66,7 @@ sealed interface ApkCheckState {
 data class ApkUpdateOffer(
     val manifest: ApkUpdateManifest,
     val decision: ApkUpdateDecision,
-) {
-    val required: Boolean get() = decision == ApkUpdateDecision.REQUIRED
-}
+)
 
 /**
  * APK 应用内更新：检查清单、下载校验 APK，并调起 Android 系统安装器。
@@ -98,12 +98,18 @@ object ApkUpdateManager {
     private lateinit var appContext: Context
     private var initialized = false
     private val downloadLock = Any()
-    private var downloadRunning = false
-    private var downloadCancelRequested = false
-    private var activeDownloadCall: Call? = null
-    private var downloadCancelSignal: CompletableDeferred<Unit>? = null
+    private var activeDownload: DownloadRun? = null
     private val checkGate = ApkCheckGate()
     private val checkHttp = http.newBuilder().callTimeout(20, TimeUnit.SECONDS).build()
+
+    private class DownloadRun {
+        @Volatile
+        var cancelled = false
+        var activeCall: Call? = null
+        var job: Job? = null
+        var retryQueued = false
+        val finished = CompletableDeferred<Unit>()
+    }
 
     private val _offer = MutableStateFlow<ApkUpdateOffer?>(null)
     val offer: StateFlow<ApkUpdateOffer?> = _offer.asStateFlow()
@@ -125,10 +131,7 @@ object ApkUpdateManager {
         // MainActivity foreground entry starts the check, including warm reopenings.
     }
 
-    /**
-     * 我的页「检查更新」：用户主动触发，结果写进 [checkState]；
-     * 与启动时的静默检查不同，这里忽略「稍后更新」记忆并回报失败原因。
-     */
+    /** User-triggered update check. It ignores a dismissed prompt and reports failures. */
     fun checkForUpdatesManually() {
         startCheck(manual = true)
     }
@@ -145,13 +148,16 @@ object ApkUpdateManager {
                         checkLatest(manual)
                         return@launch
                     } catch (t: Exception) {
+                        if (t is CancellationException) throw t
                         OtvLog.w("apk update: 检查失败 attempt=$attempt/$attempts: ${t.message}")
                         if (attempt == attempts) {
                             _checkState.value = ApkCheckState.Failed(t.message ?: "检查失败，请稍后重试")
                         } else delay(attempt * 1000L)
                     }
                 }
-            } finally { checkGate.finishCheck() }
+            } finally {
+                checkGate.finishCheck()
+            }
         }
     }
 
@@ -167,8 +173,10 @@ object ApkUpdateManager {
             acceptUpdate()
             return
         }
-        val isDownloading = synchronized(downloadLock) { downloadRunning }
-        if (entered && !isDownloading && _state.value !is ApkUpdateState.PermissionRequired) startCheck(manual = false)
+        val isDownloading = synchronized(downloadLock) { activeDownload != null }
+        if (entered && !isDownloading && _state.value !is ApkUpdateState.PermissionRequired) {
+            startCheck(manual = false)
+        }
     }
 
     fun declineUpdate() {
@@ -179,83 +187,115 @@ object ApkUpdateManager {
             .apply()
         _offer.value = null
         _state.value = null
-        synchronized(downloadLock) { verifiedApk = null }
+        verifiedApk = null
     }
 
     fun acceptUpdate() {
-        val cancellationSignal = CompletableDeferred<Unit>()
-        val current = synchronized(downloadLock) {
-            val currentOffer = _offer.value ?: return
-            if (downloadRunning) return
-            downloadRunning = true
-            downloadCancelRequested = false
-            activeDownloadCall = null
-            downloadCancelSignal = cancellationSignal
-            _state.value = ApkUpdateState.Downloading(0f, 0L, currentOffer.manifest.apk.sizeBytes)
-            currentOffer
-        }
-        scope.launch {
-            var cancelled = false
-            try {
-                ensureDownloadNotCancelled()
-                // 部分投影仪/TV 定制 ROM 没有「安装未知应用」开关页（canRequestPackageInstalls
-                // 恒为 false），安装前预检只会把用户卡死甚至因跳设置页闪退；因此先下载，
-                // 直接把安装请求交给系统，真正调不起安装器时再降级到权限提示。
-                val expected = current.manifest.apk.sizeBytes
-                val cachedApk = synchronized(downloadLock) {
-                    ensureDownloadNotCancelledLocked()
-                    verifiedApk?.takeIf { it.exists() && (expected <= 0 || it.length() == expected) }
-                }
-                val apk = cachedApk ?: downloadAndVerify(current.manifest)
-                synchronized(downloadLock) {
-                    ensureDownloadNotCancelledLocked()
-                    verifiedApk = apk
-                }
-                withContext(Dispatchers.Main) {
-                    // Serialize the final cancellation check, Installing state, and installer
-                    // launch. A cancel accepted while Downloading can therefore never race
-                    // through and open the system installer afterward.
-                    synchronized(downloadLock) {
-                        ensureDownloadNotCancelledLocked()
-                        _state.value = ApkUpdateState.Installing
-                        launchInstaller(apk)
+        val current = _offer.value ?: return
+        val run = synchronized(downloadLock) {
+            val previous = activeDownload
+            if (previous != null) {
+                if (previous.cancelled && !previous.retryQueued) {
+                    // Let the cancelled run close its stream and remove its files before
+                    // retrying into the same paths. This also makes an immediate retry work.
+                    previous.retryQueued = true
+                    scope.launch {
+                        previous.finished.await()
+                        if (_offer.value == current && _state.value == null) acceptUpdate()
                     }
                 }
-            } catch (t: Throwable) {
-                cancelled = t is CancellationException || isDownloadCancellationRequested()
-                if (cancelled) {
-                    OtvLog.i("apk update: 用户取消下载")
-                } else {
-                    OtvLog.w("apk update: 下载或校验失败: ${t.message}")
-                    _state.value = ApkUpdateState.Error(t.message ?: "更新失败，请稍后重试")
-                }
-            } finally {
-                if (cancelled) cleanupCancelledArtifacts(current.manifest)
-                synchronized(downloadLock) {
-                    if (cancelled) _state.value = null
-                    activeDownloadCall = null
-                    if (downloadCancelSignal === cancellationSignal) downloadCancelSignal = null
-                    downloadCancelRequested = false
-                    downloadRunning = false
-                }
+                return
+            }
+            DownloadRun().also {
+                activeDownload = it
+                _state.value = ApkUpdateState.Downloading(0f, 0L, current.manifest.apk.sizeBytes)
             }
         }
+        val job = scope.launch(start = CoroutineStart.LAZY) { runUpdate(current, run) }
+        synchronized(downloadLock) {
+            if (activeDownload === run) run.job = job
+        }
+        job.start()
     }
 
-    /** 下载阶段可取消；进入 Android 系统安装器后不再提供应用内取消。 */
+    /** Stop the active APK download and return to the version offer without reporting an error. */
     fun cancelUpdate() {
-        val (call, cancellationSignal) = synchronized(downloadLock) {
-            if (!downloadRunning || _state.value !is ApkUpdateState.Downloading) return
-            downloadCancelRequested = true
-            activeDownloadCall to downloadCancelSignal
+        val (call, job) = synchronized(downloadLock) {
+            val run = activeDownload ?: return
+            if (run.cancelled || _state.value !is ApkUpdateState.Downloading) return
+            run.cancelled = true
+            _state.value = null
+            run.activeCall to run.job
         }
         call?.cancel()
-        cancellationSignal?.complete(Unit)
+        job?.cancel(CancellationException("APK update cancelled"))
     }
 
     fun retryUpdate() {
-        _state.value = null
         acceptUpdate()
+    }
+
+    private suspend fun runUpdate(offer: ApkUpdateOffer, run: DownloadRun) {
+        try {
+            // Some TV ROMs have no usable "install unknown apps" settings page. Download
+            // first, then give Android's installer the APK as before.
+            ensureNotCancelled(run)
+            val expected = offer.manifest.apk.sizeBytes
+            val apk = verifiedApk?.takeIf { it.exists() && (expected <= 0 || it.length() == expected) }
+                ?: downloadAndVerify(offer.manifest, run).also { verifiedApk = it }
+            ensureNotCancelled(run)
+            val canHandOff = synchronized(downloadLock) {
+                if (activeDownload !== run || run.cancelled) {
+                    false
+                } else {
+                    _state.value = ApkUpdateState.Installing
+                    true
+                }
+            }
+            if (!canHandOff) throw CancellationException("APK update cancelled")
+            withContext(Dispatchers.Main) { launchInstaller(apk) }
+        } catch (t: Throwable) {
+            if (run.cancelled || t is CancellationException) {
+                cleanupCancelledDownload(offer.manifest)
+                synchronized(downloadLock) {
+                    if (activeDownload === run) _state.value = null
+                }
+            } else {
+                OtvLog.w("apk update: 下载或校验失败: ${t.message}")
+                synchronized(downloadLock) {
+                    if (activeDownload === run && !run.cancelled) {
+                        _state.value = ApkUpdateState.Error(t.message ?: "更新失败，请稍后重试")
+                        activeDownload = null
+                    }
+                }
+            }
+        } finally {
+            synchronized(downloadLock) {
+                if (activeDownload === run) activeDownload = null
+            }
+            run.finished.complete(Unit)
+        }
+    }
+
+    private fun cleanupCancelledDownload(manifest: ApkUpdateManifest) {
+        val dir = File(appContext.filesDir, "update")
+        val safeName = manifest.apk.fileName.substringAfterLast('/').ifBlank { "update.apk" }
+        File(dir, "$safeName.part").delete()
+        File(dir, safeName).delete()
+        verifiedApk = null
+    }
+
+    private fun ensureNotCancelled(run: DownloadRun) {
+        if (run.cancelled) throw CancellationException("APK update cancelled")
+    }
+
+    private fun publishProgress(run: DownloadRun, state: ApkUpdateState.Downloading) {
+        synchronized(downloadLock) {
+            if (activeDownload !== run || run.cancelled) {
+                throw CancellationException("APK update cancelled")
+            }
+            _state.value = state
+        }
     }
 
     fun openUnknownAppSettings() {
@@ -286,7 +326,7 @@ object ApkUpdateManager {
         }
         if (!opened) {
             _state.value = ApkUpdateState.Error(
-                "未能打开系统设置，请在系统设置中手动允许 My TV 安装未知应用后重试",
+                "未能打开系统设置，请在系统设置中手动允许 足球直播 安装未知应用后重试",
             )
         }
     }
@@ -379,39 +419,37 @@ object ApkUpdateManager {
             ),
         ).also {
             require(it.versionCode > 0) { "APK versionCode 无效" }
-            require(it.versionCode >= it.minSupportedVersionCode) { "最低支持版本不能高于发布版本" }
             require(it.packageName.isNotBlank()) { "packageName 为空" }
         }
     }
 
-    private suspend fun downloadAndVerify(manifest: ApkUpdateManifest): File {
+    private suspend fun downloadAndVerify(manifest: ApkUpdateManifest, run: DownloadRun): File {
+        ensureNotCancelled(run)
         val dir = File(appContext.filesDir, "update").apply { mkdirs() }
         val safeName = manifest.apk.fileName.substringAfterLast('/').ifBlank { "update.apk" }
         val part = File(dir, "$safeName.part")
         val target = File(dir, safeName)
-        ensureDownloadNotCancelled()
         ensureFreeSpace(dir, manifest)
         if (part.exists()) part.delete()
         if (target.exists()) target.delete()
         var lastError: Throwable? = null
-        for (attempt in 1..MAX_ATTEMPTS) {
-            ensureDownloadNotCancelled()
+        for (attempt in 0 until MAX_ATTEMPTS) {
+            ensureNotCancelled(run)
             try {
-                downloadOnce(manifest.apk, part, attempt)
-                ensureDownloadNotCancelled()
-                verifySha256(part, manifest)
-                ensureDownloadNotCancelled()
+                downloadOnce(manifest.apk, part, attempt + 1, run)
+                ensureNotCancelled(run)
+                verifySha256(part, manifest, run)
+                ensureNotCancelled(run)
                 if (target.exists()) target.delete()
                 check(part.renameTo(target)) { "无法保存更新文件" }
-                ensureDownloadNotCancelled()
                 validatePackage(target, manifest)
-                ensureDownloadNotCancelled()
+                ensureNotCancelled(run)
                 return target
             } catch (t: Throwable) {
-                if (t is CancellationException || isDownloadCancellationRequested()) {
+                if (run.cancelled || t is CancellationException) {
                     part.delete()
                     target.delete()
-                    throw if (t is CancellationException) t else CancellationException("APK 更新已取消")
+                    throw CancellationException("APK update cancelled")
                 }
                 lastError = t
                 part.delete()
@@ -419,7 +457,10 @@ object ApkUpdateManager {
                     target.delete()
                     throw t
                 }
-                if (attempt < MAX_ATTEMPTS) waitBeforeRetry(attempt * 1500L)
+                if (attempt + 1 < MAX_ATTEMPTS) {
+                    ensureNotCancelled(run)
+                    delay((attempt + 1) * 1500L)
+                }
             }
         }
         throw lastError ?: IllegalStateException("下载失败")
@@ -435,7 +476,30 @@ object ApkUpdateManager {
         }
     }
 
-    private fun downloadOnce(artifact: ApkArtifact, part: File, attempt: Int) {
+    /** Keep the call cancellable through response-body consumption, not only until headers arrive. */
+    private fun <T> withDownloadCall(
+        run: DownloadRun,
+        request: Request,
+        block: (Response) -> T,
+    ): T {
+        val call = http.newCall(request)
+        synchronized(downloadLock) {
+            if (activeDownload !== run || run.cancelled) {
+                throw CancellationException("APK update cancelled")
+            }
+            run.activeCall = call
+        }
+        return try {
+            ensureNotCancelled(run)
+            call.execute().use(block)
+        } finally {
+            synchronized(downloadLock) {
+                if (run.activeCall === call) run.activeCall = null
+            }
+        }
+    }
+
+    private fun downloadOnce(artifact: ApkArtifact, part: File, attempt: Int, run: DownloadRun) {
         // 分片清单按顺序下载并连续写入同一个 .part 文件；单对象清单退化成一段（不校验段摘要）。
         val sources = artifact.parts.ifEmpty { listOf(ApkPart(artifact.url, artifact.sizeBytes, "")) }
         val total = if (artifact.sizeBytes > 0) artifact.sizeBytes else sources.sumOf { it.sizeBytes }
@@ -446,75 +510,68 @@ object ApkUpdateManager {
         var bytesPerSecond = 0L
         part.outputStream().use { output ->
             for ((index, source) in sources.withIndex()) {
-                ensureDownloadNotCancelled()
+                ensureNotCancelled(run)
                 val request = Request.Builder().url(source.url).build()
-                val call = http.newCall(request)
-                synchronized(downloadLock) {
-                    ensureDownloadNotCancelledLocked()
-                    activeDownloadCall = call
-                }
-                try {
-                    call.execute().use { response ->
-                        check(response.isSuccessful) { "第 ${index + 1}/${sources.size} 段 HTTP ${response.code}" }
-                        val body = requireNotNull(response.body) { "下载响应为空" }
-                        val digest = source.sha256.takeIf { it.isNotBlank() }
-                            ?.let { MessageDigest.getInstance("SHA-256") }
-                        var segment = 0L
-                        var lastEmit = 0L
-                        body.byteStream().use { input ->
-                            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                            while (true) {
-                                ensureDownloadNotCancelled()
-                                val count = input.read(buffer)
-                                if (count < 0) break
-                                ensureDownloadNotCancelled()
-                                output.write(buffer, 0, count)
-                                digest?.update(buffer, 0, count)
-                                segment += count
-                                done += count
-                                speedSampleBytes += count
+                withDownloadCall(run, request) { response ->
+                    check(response.isSuccessful) { "第 ${index + 1}/${sources.size} 段 HTTP ${response.code}" }
+                    val body = requireNotNull(response.body) { "下载响应为空" }
+                    val digest = source.sha256.takeIf { it.isNotBlank() }
+                        ?.let { MessageDigest.getInstance("SHA-256") }
+                    var segment = 0L
+                    var lastEmit = 0L
+                    body.byteStream().use { input ->
+                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                        while (true) {
+                            ensureNotCancelled(run)
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            output.write(buffer, 0, count)
+                            digest?.update(buffer, 0, count)
+                            segment += count
+                            done += count
+                            speedSampleBytes += count
 
-                                // 每收到 256 KiB 或每 500 ms 推一次进度：
-                                // 弱网下逐字节推送只会让 StateFlow 疯狂触发，
-                                // 而长间隔又会让界面看着像卡住。
-                                val now = System.nanoTime()
-                                val elapsedMs = (now - speedSampleStart) / 1_000_000
-                                if (done - lastEmit >= 256L * 1024L || elapsedMs >= 500L) {
-                                    if (elapsedMs > 0) {
-                                        bytesPerSecond = speedSampleBytes * 1000L / elapsedMs
-                                    }
-                                    lastEmit = done
-                                    _state.value = ApkUpdateState.Downloading(
+                            // 每收到 256 KiB 或每 500 ms 推一次进度：
+                            // 弱网下逐字节推送只会让 StateFlow 疯狂触发，
+                            // 而长间隔又会让界面看着像卡住。
+                            val now = System.nanoTime()
+                            val elapsedMs = (now - speedSampleStart) / 1_000_000
+                            if (done - lastEmit >= 256L * 1024L || elapsedMs >= 500L) {
+                                if (elapsedMs > 0) {
+                                    bytesPerSecond = speedSampleBytes * 1000L / elapsedMs
+                                }
+                                lastEmit = done
+                                publishProgress(
+                                    run,
+                                    ApkUpdateState.Downloading(
                                         progress = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f,
                                         downloadedBytes = done,
                                         totalBytes = total,
                                         attempt = attempt,
                                         bytesPerSecond = bytesPerSecond,
-                                    )
-                                }
+                                    ),
+                                )
                             }
                         }
-                        ensureDownloadNotCancelled()
-                        // 分片收尾立刻推一次，保证最后一段的进度不被节流吞掉。
-                        _state.value = ApkUpdateState.Downloading(
+                    }
+                    // 分片收尾立刻推一次，保证最后一段的进度不被节流吞掉。
+                    publishProgress(
+                        run,
+                        ApkUpdateState.Downloading(
                             progress = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f,
                             downloadedBytes = done,
                             totalBytes = total,
                             attempt = attempt,
                             bytesPerSecond = bytesPerSecond,
-                        )
-                        if (source.sizeBytes > 0) {
-                            check(segment == source.sizeBytes) { "第 ${index + 1} 段大小不匹配" }
-                        }
-                        if (digest != null) {
-                            check(digest.digest().toHex().equals(source.sha256, ignoreCase = true)) {
-                                "第 ${index + 1} 段 SHA-256 校验失败"
-                            }
-                        }
+                        ),
+                    )
+                    if (source.sizeBytes > 0) {
+                        check(segment == source.sizeBytes) { "第 ${index + 1} 段大小不匹配" }
                     }
-                } finally {
-                    synchronized(downloadLock) {
-                        if (activeDownloadCall === call) activeDownloadCall = null
+                    if (digest != null) {
+                        check(digest.digest().toHex().equals(source.sha256, ignoreCase = true)) {
+                            "第 ${index + 1} 段 SHA-256 校验失败"
+                        }
                     }
                 }
             }
@@ -546,12 +603,12 @@ object ApkUpdateManager {
     }
 
     /** 整包摘要校验：失败多半是传输损坏，仍交给下载重试兜底。 */
-    private fun verifySha256(file: File, manifest: ApkUpdateManifest) {
+    private fun verifySha256(file: File, manifest: ApkUpdateManifest, run: DownloadRun) {
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->
             val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
             while (true) {
-                ensureDownloadNotCancelled()
+                ensureNotCancelled(run)
                 val count = input.read(buffer)
                 if (count < 0) break
                 digest.update(buffer, 0, count)
@@ -559,37 +616,6 @@ object ApkUpdateManager {
         }
         val actualSha = digest.digest().toHex()
         check(actualSha.equals(manifest.apk.sha256, ignoreCase = true)) { "SHA-256 校验失败" }
-    }
-
-    private suspend fun waitBeforeRetry(delayMillis: Long) {
-        val cancellationSignal = synchronized(downloadLock) {
-            ensureDownloadNotCancelledLocked()
-            requireNotNull(downloadCancelSignal)
-        }
-        withTimeoutOrNull(delayMillis) { cancellationSignal.await() }
-        ensureDownloadNotCancelled()
-    }
-
-    private fun ensureDownloadNotCancelled() {
-        synchronized(downloadLock) { ensureDownloadNotCancelledLocked() }
-    }
-
-    private fun ensureDownloadNotCancelledLocked() {
-        if (downloadCancelRequested) throw CancellationException("APK 更新已取消")
-    }
-
-    private fun isDownloadCancellationRequested(): Boolean =
-        synchronized(downloadLock) { downloadCancelRequested }
-
-    private fun cleanupCancelledArtifacts(manifest: ApkUpdateManifest) {
-        val dir = File(appContext.filesDir, "update").absoluteFile
-        val safeName = manifest.apk.fileName.substringAfterLast('/').ifBlank { "update.apk" }
-        val files = synchronized(downloadLock) {
-            val cached = verifiedApk?.takeIf { it.absoluteFile.parentFile == dir }
-            verifiedApk = null
-            listOf(File(dir, "$safeName.part"), File(dir, safeName)) + listOfNotNull(cached)
-        }
-        files.distinct().forEach { file -> runCatching { file.delete() } }
     }
 
     /**

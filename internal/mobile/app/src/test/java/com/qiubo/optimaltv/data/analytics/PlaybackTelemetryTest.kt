@@ -2,97 +2,91 @@ package com.qiubo.optimaltv.data.analytics
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * 埋点隐私契约测试。
- *
- * 硬性红线：**播放 URL、Cookie、签名 token、Authorization 头一律不得进日志**。
- * 这组用例是那道红线的可执行版本——真出线上事故时，CI 会红。
- */
+/** Contracts for live playback telemetry and signed source URL privacy. */
 class PlaybackTelemetryTest {
 
     @Test
-    fun stripsPlaybackUrls() {
-        assertEquals("", PlaybackTelemetry.sanitize("http://cdn.example.com/live/a.m3u8?sign=abc"))
-        assertEquals("", PlaybackTelemetry.sanitize("https://x.y/z.m3u8"))
-        assertEquals("", PlaybackTelemetry.sanitize("//relay/api/relay?u=http://a/b"))
+    fun redactDropsSignedUrlQuery() {
+        val signedUrl = "https://cdn.example.com/live/match.m3u8?sign=secret&token=private"
+
+        assertEquals("https://cdn.example.com/live/match.m3u8", PlaybackTelemetry.redact(signedUrl))
+        assertEquals("-", PlaybackTelemetry.redact("  "))
     }
 
     @Test
-    fun stripsCredentialShapedValues() {
-        assertEquals("", PlaybackTelemetry.sanitize("Authorization: Bearer eyJhbGciOi"))
-        assertEquals("", PlaybackTelemetry.sanitize("Cookie: uid=123"))
-        assertEquals("", PlaybackTelemetry.sanitize("token=abcdef"))
-        assertEquals("", PlaybackTelemetry.sanitize("sign=deadbeef"))
-        assertEquals("", PlaybackTelemetry.sanitize("secret_key=zzz"))
-        assertEquals("", PlaybackTelemetry.sanitize("password=hunter2"))
+    fun sourceReferencesAreHashedBeforeRecording() = withSilentSink {
+        val signedUrl = "https://cdn.example.com/live/match.m3u8?sign=secret&token=private"
+        val session = PlaybackTelemetry.newSession("live:match-123")
+
+        session.mark(PlaybackTelemetry.Stage.RESOLVE_START, source="source:primary")
+        session.mark(PlaybackTelemetry.Stage.FIRST_FRAME, source=signedUrl)
+
+        val output = (session.recorded().map { it.format() } + session.summary(signedUrl).format()).joinToString("\n")
+        assertFalse(output.contains("cdn.example.com"))
+        assertFalse(output.contains("secret"))
+        assertFalse(output.contains("private"))
+        assertEquals(8, session.recorded().last().sourceHash.length)
     }
 
     @Test
-    fun keepsStableLineReferences() {
-        // 线路引用是站点稳定标识（sourceId:contentId:epIndex），不含签名，必须保留——
-        // 否则埋点就失去了「哪条源出的问题」这个唯一有用的维度。
-        assertEquals("hhkan", PlaybackTelemetry.sanitize("hhkan"))
-        assertEquals("vod-1292052", PlaybackTelemetry.sanitize("vod-1292052"))
-        assertEquals("media3", PlaybackTelemetry.sanitize("media3"))
+    fun sourceHashIsStableAndDistinguishesSources() {
+        val first = PlaybackTelemetry.urlHash("source:primary")
+
+        assertEquals(first, PlaybackTelemetry.urlHash("source:primary"))
+        assertNotEquals(first, PlaybackTelemetry.urlHash("source:backup"))
+        assertEquals(8, first.length)
+        assertFalse(first.contains("source"))
     }
 
     @Test
-    fun blankStaysBlank() {
-        assertEquals("", PlaybackTelemetry.sanitize(""))
-        assertEquals("", PlaybackTelemetry.sanitize("   "))
+    fun unmeasuredSessionStagesUseMinusOneUntilFirstFrame() = withSilentSink {
+        val session = PlaybackTelemetry.newSession("live:match-123")
+
+        assertEquals(-1L, session.summary().totalClickToFrameMs)
+        session.mark(PlaybackTelemetry.Stage.RESOLVE_START)
+        session.mark(PlaybackTelemetry.Stage.PLAYER_PREPARE)
+        assertEquals(-1L, session.summary().totalClickToFrameMs)
+
+        session.mark(PlaybackTelemetry.Stage.FIRST_FRAME)
+        assertTrue(session.summary().totalClickToFrameMs >= 0L)
     }
 
     @Test
-    fun trimsAndCapsLength() {
-        assertEquals("abc", PlaybackTelemetry.sanitize("  abc  "))
-        val long = "x".repeat(200)
-        assertEquals(64, PlaybackTelemetry.sanitize(long).length)
-    }
-
-    @Test
-    fun sessionEndToEndIsNullUntilFirstFrame() {
-        val session = PlaybackTelemetry.Session("douban:1291546")
-        // 未出画面不能报 0——0 会把均值污染成「秒开」。
-        assertNull(session.totalClickToFrameMs())
-        session.emit(PlaybackTelemetry.Phase.RESOLVE_START)
-        session.emit(PlaybackTelemetry.Phase.PLAYER_PREPARE)
-        assertNull(session.totalClickToFrameMs())
-        session.emit(PlaybackTelemetry.Phase.FIRST_FRAME)
-        assertTrue((session.totalClickToFrameMs() ?: -1L) >= 0L)
-    }
-
-    @Test
-    fun countersAccumulateAcrossCalls() {
-        val counter = PlaybackTelemetry.Counter()
-        assertEquals(0L, counter.get("k"))
-        counter.inc("k")
-        counter.inc("k", 4L)
-        assertEquals(5L, counter.get("k"))
-        assertEquals(0L, counter.get("other"))
-    }
-
-    @Test
-    fun everyPhaseHasAStableWireName() {
-        val names = PlaybackTelemetry.Phase.values().map { it.wire }
-        assertEquals(names.size, names.toSet().size)
-        // 契约里约定的 9 个事件必须齐全
-        for (expected in listOf(
-            "resolve_start", "resolve_first_source", "player_prepare", "first_frame",
-            "buffer_start", "buffer_end", "auto_switch", "engine_fallback", "fatal",
-        )) {
-            assertTrue("缺少埋点事件 $expected", expected in names)
+    fun sensitiveFieldNamesAreRecognized() {
+        listOf("play_url", "token", "Authorization", "cookie", "secret_key").forEach { key ->
+            assertTrue("expected $key to be treated as sensitive", PlaybackTelemetry.isForbiddenKey(key))
         }
+        assertFalse(PlaybackTelemetry.isForbiddenKey("sourceId"))
     }
 
     @Test
-    fun sanitizerIsTheLastLineOfDefenceForEveryField() {
-        // 模拟调用方把所有字段都塞进 URL 的最坏情况：全部应被抹成空串。
-        val nasty = "https://cdn.example.com/x.m3u8?sign=deadbeef&token=xyz"
-        assertEquals("", PlaybackTelemetry.sanitize(nasty))
-        assertFalse(PlaybackTelemetry.sanitize(nasty).contains("example.com"))
+    fun stagesHaveUniqueWireNames() {
+        val names = PlaybackTelemetry.Stage.values().map { it.wire }
+
+        assertEquals(names.size, names.toSet().size)
+        assertTrue("resolve_start" in names)
+        assertTrue("first_frame" in names)
+        assertTrue("engine_fallback" in names)
+    }
+
+    @Test
+    fun classifiesLivePlaybackFailuresForRecovery() {
+        assertEquals(PlaybackTelemetry.ErrorClass.NETWORK, PlaybackTelemetry.classify("connection timed out"))
+        assertEquals(PlaybackTelemetry.ErrorClass.DECODE, PlaybackTelemetry.classify("decoder failed"))
+        assertEquals(PlaybackTelemetry.ErrorClass.SERVER, PlaybackTelemetry.classify("HTTP 403 forbidden"))
+    }
+
+    private inline fun withSilentSink(block: () -> Unit) {
+        val previousSink = PlaybackTelemetry.sink
+        PlaybackTelemetry.sink = {}
+        try {
+            block()
+        } finally {
+            PlaybackTelemetry.sink = previousSink
+        }
     }
 }

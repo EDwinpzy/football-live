@@ -6,7 +6,7 @@ memory use. The published manifest retains the client-compatible structure.
 
 用法：
   python tools/publish_apk_update.py --channel tv \
-    --apk "apk/TV版/MyTV-TV版.apk" \
+    --apk "apk/TV版/FootballLive-TV版.apk" \
     --version-code 35 --version-name 1.33 \
     --cert 601F0D63...BA43 \
     --title "发现新版本" --note "..." --note "..." \

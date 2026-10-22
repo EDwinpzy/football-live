@@ -212,7 +212,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
     LaunchedEffect(refreshEpoch) {
         if (refreshEpoch > 0L) vm.refresh(silent = true)
     }
-    // 返回落焦（需求 影视#6-2）：从播放页返回时回到上次聚焦的比赛卡/hero 按钮
+    // 从播放页返回时回到上次聚焦的比赛卡或 hero 按钮。
     val returnKey = remember { ReturnFocus.take("live") }
     val tabFocus = remember { FocusRequester() }
     val cardReg = remember { FocusRegistry() }
@@ -269,7 +269,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                 return
             }
         }
-        nav.navigate("player/" + URLEncoder.encode("live:" + m.matchId, "UTF-8") + "/0")
+        nav.navigate("player/" + URLEncoder.encode(m.matchId, "UTF-8"))
     }
 
     var leagueFilter by rememberSaveable { mutableStateOf("all") }
@@ -277,7 +277,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
     val filterChipFocus = remember { FocusRequester() }
     // 筛选行聚焦状态（BACK 分层判定用）
     var filterChipsFocused by remember { mutableStateOf(false) }
-    // 2026-09-05（用户反馈，同影视页）：筛选行为内容顶行、页面滚到顶时 UP 直达顶部
+    // 2026-09-05：筛选行为内容顶行、页面滚到顶时 UP 直达顶部。
     // tab 栏——此前必经 hero「立即观看」中转；未到顶仍走引擎滚动找回（露出 hero）。
     // 判顶用 offset 容差（ensureVisible 会微滚 ~16px 致 canScrollBackward 误判），
     // 命中时顺手归零滚动。
@@ -332,7 +332,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                 Text("直播数据加载失败：${ui.error}", color = OtvColors.White60, fontSize = 26f.sxs(s))
             }
             else -> {
-                // 返回落焦（需求 影视#6-2）：数据就绪后找回上次聚焦的比赛卡；找不回则落 tab
+                // 数据就绪后找回上次聚焦的比赛卡；找不回则落到标签栏。
                 LaunchedEffect(ui.matches) {
                     val key = returnKey ?: return@LaunchedEffect
                     if (restoredFocus || ui.matches.isEmpty()) return@LaunchedEffect
@@ -482,7 +482,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
         // TabBar 悬浮在最顶层
         MainTabBar(
             "live", { key -> com.qiubo.optimaltv.ui.components.navigateToTab(nav, key) },
-            { nav.navigate("search") }, tabFocus,
+            tabFocus,
             contentDownFocus = heroBtnFocus,
             contentDownScrollTop = { listState.scrollToItem(0) },
             onTabFocused = { tabFocused = it },
@@ -534,7 +534,7 @@ private fun LeagueFilterBar(
                             onChipsFocused?.invoke(it)
                         },
                         // 2026-09-05：页面滚到顶时 UP 直达 tab 栏（不拦截时引擎会先命中
-                        // hero「立即观看」——与影视页同款 gateway 问题）
+                        // hero「立即观看」处理同一 gateway 问题。
                         navOverride = { dir ->
                             if (dir == NAV_UP) (upToTab?.invoke() ?: false) else false
                         },
@@ -821,7 +821,7 @@ fun matchLeagueFilter(m: MatchItem, key: String): Boolean = when (key) {
     else -> m.league.contains(key)
 }
 
-/** 直播赛程列表只显示未开赛或进行中的赛事；完场赛事留给战报页。 */
+/** 直播列表仅显示未开赛或正在进行的赛事。 */
 fun visibleLiveScheduleMatches(matches: List<MatchItem>, leagueFilter: String = "all"): List<MatchItem> =
     matches.filter { !it.isFinished && matchLeagueFilter(it, leagueFilter) }
 

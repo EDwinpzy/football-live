@@ -218,7 +218,7 @@ class RelayStreamChunkedTest(unittest.TestCase):
         """Range/206 语义不变：透传段长 Content-Length，不走 chunked。"""
         up = _FakeUpstream(100_000, "plain-full")
         up.start()
-        url = "http://127.0.0.1:%d/vod/film.mp4?tx=5" % up.port
+        url = "http://127.0.0.1:%d/live/stream.mp4?tx=5" % up.port
         conn, resp = self._fetch(
             "/api/relay?u=" + urllib.parse.quote(url, safe=""),
             headers={"Range": "bytes=0-999"},
@@ -266,7 +266,7 @@ class RelayStreamChunkedTest(unittest.TestCase):
         # 普通 CL 上游 → 透传 CL（点播链路行为与旧版一致）
         up1 = _FakeUpstream(64_000, "plain-full")
         up1.start()
-        url1 = "http://127.0.0.1:%d/vod/film.mp4?tx=8" % up1.port
+        url1 = "http://127.0.0.1:%d/live/stream.mp4?tx=8" % up1.port
         status1, _c1, extra1, it1, _m1 = proxy.relay_stream(url1)
         self.assertEqual(status1, 200)
         self.assertNotIn("Transfer-Encoding", extra1)

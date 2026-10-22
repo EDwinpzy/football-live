@@ -16,10 +16,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 # 纯字面量路径常量，不含外部输入；resolve 后断言仍在工程目录内
-_PROJECT = Path(r"D:\MyProjects\My TV").resolve()
+_PROJECT = Path(__file__).resolve().parents[1]
 ICONS = _PROJECT / "android" / "app" / "src" / "main" / "assets" / "team_icons.json"
-assert str(ICONS).startswith(str(_PROJECT)), "ICONS 必须位于工程目录内"
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) OptimalTV/1.0"
+assert ICONS.is_relative_to(_PROJECT), "ICONS 必须位于工程目录内"
+UA = "Mozilla/5.0 (compatible; FootballLive/1.0)"
 
 # SSRF 防护：仅允许这两个固定域名（TDB API + 其 CDN 队标）
 ALLOWED_HOSTS = {"www.thesportsdb.com", "r2.thesportsdb.com"}

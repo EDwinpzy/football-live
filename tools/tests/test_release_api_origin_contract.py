@@ -438,9 +438,7 @@ def test_debug_network_security_config_still_trusts_migration_ca(name, module):
 def test_release_config_keeps_endpoint_derivation(name, module):
     """入口只解析一次，各 BuildConfig endpoint 仍由它派生。"""
     source = module.joinpath("build.gradle").read_text(encoding="utf-8")
-    endpoints = [("LICENSE_ENDPOINT", "/activate"),
-                 ("HOTUPDATE_ENDPOINT", "/hotupdate"),
-                 ("IPTV_LATEST_URL", "/iptv/latest")]
+    endpoints = [("HOTUPDATE_ENDPOINT", "/hotupdate")]
     for field, suffix in endpoints:
         pattern = ("buildConfigField 'String', '%s', "
                    r"'\"' \+ apiBaseUrl \+ '%s\"'" % (field, suffix))

@@ -14,7 +14,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import com.qiubo.optimaltv.data.model.LineInfo
+import com.qiubo.optimaltv.data.model.LiveSourceLine
 import com.qiubo.optimaltv.ui.player.LiveSourcePicker
 import com.qiubo.optimaltv.ui.player.PlayerUiState
 import org.junit.Assert.assertEquals
@@ -41,8 +41,8 @@ class PlayerLiveFailureControlsTest {
             // Deliberately false: a fatal live state must keep the source controls visible.
             srcPickerVisible = false,
             lines = listOf(
-                LineInfo("live:match", "线路 A2", "https://example.invalid/a2"),
-                LineInfo("live:match", "线路 Q3", "https://example.invalid/q3"),
+                LiveSourceLine("线路 A2", "https://example.invalid/a2"),
+                LiveSourceLine("线路 Q3", "https://example.invalid/q3"),
             ),
         )
         MobileUiHarness.scene = {

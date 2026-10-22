@@ -9,10 +9,9 @@ plugins {
 }
 
 // 构建缓存移到项目根目录，源码与构建产物分开。
-// 注意：目录必须与 TV 工程（build/optimal-tv）分开——两工程同名
-// rootProject（optimal-tv），共用目录会在并行构建时互相清空对方的中间产物
+// 注意：目录必须与 TV 工程（build/football-live）分开，两工程共用目录会互相清空中间产物。
 // （2026-09-02 实测：双工程同时 assembleRelease → R 资源假性 Unresolved / KSP 缓存损坏）
 allprojects {
     // 目录同样必须跟随当前 checkout，否则 worktree 构建会污染主工作树
-    buildDir = new File(rootDir, "build/optimal-tv-mobile/${project.name}")
+    buildDir = new File(rootDir, "build/football-live-mobile/${project.name}")
 }

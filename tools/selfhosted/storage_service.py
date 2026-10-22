@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Private file API for the self-hosted My TV object store."""
+"""Private file API for the FootballLive update object store."""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def make_server(
     port: int,
     root: str | Path,
     allowed_buckets: Collection[str],
-    admin_subjects: Collection[str],
+    writer_subjects: Collection[str],
     jwt_secret: bytes,
     *,
     max_upload_bytes: int = MAX_UPLOAD_BYTES,
@@ -85,12 +85,12 @@ def make_server(
         raise ValueError("JWT signing key must contain at least 32 bytes")
     if not allowed_buckets or any(not re.fullmatch(r"[a-z0-9_-]{1,63}", b) for b in allowed_buckets):
         raise ValueError("invalid bucket allowlist")
-    admins = frozenset(str(subject) for subject in admin_subjects)
-    if not admins or max_upload_bytes <= 0:
+    writers = frozenset(str(subject) for subject in writer_subjects)
+    if not writers or max_upload_bytes <= 0:
         raise ValueError("invalid storage service authorization configuration")
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "MyTVStorage/1.0"
+        server_version = "FootballLiveStorage/1.0"
 
         def _send_json(self, status: int, payload: dict[str, object]) -> None:
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -117,7 +117,7 @@ def make_server(
             if scheme.lower() != "bearer" or not token:
                 return False
             claims = decode_access_token(token, jwt_secret)
-            return bool(claims and claims.get("sub") in admins)
+            return bool(claims and claims.get("sub") in writers)
 
         def do_GET(self) -> None:
             self._serve_object(head_only=False)
@@ -238,10 +238,14 @@ def main() -> None:
     port = int(os.environ.get("OTV_STORAGE_PORT", "8092"))
     root = os.environ.get("OTV_STORAGE_ROOT", "/srv/objects")
     secret_file = Path(os.environ.get("OTV_JWT_SECRET_FILE", "/run/secrets/jwt-signing-key"))
-    admin_subjects = [item.strip() for item in os.environ.get("OTV_STORAGE_ADMIN_SUBJECTS", "").split(",") if item.strip()]
+    subjects_value = os.environ.get(
+        "OTV_STORAGE_WRITER_SUBJECTS",
+        os.environ.get("OTV_STORAGE_ADMIN_SUBJECTS", ""),
+    )
+    writer_subjects = [item.strip() for item in subjects_value.split(",") if item.strip()]
     allowed_buckets = [item.strip() for item in os.environ.get("OTV_STORAGE_BUCKETS", "hotupdate").split(",") if item.strip()]
     secret = secret_file.read_bytes().strip()
-    server = make_server(host, port, root, allowed_buckets, admin_subjects, secret)
+    server = make_server(host, port, root, allowed_buckets, writer_subjects, secret)
     server.serve_forever()
 
 

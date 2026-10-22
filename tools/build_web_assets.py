@@ -1,4 +1,4 @@
-"""Build a deterministic, content-addressed bundle for the My TV Web client."""
+"""Build a deterministic, content-addressed bundle for the FootballLive Web client."""
 from __future__ import annotations
 
 import argparse

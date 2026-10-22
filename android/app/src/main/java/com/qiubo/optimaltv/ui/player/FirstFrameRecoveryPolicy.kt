@@ -1,11 +1,6 @@
 package com.qiubo.optimaltv.ui.player
 
-/**
- * 点播首帧等待策略。
- *
- * 等待和引擎恢复始终保留用户选择的线路。Media3 最多在同一线路上回退到 VLC；
- * 普通点播没有起播截止时间，实际播放错误由同线路持续重试处理。
- */
+/** Football live first-frame wait and engine fallback policy. */
 object FirstFrameRecoveryPolicy {
 
     const val NORMAL_MS = 3_000L
@@ -45,14 +40,6 @@ object FirstFrameRecoveryPolicy {
         onMedia3 && !vlcAlreadyTried -> Action.ENGINE_FALLBACK
         else -> Action.WAIT
     }
-
-    /** VOD replays also stay on the selected source and wait without a deadline. */
-    fun footballAction(
-        elapsedMs: Long,
-        hasBackup: Boolean,
-        onMedia3: Boolean,
-        vlcAlreadyTried: Boolean,
-    ): Action = action(elapsedMs, hasBackup, onMedia3, vlcAlreadyTried)
 
     /**
      * 快速起播判定：若已有可用线路引用（resolver preferred / last_good / 已解析首选），

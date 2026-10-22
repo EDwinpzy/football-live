@@ -325,8 +325,7 @@ VALUES ('pg_cu_optimization_migration.sql', :'pg_cu_optimization_sha256');
 COMMIT;
 \endif
 
--- Reconcile the importer role every deployment so password rotation and grant
--- drift are repaired before PostgREST or the admin API can start.
+-- Disable the retired license-import role on every deployment.
 BEGIN;
 \ir license_importer_role.sql
 INSERT INTO public.schema_migrations (version, sql_sha256)
@@ -342,5 +341,3 @@ COMMIT;
 -- already-migrated database whose original migration file was applied before
 -- the GRANT statements existed.
 \ir rpc_grants_repair.sql
-
-\ir license_importer_smoke.psql

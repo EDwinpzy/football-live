@@ -2,7 +2,7 @@
 
 这些测试不跑 PyInstaller。bundle 模式用真实的 tools/backend-src 源码跑一遍
 build_backend_zip()，锁定：
-  1. zip 内含全部后端必需文件（含延迟 import 的 decrypt_python.py）与完整 www；
+  1. zip 内含全部足球直播后端必需文件与完整 www；
   2. 不含 tests / 缓存 / Linux .so / 密钥；
   3. hls.js@1.5.13 落到 zip 内并在 index.html 改写为相对引用；
   4. logo.png 转换出多尺寸 .ico；
@@ -50,10 +50,12 @@ class BackendZipContractTest(unittest.TestCase):
         for name in build.BACKEND_FILES:
             self.assertIn(name, self.names, f"backend.zip 缺少 {name}")
 
-    def test_contains_quickjs_fallback_used_by_windows(self):
-        # Windows 没有 node，proxy.decrypt_page() 落 quickjs 兜底 → 必须能 import。
-        self.assertIn("decrypt_python.py", self.names)
-        self.assertIn("decrypt_stream.js", self.names)
+    def test_excludes_nonfootball_runtime_modules(self):
+        runtime_modules = {
+            name for name in self.names
+            if "/" not in name and name.lower().endswith((".py", ".json", ".js"))
+        }
+        self.assertEqual(runtime_modules, {"proxy.py", "vlc_hls.py", "team_backdrop.py"})
 
     def test_contains_whole_web_client(self):
         for name in ("www/index.html", "www/app.js", "www/style.css",
@@ -91,7 +93,7 @@ class BackendZipContractTest(unittest.TestCase):
             self.assertFalse(name.endswith((".so", ".pyd", ".pem", ".key")), name)
         # 运行期缓存永不进包
         self.assertNotIn("team_icon_cache.json", self.names)
-        # Linux quickjs wheel 不能进 Windows 包（Windows 用 pip quickjs 装进 exe）。
+        # Runtime dependencies are imported from Python source; no vendored platform wheel is needed.
         self.assertFalse(any(name.startswith("vendor/") for name in self.names))
 
     def test_zip_entries_are_deterministic(self):
@@ -149,7 +151,7 @@ class HlsFetchContractTest(unittest.TestCase):
 class IconContractTest(unittest.TestCase):
     def test_logo_becomes_a_multi_size_ico(self):
         with TemporaryDirectory() as tmp:
-            ico = build.write_icon(Path(tmp) / "mytv.ico",
+            ico = build.write_icon(Path(tmp) / "FootballLive.ico",
                                    ROOT / "tools" / "backend-src" / "www" / "assets" / "logo.png")
             data = ico.read_bytes()
             self.assertEqual(data[:4], b"\x00\x00\x01\x00")
@@ -167,7 +169,7 @@ class PyInstallerCommandContractTest(unittest.TestCase):
             (bundle / "mytv_migration_ca.pem").write_text("-----BEGIN CERTIFICATE-----\n")
             launcher = DESKTOP_DIR / "launcher.py"
             launcher.touch()
-            ico = build.write_icon(tmp_path / "mytv.ico",
+            ico = build.write_icon(tmp_path / "FootballLive.ico",
                                    ROOT / "tools" / "backend-src" / "www" / "assets" / "logo.png")
             argv = build.pyinstaller_argv(
                 launcher=launcher, dist_dir=tmp_path / "dist",
@@ -185,21 +187,22 @@ class PyInstallerCommandContractTest(unittest.TestCase):
                         options[token].append(value)
             self.assertIn("--onefile", argv)
             self.assertIn("--windowed", argv)
-            self.assertEqual(options["--name"], ["MyTV"])
+            self.assertEqual(options["--name"], ["FootballLive"])
             self.assertNotIn("--collect-all", options)
             self.assertIn("webview.platforms.qt", options["--exclude-module"])
             self.assertIn("webview.platforms.gtk", options["--exclude-module"])
             hidden = options["--hidden-import"]
-            for module in ("quickjs", "webview.platforms.edgechromium",
-                           "sqlite3", "urllib.request", "html"):
+            for module in ("webview.platforms.edgechromium",
+                           "urllib.request", "html"):
                 self.assertIn(module, hidden)
+            self.assertNotIn("quickjs", hidden)
             self.assertNotIn("proxy", hidden)
             self.assertEqual(len(options["--icon"]), 1)
             self.assertEqual(sorted(part.split(";")[-1] for part in options["--add-data"]),
                              ["desktop", "desktop"])
             self.assertIn("backend.zip", options["--add-data"][0])
             self.assertIn("mytv_migration_ca.pem", options["--add-data"][1])
-            self.assertIn("mytv.ico", options["--icon"][0])
+            self.assertIn("FootballLive.ico", options["--icon"][0])
             self.assertNotIn("tools/keys", joined)
             self.assertNotIn(".learnings", joined)
             self.assertEqual(options["--distpath"], [str(tmp_path / "dist")])
@@ -213,8 +216,9 @@ class PyInstallerCommandContractTest(unittest.TestCase):
 
     def test_pinned_runtime_versions(self):
         text = (DESKTOP_DIR / "requirements-build.txt").read_text(encoding="utf-8")
-        for pin in ("pywebview==6.2.1", "quickjs==1.19.4", "pyinstaller==6.19.0"):
+        for pin in ("pywebview==6.2.1", "pyinstaller==6.19.0"):
             self.assertIn(pin, text)
+        self.assertNotIn("quickjs", text)
 
 
 if __name__ == "__main__":

@@ -161,7 +161,7 @@ class VlcHlsContinuityTests(unittest.TestCase):
         self.assertIn("#EXT-X-MEDIA-SEQUENCE:0",
                       self.normalize(playlist(150), session="b" * 32))
 
-    def test_vod_master_unmarked_delta_and_implicit_sequence_playlists_are_unchanged(self):
+    def test_unmarked_delta_and_implicit_sequence_playlists_are_unchanged(self):
         text = playlist(100)
         self.assertEqual(text, vlc_hls.normalize(text, self.url, None))
         self.assertEqual(text, vlc_hls.normalize(text, self.url, "invalid"))

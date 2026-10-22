@@ -1,12 +1,9 @@
 package com.qiubo.optimaltv.ui.player
 
-import com.qiubo.optimaltv.playback.PlaybackKind
 import com.qiubo.optimaltv.playback.PlaybackRecoveryPolicy
 import com.qiubo.optimaltv.playback.RecoveryAction
-import com.qiubo.optimaltv.playback.ResolvedSessionUrlReusePolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -51,60 +48,6 @@ class PlaybackRecoveryCoordinationPolicyTest {
                 awaitingPrepare = false,
                 sourceResolving = false,
                 recoveryInFlight = false,
-            ),
-        )
-    }
-
-    @Test
-    fun `live recovery never uses the VOD same session reload action`() {
-        assertEquals(RecoveryAction.RELOAD_CURRENT, PlaybackRecoveryPolicy.action(PlaybackKind.VOD, 0))
-        for (attempt in 0..5) {
-            assertFalse(
-                PlaybackRecoveryPolicy.action(PlaybackKind.LIVE, attempt) == RecoveryAction.RELOAD_CURRENT,
-            )
-        }
-    }
-
-    @Test
-    fun `same selected VOD line can reuse resolved URL before first READY`() {
-        val startedThisSession = false
-
-        assertFalse(startedThisSession)
-        assertEquals(
-            "https://cdn.example/video.m3u8?token=current",
-            ResolvedSessionUrlReusePolicy.vodUrl(
-                reuseRequested = true,
-                requestedLine = 2,
-                activeLine = 2,
-                sessionUrl = "https://cdn.example/video.m3u8?token=current",
-            ),
-        )
-    }
-
-    @Test
-    fun `VOD URL reuse rejects a different line or an empty URL`() {
-        assertNull(
-            ResolvedSessionUrlReusePolicy.vodUrl(
-                reuseRequested = true,
-                requestedLine = 1,
-                activeLine = 2,
-                sessionUrl = "https://cdn.example/video.m3u8?token=current",
-            ),
-        )
-        assertNull(
-            ResolvedSessionUrlReusePolicy.vodUrl(
-                reuseRequested = true,
-                requestedLine = 2,
-                activeLine = 2,
-                sessionUrl = " \t",
-            ),
-        )
-        assertNull(
-            ResolvedSessionUrlReusePolicy.vodUrl(
-                reuseRequested = false,
-                requestedLine = 2,
-                activeLine = 2,
-                sessionUrl = "https://cdn.example/video.m3u8?token=current",
             ),
         )
     }

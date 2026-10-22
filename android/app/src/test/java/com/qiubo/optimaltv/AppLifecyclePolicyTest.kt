@@ -18,7 +18,7 @@ class AppLifecyclePolicyTest {
         assertEquals(ForegroundDecision.REFRESH_AND_RENEW_LIVE, decision)
     }
 
-    @Test fun `vod never uses live renewal and explicit exit is separate from background`() {
+    @Test fun `non-live lifecycle never renews live playback and explicit exit is separate from background`() {
         assertEquals(ForegroundDecision.REFRESH,
             AppLifecyclePolicy.onForeground(backgroundedAtMs = 1_000, nowMs = 90_000, isLive = false))
         assertFalse(AppLifecyclePolicy.isExplicitExit(false))

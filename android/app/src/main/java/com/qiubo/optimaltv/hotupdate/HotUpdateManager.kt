@@ -54,7 +54,7 @@ sealed interface ForceState {
  *    后端进程状态经 hu_state.json 文件回传主进程（DataStore 非多进程安全）。
  *  ④ 强制更新保持进入时阻断检查（加载页遮罩），下载带进度，完成自动生效。
  *
- * 热更对象 = 内嵌 Python 后端 zip（proxy/scraper/www，与 assets/backend/python-backend.zip
+ * 热更对象 = 内嵌 Python 后端 zip（proxy/team_backdrop/www，与 assets/backend/python-backend.zip
  * 同构）。下载 → SHA-256 + zip 结构双校验 → 暂存 filesDir/hotupdate/backend-hu.zip +
  * 版本标记 → 重启进程由 EmbeddedBackend 优先解压该包（坏包隔离回退 assets）。
  * 防砖阀门：强制包启动失败被隔离时记 POISON，同版本不再阻断；断网/检查失败放行。
@@ -69,12 +69,9 @@ object HotUpdateManager {
         val DEVICE = stringPreferencesKey("device_id")  // 本机随机指纹（仅日志关联用）
     }
 
-    /** 热更 zip 必备条目：与 build_backend_zip.py 的 REPL 集合一致 + www 资源目录 */
+    /** 热更 zip 必备条目：足球直播代理与线路处理模块 + 网页资源目录 */
     private val REQUIRED_ENTRIES = listOf(
-        "proxy.py", "hhkan.py", "scraper.py", "team_backdrop.py", "decrypt_stream.js",
-        "douban_catalog.py", "douban_snapshot.json", "media_index.py", "pinyin_map.json",
-        "vod_api.py", "vod_sources.py",
-        "vod_sources.default.json",
+        "proxy.py", "vlc_hls.py", "team_backdrop.py",
     )
     private const val REQUIRED_PREFIX = "www/"
 
@@ -130,14 +127,6 @@ object HotUpdateManager {
         appCtx = context.applicationContext
         scope.launch {
             consumeBackendState()
-            // 影视源配置独立于代码热更：启动即拉一次，之后后台低频轮询。
-            launch {
-                while (true) {
-                    runCatching { syncVodSources() }
-                        .onFailure { OtvLog.w("影视源配置同步失败（沿用本地版本）: ${it.message}") }
-                    delay(6 * 60 * 60_000L)
-                }
-            }
             var pending: Triple<JSONObject, Int, String>? = null
             try {
                 // P1 修复（2026-09-04）：12s 超时只包 check 元数据——旧版把强更的
@@ -194,7 +183,7 @@ object HotUpdateManager {
         return HuStateFile.bumpProbeFails(context)
     }
 
-    /** EmbeddedBackend 以 assets 启动后回调（激活版本归零——强制判断的基准） */
+    /** EmbeddedBackend 以 assets 启动后回调，将当前运行版本记为内置资源版本。 */
     fun notifyActiveAssets(context: Context) {
         if (!BuildConfig.HOTUPDATE_ENABLED) return
         HuStateFile.writeAssets(context)
@@ -473,26 +462,4 @@ object HotUpdateManager {
         OtvLog.i("hotupdate: report $result v$code${if (detail.isNotBlank()) " ($detail)" else ""}")
     }
 
-    /** 拉取已发布影视源；草稿不会下发。临时文件落盘后原子替换，内置后端会热加载新版本。 */
-    private suspend fun syncVodSources() {
-        val target = File(com.qiubo.optimaltv.EmbeddedBackend.backendDir(appCtx), "vod_sources.runtime.json")
-        val localVersion = runCatching {
-            if (target.isFile) JSONObject(target.readText()).optInt("version", 0) else 0
-        }.getOrDefault(0)
-        val response = withTimeoutOrNull(CHECK_TIMEOUT_MS) {
-            postJson(BuildConfig.HOTUPDATE_ENDPOINT.trimEnd('/') + "/vod-sources/check",
-                JSONObject().put("deviceId", deviceId()).put("version", localVersion))
-        } ?: return
-        if (!response.optBoolean("hasUpdate", false)) return
-        val config = response.optJSONObject("config") ?: return
-        require(config.optJSONArray("sources") != null) { "影视源配置格式错误" }
-        target.parentFile?.mkdirs()
-        val tmp = File(target.parentFile, target.name + ".tmp")
-        tmp.writeText(config.toString())
-        if (!tmp.renameTo(target)) {
-            target.delete()
-            require(tmp.renameTo(target)) { "影视源配置替换失败" }
-        }
-        OtvLog.i("影视源配置已更新至 v${config.optInt("version", response.optInt("version"))}")
-    }
 }

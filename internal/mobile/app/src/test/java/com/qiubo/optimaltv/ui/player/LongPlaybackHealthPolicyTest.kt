@@ -1,175 +1,273 @@
 package com.qiubo.optimaltv.ui.player
 
+import com.qiubo.optimaltv.data.analytics.PlaybackTelemetry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/**
+ * [LongPlaybackHealthPolicy] 单测。
+ *
+ * 最要紧的一条是 `buffer 在涨就不算卡死`——旧版只看「BUFFERING 满 8s」就把正常补片
+ * 判成卡死并换线，这是「看十几分钟莫名换台」的根因。这条断言如果挂了，说明改坏了。
+ */
 class LongPlaybackHealthPolicyTest {
 
-    private fun action(bufferingMs: Long, growing: Boolean, inCooldown: Boolean = false) =
-        LongPlaybackHealthPolicy.actionFor(bufferingMs, growing, inCooldown)
-
-    @Test
-    fun shortBufferingIsHealthyRegardlessOfGrowth() {
-        assertEquals(LongPlaybackHealthPolicy.Action.HEALTHY, action(0L, growing = false))
-        assertEquals(LongPlaybackHealthPolicy.Action.HEALTHY, action(3_499L, growing = false))
+    /** 与实现无关的期望值。改实现常量 → 这里红。 */
+    private object Spec {
+        const val PREP_BACKUP_MS = 3_500L
+        const val SWITCH_MS = 6_000L
+        const val DEGRADE_ENGINE_MS = 12_000L
+        const val HARD_TIMEOUT_MS = 20_000L
+        const val COOLDOWN_MIN_MS = 20_000L
+        const val COOLDOWN_MAX_MS = 30_000L
+        const val FREEZE_MS = 30_000L
     }
 
-    @Test
-    fun growingBufferStaysHealthyPastEveryThreshold() {
-        // 这是本策略的核心：正常预缓冲会进 BUFFERING，但 buffer 在涨就说明媒体在下载，
-        // 只是还没追上播放头。旧口径只看状态，会在这里白白换源。
-        assertEquals(LongPlaybackHealthPolicy.Action.HEALTHY, action(4_000L, growing = true))
-        assertEquals(LongPlaybackHealthPolicy.Action.HEALTHY, action(7_000L, growing = true))
-        assertEquals(LongPlaybackHealthPolicy.Action.HEALTHY, action(30_000L, growing = true))
+    @Test fun `the shipped thresholds match the spec`() {
+        assertEquals(Spec.PREP_BACKUP_MS, LongPlaybackHealthPolicy.PREP_BACKUP_MS)
+        assertEquals(Spec.SWITCH_MS, LongPlaybackHealthPolicy.SWITCH_MS)
+        assertEquals(Spec.DEGRADE_ENGINE_MS, LongPlaybackHealthPolicy.DEGRADE_ENGINE_MS)
+        assertEquals(Spec.HARD_TIMEOUT_MS, LongPlaybackHealthPolicy.HARD_TIMEOUT_MS)
+        assertEquals(Spec.COOLDOWN_MIN_MS, LongPlaybackHealthPolicy.SWITCH_COOLDOWN_MIN_MS)
+        assertEquals(Spec.COOLDOWN_MAX_MS, LongPlaybackHealthPolicy.SWITCH_COOLDOWN_MAX_MS)
+        assertEquals(Spec.FREEZE_MS, LongPlaybackHealthPolicy.FREEZE_POSITION_MOVING_MS)
     }
 
-    @Test
-    fun stalledBufferEscalatesThroughTheLadder() {
-        assertEquals(LongPlaybackHealthPolicy.Action.PREPARE_BACKUP, action(3_500L, growing = false))
-        assertEquals(LongPlaybackHealthPolicy.Action.SWITCH_BACKUP, action(6_000L, growing = false))
-        assertEquals(LongPlaybackHealthPolicy.Action.ENGINE_DEGRADE, action(12_000L, growing = false))
-        assertEquals(LongPlaybackHealthPolicy.Action.ENGINE_DEGRADE, action(60_000L, growing = false))
+    @Test fun `a growing buffer is never treated as a stall no matter how long`() {
+        // 缓冲还在涨 = 管道没堵死，哪怕 BUFFERING 状态挂了很久也不该动它。
+        listOf(0L, 1_000L, 5_000L, 30_000L, 600_000L).forEach { ms ->
+            assertEquals(
+                "buffer 仍在增长时 ${ms}ms 不该判卡死",
+                LongPlaybackHealthPolicy.Action.HEALTHY,
+                LongPlaybackHealthPolicy.action(ms, bufferGrowing = true, positionMoving = false),
+            )
+        }
     }
 
-    @Test
-    fun cooldownSuppressesEveryAction() {
-        // 换源后正在起播，此时 BUFFERING 属正常；冷却期内不得再触发，避免自激换源。
-        assertEquals(LongPlaybackHealthPolicy.Action.COOLDOWN, action(500L, growing = false, inCooldown = true))
-        assertEquals(LongPlaybackHealthPolicy.Action.COOLDOWN, action(20_000L, growing = false, inCooldown = true))
-        // 冷却期内连「buffer 停住 12s」也不动手
+    @Test fun `a moving position is never treated as a stall`() {
+        listOf(0L, 5_000L, 30_000L).forEach { ms ->
+            assertEquals(
+                "位置仍在前进时 ${ms}ms 不该判卡死",
+                LongPlaybackHealthPolicy.Action.HEALTHY,
+                LongPlaybackHealthPolicy.action(ms, bufferGrowing = false, positionMoving = true),
+            )
+        }
+    }
+
+    @Test fun `a dead buffer escalates through the ladder at each boundary`() {
+        fun at(ms: Long) = LongPlaybackHealthPolicy.action(
+            bufferingMs = ms,
+            bufferGrowing = false,
+            positionMoving = false,
+            hasBackup = true,
+        )
+        assertEquals(LongPlaybackHealthPolicy.Action.HEALTHY, at(Spec.PREP_BACKUP_MS - 1))
+        assertEquals(LongPlaybackHealthPolicy.Action.PREP_BACKUP, at(Spec.PREP_BACKUP_MS))
+        assertEquals(LongPlaybackHealthPolicy.Action.PREP_BACKUP, at(Spec.SWITCH_MS - 1))
+        assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.SWITCH_MS))
+        assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.DEGRADE_ENGINE_MS - 1))
+        assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.DEGRADE_ENGINE_MS))
+        assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.HARD_TIMEOUT_MS - 1))
+        assertEquals(LongPlaybackHealthPolicy.Action.GIVE_UP, at(Spec.HARD_TIMEOUT_MS))
+    }
+
+    @Test fun `with no backup line network stall waits for the recovery threshold`() {
+        // 没有备用线时不应把网络停滞误判成解码故障，更不能 3.5s 就切 VLC。
         assertEquals(
-            LongPlaybackHealthPolicy.Action.COOLDOWN,
-            action(12_000L, growing = false, inCooldown = true),
+            LongPlaybackHealthPolicy.Action.HEALTHY,
+            LongPlaybackHealthPolicy.action(
+                bufferingMs = Spec.PREP_BACKUP_MS,
+                bufferGrowing = false,
+                positionMoving = false,
+                hasBackup = false,
+            ),
+        )
+        assertEquals(
+            LongPlaybackHealthPolicy.Action.HEALTHY,
+            LongPlaybackHealthPolicy.action(
+                bufferingMs = Spec.SWITCH_MS - 1,
+                bufferGrowing = false,
+                positionMoving = false,
+                hasBackup = false,
+            ),
+        )
+        assertEquals(
+            LongPlaybackHealthPolicy.Action.SWITCH,
+            LongPlaybackHealthPolicy.action(
+                bufferingMs = Spec.SWITCH_MS,
+                bufferGrowing = false,
+                positionMoving = false,
+                hasBackup = false,
+            ),
         )
     }
 
-    @Test
-    fun growthNeedsToClearTheEpsilon() {
-        // 分片粒度抖动不该算「在增长」，否则正常的锯齿会被判成健康。
-        assertFalse(LongPlaybackHealthPolicy.isGrowing(1_000L, 1_050L))
-        assertFalse(LongPlaybackHealthPolicy.isGrowing(1_000L, 900L))
-        assertTrue(LongPlaybackHealthPolicy.isGrowing(1_000L, 1_120L))
-        assertTrue(LongPlaybackHealthPolicy.isGrowing(1_000L, 5_000L))
+    @Test fun `network and unknown stalls never degrade the engine`() {
+        listOf(
+            PlaybackTelemetry.ErrorClass.NETWORK,
+            PlaybackTelemetry.ErrorClass.SERVER,
+            PlaybackTelemetry.ErrorClass.UNKNOWN,
+            PlaybackTelemetry.ErrorClass.NONE,
+        ).forEach { errorClass ->
+            listOf(Spec.PREP_BACKUP_MS, Spec.SWITCH_MS, Spec.DEGRADE_ENGINE_MS, Spec.HARD_TIMEOUT_MS - 1)
+                .forEach { ms ->
+                    val action = LongPlaybackHealthPolicy.action(
+                        bufferingMs = ms,
+                        bufferGrowing = false,
+                        positionMoving = false,
+                        hasBackup = false,
+                        errorClass = errorClass,
+                    )
+                    assertFalse(
+                        "$errorClass at ${ms}ms must not degrade the engine",
+                        action == LongPlaybackHealthPolicy.Action.DEGRADE_ENGINE,
+                    )
+                }
+        }
     }
 
-    @Test
-    fun cooldownGrowsWithEscalationButIsCapped() {
-        assertEquals(20_000L, LongPlaybackHealthPolicy.cooldownMs(0))
-        assertEquals(25_000L, LongPlaybackHealthPolicy.cooldownMs(1))
-        // 封顶 30s：再久用户会以为应用死了
-        assertEquals(30_000L, LongPlaybackHealthPolicy.cooldownMs(2))
-        assertEquals(30_000L, LongPlaybackHealthPolicy.cooldownMs(99))
-        // 负数档位不产生负冷却
-        assertEquals(20_000L, LongPlaybackHealthPolicy.cooldownMs(-5))
+    @Test fun `network stall escalates through switch to the hard timeout`() {
+        fun at(ms: Long) = LongPlaybackHealthPolicy.action(
+            bufferingMs = ms,
+            bufferGrowing = false,
+            positionMoving = false,
+            errorClass = PlaybackTelemetry.ErrorClass.NETWORK,
+        )
+        assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.SWITCH_MS))
+        assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.DEGRADE_ENGINE_MS))
+        assertEquals(LongPlaybackHealthPolicy.Action.SWITCH, at(Spec.HARD_TIMEOUT_MS - 1))
+        assertEquals(LongPlaybackHealthPolicy.Action.GIVE_UP, at(Spec.HARD_TIMEOUT_MS))
     }
 
-    /* ---------- 冷却状态机：修复「换线后冷却被起播清零」的自激循环 ---------- */
-
-    @Test
-    fun cooldownSurvivesTheNewLineComingUp() {
-        // 场景：t=10s 判卡顿换线 → 装弹到 t=30s（窗口 20s）；新线在 t=10.03s 就 READY。
-        // 旧版 onSessionStarted 无条件 healthCooldownUntil = 0，冷却当场作废，
-        // 于是「刚换的线正在起播、缓冲属正常」这段最该被保护的窗口毫无保护，
-        // 健康采样很快又判卡顿 → 再换线，来回打摆。
-        val cd = LongPlaybackHealthPolicy.Cooldown()
-        cd.arm(now = 10_000L, escalationStep = 0)
-        assertEquals(30_000L, cd.until)
-        assertTrue(cd.isActive(10_000L))
-
-        // 新线起播（t=10.03s）：起播本身**不得**清冷却
-        assertTrue("新线起播后冷却仍在", cd.isActive(10_003L))
-        assertTrue(cd.isActive(29_999L))
-        // 到期后自然失效
-        assertFalse(cd.isActive(30_000L))
+    @Test fun `decode failure degrades the engine without wasting a source switch`() {
+        val degradeAt = LongPlaybackHealthPolicy.action(
+            bufferingMs = Spec.PREP_BACKUP_MS,
+            bufferGrowing = false,
+            positionMoving = false,
+            errorClass = PlaybackTelemetry.ErrorClass.DECODE,
+        )
+        // 3.5s 就该降级引擎，而不是先 SWITCH 一次（换源对解码无效）。
+        assertEquals(LongPlaybackHealthPolicy.Action.DEGRADE_ENGINE, degradeAt)
+        assertEquals(
+            LongPlaybackHealthPolicy.Action.GIVE_UP,
+            LongPlaybackHealthPolicy.action(
+                bufferingMs = Spec.DEGRADE_ENGINE_MS,
+                bufferGrowing = false,
+                positionMoving = false,
+                errorClass = PlaybackTelemetry.ErrorClass.DECODE,
+            ),
+        )
     }
 
-    @Test
-    fun cooldownIsClearedOnlyByStablePlaybackOrSessionEnd() {
-        val cd = LongPlaybackHealthPolicy.Cooldown()
-        cd.arm(0L, 0)
-        assertTrue(cd.isActive(1_000L))
-        // 稳定播放确认（60s 体检达标）才清
-        cd.onStablePlayback()
-        assertFalse(cd.isActive(1_000L))
-        // 换片/退出：会话级状态清干净
-        cd.arm(0L, 0)
-        assertTrue(cd.isActive(1L))
-        cd.reset()
-        assertFalse(cd.isActive(1L))
+    @Test fun `decode evidence is not swallowed by a growing buffer or moving position`() {
+        assertEquals(
+            LongPlaybackHealthPolicy.Action.DEGRADE_ENGINE,
+            LongPlaybackHealthPolicy.action(
+                bufferingMs = 0L,
+                bufferGrowing = true,
+                positionMoving = true,
+                errorClass = PlaybackTelemetry.ErrorClass.DECODE,
+            ),
+        )
     }
 
-    @Test
-    fun repeatedArmingNeverShortensAnActiveWindow() {
-        val cd = LongPlaybackHealthPolicy.Cooldown()
-        cd.arm(now = 0L, escalationStep = 0)      // → 20s
-        cd.arm(now = 1_000L, escalationStep = 0)  // → 21s（延长）
-        val first = cd.until
-        assertEquals(21_000L, first)
-        // 重复装弹只延长不缩短：再晚 1s 装弹，窗口推到 22s，而不是把 21s 拉回来
-        cd.arm(now = 2_000L, escalationStep = 0)
-        assertEquals(22_000L, cd.until)
-        assertTrue(cd.until >= first)
-        // 一次「更轻」的装弹不能把窗口拉短，否则会提前解除保护
-        cd.arm(now = 500L, escalationStep = 0)
-        assertEquals(22_000L, cd.until)
+    @Test fun `switch cooldown blocks an immediate bounce back to the line that just failed`() {
+        val lastSwitch = 100_000L
+        // 刚切线 5s 后又故障，且候选就是刚失败的那条 → 拒绝（防抖动）。
+        assertFalse(
+            LongPlaybackHealthPolicy.canSwitchNow(
+                nowMs = lastSwitch + 5_000,
+                lastSwitchAtMs = lastSwitch,
+                candidateIndex = 1,
+                failedIndex = 1,
+            ),
+        )
+        // 冷却满 20s 后允许再试那条线（瞬时抖动会自愈）。
+        assertTrue(
+            LongPlaybackHealthPolicy.canSwitchNow(
+                nowMs = lastSwitch + Spec.COOLDOWN_MIN_MS,
+                lastSwitchAtMs = lastSwitch,
+                candidateIndex = 1,
+                failedIndex = 1,
+            ),
+        )
     }
 
-    @Test
-    fun cooldownIsInactiveBeforeAnythingArmsIt() {
-        val cd = LongPlaybackHealthPolicy.Cooldown()
-        assertFalse(cd.isActive(0L))
-        assertFalse(cd.isActive(Long.MAX_VALUE / 2))
+    @Test fun `cooldown never blocks a switch to a different line`() {
+        val lastSwitch = 100_000L
+        // 冷却只拦「回切刚失败的那条」，切别的线永远放行——否则冷却会把恢复链锁死。
+        assertTrue(
+            LongPlaybackHealthPolicy.canSwitchNow(
+                nowMs = lastSwitch + 1_000,
+                lastSwitchAtMs = lastSwitch,
+                candidateIndex = 2,
+                failedIndex = 1,
+            ),
+        )
     }
 
-    /* ---------- 恢复预算：给「僵尸源」无限循环封顶 ---------- */
-
-    @Test
-    fun unstableRecoveryLoopIsCapped() {
-        // 僵尸线：起播→清零→卡顿→换线→起播→清零…，每次都没撑满 60s。
-        // 旧版 recoveryAttempt 每次起播成功都清零，永远到不了 PlaybackRecoveryPolicy 的 GIVE_UP，
-        // 播放器无限转圈。预算耗尽必须拒绝下一次恢复。
-        val budget = LongPlaybackHealthPolicy.RecoveryBudget(maxUnstableRecoveries = 3)
-        assertTrue(budget.requestRecovery(stablePlayback = false))
-        assertTrue(budget.requestRecovery(stablePlayback = false))
-        assertTrue(budget.requestRecovery(stablePlayback = false))
-        // 第四次：超预算 → 调用方必须走 GIVE_UP
-        assertFalse(budget.requestRecovery(stablePlayback = false))
-        assertEquals(0, budget.remaining)
-        // 已耗尽后继续拒绝（不因再申请一次就放行）
-        assertFalse(budget.requestRecovery(stablePlayback = false))
+    @Test fun `cooldown is open before the first switch and closes inside the window`() {
+        val lastSwitch = 100_000L
+        assertTrue(LongPlaybackHealthPolicy.cooldownElapsed(50_000L, lastSwitchAtMs = -1L))
+        assertFalse(LongPlaybackHealthPolicy.cooldownElapsed(lastSwitch + 1_000, lastSwitch))
+        assertTrue(
+            LongPlaybackHealthPolicy.cooldownElapsed(
+                lastSwitch + LongPlaybackHealthPolicy.SWITCH_COOLDOWN_MIN_MS,
+                lastSwitch,
+            ),
+        )
     }
 
-    @Test
-    fun stablePlaybackRestoresTheRecoveryBudget() {
-        val budget = LongPlaybackHealthPolicy.RecoveryBudget(maxUnstableRecoveries = 3)
-        repeat(3) { budget.requestRecovery(stablePlayback = false) }
-        assertEquals(0, budget.remaining)
-        // 这条线真撑住了 → 预算恢复，值得再给它机会
-        assertTrue(budget.requestRecovery(stablePlayback = true))
-        assertEquals(3, budget.remaining)
+    @Test fun `cooldown window stays inside the documented 20 to 30 second band`() {
+        assertEquals(Spec.COOLDOWN_MIN_MS, LongPlaybackHealthPolicy.SWITCH_COOLDOWN_MIN_MS)
+        assertEquals(Spec.COOLDOWN_MAX_MS, LongPlaybackHealthPolicy.SWITCH_COOLDOWN_MAX_MS)
+        assertTrue(
+            LongPlaybackHealthPolicy.SWITCH_COOLDOWN_MIN_MS < LongPlaybackHealthPolicy.SWITCH_COOLDOWN_MAX_MS,
+        )
     }
 
-    @Test
-    fun recoveryBudgetIsScopedToOneSession() {
-        val budget = LongPlaybackHealthPolicy.RecoveryBudget(maxUnstableRecoveries = 2)
-        budget.requestRecovery(stablePlayback = false)
-        budget.requestRecovery(stablePlayback = false)
-        assertFalse(budget.requestRecovery(stablePlayback = false))
-        // 换片/退出 → 新会话从零开始，不能让上一集的烂线拖垮下一集
-        budget.reset()
-        assertEquals(2, budget.remaining)
-        assertTrue(budget.requestRecovery(stablePlayback = false))
+    @Test fun `a frozen picture with a moving clock is caught by the decoder counter not the watchdog`() {
+        // 「时钟在走、画面冻住」：位置前进但渲染帧数不增，既有看门狗（只看 BUFFERING 超时与
+        // 位置停滞）全都不响，只能靠渲染帧数这个硬信号。
+        assertFalse(
+            LongPlaybackHealthPolicy.isFrozen(
+                positionMoving = true,
+                renderedNotIncreasingForMs = Spec.FREEZE_MS - 1,
+            ),
+        )
+        assertTrue(
+            LongPlaybackHealthPolicy.isFrozen(
+                positionMoving = true,
+                renderedNotIncreasingForMs = Spec.FREEZE_MS,
+            ),
+        )
+        // 位置也没动时不算「冻结」——那是纯卡死，走另一条恢复链。
+        assertFalse(
+            LongPlaybackHealthPolicy.isFrozen(
+                positionMoving = false,
+                renderedNotIncreasingForMs = Spec.FREEZE_MS * 2,
+            ),
+        )
     }
 
-    @Test
-    fun defaultBudgetIsBounded() {
-        // 默认预算必须是有限值——无上限的「恢复」等于没有恢复。
-        val budget = LongPlaybackHealthPolicy.RecoveryBudget()
-        assertTrue(LongPlaybackHealthPolicy.MAX_UNSTABLE_RECOVERIES in 1..20)
-        var allowed = 0
-        while (budget.requestRecovery(stablePlayback = false)) allowed++
-        assertEquals(LongPlaybackHealthPolicy.MAX_UNSTABLE_RECOVERIES, allowed)
+    @Test fun `a decode freeze degrades the engine instead of re-picking the same source`() {
+        // 「位置在前进、帧数不增」= 渲染/解码管线死了。这里最关键的修正：
+        // 旧实现把冻结也丢进 recoverPlaybackStall 的通用阶梯，而那条阶梯第 0 步是
+        // RELOAD_CURRENT（同一条线原地重试）——对解码冻结毫无意义，还白等一轮。
+        // 冻结必须直接降级引擎：换源对同编码内容无效。
+        val frozen = LongPlaybackHealthPolicy.action(
+            bufferingMs = 0L,              // 冻结与 BUFFERING 无关：状态常是 READY
+            bufferGrowing = true,          // buffer 在涨也不代表能出画面——渲染管死了
+            positionMoving = true,         // 时钟照走，正是冻结的特征
+            hasBackup = true,
+            errorClass = PlaybackTelemetry.ErrorClass.DECODE,
+        )
+        assertEquals(
+            "解码类冻结必须直接降级引擎，不能被「buffer 在涨」判成 HEALTHY",
+            LongPlaybackHealthPolicy.Action.DEGRADE_ENGINE,
+            frozen,
+        )
     }
 }

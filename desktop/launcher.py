@@ -1,7 +1,6 @@
-"""My TV Windows 桌面启动器。
+"""足球直播 Windows 桌面启动器。
 
-职责很窄：准备后端运行环境、启动 tools/backend-src/proxy.py、把本地 WebView2 窗口指向它。
-不含任何卡密门控逻辑——门控完全由后端与网页端负责，本启动器与网页版行为一致。
+职责很窄：准备后端运行环境、启动 tools/backend-src/proxy.py、把本地 WebView2 窗口指向足球直播页面。
 
 打包形态（PyInstaller）：
     sys._MEIPASS/desktop/backend.zip        内嵌后端（.py / json / www，不含 Linux vendor）
@@ -36,8 +35,8 @@ import webview
 import updater as hotupdate
 
 
-APP_NAME = "MyTV"
-APP_TITLE = "My TV"
+APP_DATA_DIR = "MyTV"  # 兼容既有更新包、日志及本地数据目录
+APP_TITLE = "足球直播"
 PREFERRED_PORT = 8090
 DEFAULT_API_ORIGIN = "https://103.236.97.137:35208"
 API_ORIGIN_ENV = "OTV_DESKTOP_API_BASE_URL"
@@ -47,14 +46,15 @@ HEALTH_RETRY_DELAY = 0.4
 SELF_TEST_STARTUP_TIMEOUT = 180.0
 
 API_ENV_KEYS = (
+    "OTV_APK_UPDATE_OBJECT_BASE",
+)
+LEGACY_API_ENV_KEYS = (
     "OTV_CLOUD_BASE",
     "OTV_LICENSE_ENDPOINT",
     "OTV_IPTV_LATEST_URL",
-    "OTV_APK_UPDATE_OBJECT_BASE",
     "OTV_METADATA_API_URL",
     "OTV_VOD_LINE_INDEX_URL",
 )
-
 class BackendStartError(RuntimeError):
     """后端无法在本机启动。"""
 
@@ -78,7 +78,7 @@ def local_app_data_root() -> Path:
         base = str(os.environ.get("USERPROFILE") or "").strip()
     if not base:
         base = str(Path.home())
-    return Path(base) / APP_NAME
+    return Path(base) / APP_DATA_DIR
 
 
 def ensure_std_streams() -> None:
@@ -211,7 +211,7 @@ def build_api_ssl_context(ca_path: Path) -> ssl.SSLContext:
 
 
 def configure_api_environment(api_base_url: str, ca_path: Path) -> ssl.SSLContext:
-    """按 proxy_runner.configure_api_environment 的契约配置私有 CA 与云端 origin。"""
+    """配置更新服务地址与迁移 CA。"""
     origin = str(api_base_url or "").strip().rstrip("/")
     try:
         parsed = urlsplit(origin)
@@ -228,13 +228,10 @@ def configure_api_environment(api_base_url: str, ca_path: Path) -> ssl.SSLContex
         urllib.request.HTTPSHandler(context=context)
     ))
 
-    os.environ["OTV_CLOUD_BASE"] = origin + "/web"
-    os.environ["OTV_LICENSE_ENDPOINT"] = origin + "/activate"
-    os.environ["OTV_IPTV_LATEST_URL"] = origin + "/iptv/latest"
     os.environ["OTV_APK_UPDATE_OBJECT_BASE"] = origin + "/v1/storages/object/hotupdate"
-    # 私有 nginx 暴露 /metadata/ 与 /v1/storages/object/；与网页版部署保持一致。
-    os.environ["OTV_METADATA_API_URL"] = origin
-    os.environ["OTV_VOD_LINE_INDEX_URL"] = origin + "/v1/storages/object/hotupdate/vod-lines.json"
+    # Remove stale service URLs inherited from older installations.
+    for key in LEGACY_API_ENV_KEYS:
+        os.environ.pop(key, None)
     return context
 
 
@@ -280,17 +277,8 @@ def wait_for_backend(port: int, timeout: float = BACKEND_READY_TIMEOUT,
     return False
 
 
-def quickjs_smoke() -> bool:
-    """确认 Windows 包内的原生 QuickJS 可执行解密脚本。"""
-    try:
-        import quickjs
-        return quickjs.Context().eval("1 + 1") == 2
-    except Exception:
-        return False
-
-
 def run_self_test(port: int) -> int:
-    """验证健康端点、首页和 QuickJS；成功返回 0。"""
+    """验证足球直播后端健康端点与主页；成功返回 0。"""
     if not wait_for_backend(port, timeout=SELF_TEST_STARTUP_TIMEOUT):
         print("self-test: backend did not become healthy on port %d" % port, file=sys.stderr)
         return 2
@@ -305,9 +293,6 @@ def run_self_test(port: int) -> int:
     if status != 200 or not body.strip():
         print("self-test: unexpected index response (status=%s)" % status, file=sys.stderr)
         return 4
-    if not quickjs_smoke():
-        print("self-test: QuickJS runtime is unavailable", file=sys.stderr)
-        return 5
     print("self-test: ok (port=%d)" % port)
     return 0
 
@@ -421,7 +406,7 @@ class BackendProcess:
                 print("backend thread failed: %r" % (exc,), file=sys.stderr)
                 traceback.print_exc()
 
-        self._thread = threading.Thread(target=_run, daemon=True, name="mytv-backend")
+        self._thread = threading.Thread(target=_run, daemon=True, name="football-live-backend")
         self._thread.start()
 
     def wait_error(self, timeout: float = 1.0) -> None:
@@ -494,7 +479,7 @@ def start_background_update(api_origin: str,
 
 def main(argv=None) -> int:
     ensure_std_streams()
-    parser = argparse.ArgumentParser(description="My TV desktop launcher")
+    parser = argparse.ArgumentParser(description="足球直播 desktop launcher")
     parser.add_argument("--self-test", action="store_true",
                         help="start the backend, verify health and index, then exit")
     args = parser.parse_args(argv)
@@ -532,11 +517,11 @@ def main(argv=None) -> int:
         finally:
             instance.release()
     except BackendStartError as exc:
-        _show_error_dialog("My TV 启动失败", str(exc))
+        _show_error_dialog("足球直播启动失败", str(exc))
         print("launcher error: %s" % exc, file=sys.stderr)
         return 1
     except Exception as exc:  # noqa: BLE001 - 顶层兜底，避免静默退出
-        _show_error_dialog("My TV 启动失败", "%r\n\n%s" % (exc, traceback.format_exc(limit=6)))
+        _show_error_dialog("足球直播启动失败", "%r\n\n%s" % (exc, traceback.format_exc(limit=6)))
         print("launcher unexpected error: %r" % (exc,), file=sys.stderr)
         traceback.print_exc()
         return 1

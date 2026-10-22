@@ -18,13 +18,11 @@ class LiveFlashContractTest(unittest.TestCase):
         previous_cache = copy.deepcopy(proxy._cache)
         proxy._cache.update(ts=0, data=None, raw_error=None, refreshing=False)
         try:
-            with mock.patch.object(proxy, "fetch_source", side_effect=TimeoutError("source timeout")), \
-                    mock.patch.object(proxy, "_cloud_get_json") as cloud:
+            with mock.patch.object(proxy, "fetch_source", side_effect=TimeoutError("source timeout")):
                 payload, cached = proxy.build_api(wait_for_fresh=True)
             self.assertFalse(cached)
             self.assertEqual([], payload["matches"])
             self.assertEqual("source timeout", payload["error"])
-            cloud.assert_not_called()
         finally:
             proxy._cache.clear()
             proxy._cache.update(previous_cache)

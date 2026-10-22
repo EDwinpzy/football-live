@@ -1,17 +1,17 @@
-"""My TV Windows 桌面版自动更新。
+"""足球直播 Windows 桌面版自动更新。
 
 复用服务端既有的热更体系（与 Android 同一个 /hotupdate/check 契约），
 但不引入第二套发布流程：服务端照旧用 hu-upload.mjs 发一个 zip，桌面端
 自己去拉。
 
 设计要点：
-  * 更新范围 = 后端 Python 模块 + www 前端 + 快照，也就是 backend.zip 里的
-    全部内容；EXE 壳本身（PyInstaller 冻结的 launcher/webview/quickjs）不在
+  * 更新范围 = 足球直播后端 Python 模块 + www 前端，也就是 backend.zip 里的
+    全部内容；EXE 壳本身（PyInstaller 冻结的 launcher/webview）不在
     范围内，那部分改动仍然要重发版本。
   * 生效时机 = 下次启动。下载完成后只写 pending 标记，不动正在运行的进程，
-    用户不会在播放中被重启。
+    用户不会在直播中被重启。
   * 失败策略 = 静默回退。任何一步出错（网络、校验、解压、目录缺失）都退回
-    内置 backend.zip 并继续启动，更新永远不能把应用卡死在起不来。
+    内置 backend.zip 并继续启动，更新失败也不会阻止应用启动。
 
 安全口径与 launcher.py 的内置包解压一致：拒绝绝对路径、`..`、盘符冒号与
 符号链接；先写临时目录再 os.replace，标记最后落盘。
@@ -37,7 +37,7 @@ from urllib.parse import urlsplit
 
 CHECK_PATH = "/hotupdate/check"
 STORAGE_PREFIX = "/v1/storages/object/hotupdate"
-USER_AGENT = "MyTV-Desktop-Updater/1.0"
+USER_AGENT = "FootballLive-Desktop-Updater/1.0"
 CHECK_TIMEOUT = 12.0
 DOWNLOAD_TIMEOUT = 180.0
 MANIFEST_MAX_BYTES = 256 * 1024
@@ -94,7 +94,7 @@ def update_root(app_data_root: Path) -> Path:
 def device_id(app_data_root: Path) -> str:
     """稳定的 64 位十六进制设备标识。
 
-    服务端 hotupdate/check 与 /activate 共用 ``[a-f0-9]{64}`` 校验
+    服务端 hotupdate/check 使用 ``[a-f0-9]{64}`` 校验
     （api_service.py 的 bad_device 分支），所以这里必须产出同样的形状，
     不能用 "desktop" 这类占位串。首次生成后落盘复用，保证多次启动同一台
     机器始终是同一个 id——服务端按设备统计热更下发。
@@ -109,7 +109,7 @@ def device_id(app_data_root: Path) -> str:
         pass
     seed = "%s|%s|%s" % (
         root,
-        os.environ.get("COMPUTERNAME") or os.environ.get("USERNAME") or "mytv",
+        os.environ.get("COMPUTERNAME") or os.environ.get("USERNAME") or "football-live",
         time.time_ns(),
     )
     generated = hashlib.sha256(seed.encode("utf-8")).hexdigest()
@@ -388,7 +388,7 @@ class BackgroundUpdater:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._thread = threading.Thread(
-                target=self._run, name="mytv-updater", daemon=True)
+                target=self._run, name="football-live-updater", daemon=True)
             self._thread.start()
 
     def _run(self) -> None:

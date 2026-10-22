@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-UA = {"User-Agent": "MyTV Android"}
+UA = {"User-Agent": "FootballLive Android"}
 
 
 def get(url, timeout=15, headers=None):
@@ -51,7 +51,7 @@ def probe(url):
         return out
     if not target.startswith("http"):
         target = urllib.parse.urljoin(url, target)
-    headers = {"User-Agent": "MyTV Android", "Referer": url}
+    headers = {"User-Agent": "FootballLive Android", "Referer": url}
     seg = get(target, headers=headers)
     out["segment"] = seg.get("code", seg.get("err"))
     out["segment_ok"] = bool(seg["ok"])

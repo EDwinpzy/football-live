@@ -7,7 +7,7 @@ import org.junit.Test
 
 class FirstFrameRecoveryPolicyTest {
 
-    @Test fun `VOD has no startup deadline while live keeps its watchdog`() {
+    @Test fun `live playback retains its startup watchdog`() {
         assertEquals(20_000L, PlayerViewModel.START_WATCHDOG_MS)
     }
 
@@ -46,16 +46,16 @@ class FirstFrameRecoveryPolicyTest {
         )
     }
 
-    @Test fun `VOD replay does not switch sources or time out`() {
+    @Test fun `live first frame keeps waiting after engine fallback`() {
         assertEquals(
             FirstFrameRecoveryPolicy.Action.ENGINE_FALLBACK,
-            FirstFrameRecoveryPolicy.footballAction(
+            FirstFrameRecoveryPolicy.action(
                 7_000, hasBackup = true, onMedia3 = true, vlcAlreadyTried = false,
             ),
         )
         assertEquals(
             FirstFrameRecoveryPolicy.Action.WAIT,
-            FirstFrameRecoveryPolicy.footballAction(
+            FirstFrameRecoveryPolicy.action(
                 Long.MAX_VALUE, hasBackup = true, onMedia3 = false, vlcAlreadyTried = true,
             ),
         )

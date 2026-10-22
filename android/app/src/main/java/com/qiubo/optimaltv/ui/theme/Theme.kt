@@ -40,7 +40,7 @@ val AppTypography = androidx.compose.material3.Typography(
 )
 
 @Composable
-fun OptimalTvTheme(content: @Composable () -> Unit) {
+fun FootballLiveTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = DarkScheme,
         typography = AppTypography,

@@ -3,7 +3,7 @@ package com.qiubo.optimaltv.ui.player
 /**
  * 起播首帧阶梯（方案 §首帧恢复）。
  *
- * 与 [LongPlaybackHealthPolicy] 分工：这里描述起播等待阶段；点播持续等待并在实际错误时
+ * 与 [LongPlaybackHealthPolicy] 分工：这里描述直播起播等待阶段；持续等待并在实际错误时
  * 重试当前线路，不因经过时长结束播放。
  *
  * 阶段：0–3s 正常等待 → 3–5s 记录等待状态 → 5s 后保持恢复状态。

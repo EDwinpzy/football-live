@@ -154,10 +154,14 @@ def test_self_hosted_web_image_builds_and_uses_hashed_dist(tmp_path):
         "COPY tools/backend-src/www/ /build/www/",
         "COPY tools/build_web_assets.py /build/build_web_assets.py",
         "RUN python /build/build_web_assets.py /build/www /build/web-dist",
-        "COPY tools/backend-src/*.py tools/backend-src/*.json /app/",
+        "COPY tools/backend-src/proxy.py tools/backend-src/vlc_hls.py tools/backend-src/team_backdrop.py /app/",
+        "COPY tools/backend-src/team_icon_cache.json /app/",
+        "COPY tools/backend-src/svg_icon_cache/ /app/svg_icon_cache/",
+        "COPY tools/backend-src/transparent_icon_cache/ /app/transparent_icon_cache/",
         "COPY --from=web-assets /build/web-dist/ /app/www/",
     ):
         assert contract in dockerfile
+    assert "COPY tools/backend-src/*.py" not in dockerfile
     assert "COPY tools/backend-src/ /app/" not in dockerfile
 
     source = tmp_path / "www"
@@ -176,24 +180,6 @@ def test_self_hosted_web_image_builds_and_uses_hashed_dist(tmp_path):
         assert asset.is_file()
         expected_prefix = Path(reference).name.split(".")[1]
         assert hashlib.sha256(asset.read_bytes()).hexdigest().startswith(expected_prefix)
-
-
-def test_web_image_decrypt_stream_js_is_either_copied_or_explicitly_excluded():
-    """Important 6: narrowing the COPY list must not silently drop a runtime dep.
-
-    proxy.py shells out to `node decrypt_stream.js` and falls back to the
-    quickjs path in decrypt_python when node is missing. The image is
-    python:3.12-slim, so node is never there: the file is dead weight. But
-    dropping it without a word makes the next person debug quickjs instead of
-    noticing the file never shipped. Whichever way this goes, say so.
-    """
-    dockerfile = (ROOT / "deploy" / "selfhosted" / "Dockerfile.web").read_text(encoding="utf-8")
-    copied = "COPY tools/backend-src/decrypt_stream.js" in dockerfile
-    explained = "decrypt_stream.js" in dockerfile and "decrypt_python" in dockerfile
-    assert copied or explained, (
-        "decrypt_stream.js must either be copied into the image or have a comment "
-        "explaining that the container has no node and decryption uses decrypt_python"
-    )
 
 
 def test_output_nested_in_source_is_rejected_without_changing_source(tmp_path):

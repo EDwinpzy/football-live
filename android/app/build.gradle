@@ -8,12 +8,12 @@ plugins {
 // 复验/联调可临时抬高版本号打一个升级包（-PapkVersionCode / -PapkVersionName），不必改死代码。
 def apkVersionCodeOverride = project.findProperty('apkVersionCode')
 def apkVersionNameOverride = project.findProperty('apkVersionName')
-// ---- My TV Release 入口门槛（OTV-RELEASE-ORIGIN-GATE-BEGIN）----------------
+// ---- 足球直播 Release 入口门槛（OTV-RELEASE-ORIGIN-GATE-BEGIN）----------------
 // TV 版与移动版必须使用逐字节相同的一段规则与同一套报错文案；对称性由
 // tools/tests/test_release_api_origin_contract.py 断言，改动必须同步两处。
 // 正式包：必须显式传入已验收的正式域名 -PapiBaseUrl=https://<正式域名>
 // （或环境变量 OTV_RELEASE_API_BASE_URL），缺省立即 fail fast。
-// 入口只接受纯 origin（结尾斜杠会被 normalize 去掉），端点由 /activate、/hotupdate
+// 入口只接受纯 origin（结尾斜杠会被 normalize 去掉），热更新端点由 /hotupdate
 // 等固定路径拼接而成，所以任何路径都视为错误输入。
 // 迁移 CA + IP 入口：默认仍只允许 Debug 本机联调，正式包一律拒绝。
 // 无正式域名的自建 VPS（103.236.97.137:35208）要出正式包，必须显式双重 opt-in：
@@ -69,7 +69,7 @@ def otvApiOriginProblem = { String otvUrl ->
         return "Release 入口必须使用已备案的正式域名：${otvUrl}"
     }
     if (!(otvUri.path in ['', '/'])) {
-        return "Release 入口不得包含路径：${otvUrl}（端点由 /activate、/hotupdate 等固定路径组成）"
+        return "Release 入口不得包含路径：${otvUrl}（直播端点由构建配置派生）"
     }
     return null
 }
@@ -83,14 +83,14 @@ def apiBaseUrl
 if (otvReleaseRequested) {
     def otvProblem = otvApiOriginProblem(otvConfiguredApiBaseUrl)
     if (otvProblem) {
-        throw new GradleException("My TV Release 入口门槛未通过：${otvProblem}")
+        throw new GradleException("足球直播 Release 入口门槛未通过：${otvProblem}")
     }
     apiBaseUrl = otvConfiguredApiBaseUrl.replaceAll('/+$', '')
 } else {
     apiBaseUrl = (otvConfiguredApiBaseUrl ?: otvMigrationTestOrigin).replaceAll('/+$', '')
 }
 def apiBaseUrlConstant = '"' + apiBaseUrl + '"'
-// ---- My TV Release 入口门槛（OTV-RELEASE-ORIGIN-GATE-END）------------------
+// ---- 足球直播 Release 入口门槛（OTV-RELEASE-ORIGIN-GATE-END）------------------
 def releaseStorePassword = project.findProperty('OTV_RELEASE_STORE_PASSWORD') ?: System.getenv('OTV_RELEASE_STORE_PASSWORD') ?: ''
 def releaseKeyPassword = project.findProperty('OTV_RELEASE_KEY_PASSWORD') ?: System.getenv('OTV_RELEASE_KEY_PASSWORD') ?: ''
 
@@ -112,13 +112,9 @@ android {
         // 技术方案 §4.2：坚果 N1 Air = Bonfire OS / Android 11 → minSdk 30，零 GMS 依赖
     minSdk 30
     targetSdk 34
-    // v1.25（2026-09-13）：授权协议 v2，统一到期时间与 24 小时网络宽限
-    // v1.27（2026-09-15）：影视三栏恒空 / 豆瓣海报 418 / 今日比赛滤掉亚冠 / 详情页超时 修复批
-    // v1.28（2026-09-16）：重装免重激活（设备维度恢复）+ 激活失败保留真实 HTTP 状态并重试一次
-    // v1.29（2026-09-16）：影视源全通修复批——源匹配失败重试 / 代理 fake-IP 放行 /
-    //                      探测预算收敛 / 豆瓣海报 Referer 与占位图兜底（热更 v21 同源）
+    // 2026-09-16：足球比赛列表和信号源解析优化。
     // v1.32（2026-09-16）：云端接口从 Sites 切回腾讯云 CloudBase（国内可直连）。
-    // 2026-10-11：按用户要求，所有变体关闭内容准入门禁；会员/激活功能仍可主动访问。
+    // 2026-10-11：所有变体关闭内容准入门禁。
     // v1.34（2026-09-21）：APK 应用内更新支持分片下载——对象桶单对象硬上限 100 MiB，
     // 大包按 < 100 MiB 拆段，客户端按序下载拼成整包后仍校验 SHA-256 与签名证书。
     // v1.35（2026-09-21）：移动端长按画面左右两侧 = 3.0x 倍速播放（网页版同款、仅触屏）；
@@ -135,49 +131,29 @@ android {
     versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "3.0.21")
         // 方案 §5：双 ABI split 思路——真机 arm64/v7a + 模拟器 x86_64（开发验证用）
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
-        // AOSP 谷歌拼音解码器（搜索页拼音候选，2026-08-29）；默认 c++_static（new/delete 需要 libc++）
         // v1.19 版本重规划：内测/公测双 flavor 退役——只保留一条正式分发线（原公测版）。
-        // 热更新为正式线标配；授权端点仅供用户主动访问会员/激活页面。
+        // 热更新用于内嵌后端的启动维护。
         // v1.18 热更新：云端下发内嵌后端 zip，启动时静默检查+预下载，下次冷启动生效
-        // 2026-09-19 老板要求：**桌面应用名不带「TV版/移动版」**，两端统一 'My TV'；
-        // 区分只保留在 APK 产物文件名（MyTV-TV版.apk / MyTV-移动版.apk，见文件末尾归档块）。
+        // TV 与移动客户端统一显示「足球直播」；归档文件名按设备类型区分。
         // 注意：两端 label 相同，故**同一台设备不要同时装 TV 版与移动版**（靠 applicationId
         // 可以共存，但桌面会出现两个同名图标），分发时按设备类型二选一。
-        resValue 'string', 'app_name', 'My TV'
-        // 所有构建变体都不启用内容准入门禁；会员/激活页仍保留为用户主动访问功能。
-        buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'
+        resValue 'string', 'app_name', '足球直播'
+        // 足球比赛列表可直接访问，不设置内容准入门禁。
         buildConfigField 'String', 'API_BASE_URL', apiBaseUrlConstant
-        buildConfigField 'String', 'LICENSE_ENDPOINT', '"' + apiBaseUrl + '/activate"'
         buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'true'
         buildConfigField 'String', 'HOTUPDATE_ENDPOINT', '"' + apiBaseUrl + '/hotupdate"'
-        buildConfigField 'String', 'IPTV_LATEST_URL', '"' + apiBaseUrl + '/iptv/latest"'
         // APK 应用内更新清单；发布时将对应清单放到静态站点的 apk-update/ 目录。
         // 联调/自测可用 -PapkUpdateUrl=<https 地址> 临时指向测试清单，不必改死代码。
         buildConfigField 'boolean', 'APK_UPDATE_ENABLED', 'true'
         buildConfigField 'String', 'APK_UPDATE_URL',
                 '"' + (project.findProperty('apkUpdateUrl') ?: (apiBaseUrl + '/web/apk-update/tv.json')) + '"'
-        // 启动门闸预算：TV 90s（用户要求全加载完再进，遥控场景可等）；App.kt 共享读取。
-        // 2026-09-03 事故教训见 mobile 的 30000 注释
-        buildConfigField 'long', 'STARTUP_GATE_MS', '90000'
 
         // 焦点导航仪器测试（2026-09-06 三层测试体系第二层）：自定义 Runner 换轻量
-        // FocusTestApp（绕开 App.kt 的 Chaquopy 后端/许可证/启动门闸），harness 见
+        // FocusTestApp（避免仪器测试启动内嵌 Python 后端），harness 见
         // androidTest/.../focus/。真实按键注入（Espresso sendKeySync → Activity
         // .dispatchKeyEvent → OtvNav.dispatch）+ assertIsFocused 语义断言。
         testInstrumentationRunner 'com.qiubo.optimaltv.focus.FocusTestRunner'
 
-        externalNativeBuild {
-            cmake {
-                cppFlags "-std=c++14 -fexceptions"
-            }
-        }
-    }
-
-    externalNativeBuild {
-        cmake {
-            path "src/main/cpp/pinyinime/CMakeLists.txt"
-            version "3.22.1"
-        }
     }
 
     signingConfigs {
@@ -202,17 +178,12 @@ android {
         release {
             minifyEnabled false   // Chaquopy + 反射（引擎/Room）保守不混淆
             signingConfig signingConfigs.release
-            // 所有变体都允许未激活用户进入主功能。
-            buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'
         }
         debug {
-            // v1.20 QA：debug 也用发布签名——可覆盖安装 release（保激活/收藏等数据），
-            // 模拟器经 otvDebugLicense 注码通道激活后装回 release 即可验证激活态
+            // v1.20 QA：debug 也用发布签名，可覆盖安装 release 做升级验证。
             signingConfig signingConfigs.release
             // Debug 必须验证 APK 内嵌的当前后端；不要让线上热更新覆盖本地测试代码。
             buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'false'
-            // Debug 与 Release 一致，不启用内容准入门禁。
-            buildConfigField 'boolean', 'LICENSE_ENABLED', 'false'
         }
     }
 
@@ -246,13 +217,13 @@ chaquopy {
     }
 }
 
-// 统一产物到项目目录（v1.19 版本重规划定稿）：apk/TV版/ 固定名 MyTV-TV版.apk，
+// 统一产物到项目目录：apk/TV版/ 固定名 FootballLive-TV.apk，
 // 由 assembleRelease 复制（对外分发=签名+热更新正式链路）。
 // debug 测试包不进 apk/——直接用项目根 build 构建输出目录。
 tasks.register("copyTvApk", Copy) {
     from(layout.buildDirectory.file("outputs/apk/release/app-release.apk"))
     into(rootProject.file("../apk/TV版"))
-    rename { "MyTV-TV版.apk" }
+    rename { "FootballLive-TV.apk" }
 }
 // AGP 的 assemble 任务在 android 插件注册后才出现，须在 afterEvaluate 挂接依赖
 afterEvaluate {
@@ -297,8 +268,6 @@ dependencies {
     // 队标 SVG 解码（football-data crests 为 svg，Coil 默认不支持）
     implementation 'io.coil-kt:coil-svg:2.6.0'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-    // v1.17 公测版：会员页购买二维码生成（BitMatrix 自绘 Canvas，无嵌入视图依赖）
-    implementation 'com.google.zxing:core:3.5.3'
 
     // 焦点导航几何规则（NavGeom）JVM 单元测试
     testImplementation 'junit:junit:4.13.2'

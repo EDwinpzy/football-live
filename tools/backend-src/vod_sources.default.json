@@ -1,8 +1,0 @@
-{
-  "schema": 1,
-  "version": 3,
-  "sources": [
-    {"id":"hhkan","name":"好好看","site_url":"https://www.haohankan.com","api_url":"","adapter_type":"hhkan","enabled":true,"revision":1},
-    {"id":"feifan","name":"非凡资源","site_url":"http://cj.ffzyapi.com","api_url":"http://cj.ffzyapi.com/api.php/provide/vod/","adapter_type":"macms_json","enabled":true,"revision":1}
-  ]
-}

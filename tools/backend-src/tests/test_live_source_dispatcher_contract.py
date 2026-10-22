@@ -1,6 +1,6 @@
 """足球信号源请求不得与其它接口共用 OkHttp 并发名额（2026-10-17 回归契约）。
 
-现场：赛程/战报/集锦/新闻/信号源全部打到 127.0.0.1:8090，OkHttp 默认
+现场：赛程与信号源请求打到 127.0.0.1:8090，OkHttp 默认
 maxRequestsPerHost=5。旧版 liveSourceHttp 由主客户端 newBuilder 派生，沿用同一个
 Dispatcher，进足球页瞬间被慢接口占满 → 信号源请求排队 → callTimeout 到点抛
 InterruptedIOException → 播放器「无可用信号源」，只有杀进程才恢复。
@@ -28,7 +28,7 @@ class LiveSourceDispatcherContractTest(unittest.TestCase):
             with self.subTest(repository=relative):
                 source = self.read(relative)
                 block = source[source.index("private val liveSourceHttp"):]
-                block = block[:block.index("private suspend fun getSlow")]
+                block = block[:block.index("private suspend fun getLiveSource")]
                 self.assertIn(".dispatcher(", block)
                 self.assertIn("maxRequestsPerHost", block)
                 # dispatcher 必须在 build() 之前挂上，否则仍是共用主客户端的队列

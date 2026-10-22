@@ -11,7 +11,7 @@ import java.util.concurrent.ConcurrentHashMap
  * 抱怨能落到具体段落上：详情拖了多久、解析拖了多久、prepare 拖了多久、首帧拖了多久。
  *
  * **隐私红线（硬性）**：绝不记录播放 URL、Cookie、签名 token、Authorization 头。
- * 可点播的直链普遍带分钟级签名，落进日志等于泄漏可播放凭证，且日志会经 OtvLog 双写
+ * 上游直链普遍带分钟级签名，落进日志等于泄漏可播放凭证，且日志会经 OtvLog 双写
  * 持久化到 files/logs/otv.log。本文件只接受「线路稳定标识 + 耗时 + 错误分类」：
  *  - sourceId 走 [urlHash] 的短哈希，和 [com.qiubo.optimaltv.playback.PlaybackHealthLog.urlHash] 同一口径；
  *  - 任何地址在入队前经 [redact] 抹掉 query，只留 scheme://host/path；
@@ -107,7 +107,7 @@ object PlaybackTelemetry {
         /**
          * 结算：一次性吐出这次会话的五个关键耗时。
          *
-         * detail_ms —— 详情/线路解析等「点播放之前」的耗时；
+         * detail_ms —— 比赛选择到开始获取信号源前的耗时；
          * resolve_ms —— 解析到拿到可用线路的耗时；
          * prepare_ms —— 拿到直链到交引擎 prepare 的耗时；
          * first_frame_ms —— prepare 到首帧渲染的耗时；
@@ -156,7 +156,7 @@ object PlaybackTelemetry {
     /**
      * 地址脱敏：只保留 scheme://host/path，丢掉 query 与 fragment。
      *
-     * 点播直链的签名（?sign=…&t=…）全在 query 里，抹掉 query 后地址只用于「同一条线路
+     * 直播直链的签名（?sign=…&t=…）全在 query 里，抹掉 query 后地址只用于「同一条线路
      * 的多次尝试是否指向同一后端」这种诊断，不可播放。
      */
     fun redact(raw: String): String {

@@ -48,12 +48,6 @@ class CloudBaseFullyRemovedTests(unittest.TestCase):
                     "cloudfunctions", stripped,
                     "%s 仍在实际引用 cloudfunctions：%s" % (path.name, stripped))
 
-    def test_quickjs_vendor_lives_in_backend_src(self):
-        vendor = ROOT / "tools" / "backend-src" / "vendor"
-        self.assertTrue(
-            list(vendor.glob("_quickjs*.so")),
-            "tools/backend-src/vendor/ 下缺少 quickjs 扩展")
-
     def test_no_runtime_config_points_at_cloudbase_endpoints(self):
         forbidden = ("appletv-d5ge1bth794873f76", "tcloudbase.com")
         for name in ("deploy/selfhosted/.env.example", "deploy/selfhosted/compose.yaml"):

@@ -1,5 +1,4 @@
-"""重建内置后端 zip：以 app assets 里现有的 python-backend.zip 为基础，
-用 tools/backend-src/ 下的源文件覆盖同名条目，输出写回 assets/backend/python-backend.zip。
+"""重建内置足球直播后端 zip，并同步 TV 与移动端 assets。
 
 2026-09-07 需求⑤（热更含前后端）：REPL 从 5 个后端文件扩到全量——
 www/index.html、www/app.js、www/style.css、www/manifest.webmanifest、www/assets/*
@@ -32,21 +31,9 @@ TMP_ZIP = os.path.join(ROOT, "tools", "python-backend-new.zip")
 SRC_DIR = os.path.join(ROOT, "tools", "backend-src")
 POSTER_DIR = r"D:\OneDrive\ZCode\football-posters"
 
-REPL = ["proxy.py", "vlc_hls.py", "hhkan.py", "hhkan_snapshot.py", "hhkan_snapshot.json",
-        "team_backdrop.py", "scraper.py", "decrypt_stream.js",
-        "douban_catalog.py", "douban_snapshot.json", "douban_filter_matrix.json",
-        "media_index.py", "pinyin_map.json", "ime_hotwords.py", "vod_api.py",
-        "vod_sources.py", "vod_sources.default.json",
-        # 下面三个都是顶层 import，曾因白名单手工维护而漏收，打出来的 zip
-        # 在真机启动时直接 ModuleNotFoundError，整个内嵌 Python 后端起不来，
-        # 影视详情 / 播放 / 片源全部失效：
-        #   proxy.py    import metadata_client / import vod_resolver
-        #   hhkan.py    import source_dns
-        # vod_resolver 是方案 §5/§6 的片源解析器。延迟导入的 decrypt_python
-        # 有 quickjs 兜底、不属于打包必需，不在此列。
-        # tests/test_backend_zip_completeness.py 用 AST 静态分析顶层 import，
-        # 新增硬依赖必须同步登记到这里。
-        "source_dns.py", "vod_resolver.py", "metadata_client.py"]
+# 嵌入式 Python runtime 只保留足球直播 API、HLS 中继及队徽资源。
+# 新增顶层同包依赖时同步更新这里；完整性由 tests/test_backend_zip_completeness.py 检查。
+REPL = ["proxy.py", "vlc_hls.py", "team_backdrop.py"]
 # 需求⑤：热更包纳入前端（www 根文件 + www/assets 下全部前端资源；football 海报池仍走整池替换）
 WWW_FILES = ["index.html", "app.js", "style.css", "manifest.webmanifest"]
 WWW_ASSETS_PREFIX = "www/assets/"
@@ -126,7 +113,7 @@ def main():
         src = os.path.join(SRC_DIR, "www", name)
         if not os.path.isfile(src):
             raise SystemExit("缺少 %s" % src)
-    with tempfile.TemporaryDirectory(prefix="mytv-web-assets-") as build_temp:
+    with tempfile.TemporaryDirectory(prefix="football-live-web-assets-") as build_temp:
         web_dist = Path(build_temp) / "www"
         build_assets(Path(SRC_DIR) / "www", web_dist)
         web_files = {}
@@ -180,6 +167,11 @@ def main():
             data = open(os.path.join(SRC_DIR, base), "rb").read()
             write_entry(zout, item.filename, data, item)
             replaced.append(item.filename)
+        elif ("/" not in item.filename
+              and os.path.splitext(item.filename)[1].lower() in (".py", ".json", ".js")
+              and item.filename not in REPL):
+            # 删除旧客户端内嵌包中残留的 VOD、影视元数据和 IPTV 运行模块。
+            dropped += 1
         elif replace_posters and item.filename.startswith(FB_PREFIX):
             dropped += 1  # 旧海报池整池移除（需求：原来的海报都去掉）
         elif (item.filename == "www/asset-manifest.json"

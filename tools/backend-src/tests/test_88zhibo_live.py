@@ -35,10 +35,10 @@ class ZhiBo88LiveTest(unittest.TestCase):
         handler = object.__new__(proxy.Handler)
         observed = []
         with mock.patch.object(proxy.Handler, "_do_get", side_effect=observed.append):
-            for path in ("/api/matches?fresh=1&football_vpn=1", "/vod/home?football_vpn=1", "/api/matches?fresh=1"):
+            for path in ("/api/matches?fresh=1&football_vpn=1", "/api/matches?fresh=1"):
                 handler.path = path
                 handler.do_GET()
-        self.assertEqual(["/api/matches", "/vod/home", "/api/matches"], [item.path for item in observed])
+        self.assertEqual(["/api/matches", "/api/matches"], [item.path for item in observed])
         self.assertFalse(hasattr(proxy, "FOOTBALL_PROXY_URL"))
         self.assertFalse(hasattr(proxy, "_UPSTREAM_PROXY_URL"))
 

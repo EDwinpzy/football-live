@@ -6,6 +6,10 @@ import plistlib
 import zipfile
 
 
+def default_output_path(app: pathlib.Path) -> pathlib.Path:
+    return app.parent / "FootballLive-unsigned.ipa"
+
+
 def package(app: pathlib.Path, output: pathlib.Path) -> None:
     if not app.is_dir() or app.suffix != ".app":
         raise ValueError("Expected an Xcode .app directory")
@@ -32,6 +36,7 @@ def package(app: pathlib.Path, output: pathlib.Path) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app", type=pathlib.Path)
-    parser.add_argument("output", type=pathlib.Path)
+    parser.add_argument("output", type=pathlib.Path, nargs="?")
     args = parser.parse_args()
-    package(args.app, args.output)
+    output = args.output or default_output_path(args.app)
+    package(args.app, output)

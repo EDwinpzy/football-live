@@ -8,7 +8,6 @@ import android.os.Looper
 import java.util.concurrent.atomic.AtomicBoolean
 import com.qiubo.optimaltv.BackendService
 import com.qiubo.optimaltv.OtvLog
-import com.qiubo.optimaltv.announcement.AnnouncementManager
 import com.qiubo.optimaltv.hotupdate.HotUpdateManager
 import com.qiubo.optimaltv.playback.StreamDecryptServer
 
@@ -22,7 +21,6 @@ object ExitCoordinator {
         if (!exitStarted.compareAndSet(false, true)) return
         OtvLog.i("explicit exit: release playback helpers and backend")
         AppLifecycleManager.shutdown()
-        AnnouncementManager.shutdown()
         HotUpdateManager.shutdown()
         StreamDecryptServer.shutdown()
         /* 内嵌后端跑在独立进程（:backend）。旧实现只杀主进程，后端会活下来继续占着

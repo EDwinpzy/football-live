@@ -1,15 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 仅 debug 构建追加：调试广播接收器（注入搜索词，见 DebugQueryReceiver.kt）
-     + 焦点导航仪器测试 harness Activity（见 focus/FocusHarnessActivity.kt） -->
+<!-- Debug-only focus navigation test harness. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
-        <receiver
-            android:name=".DebugQueryReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.qiubo.optimaltv.DEBUG_QUERY" />
-            </intent-filter>
-        </receiver>
         <activity
             android:name="com.qiubo.optimaltv.focus.FocusHarnessActivity"
             android:exported="true" />

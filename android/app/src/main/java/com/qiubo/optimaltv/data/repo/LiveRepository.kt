@@ -4,9 +4,6 @@ import com.qiubo.optimaltv.OtvLog
 import com.qiubo.optimaltv.data.model.LiveStreamSource
 import com.qiubo.optimaltv.data.model.MatchChannel
 import com.qiubo.optimaltv.data.model.MatchItem
-import com.qiubo.optimaltv.data.model.NewsItem
-import com.qiubo.optimaltv.data.model.ResultItem
-import com.qiubo.optimaltv.data.model.VideoItem
 import com.qiubo.optimaltv.data.prefs.SettingsStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -23,9 +20,6 @@ import java.net.URLEncoder
  * 足球直播仓库（1:1 复刻原版 web 数据链路，同一后端）：
  * - matches: /api/matches（90 场左右，含 live 比分）
  * - 直播信号: /api/stream/{matchId}?src=all&fresh=1 → 仅返回已解析并探活的 HLS 线路
- * - 回看: /api/football-results（战报比分）→ 播放走 hhkan 搜索回放
- * - 集锦: /api/football-videos（hhkan vid，7 天内）
- * - 新闻: /api/football-news
  */
 class LiveRepository(
     private val settings: SettingsStore,
@@ -84,15 +78,6 @@ class LiveRepository(
     }
 
     private var matchesCache: Pair<Long, List<MatchItem>>? = null
-    /** 冷抓接口（/hhkan/search 站点实时抓取）专用：75s 读超时——后端 _fetch 会在
-     *  镜像域间切换重试（每域最长 25s×挑战求解），45s 会把「慢而能成」的搜索截成空结果（需求 搜索#2） */
-    private val slowHttp by lazy {
-        okHttp.newBuilder()
-            .readTimeout(75, java.util.concurrent.TimeUnit.SECONDS)
-            .proxy(java.net.Proxy.NO_PROXY)
-            .build()
-    }
-
     /** 赛程只请求一次直连接口；代理重试曾让失败路径额外等待订阅刷新和原生核心启动。 */
     private val matchesHttp by lazy {
         okHttp.newBuilder()
@@ -109,7 +94,7 @@ class LiveRepository(
      * 2026-10-17（用户报障「足球直播经常找不到可用信号源，退出 app 重进又好了」）：
      * 旧版由 [okHttp] newBuilder 派生，**沿用同一个 Dispatcher**。生产请求走
      * `liveHttpResponse`（异步 enqueue），而 OkHttp 的 `maxRequestsPerHost`（默认 5）
-     * 只约束异步调用；赛程/战报/集锦/新闻/信号源全部打到同一个 127.0.0.1:8090，
+     * 只约束异步调用；赛程与信号源请求打到同一个 127.0.0.1:8090，
      * 进足球页瞬间几路并发就能占满 5 个名额。更糟的是**排队期间 callTimeout 不生效**
      * （OkHttp 在 call 真正开始跑时才 enter 超时），信号源请求会在 ready 队列里无限期
      * 挂着——播放器停在「正在查找片源…」，用户退出重进（新会话、新队列）才恢复。
@@ -132,53 +117,10 @@ class LiveRepository(
             .build()
     }
 
-    private suspend fun getSlow(base: String, path: String): JSONObject = withContext(Dispatchers.IO) {
-        val req = Request.Builder()
-            .url(base.trimEnd('/') + path)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
-            .build()
-        liveHttpResponse(slowHttp, req).use { resp ->
-            require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
-            JSONObject(resp.body?.string().orEmpty())
-        }
-    }
-
     private suspend fun getLiveSource(base: String, path: String): JSONObject = withContext(Dispatchers.IO) {
         val req = Request.Builder()
             .url(base.trimEnd('/') + path)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
-            .build()
-        liveHttpResponse(liveSourceHttp, req).use { resp ->
-            require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
-            JSONObject(resp.body?.string().orEmpty())
-        }
-    }
-
-    /** 搜索输入变化时，取消旧 OkHttp 调用，避免过期查询继续占用 IO 和后端请求槽位。 */
-    private suspend fun getSearch(base: String, path: String): JSONObject = withContext(Dispatchers.IO) {
-        val req = Request.Builder()
-            .url(base.trimEnd('/') + path)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
-            .build()
-        val call = slowHttp.newCall(req)
-        val job = currentCoroutineContext()[Job]
-        val cancellation = job?.invokeOnCompletion { cause ->
-            if (cause is CancellationException) call.cancel()
-        }
-        try {
-            call.execute().use { resp ->
-                require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
-                JSONObject(resp.body?.string().orEmpty())
-            }
-        } finally {
-            cancellation?.dispose()
-        }
-    }
-
-    private suspend fun get(base: String, path: String): JSONObject = withContext(Dispatchers.IO) {
-        val req = Request.Builder()
-            .url(base.trimEnd('/') + path)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) FootballLive/1.0")
             .build()
         liveHttpResponse(liveSourceHttp, req).use { resp ->
             require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
@@ -190,7 +132,7 @@ class LiveRepository(
         val path = matchesRequestPath()
         val req = Request.Builder()
             .url(base.trimEnd('/') + path)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) FootballLive/1.0")
             .build()
         liveHttpResponse(matchesHttp, req).use { resp ->
             require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
@@ -209,7 +151,7 @@ class LiveRepository(
     init {
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             runCatching {
-                settings.settings.collect { cachedBase = it.hhkanBaseUrl.trim().trimEnd('/') }
+                settings.settings.collect { cachedBase = it.liveApiBaseUrl.trim().trimEnd('/') }
             }
         }
     }
@@ -493,56 +435,6 @@ class LiveRepository(
         }.getOrDefault(true)
     }
 
-    /** 回看战报（近 16 条，含比分） */
-    suspend fun results(): List<ResultItem> = withContext(Dispatchers.IO) {
-        runCatching {
-            val arr = get(baseUrl(), "/api/football-results?n=16").getJSONArray("list")
-            (0 until arr.length()).mapNotNull { i ->
-                val o = arr.optJSONObject(i) ?: return@mapNotNull null
-                val h = o.optString("home"); val a = o.optString("away")
-                if (h.isBlank() || a.isBlank() || !o.has("h")) return@mapNotNull null
-                ResultItem(
-                    home = h, away = a,
-                    h = o.optInt("h", -1).let { if (it < 0) "" else it.toString() },
-                    a = o.optInt("a", -1).let { if (it < 0) "" else it.toString() },
-                    title = o.optString("title"), url = o.optString("url"),
-                )
-            }
-        }.getOrDefault(emptyList())
-    }
-
-    /** 集锦（hhkan 聚合，id 即 hhkan vid，可直接走 hhkan 详情解析播放） */
-    suspend fun videos(): List<VideoItem> = withContext(Dispatchers.IO) {
-        runCatching {
-            val base = baseUrl()
-            val arr = get(base, "/api/football-videos?n=48").getJSONArray("list")
-            (0 until arr.length()).mapNotNull { i ->
-                val o = arr.optJSONObject(i) ?: return@mapNotNull null
-                val id = o.optLong("id", 0L)
-                if (id <= 0L) return@mapNotNull null
-                // cover 来自 vres.* CDN，模拟器/真机不可直连 → 经后端 /hhkan/proxy 中继，否则封面不显示
-                val cover = com.qiubo.optimaltv.data.source.HhkanSource.relayed(base, o.optString("cover"))
-                VideoItem(
-                    id = id.toString(), title = o.optString("title"), cover = cover,
-                    league = o.optString("league"),
-                    home = o.optString("home"), away = o.optString("away"),
-                    h = o.optString("h"), a = o.optString("a"),
-                )
-            }
-        }.getOrDefault(emptyList())
-    }
-
-    /** 足球新闻 */
-    suspend fun news(): List<NewsItem> = withContext(Dispatchers.IO) {
-        runCatching {
-            val arr = get(baseUrl(), "/api/football-news?n=40").getJSONArray("list")
-            (0 until arr.length()).mapNotNull { i ->
-                val o = arr.optJSONObject(i) ?: return@mapNotNull null
-                NewsItem(title = o.optString("title"), img = o.optString("img"), time = o.optString("time"), content = o.optString("content"))
-            }
-        }.getOrDefault(emptyList())
-    }
-
     /** 队标（原版 iconUrl 1:1：normTeamName 归一化 → 本地 574 队映射零请求，未命中回落后端接口） */
     private val teamIcons: Map<String, String> by lazy {
         runCatching {
@@ -578,21 +470,6 @@ class LiveRepository(
     private fun baseTeamName(n: String): String =
         n.replace(Regex("(女篮|男篮|女足|男足|B队|二队|U\\d+|青年队)$"), "")
 
-    /** 实时搜索（原版 doSearch：每次输入防抖后调 /hhkan/search，站点原生支持拼音节匹配如 shouhu；冷抓 45s） */
-    suspend fun search(k: String): List<VideoItem> = withContext(Dispatchers.IO) {
-        val q = k.trim()
-        if (q.isEmpty()) return@withContext emptyList()
-        runCatching {
-            val arr = getSlow(baseUrl(), "/hhkan/search?k=" + URLEncoder.encode(q, "UTF-8")).optJSONArray("items")
-            (0 until (arr?.length() ?: 0)).mapNotNull { i ->
-                val o = arr!!.optJSONObject(i) ?: return@mapNotNull null
-                val id = o.optLong("id", 0L)
-                if (id <= 0L) return@mapNotNull null
-                VideoItem(id = id.toString(), title = o.optString("title"), cover = o.optString("cover"))
-            }
-        }.onFailure { android.util.Log.w(TAG, "search 失败: ${it.message}") }.getOrDefault(emptyList())
-    }
-
     /** 足球海报池（2026-08-29 换新海报 36 张 jpg，经后端静态托管） */
     fun posterUrl(index: Int): String =
         baseUrl() + "/assets/football/fb-" + String.format(java.util.Locale.ROOT, "%02d", (index % POSTER_POOL) + 1) + ".jpg"
@@ -601,80 +478,4 @@ class LiveRepository(
      *  仅每次启动 app 时换一张（旧版按 matchId 散列，切比赛海报跟着换，用户不要） */
     val launchPosterIndex: Int = kotlin.random.Random.nextInt(POSTER_POOL)
 
-    /** 设备本地豆瓣媒体库搜索。retryNonce 仅保留二进制兼容，搜索不会触网也无需重试。 */
-    suspend fun searchRemote(query: String, retryNonce: Int = 0): List<com.qiubo.optimaltv.data.model.VodItem> = withContext(Dispatchers.IO) {
-        try {
-            val base = baseUrl()
-            val k = URLEncoder.encode(query.trim(), "UTF-8")
-            val arr = getSearch(base, "/api/search?q=$k&limit=60").optJSONArray("items")
-            (0 until (arr?.length() ?: 0)).mapNotNull { i ->
-                val o = arr?.optJSONObject(i) ?: return@mapNotNull null
-                val id = o.optString("douban_id").ifBlank { o.optString("id").removePrefix("douban:") }
-                if (id.isBlank()) return@mapNotNull null
-                com.qiubo.optimaltv.data.model.VodItem(
-                    id = "douban:$id", sourceId = "douban",
-                    title = o.optString("title").trim(),
-                    categoryId = "douban:" + o.optString("category", "movie"),
-                    year = o.optString("year"), rating = o.optDouble("rating", 0.0),
-                    desc = o.optString("summary"),
-                    posterUrl = com.qiubo.optimaltv.data.source.VodApiSource.relayPoster(base, o.optString("poster_url")),
-                    detailRef = id,
-                )
-            }.filter { it.title.isNotBlank() }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            android.util.Log.w(TAG, "VOD search failed: ${error.message}")
-            emptyList()
-        }
-    }
-
-    /** 已知 hhkan vid 的线路解析（集锦直入播放器用） */
-    suspend fun hhkanVidLines(vid: String): List<com.qiubo.optimaltv.data.model.LineInfo> = withContext(Dispatchers.IO) {
-        val base = baseUrl()
-        runCatching {
-            val d = com.qiubo.optimaltv.data.source.HhkanSource.fetchDetail(base, okHttp, vid)
-            d.lines.mapNotNull { line ->
-                line.episodes.getOrNull(0)?.let { ep ->
-                    com.qiubo.optimaltv.data.model.LineInfo(
-                        vodId = "hhkanplay:$vid", label = line.name, url = "",
-                        playRef = "$vid-${ep.second}-${ep.third}",
-                    )
-                }
-            }
-        }.getOrDefault(emptyList())
-    }
-
-    /**
-     * 回放解析（原版 playRewatch）：hhkan 搜「home VS away」→ 命中取详情多线路；
-     * 搜不到 → 集锦列表同队名兜底。返回 (标题, 线路列表)，null = 无回放。
-     */
-    suspend fun replayLines(home: String, away: String): Pair<String, List<com.qiubo.optimaltv.data.model.LineInfo>>? =
-        withContext(Dispatchers.IO) {
-            val base = baseUrl()
-            var vid = ""; var title = ""
-            runCatching {
-                val kw = URLEncoder.encode("$home VS $away", "UTF-8")
-                val arr = get(base, "/hhkan/search?k=$kw").optJSONArray("items")
-                if (arr != null) for (i in 0 until arr.length()) {
-                    val o = arr.optJSONObject(i) ?: continue
-                    val t = o.optString("title")
-                    if (t.contains(home) || t.contains(away)) { vid = o.optLong("id").toString(); title = t; break }
-                }
-            }
-            if (vid.isBlank()) {
-                videos().find { it.title.contains(home) || it.title.contains(away) }?.let { vid = it.id; title = it.title }
-            }
-            if (vid.isBlank()) return@withContext null
-            val d = com.qiubo.optimaltv.data.source.HhkanSource.fetchDetail(base, okHttp, vid)
-            val lines = d.lines.mapIndexedNotNull { idx, line ->
-                line.episodes.getOrNull(0)?.let { ep ->
-                    com.qiubo.optimaltv.data.model.LineInfo(
-                        vodId = "replay:$vid", label = line.name, url = "",
-                        playRef = "$vid-${ep.second}-${ep.third}",
-                    )
-                }
-            }
-            if (lines.isEmpty()) null else (title.ifBlank { "$home 对阵 $away 回放" }) to lines
-        }
 }

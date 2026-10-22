@@ -1,7 +1,7 @@
 """Chaquopy 入口：把解压后的后端目录加入 sys.path，再启动 proxy.main(port)。
 
 app 侧 EmbeddedBackend 解压 zip 后调用 start(dir, port)：
-- dir 是应用私有可写目录（含 proxy.py / hhkan.py / team_backdrop.py / scraper.py / www / 缓存目录）
+- dir 是应用私有可写目录（含随包的足球直播后端脚本、www 与缓存目录）
 - 在此把 dir 插到 sys.path[0]，保证 import proxy 用的是解压出的那份
 """
 import sys
@@ -35,9 +35,6 @@ def configure_api_environment(api_base_url, migration_ca_path):
         urllib.request.HTTPSHandler(context=context)
     ))
 
-    os.environ["OTV_CLOUD_BASE"] = origin + "/web"
-    os.environ["OTV_LICENSE_ENDPOINT"] = origin + "/activate"
-    os.environ["OTV_IPTV_LATEST_URL"] = origin + "/iptv/latest"
     os.environ["OTV_APK_UPDATE_OBJECT_BASE"] = origin + "/v1/storages/object/hotupdate"
 
 

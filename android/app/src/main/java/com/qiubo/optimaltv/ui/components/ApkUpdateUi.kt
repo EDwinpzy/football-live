@@ -143,7 +143,7 @@ private fun ApkUpdateStatus(state: ApkUpdateState?, s: Float) {
             )
         }
         ApkUpdateState.PermissionRequired -> androidx.compose.material3.Text(
-            "请在系统设置中允许 My TV 安装未知应用，返回后会继续安装。",
+            "请在系统设置中允许 足球直播 安装未知应用，返回后会继续安装。",
             color = OtvColors.White70,
             fontSize = 20f.sxs(s),
         )

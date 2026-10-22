@@ -12,7 +12,7 @@ import java.util.concurrent.TimeUnit
  * app 启动时把后端 zip 解压到应用可写目录，用 Chaquopy 在本机 127.0.0.1:8090 跑 proxy.py
  * —— app 的 baseUrl 默认指向这里。
  *
- * proxy.py 只用标准库 + 自有模块（hhkan/team_backdrop/scraper），无需 pip 包；
+ * proxy.py 与足球直播后端模块随包提供，运行时解压到应用私有目录；
  * www/ 与缓存目录(team_icon_cache/svg/transparent)运行前在解压目录内创建。
  *
  * v1.18 热更新（公测版）：优先解压 HotUpdateManager 暂存的云端包
@@ -64,7 +64,7 @@ object EmbeddedBackend {
                         val mod = com.chaquo.python.Python.getInstance().getModule("proxy_runner")
                         mod.callAttr("start", ex.dir.absolutePath, PORT, BuildConfig.API_BASE_URL, migrationCaPath)
                         if (ex.src.startsWith("hot") && probeHealthy(appCtx, ex.code)) {
-                            // 热更包健康起服：记激活版本 + 上报 applied（强制更新闭环）
+                            // 热更包健康起服：记录当前运行版本并上报 applied。
                             com.qiubo.optimaltv.hotupdate.HotUpdateManager.notifyApplied(appCtx, ex.code)
                         }
                         Log.i(TAG, "后端已启动 src=${ex.src} port=$PORT")
@@ -165,7 +165,7 @@ object EmbeddedBackend {
             // 2026-09-30：坏包的解压目录必须一并作废。原来只删热更 marker，
             // 而 embedded_backend/.extracted 仍写着 `hot|<code>|<len>`，于是下次
             // 启动 extractZipIfNeeded 命中标记直接复用这份坏包解压目录，
-            // 内置 assets 后端永远不生效（现场：APK 已升级但设备仍跑旧搜索逻辑）。
+            // 内置 assets 后端永远不生效（现场：APK 已升级但设备仍运行旧后端）。
             EmbeddedBackendPolicy.invalidateAfterQuarantine(backendDir(ctx))
             com.qiubo.optimaltv.hotupdate.HotUpdateManager.notifyApplyFailed(ctx, code, reason)
         }

@@ -55,7 +55,7 @@ fun rememberDoubleBackExit(onHint: (String) -> Unit): () -> Unit {
 private const val DOUBLE_BACK_WINDOW_MS = 2500L
 
 /** 底部轻提示（需求 足球#5：只保留文字，背景半透明灰色；v1.18 尺寸与 TV 版 1:1 同款）。
- *  需求 影视#3：全站浮窗提示统一贴屏幕最下方（底边距 40，不再浮在半空）。
+ * 提示统一贴屏幕最下方（底边距 40）。
  */
 @Composable
 fun BoxScope.OtvHint(text: String?, modifier: Modifier = Modifier) {

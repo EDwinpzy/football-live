@@ -2,7 +2,7 @@ package com.qiubo.optimaltv.mobileui
 
 import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.assertIsSelected
-import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertDoesNotExist
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -29,47 +29,35 @@ class MobileTabBarTest {
     @Test
     fun hiddenTabBarDoesNotExposeTouchActions() {
         MobileUiHarness.scene = {
-            MainTabBar(
-                currentKey = "vod",
-                onSelect = {},
-                onSearch = {},
-                hidden = true,
-            )
+            MainTabBar(currentKey = "live", onSelect = {}, hidden = true)
         }
         rule.waitForIdle()
 
-        rule.onNodeWithText("影视").assertHasNoClickAction()
+        rule.onNodeWithText("足球直播").assertHasNoClickAction()
     }
 
     @Test
-    fun tabAndSearchClicksEmitNavigationIntents() {
+    fun footballIsTheOnlyTabAndSearchIsAbsent() {
         var selected = ""
-        var searchClicks = 0
         MobileUiHarness.scene = {
-            MainTabBar(
-                currentKey = "vod",
-                onSelect = { selected = it },
-                onSearch = { searchClicks++ },
-            )
+            MainTabBar(currentKey = "live", onSelect = { selected = it })
         }
         rule.waitForIdle()
 
-        rule.onNodeWithTag(MobileUiTags.mainTab("vod")).assertIsSelected()
-        rule.onNodeWithTag(MobileUiTags.mainTab("tv")).assertIsNotSelected().performClick()
-        rule.runOnIdle { assertEquals("tv", selected) }
-        rule.onNodeWithTag(MobileUiTags.SearchTab).performClick()
-        rule.runOnIdle { assertEquals(1, searchClicks) }
+        rule.onNodeWithTag(MobileUiTags.mainTab("live")).assertIsSelected().performClick()
+        rule.onNodeWithTag(MobileUiTags.mainTab("vod")).assertDoesNotExist()
+        rule.onNodeWithTag("mobile-tab-search").assertDoesNotExist()
+        rule.runOnIdle { assertEquals("live", selected) }
     }
 
     @Test
     fun displayOnlyTabBarDoesNotExposeTouchActions() {
         MobileUiHarness.scene = {
-            MainTabBar("vod", {}, {}, interactive = false)
+            MainTabBar("live", {}, interactive = false)
         }
         rule.waitForIdle()
 
-        rule.onNodeWithTag(MobileUiTags.mainTab("vod")).assertHasNoClickAction()
-        rule.onNodeWithTag(MobileUiTags.SearchTab).assertHasNoClickAction()
+        rule.onNodeWithTag(MobileUiTags.mainTab("live")).assertHasNoClickAction()
     }
 
     @Test

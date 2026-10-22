@@ -4,12 +4,9 @@ import android.app.Application
 import android.content.Context
 import android.os.Looper
 import android.view.View
-import androidx.room.Room
 import com.qiubo.optimaltv.Graph
 import com.qiubo.optimaltv.data.analytics.PlaybackTelemetry
-import com.qiubo.optimaltv.data.db.AppDb
 import com.qiubo.optimaltv.data.prefs.SettingsStore
-import com.qiubo.optimaltv.data.repo.VodRepository
 import com.qiubo.optimaltv.playback.DecoderStats
 import com.qiubo.optimaltv.playback.EnginePlayState
 import com.qiubo.optimaltv.playback.EngineUiState
@@ -18,7 +15,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -37,7 +33,6 @@ import java.util.concurrent.TimeUnit
 @LooperMode(LooperMode.Mode.PAUSED)
 class PlaybackFreezeMonitorTest {
     private lateinit var context: Context
-    private lateinit var db: AppDb
     private lateinit var settings: SettingsStore
     private lateinit var vm: PlayerViewModel
     private lateinit var engine: FakeMediaEngine
@@ -52,15 +47,9 @@ class PlaybackFreezeMonitorTest {
         originalTelemetrySink = PlaybackTelemetry.sink
         PlaybackTelemetry.sink = {}
 
-        db = Room.inMemoryDatabaseBuilder(context, AppDb::class.java)
-            .allowMainThreadQueries()
-            .build()
         settings = SettingsStore(context)
         vm = PlayerViewModel(
             "live:freeze-monitor-test",
-            0,
-            VodRepository(settings, OkHttpClient(), context),
-            db,
             settings,
             autoBoot = false,
         )
@@ -82,7 +71,6 @@ class PlaybackFreezeMonitorTest {
             cancelJob("engineStateJob")
             if (vm.hasEngine()) vm.engine.release()
         }
-        if (::db.isInitialized) db.close()
         if (::originalTelemetrySink.isInitialized) PlaybackTelemetry.sink = originalTelemetrySink
         if (graphContextCaptured) {
             Graph::class.java.getDeclaredField("appContext").apply { isAccessible = true }
@@ -182,7 +170,6 @@ class PlaybackFreezeMonitorTest {
         override fun swapSource(url: String, autoplay: Boolean) = Unit
         override fun seekToLiveEdge() = Unit
         override fun setSoftwareDecoderPreferred(on: Boolean) = Unit
-        override fun setLargeBufferPreferred(on: Boolean) = Unit
         override fun setLiveWindowHintMs(windowMs: Long) = Unit
         override fun audioCodecs(): String? = null
         override fun decoderStats(): DecoderStats {
@@ -199,7 +186,6 @@ class PlaybackFreezeMonitorTest {
 
         override fun play() = Unit
         override fun pause() = Unit
-        override fun seekTo(ms: Long) = Unit
         override fun setSpeed(v: Float) = Unit
         override fun release() = Unit
     }

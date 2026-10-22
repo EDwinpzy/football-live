@@ -276,7 +276,7 @@ fun Modifier.dpadFocusable(
     val latestNode = androidx.compose.runtime.rememberUpdatedState(bandNode)
     // 2026-09-19 光标乱跑根修：注册表必须始终指向【当前附着】的 bandNode。
     // bandNode 由 remember(externalFocusRequester) 生成——LazyColumn item key
-    // （lib-sec-板块名-rN）跨分类同名，切分类/数据刷新后卡片组合被保留但 vod 已换，
+    // （lib-sec-板块名-rN）跨分组同名，切分组/数据刷新后卡片组合被保留但内容已换，
     // fr(新id) 变了 → remember 重跑生成新节点挂到修饰符上；注册表若不跟着换，
     // cards[bandId] 就永远停在【从未上过屏的僵尸节点】（bounds=Zero 或冻结在
     // 滚动前 sliver 位置），dispatch 读它做几何起点 → UP 落下一行、横向锁死、
@@ -417,30 +417,6 @@ fun Modifier.dpadFocusable(
         }
 }
 
-private val POSTER_PLACEHOLDER_PALETTES = listOf(
-    listOf(Color(0xFF20304A), Color(0xFF0E1626)),
-    listOf(Color(0xFF3A2545), Color(0xFF160F1D)),
-    listOf(Color(0xFF1E3B33), Color(0xFF0D1A16)),
-    listOf(Color(0xFF453225), Color(0xFF1B140E)),
-)
-
-/** 渐变占位海报（图片源不可达时的兜底视觉）。floorMod：hashCode 可能为负，% 会得负索引 */
-@Composable
-fun PosterPlaceholder(
-    seed: Int,
-    modifier: Modifier = Modifier,
-    visible: () -> Boolean = { true },
-) {
-    val brush = remember(seed) {
-        Brush.linearGradient(POSTER_PLACEHOLDER_PALETTES[Math.floorMod(seed, POSTER_PLACEHOLDER_PALETTES.size)])
-    }
-    Box(
-        modifier.drawBehind {
-            if (visible()) drawRect(brush)
-        },
-    )
-}
-
 private const val TAG = "OptimalTV"
 
 /**
@@ -476,7 +452,7 @@ object ReturnFocus {
 
     /** 取回并消费（一次性）。仅「返回本屏」（BACK 从详情/播放回来）应恢复上次落焦；
      *  消费防止旧记忆残留——否则 tab 切回本屏时会被旧 key 劫持：v1.13 实测只要在
-     *  影视页聚焦过一次「立即播放」，之后每次经 tab 切回影视页光标都自动跳到该钮。 */
+     *  足球页聚焦过一次比赛卡，之后返回该页光标都会自动跳到该比赛。 */
     fun take(screen: String): String? = last.remove(screen)
 
     /** tab 切换/搜索 chip 等前进入口调用：全部落焦记忆作废，目标屏一律落初始焦点 */
@@ -765,7 +741,7 @@ object OtvNav {
         // 2026-09-19 光标乱跑修复：搜索起点优先用【本组自愈锚点】而非 cur.bounds。
         // 锚点只在【聚焦节点的真实上报】时刷新（onCardFocused/updateAnchor），
         // 构造上恒等于当前焦点节点最后一次聚焦位置——即使注册 bounds 因 Lazy 容器
-        // 裁边/节点置换出现异常，锚点仍可靠（实测影视页片库首行卡 UP 反向落点根因）。
+        // 裁边/节点置换出现异常，锚点仍可靠（实测足球比赛卡片首行 UP 反向落点根因）。
         val origin = lastAnchorByGroup[cur.group ?: ""]?.bounds ?: currentNodeOrigin(cur)
         val target = searchGeom(origin, dir, cur.group, exclude = cur)
         if (target != null && focusNode(target)) {

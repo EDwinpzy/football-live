@@ -52,10 +52,7 @@ import kotlinx.coroutines.launch
 data class TabItem(val key: String, val label: String)
 
 val MAIN_TABS = listOf(
-    TabItem("live", "足球"),
-    TabItem("vod", "影视"),
-    TabItem("tv", "电视"),   // v1.13：公开 IPTV 直播（影视之后、我的之前）
-    TabItem("favorites", "我的"),
+    TabItem("live", "足球直播"),
 )
 
 /** Tab 间导航统一入口：popUpTo 起点页 + launchSingleTop，反复横跳不撑爆返回栈。
@@ -73,7 +70,6 @@ fun navigateToTab(nav: NavController, key: String) {
 fun MainTabBar(
     currentKey: String,
     onSelect: (String) -> Unit,
-    onSearch: () -> Unit,
     initialFocus: FocusRequester? = null,
     /** 顶部毛玻璃层（原版 #topbar backdrop-filter:blur）：画在渐变之上、brand/胶囊之下，全宽 150 高 */
     glass: (@Composable () -> Unit)? = null,
@@ -82,14 +78,10 @@ fun MainTabBar(
     /** 深滚后内容首目标（hero）被 LazyColumn 回收、requestFocus 抛异常时的兜底：
      *  各屏传「滚回顶部」，随后自动重试落焦（loading 中按 DOWN 也能在内容就绪后落焦） */
     contentDownScrollTop: (suspend () -> Unit)? = null,
-    /** false = 纯展示（搜索/全部等二级页）：tab 与搜索 chip 均不可聚焦，
-     *  方向键无法从内容区（如软键盘）误入标签栏导致误切页（需求 #12） */
+    /** false = 纯展示：tab 不可聚焦。 */
     interactive: Boolean = true,
     /** 任一 tab 聚焦状态回调（供各屏 BackHandler 判定「已在顶部 tab 栏」再退出，需求 #2） */
     onTabFocused: ((Boolean) -> Unit)? = null,
-    /** 搜索 chip 落焦句柄（需求 搜索#1：搜索页标签栏可交互后，键盘到顶 UP 定向回
-     *  搜索 chip；内容区 UP 兜底仍由各屏自行注册 RowBandNav.topFocus） */
-    searchChipFocus: FocusRequester? = null,
     /** v1.16 自动隐藏（用户需求：光标下移进内容区隐藏顶栏，回顶部才显示）：
      *  true = 聚焦节点顶边越过阈值即淡出上移本栏；光标回顶自动淡入。 */
     autoHide: Boolean = false,
@@ -144,7 +136,7 @@ fun MainTabBar(
             )
         }
         glass?.invoke()
-        // brand logo 已移除（需求 影视#10：app 左上角 logo 去掉）
+        // 单标签导航保持紧凑，不重复显示品牌 logo。
         // v1.13：行内左右/UP 封锁/DOWN 定向全部由 OtvNav 引擎处理——
         // tab 节点 navOverride：DOWN = 进内容区首焦点（几何搜索会被水平重叠的 chips 抢走）；
         // UP 一律封锁（顶栏之上无区域，放行会被兜底甩进下方内容）
@@ -191,7 +183,7 @@ fun MainTabBar(
             MAIN_TABS.forEach { tab ->
                 val selected = tab.key == currentKey
                 var focused by remember { mutableStateOf(false) }
-                // 无所在页（会员页等 interactive 二级页，currentKey 空串）：initialFocus 锚定
+                // 无所在标签页（播放器等独立页面，currentKey 空串）：initialFocus 锚定
                 // 首个 tab 作为 UP 逃逸落点。落点必须关 autoSelect——否则聚焦 80ms 后
                 // hover-select 直接劫持跳页，用户永远停不在标签栏上左右选页
                 val anchored = initialFocus != null &&
@@ -236,39 +228,6 @@ fun MainTabBar(
                         color = if (selected || focused) OtvColors.White else OtvColors.White60,
                     )
                 }
-            }
-            // 搜索 chip（原版 #search-chip：111×56 r35，图标 #999；聚焦黑60%胶囊 + 图标变白）
-            var searchFocused by remember { mutableStateOf(false) }
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .then(if (searchChipFocus != null) Modifier.focusRequester(searchChipFocus) else Modifier)
-                    .then(
-                        if (interactive) {
-                            Modifier.dpadFocusable(
-                                scaleFocused = 1f,
-                                focusedBg = Color(0x99000000),
-                                focusedBgRadius = 28f.sx(s),
-                                floating = true,
-                                onFocusedChange = { searchFocused = it },
-                                // 需求 搜索#1：光标移到搜索 chip 即自动进入搜索页，无需再按 OK
-                                autoSelect = true,
-                            ) {
-                                // 搜索 chip 进入同属「新进入」：清空返回落焦记忆，
-                                // 搜索页一律落键盘（而非上次的结果卡）
-                                ReturnFocus.clearAll(); onSearch()
-                            }
-                        } else Modifier,
-                    )
-                    .width(111f.sx(s))
-                    .height(56f.sx(s)),
-            ) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_search),
-                    contentDescription = "搜索",
-                    tint = if (searchFocused) OtvColors.White else Color(0xFF999999),
-                    modifier = Modifier.size(29f.sx(s)),
-                )
             }
         }
         } // CompositionLocalProvider(LocalNavOverride provides tabDir)

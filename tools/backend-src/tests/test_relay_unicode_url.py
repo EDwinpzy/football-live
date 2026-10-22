@@ -9,7 +9,6 @@ BACKEND = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 
 import proxy  # noqa: E402
-import vod_sources  # noqa: E402
 
 
 class _Response:
@@ -33,7 +32,7 @@ class RelayUnicodeUrlTests(unittest.TestCase):
                 mock.patch.object(proxy, "_http", client):
             result, final_url = proxy._open_upstream(raw_url, {}, read_timeout=2)
 
-        expected = vod_sources._ascii_http_url(raw_url)
+        expected = proxy._ascii_http_url(raw_url)
         self.assertIs(result, response)
         self.assertEqual(client.request.call_args.args[:2], ("GET", expected))
         self.assertEqual(final_url, expected)
@@ -54,8 +53,8 @@ class RelayUnicodeUrlTests(unittest.TestCase):
                 mock.patch.object(proxy, "_blocked_internal_url", return_value=False):
             result, final_url = proxy._open_upstream(raw_url, {}, read_timeout=2)
 
-        first_url = vod_sources._ascii_http_url(raw_url)
-        expected_final = vod_sources._ascii_http_url(
+        first_url = proxy._ascii_http_url(raw_url)
+        expected_final = proxy._ascii_http_url(
             proxy.urljoin(first_url, location))
         requested_urls = [call.args[1] for call in client.request.call_args_list]
         self.assertEqual(requested_urls, [first_url, expected_final])
@@ -66,7 +65,7 @@ class RelayUnicodeUrlTests(unittest.TestCase):
 
     def test_urllib_fallback_receives_normalized_url(self):
         raw_url = "https://example.test/剧集/第一集.m3u8?token=值"
-        expected = vod_sources._ascii_http_url(raw_url)
+        expected = proxy._ascii_http_url(raw_url)
         response = _Response(200)
         opener = mock.Mock()
         opener.open.return_value = response
@@ -94,9 +93,9 @@ class RelayUnicodeUrlTests(unittest.TestCase):
                 mock.patch.object(proxy, "_blocked_internal_url", return_value=False):
             result, final_url = proxy._open_upstream(raw_url, {}, read_timeout=2)
 
-        expected = vod_sources._ascii_http_url(proxy.urljoin(raw_url, location))
+        expected = proxy._ascii_http_url(proxy.urljoin(raw_url, location))
         requests = [call.args[0].full_url for call in opener.open.call_args_list]
-        self.assertEqual(requests, [vod_sources._ascii_http_url(raw_url), expected])
+        self.assertEqual(requests, [proxy._ascii_http_url(raw_url), expected])
         self.assertIs(result, response)
         self.assertEqual(final_url, expected)
 

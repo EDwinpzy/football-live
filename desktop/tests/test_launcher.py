@@ -161,23 +161,20 @@ class CaTrustTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ca = Path(tmp) / "ca.pem"
             ca.write_bytes(TEST_CA_PEM)
-            original_env = {key: os.environ.get(key) for key in launcher.API_ENV_KEYS}
+            env_keys = launcher.API_ENV_KEYS + launcher.LEGACY_API_ENV_KEYS
+            original_env = {key: os.environ.get(key) for key in env_keys}
             previous_opener = urllib.request._opener
             system_cas = set(ssl.create_default_context().get_ca_certs(binary_form=True))
             try:
+                for key in launcher.LEGACY_API_ENV_KEYS:
+                    os.environ[key] = "https://obsolete.example"
                 launcher.configure_api_environment("https://example.test:35208", ca)
-                self.assertEqual(os.environ["OTV_CLOUD_BASE"], "https://example.test:35208/web")
-                self.assertEqual(os.environ["OTV_LICENSE_ENDPOINT"], "https://example.test:35208/activate")
-                self.assertEqual(os.environ["OTV_IPTV_LATEST_URL"], "https://example.test:35208/iptv/latest")
                 self.assertEqual(
                     os.environ["OTV_APK_UPDATE_OBJECT_BASE"],
                     "https://example.test:35208/v1/storages/object/hotupdate",
                 )
-                self.assertEqual(os.environ["OTV_METADATA_API_URL"], "https://example.test:35208")
-                self.assertEqual(
-                    os.environ["OTV_VOD_LINE_INDEX_URL"],
-                    "https://example.test:35208/v1/storages/object/hotupdate/vod-lines.json",
-                )
+                for key in launcher.LEGACY_API_ENV_KEYS:
+                    self.assertNotIn(key, os.environ)
                 handler = next(
                     item for item in urllib.request._opener.handlers
                     if isinstance(item, urllib.request.HTTPSHandler)
@@ -312,7 +309,7 @@ class WebviewStartTests(unittest.TestCase):
                 mock.patch.object(launcher.webview, "create_window") as create_window:
             window = mock.Mock()
             create_window.return_value = window
-            launcher.show_window("http://127.0.0.1:8090/", storage_path=r"C:\profile", title="My TV")
+            launcher.show_window("http://127.0.0.1:8090/", storage_path=r"C:\profile", title="足球直播")
         self.assertTrue(create_window.called)
         webview.start.assert_called_once()
         kwargs = webview.start.call_args.kwargs
@@ -322,15 +319,6 @@ class WebviewStartTests(unittest.TestCase):
 
 
 class SelfTestModeTests(unittest.TestCase):
-    def test_self_test_rejects_broken_quickjs_runtime(self):
-        with mock.patch.object(launcher, "wait_for_backend", return_value=True), \
-                mock.patch.object(launcher.urllib.request, "urlopen") as urlopen, \
-                mock.patch.object(launcher, "quickjs_smoke", return_value=False, create=True):
-            response = urlopen.return_value.__enter__.return_value
-            response.status = 200
-            response.read.return_value = b"<html>My TV</html>"
-            self.assertNotEqual(launcher.run_self_test(8090), 0)
-
     def test_self_test_validates_health_and_index(self):
         health = mock.Mock()
         health.status = 200
@@ -339,7 +327,7 @@ class SelfTestModeTests(unittest.TestCase):
         health.__exit__ = lambda *a: False
         index = mock.Mock()
         index.status = 200
-        index.read.return_value = b"<html>My TV</html>"
+        index.read.return_value = "<html>足球直播</html>".encode("utf-8")
         index.__enter__ = lambda self: self
         index.__exit__ = lambda *a: False
 

@@ -49,11 +49,10 @@ data class EngineUiState(
     val firstFrameRendered: Boolean = false,
 )
 
-class PrepareRequest(val url: String, val startMs: Long)
+class PrepareRequest(val url: String)
 
 /**
- * 引擎统一抽象缝（技术方案 §3.2，jellyplay 简化版）：
- * MediaEngine ⇄ IJKPlayer ⇄ libVLC 三引擎可切；当前内置 Media3，IJK/VLC 为预留位。
+ * Common playback interface for Media3 and the libVLC fallback engine.
  */
 interface MediaEngine {
     val engineId: String
@@ -68,9 +67,6 @@ interface MediaEngine {
     fun seekToLiveEdge()
     /** 硬解失败兜底：重建播放器改用软解优先的解码器选择（直播 DECODING_FAILED 用） */
     fun setSoftwareDecoderPreferred(on: Boolean)
-    /** v1.17 IPTV 大缓冲档（用户需求：美国/英国等远端源卡顿）——加大 min/max 缓冲
-     *  平滑抖动；默认关闭（足球直播走本地中继无需）。须在首次 prepare 前设置。 */
-    fun setLargeBufferPreferred(on: Boolean) {}
     /**
      * 直播窗口提示（2026-09-16 长跑卡顿根治）：上层在起播前探测媒体清单的可播放窗口
      * 长度（毫秒）后传入，0 = 未知（沿用旧行为）。须在 prepare 前调用。
@@ -96,29 +92,11 @@ interface MediaEngine {
     fun decoderStats(): DecoderStats? = null
     fun play()
     fun pause()
-    fun seekTo(ms: Long)
     fun setSpeed(v: Float)
     fun release()
 }
 
-/** 引擎能力位矩阵（设置页展示用） */
-data class EngineDescriptor(
-    val id: String,
-    val displayName: String,
-    val available: Boolean,
-    val note: String,
-)
-
 object EngineRegistry {
-    val descriptors = listOf(
-        EngineDescriptor("media3", "Media3 / ExoPlayer", true, "默认内核：HLS/DASH 标准流、硬解稳定"),
-        EngineDescriptor("vlc", "libVLC 兜底", true, "自带 ffmpeg 软解：MediaCodec 解不动的流（AVC High 8x8）自动兜底"),
-        EngineDescriptor("ijk", "IJKPlayer", false, "预留：点播杂源兜底，设备阶段接入"),
-    )
-
-    fun descriptorOf(id: String): EngineDescriptor =
-        descriptors.firstOrNull { it.id == id } ?: descriptors[0]
-
     /** 未内置引擎一律回落 Media3（AV1 无硬解时的软解兜底同理） */
     fun create(engineId: String, context: Context): MediaEngine =
         if (engineId == "vlc") VlcEngine(context) else Media3Engine(context)
@@ -149,14 +127,8 @@ class Media3Engine(context: Context) : MediaEngine {
     /** 软解优先（直播硬解失败兜底）：true 时 MediaCodecSelector 只选软解（google/c2.android），
      *  无软解才回落硬解列表。切换时重建播放器（渲染面复用不闪黑）。 */
     @Volatile private var softwarePreferred = false
-    /** v1.17 IPTV 大缓冲档：ensurePlayer 按 this 标记选 LoadControl 参数 */
-    @Volatile private var largeBuffer = false
     /** 直播窗口长度提示（0 = 未知）：见 MediaEngine.setLiveWindowHintMs */
     @Volatile private var liveWindowHintMs = 0L
-
-    override fun setLargeBufferPreferred(on: Boolean) {
-        largeBuffer = on
-    }
 
     /** 小窗口直播（足球直播中继：3×2s＝6s）：必须换掉固定的 15s 目标延迟与 6s 恢复水位 */
     private fun smallWindowLive(): Boolean = LiveWindowPolicy.isSmall(liveWindowHintMs)
@@ -292,12 +264,23 @@ class Media3Engine(context: Context) : MediaEngine {
         }
 
         override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
-            com.qiubo.optimaltv.OtvLog.i("engine 视频轨道 ${videoSize.width}x${videoSize.height}")
+            com.qiubo.optimaltv.OtvLog.i(
+                "engine 视频轨道 ${videoSize.width}x${videoSize.height} fps=${player?.videoFormat?.frameRate}",
+            )
         }
     }
 
     /** 丢帧统计（AnalyticsListener 才有该回调）：解码/供给不足的量化证据 */
     private val analyticsListener = object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+        override fun onVideoDecoderInitialized(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            decoderName: String,
+            initializedTimestampMs: Long,
+            initializationDurationMs: Long,
+        ) {
+            com.qiubo.optimaltv.OtvLog.i("engine 视频解码器 $decoderName init=${initializationDurationMs}ms")
+        }
+
         override fun onDroppedVideoFrames(
             eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
             droppedFrames: Int,
@@ -330,31 +313,21 @@ class Media3Engine(context: Context) : MediaEngine {
         val httpFactory = DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(10_000)
-            // 需求 影视#4：源站/中继链路慢，读超时太短会中途断流重试（观感=经常卡顿）
+            // 直播源站或中继链路较慢时，读超时过短会触发中途断流重试。
             .setReadTimeoutMs(30_000)
-            .setUserAgent("Mozilla/5.0 (Linux; Android 11) OptimalTV/1.0")
+            .setUserAgent("Mozilla/5.0 (Linux; Android 11) FootballLive/1.0")
         val dataSourceFactory = DefaultDataSource.Factory(appCtx, httpFactory)
-        // 需求 影视#4：加大缓冲池——低配盒子/慢源下 15s 缓冲一低于水位就 rebuffer；
+        // 直播缓冲参数按低配设备与慢源调整，降低网络抖动造成的反复缓冲；
         // v1.10（2026-08-31 低端机起播提速）：起播水位 2.5s→1s、二次缓冲 5s→2s——
         // 缓冲水位只决定「多少缓冲开始出画」，min/max 不变，播放中稳定性不受影响。
         // v1.14（2026-09-01 卡顿根治）：max 90s→120s——直播续签改「旧地址死透才切」后，
         // 检测间隔 90s 必须被缓冲余量完整覆盖（120s > 90s 检测 + 30s 切换衔接安全垫）。
-        // v1.17：IPTV（远端公网源，美英线抖动大）用大缓冲档 45s/150s；
-        // v1.19（电视#3 换台提速）：大缓冲档起播水位 3s/6s→1s/2s——水位只影响「出画
-        // 门槛」，min/max 不变；实测 IPTV 换台转圈时间主要耗在 3s 起播水位上。
-        // v1.22（2026-09-05 需求⑨ IPTV 卡顿）：rebuffer 水位 2s→6s——公网源瞬时抖动
-        // （1-3s 断供）在 2s 水位下每次都演成可感知暂停，6s 让 ExoPlayer 在缓冲余量内
-        // 自愈（观感=不再频繁转圈），恢复代价仅多等几秒缓冲。
-        // v1.23（2026-09-06 足球半小时零卡顿）：默认档 rebuffer 4s→6s 与 IPTV 档对齐
-        // ——直播 CDN 3-5s 级供给抖动在 4s 水位下仍会露头成可感知转圈，6s 水位下
-        // 播放器在缓冲余量内自愈；点播同享（恢复多等 2s，换感知不到的抖动）。
-        // 点播与足球直播（本地中继）维持 30s/120s。
+        // Absorb football stream CDN stalls within the six second rebuffer reserve.
         val (minBuf, maxBuf, startBuf, reBuf) =
             when {
                 // 小窗口直播（中继足球源 6s）：恢复水位必须小于窗口，否则一次抖动就要
                 // 等满整个窗口才出画（实测「转圈 8s 后触发整会话重解析」的大卡顿）
                 smallWindowLive() -> intArrayOf(8_000, 16_000, 600, 1_500).toList()
-                largeBuffer -> intArrayOf(45_000, 150_000, 1_000, 6_000).toList()
                 else -> intArrayOf(30_000, 120_000, 1_000, 6_000).toList()
             }
         val loadControl = DefaultLoadControl.Builder()
@@ -402,20 +375,23 @@ class Media3Engine(context: Context) : MediaEngine {
                         // 负值（落后直播边缘 N 秒），旧版把负值恒压成 0 → VM stall 监测
                         // 「位置 8s 不动」每轮误判 → seekToLiveEdge+rebuffer 每 8s 循环
                         //（画面正常却在自伤式重置，用户观感=持续小卡顿）。
-                        // 直播页不渲染进度条、直播不落进度库，负值透传无副作用；
-                        // 点播 position 本就非负，行为不变。
+                        // 直播播放器不展示时间轴也不持久化播放进度；保留原始时钟值供体检与恢复使用。
                         positionMs = p.currentPosition,
                         durationMs = if (p.duration > 0) p.duration else 0,
                         bufferedAheadMs = p.totalBufferedDuration.coerceAtLeast(0),
                     )
                     // 播放心跳（每 10s 一条）：黑屏事后排查的核心证据链——
                     // state=READY 但持续 isPlaying=true 且首帧日志缺失 = 渲染层黑屏；
-                    // buffered 持续走低 + 丢帧 = 网络/供给层问题
+                    // 结合缓冲、实际输出与丢帧计数区分供给不足和解码/渲染压力。
                     if (++beat % 20 == 0) {
                         val st = _ui.value
                         com.qiubo.optimaltv.OtvLog.i(
                             "hb ${st.state} playing=${st.isPlaying} pos=${st.positionMs / 1000}s " +
-                                "buf=${st.bufferedAheadMs / 1000}s dropped=$droppedFramesTotal rbuf=$rebufferCount",
+                                "buf=${st.bufferedAheadMs / 1000}s " +
+                                "dropped=${p.videoDecoderCounters?.droppedBufferCount ?: droppedFramesTotal} rbuf=$rebufferCount " +
+                                "rendered=${p.videoDecoderCounters?.renderedOutputBufferCount ?: -1} " +
+                                "skipped=${p.videoDecoderCounters?.skippedOutputBufferCount ?: -1} " +
+                                "speed=${p.playbackParameters.speed} liveOffsetMs=${p.currentLiveOffset}",
                         )
                     }
                 }
@@ -426,13 +402,12 @@ class Media3Engine(context: Context) : MediaEngine {
 
     /** MediaItem 构建（直播稳定性修复 2026-08-30）：中继 URL 路径是 /api/relay?u=…，
      *  扩展名藏在编码后的查询参数里——ExoPlayer 按路径推断内容类型会判成普通媒体，
-     *  解析 HLS 文本失败报 PARSING_CONTAINER_UNSUPPORTED（「直播看不了」根因：
-     *  VOD 直链带 .m3u8 路径所以一直正常，直播中继全军覆没）。
+     *  解析 HLS 文本失败报 PARSING_CONTAINER_UNSUPPORTED，因此按 m3u8 地址显式声明 HLS MIME。
      *  URL 任意位置含 m3u8 即显式声明 HLS MIME。
      *  v1.23（2026-09-06 半小时零卡顿）：直播显式 LiveConfiguration——默认目标偏移仅
      *  约 3×分片时长（实测 4-8s），CDN 瞬时断供几秒就击穿成可感知 rebuffer；
      *  目标 15s（播放器在 [8s,30s] 区间自适配：抖动时自动退离边缘吸收，稳定时追近）
-     *  观感=固定落后十来秒的稳定直播。点播静态清单（带 ENDLIST）不受影响。 */
+     *  观感=固定落后十来秒的稳定直播。 */
     private fun mediaItemFor(url: String): MediaItem {
         val b = MediaItem.Builder().setUri(url)
         if (url.contains("m3u8", ignoreCase = true)) {
@@ -444,7 +419,7 @@ class Media3Engine(context: Context) : MediaEngine {
 
     /**
      * 直播目标偏移（2026-09-16 长跑卡顿根治）：
-     * - 窗口未知 / 大窗口（公网 IPTV 等，窗口通常 30s+）：沿用 v1.23 的「落后 15s」，
+     * - 窗口未知 / 大窗口（上游 HLS 清单窗口通常 30s+）：沿用 v1.23 的「落后 15s」，
      *   抖动时自动退离边缘吸收，稳定时追近；
      * - 小窗口（中继足球源实测 6s）：目标偏移取窗口的 60%（6s → 3.6s），多留一段抗抖缓冲。
      *   **可达**——不可达时 ExoPlayer 的速度控制会长期按 0.97x 追赶，最后被滑动窗口
@@ -467,18 +442,14 @@ class Media3Engine(context: Context) : MediaEngine {
         val p = ensurePlayer()
         _ui.value = _ui.value.copy(
             state = EnginePlayState.BUFFERING,
-            positionMs = request.startMs,
+            positionMs = 0L,
             durationMs = 0,
             errorMsg = null,
             firstFrameRendered = false,   // 新媒体：首帧信号复位（首帧看门狗判定基准）
         )
         p.setMediaItem(mediaItemFor(request.url))
-        // v1.23（2026-09-06 直播起播落窗修复）：startMs<=0 一律 seekToDefaultPosition——
-        // 直播 seekTo(0) = 跳到滑动窗口头（最老分片），供给稍慢就被窗口滚出 →
-        // ERROR_CODE_BEHIND_LIVE_WINDOW 循环（实测每 15-80s 一次重解析级大卡顿）；
-        // default position = 直播边缘附近（LiveConfiguration targetOffset 内）。
-        // 点播 default = 片头，与 seekTo(0) 等效；startMs>0（点播续播）行为不变。
-        if (request.startMs > 0) p.seekTo(request.startMs) else p.seekToDefaultPosition()
+        // Start at the playlist's live default position, not at its oldest rolling segment.
+        p.seekToDefaultPosition()
         p.prepare()
         p.playWhenReady = true
     }
@@ -519,8 +490,6 @@ class Media3Engine(context: Context) : MediaEngine {
         p.pause()
         _ui.value = _ui.value.copy(isPlaying = false)
     }
-
-    override fun seekTo(ms: Long) { player?.seekTo(ms.coerceAtLeast(0)) }
 
     override fun setSpeed(v: Float) {
         player?.playbackParameters = PlaybackParameters(v)

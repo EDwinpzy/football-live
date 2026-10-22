@@ -189,7 +189,7 @@ private object LiveViewModelImportance {
 /* ---------------- Screen（v1.18 布局与 TV 版 1:1 同款，交互触控） ---------------- */
 
 /** hero 海报带高度（并入 LazyColumn 首项，随内容滚动，不再固定顶部）；
- *  需求①（2026-09-12）：竖屏自适应缩小 700→520（与影视页 VOD_BAND_PORTRAIT 同做法） */
+ * 需求①（2026-09-12）：竖屏自适应缩小 700→520，适配手机竖屏可视范围。 */
 private const val LIVE_BAND = 700f
 private const val LIVE_BAND_PORTRAIT = 520f
 
@@ -273,7 +273,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                 return
             }
         }
-        nav.navigate("player/" + URLEncoder.encode("live:" + m.matchId, "UTF-8") + "/0")
+        nav.navigate("player/" + URLEncoder.encode(m.matchId, "UTF-8"))
     }
 
     var leagueFilter by rememberSaveable { mutableStateOf("all") }
@@ -411,7 +411,6 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
         // TabBar 悬浮在最顶层（触控版：滚动下潜）
         MainTabBar(
             "live", { key -> navigateToTab(nav, key) },
-            { nav.navigate("search") },
             hidden = chromeGone,
         )
         OtvHint(hint)
@@ -727,7 +726,7 @@ fun matchLeagueFilter(m: MatchItem, key: String): Boolean = when (key) {
     else -> m.league.contains(key)
 }
 
-/** 直播赛程列表只显示未开赛或进行中的赛事；完场赛事留给战报页。 */
+/** 直播列表仅显示未开赛或正在进行的赛事。 */
 fun visibleLiveScheduleMatches(matches: List<MatchItem>, leagueFilter: String = "all"): List<MatchItem> =
     matches.filter { !it.isFinished && matchLeagueFilter(it, leagueFilter) }
 

@@ -1,9 +1,10 @@
 #!/bin/bash
-# 直播 10 分钟流畅性监控：采集 OTV 心跳/错误/卡顿日志到文件，供事后分析
+# 足球直播 10 分钟播放监控：采集心跳/错误/卡顿日志，供事后分析
 # usage: monitor_live.sh <分钟数>
 ADB='/c/应用/MuMuPlayer/nx_main/adb.exe'
 SER=127.0.0.1:16416
-OUT='D:\MyProjects\My TV\tools\backend-src\monitor_live.log'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUT="$SCRIPT_DIR/backend-src/monitor_live.log"
 MINS=${1:-10}
 echo "=== monitor start $(date +%H:%M:%S) ===" > "$OUT"
 for i in $(seq 1 $((MINS * 2))); do

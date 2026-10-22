@@ -1,6 +1,6 @@
-"""My TV Windows EXE 构建脚本。
+"""足球直播 Windows EXE 构建脚本。
 
-产物：``apk/Windows版/MyTV.exe``（单文件、无控制台窗口、双击即用）。
+产物：``apk/Windows版/FootballLive.exe``（单文件、无控制台窗口、双击即用）。
 
 与 launcher.py 的打包契约（两者必须一致）：
   * 数据解压到 ``sys._MEIPASS/desktop/backend.zip`` 与
@@ -41,15 +41,15 @@ BACKEND_SRC = ROOT / "tools" / "backend-src"
 PEM_SOURCE = ROOT / "android" / "app" / "src" / "main" / "res" / "raw" / "mytv_migration_ca.pem"
 LOGO_SOURCE = BACKEND_SRC / "www" / "assets" / "logo.png"
 OUT_DIR = ROOT / "apk" / "Windows版"
-EXE_NAME = "MyTV"
+EXE_NAME = "FootballLive"
 
 # launcher.py 期望的包内路径；改这里必须同步改 launcher.py。
 BUNDLE_DIR_NAME = "desktop"
 BACKEND_ZIP_NAME = "backend.zip"
 PEM_NAME = "mytv_migration_ca.pem"
 
-RUNTIME_DEPENDENCIES = ("webview", "quickjs", "PyInstaller")
-PINNED_VERSIONS = {"webview": "6.2.1", "quickjs": "1.19.4", "pyinstaller": "6.19.0"}
+RUNTIME_DEPENDENCIES = ("webview", "PyInstaller")
+PINNED_VERSIONS = {"webview": "6.2.1", "pyinstaller": "6.19.0"}
 
 # ZIP 条目时间固定，相同源码重复构建得到相同 SHA-256（与 Android 热更包同思路）。
 FIXED_ZIP_TIME = (2026, 1, 1, 0, 0, 0)
@@ -107,14 +107,12 @@ def _load_module(name: str, path: Path):
 
 def _load_android_backend_files() -> tuple[str, ...]:
     """复用 tools/build_backend_zip.py 的 REPL 清单，避免两份白名单漂移。"""
-    return tuple(_load_module("mytv_build_backend_zip", ROOT / "tools" / "build_backend_zip.py").REPL)
+    return tuple(_load_module("football_live_build_backend_zip", ROOT / "tools" / "build_backend_zip.py").REPL)
 
 
-# REPL（与 Android 热更包同一份清单）+ Windows 额外需要的 quickjs 兜底。
-# decrypt_python.py 在 Android 侧不进包（那里走 :8091 的 QuickJS 服务），
-# 但 Windows 没有 node，proxy.decrypt_page() 会 import 它，必须带上。
+# REPL 与 Android 后端 ZIP 使用同一份足球直播 runtime 清单。
 _ANDROID_FILES = _load_android_backend_files()
-BACKEND_FILES: tuple[str, ...] = tuple(dict.fromkeys(_ANDROID_FILES + ("decrypt_python.py",)))
+BACKEND_FILES: tuple[str, ...] = _ANDROID_FILES
 
 
 def backend_hidden_imports() -> tuple[str, ...]:
@@ -135,7 +133,7 @@ def backend_hidden_imports() -> tuple[str, ...]:
                 names.add(node.module)
                 if node.module == "PIL":
                     names.update("PIL." + alias.name for alias in node.names)
-    allowed = set(sys.stdlib_module_names) | {"PIL", "urllib3", "quickjs"}
+    allowed = set(sys.stdlib_module_names) | {"PIL", "urllib3"}
     return tuple(sorted(name for name in names
                         if name.split(".", 1)[0] in allowed
                         and name != "__future__"))
@@ -230,7 +228,7 @@ def build_backend_zip(output: Path, *, allow_network: bool = True,
         raise HlsDownloadError(
             "--offline 模式需要已缓存的 hls.js：%s（先联网构建一次）" % cache)
 
-    web_dist = Path(tempfile.mkdtemp(prefix="mytv-web-dist-"))
+    web_dist = Path(tempfile.mkdtemp(prefix="football-live-web-dist-"))
     try:
         _build_web_assets(source / "www", web_dist)
         index_html = (web_dist / "index.html").read_text(encoding="utf-8")
@@ -270,7 +268,7 @@ def _default_hls_cache() -> Path:
 
 def _build_web_assets(source: Path, output: Path) -> None:
     """复用 tools/build_web_assets.py 生成内容寻址的 www（index/app.js/style.css）。"""
-    _load_module("mytv_build_web_assets", ROOT / "tools" / "build_web_assets.py").build_assets(source, output)
+    _load_module("football_live_build_web_assets", ROOT / "tools" / "build_web_assets.py").build_assets(source, output)
 
 
 def write_icon(icon_path: Path, logo_path: Path = LOGO_SOURCE) -> Path:
@@ -352,7 +350,7 @@ def build_exe(*, bundle_only: bool = False, offline: bool = False) -> Path:
     build_dir = out_dir / "build"
     bundle_dir = build_dir / "bundle" / BUNDLE_DIR_NAME
     bundle_dir.mkdir(parents=True, exist_ok=True)
-    icon = write_icon(build_dir / "mytv.ico")
+    icon = write_icon(build_dir / "FootballLive.ico")
 
     result = build_backend_zip(bundle_dir / BACKEND_ZIP_NAME,
                                allow_network=not offline,

@@ -82,6 +82,8 @@ def test_release_runs_schema_migrations_before_compose_up(gate_only):
     assert migration is not None, runner.calls
     assert up is not None, runner.calls
     assert migration < up, f"迁移必须先于 up 执行：{runner.calls}"
+    assert "--remove-orphans" in runner.calls[up][0], \
+        f"已从 Compose 移除的后台服务必须随发布停止：{runner.calls[up]}"
 
 
 def test_migration_failure_blocks_compose_up(gate_only):
@@ -101,8 +103,8 @@ def test_release_check_covers_every_script_it_invokes(release_module):
     invoked = set(re.findall(r'script_path\(root,\s*"([^"]+)"\)', source))
     assert invoked, "发布器应通过 script_path 声明它调用的脚本"
     assert invoked <= required, f"这些脚本没进存在性检查：{invoked - required}"
-    # 关键脚本确实存在（其余由并行的网页 agent 分支落地）。
-    for name in ("build_backend_zip.py", "build_catalog_seed.py"):
+    # 关键脚本确实存在。
+    for name in ("build_backend_zip.py", "build_web_assets.py"):
         assert name in required
         assert (ROOT / "tools" / name).is_file(), f"{name} 必须存在"
 

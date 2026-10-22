@@ -47,10 +47,7 @@ import com.qiubo.optimaltv.ui.theme.sxs
 data class TabItem(val key: String, val label: String)
 
 val MAIN_TABS = listOf(
-    TabItem("live", "足球"),
-    TabItem("vod", "影视"),
-    TabItem("tv", "电视"),   // v1.13：公开 IPTV 直播（影视之后、我的之前）
-    TabItem("favorites", "我的"),
+    TabItem("live", "足球直播"),
 )
 
 /** Tab 间导航统一入口（与 TV 版同语义）：popUpTo 起点页 + launchSingleTop，反复横跳不撑爆返回栈 */
@@ -65,10 +62,9 @@ fun navigateToTab(nav: NavController, key: String) {
 fun MainTabBar(
     currentKey: String,
     onSelect: (String) -> Unit,
-    onSearch: () -> Unit,
     /** 触控版 auto-hide：内容区滚离顶部时由各屏传入 true，顶栏淡出上移；回顶自动淡入 */
     hidden: Boolean = false,
-    /** 纯展示（会员页等二级页）：tab 与搜索 chip 不可点 */
+    /** 纯展示时不响应触摸。 */
     interactive: Boolean = true,
 ) {
     val s = rememberUiScale()
@@ -149,29 +145,6 @@ fun MainTabBar(
                         color = if (selected) OtvColors.White else OtvColors.White60,
                     )
                 }
-            }
-            // 搜索 chip（原版 #search-chip：111×56 r35，图标 #999；点击进搜索页）
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .then(
-                        if (acceptsInput) {
-                            Modifier
-                                .clip(RoundedCornerShape(28f.sx(s)))
-                                .tapCard { onSearch() }
-                        } else Modifier
-                    )
-                    .testTag(MobileUiTags.SearchTab)
-                    .semantics { role = Role.Button }
-                    .width(111f.sx(s))
-                    .height(56f.sx(s)),
-            ) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_search),
-                    contentDescription = "搜索",
-                    tint = Color(0xFF999999),
-                    modifier = Modifier.size(29f.sx(s)),
-                )
             }
         }
     }

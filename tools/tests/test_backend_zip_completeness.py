@@ -1,5 +1,4 @@
 import ast
-import io
 import unittest
 import zipfile
 from pathlib import Path
@@ -45,24 +44,17 @@ def _local_imports(path: Path) -> set:
     return {n for n in names if (SRC / (n + ".py")).exists()}
 
 
-APK_PATHS = ("apk/TV版/MyTV-TV版.apk", "apk/移动版/MyTV-移动版.apk")
+BACKEND_ZIPS = (
+    ROOT / "android/app/src/main/assets/backend/python-backend.zip",
+    ROOT / "internal/mobile/app/src/main/assets/backend/python-backend.zip",
+)
 
 
 class BackendZipCompletenessTests(unittest.TestCase):
-    """打包白名单必须覆盖所有被导入的同包模块。
+    """客户端后端 ZIP 只包含足球直播所需模块及其静态网页。"""
 
-    build_backend_zip.py 的 REPL 是手工维护的文件白名单。hhkan.py 里有
-    `import source_dns`，但白名单漏了它，于是打出来的 python-backend.zip
-    缺这个文件。App 内嵌后端启动时直接
-    `ModuleNotFoundError: No module named 'source_dns'`，整个 Python 后端
-    起不来，影视详情、播放、片源全部失效——而包能正常构建、能发布，
-    崩溃只在真机启动时才出现。
-    """
-
-    def test_source_dns_is_in_the_whitelist(self):
-        self.assertIn(
-            "source_dns", _whitelisted_names(),
-            "source_dns.py 被 hhkan.py 导入，必须打进后端 zip")
+    def test_runtime_whitelist_contains_only_live_modules(self):
+        self.assertEqual(_whitelisted_names(), {"proxy", "vlc_hls", "team_backdrop"})
 
     def test_every_local_import_of_a_whitelisted_module_is_packaged(self):
         whitelist = _whitelisted_names()
@@ -78,19 +70,17 @@ class BackendZipCompletenessTests(unittest.TestCase):
             missing, {},
             "这些同包依赖没进白名单，打出来的 zip 会在真机上 ImportError：%s" % missing)
 
-    def test_published_apk_embeds_a_complete_backend_zip(self):
-        """直接查已发布的 APK，别只验证白名单。"""
-        for relative in APK_PATHS:
-            apk = ROOT / relative
-            if not apk.exists():
+    def test_embedded_backend_zips_contain_no_nonfootball_runtime_modules(self):
+        allowed = {name + ".py" for name in _whitelisted_names()}
+        for archive in BACKEND_ZIPS:
+            if not archive.exists():
                 continue
-            with zipfile.ZipFile(apk) as outer:
-                with outer.open("assets/backend/python-backend.zip") as handle:
-                    with zipfile.ZipFile(io.BytesIO(handle.read())) as inner:
-                        names = inner.namelist()
-            self.assertIn(
-                "source_dns.py", names,
-                "%s 的内嵌后端 zip 缺 source_dns.py" % apk.name)
+            with zipfile.ZipFile(archive) as runtime:
+                root_modules = {
+                    name for name in runtime.namelist()
+                    if "/" not in name and name.lower().endswith((".py", ".json", ".js"))
+                }
+            self.assertEqual(root_modules, allowed, f"{archive} 含有非直播 runtime 文件")
 
 
 if __name__ == "__main__":

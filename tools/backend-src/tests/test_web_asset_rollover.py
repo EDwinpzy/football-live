@@ -320,11 +320,8 @@ def test_web_service_mounts_persistent_archive_and_runs_archive_entrypoint():
 
 
 def test_archive_volume_is_documented_for_preparation_and_backup():
-    """Important 4: a volume nobody documented is a volume nobody restores."""
-    readme = (ROOT / "deploy/selfhosted/README.md").read_text(encoding="utf-8")
-    prepare, _, rest = readme.partition("## Publish an APK from the VPS")
-    assert prepare.startswith("# My TV self-hosted stack")
-    assert "## Prepare the VPS" in prepare
-    for section, label in ((prepare, "setup steps"), (rest, "backup section")):
-        assert "WEB_ASSET_ARCHIVE_HOST_PATH" in section, f"the {label} must name the archive volume"
-        assert "web-assets" in section, f"the {label} must show the archive path"
+    """The retained web-asset archive volume remains documented centrally."""
+    docs = (ROOT / "docs/项目文档.md").read_text(encoding="utf-8")
+    assert "WEB_ASSET_ARCHIVE_HOST_PATH" in docs
+    assert "web-assets" in docs
+    assert "备份" in docs

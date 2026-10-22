@@ -18,9 +18,9 @@ def build_profile(der: bytes) -> dict:
         "PayloadVersion": 1,
         "PayloadIdentifier": identifier + ".certificate",
         "PayloadUUID": str(uuid.uuid5(uuid.NAMESPACE_URL, identifier + fingerprint)),
-        "PayloadDisplayName": "My TV Root CA",
-        "PayloadDescription": "Public root certificate for the existing My TV HTTPS service.",
-        "PayloadCertificateFileName": "MyTV-Root-CA.cer",
+        "PayloadDisplayName": "足球直播根证书",
+        "PayloadDescription": "Public root certificate for the 足球直播 HTTPS service.",
+        "PayloadCertificateFileName": "FootballLive-Root-CA.cer",
         "PayloadContent": der,
     }
     return {
@@ -28,9 +28,9 @@ def build_profile(der: bytes) -> dict:
         "PayloadVersion": 1,
         "PayloadIdentifier": identifier,
         "PayloadUUID": str(uuid.uuid5(uuid.NAMESPACE_URL, identifier)),
-        "PayloadDisplayName": "My TV HTTPS Certificate",
-        "PayloadDescription": "Contains only the public My TV root CA. After installation, enable full trust in Settings > General > About > Certificate Trust Settings.",
-        "PayloadOrganization": "My TV",
+        "PayloadDisplayName": "足球直播 HTTPS 证书",
+        "PayloadDescription": "仅包含足球直播公开根证书。安装后，请在“设置 > 通用 > 关于本机 > 证书信任设置”中启用完全信任。",
+        "PayloadOrganization": "足球直播",
         "PayloadRemovalDisallowed": False,
         "PayloadContent": [certificate],
     }
@@ -42,6 +42,6 @@ if __name__ == "__main__":
         raise ValueError("Expected exactly one public certificate, without a private key")
     der = ssl.PEM_cert_to_DER_cert(pem)
     CERT_DIR.mkdir(parents=True, exist_ok=True)
-    (CERT_DIR / "MyTV-Root-CA.cer").write_bytes(der)
-    (CERT_DIR / "MyTV-Root-CA.mobileconfig").write_bytes(plistlib.dumps(build_profile(der), sort_keys=False))
+    (CERT_DIR / "FootballLive-Root-CA.cer").write_bytes(der)
+    (CERT_DIR / "FootballLive-Root-CA.mobileconfig").write_bytes(plistlib.dumps(build_profile(der), sort_keys=False))
     print("Public CA SHA-256:", hashlib.sha256(der).hexdigest())

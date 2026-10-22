@@ -1,4 +1,4 @@
-# AGENTS.md — My TV 仓库约定
+# AGENTS.md — 足球直播仓库约定
 
 ## 并行委派
 
@@ -20,26 +20,21 @@
 > 发布前 `git status` 要干净：别人未提交的改动不要打包进去。目的：避免热更版本号抢占、
 > 半成品上线、APK 内嵌 zip 与构建产物不一致。不要用定时任务触发发布；只在用户明确要求发布的当前对话中执行这些检查。
 
-1. 测试：后端改动跑 `tools/backend-src/tests`（至少 `test_douban_catalog.py`）；Kotlin 侧以 `assembleRelease` 编译通过兜底。
+1. 测试：后端改动跑 `tools/backend-src/tests` 足球直播测试；Kotlin 侧以 `assembleRelease` 编译通过兜底。
 2. 部署网页版 + 重建产物：`python tools/release_all.py --deploy`。
 3. 构建 APK：`android` 与 `internal/mobile` 各跑一次 `.\gradlew.bat assembleRelease`（自动归档到 `apk/TV版/`、`apk/移动版/`）。
-4. 上传并发布热更：`node 后台管理系统/scripts/ops/hu-upload.mjs --site "https://<正式域名>/admin" --name "<名称>" --notes "<备注>"`
-   （站点最高版本 +1、立即发布）。**`--site` 或 `SITE_URL` 必须显式传入**：
-   CloudBase 已退役，脚本不再内置默认站点，缺站点会直接 exit 2 失败，
-   避免标准发布流程把热更静默发回已下线的云端。
+4. 如需发布 Android 应用内更新包，使用 `python tools/publish_apk_update.py --channel <tv|mobile> --apk <APK路径> --version-code <版本号> --version-name <版本名> --cert <签名证书SHA-256>`；按工具提示补齐更新说明和发布参数。热更新管理后台及其上传脚本已删除。
 5. 更新文档：把本次变更摘要与实测证据写进 `docs/项目文档.md` 对应章节
    （全项目只保留 `README.md` 与 `docs/项目文档.md` 两份文档）。
 6. 提交并推送：`git add -A` → commit → `git push origin main`。
 
 ### 顺序与口径
 
-- `tools/release_all.py` 会先刷新豆瓣快照（超过 24h 才抓），会改变后端 zip 内容，**必须先跑它再重打 APK**，
-  否则 APK 内嵌 zip 与构建产物不一致。
-- 热更包即 `android/app/src/main/assets/backend/python-backend.zip`；版本号取站点当前最高 +1。
-- 并发期间只提交代码与文档是安全的；但**热更版本号与 APK 产物以最后一次统一构建为准**，
-  中途任务不要再单独上传热更或另发 APK 版本。
+- `tools/release_all.py` 构建网页与足球直播后端 zip；完成后再重打 APK，确保 APK 内嵌 zip 与构建产物一致。
+- 并发期间只提交代码与文档是安全的；**应用更新版本号与 APK 产物以最后一次统一构建为准**，
+  中途任务不要再单独上传更新包或另发 APK 版本。
 - 发布后自检：线上 `/web/app.js` 与 `tools/backend-src/www/app.js` 的 SHA-256 一致；线上热更包 sha256 与本地 zip 一致；
-  两个 APK 内嵌 zip 的 `douban_catalog.py`、`proxy.py`、`douban_snapshot.json`、`www/app.js` 与 `tools/backend-src` 逐一一致。
+  两个 APK 内嵌 zip 的 `proxy.py`、`vlc_hls.py`、`team_backdrop.py`、`www/app.js` 与 `tools/backend-src` 逐一一致，并确认没有旧影视 runtime 模块。
 - 仍要先问的情况：不可恢复的破坏性操作（历史重写、删数据、下线在跑的东西），以及需要用户做产品取舍的改动。
 
 ## 文档

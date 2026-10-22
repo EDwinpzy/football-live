@@ -1,19 +1,6 @@
 #!/bin/sh
 set -eu
 
-password_file=${LICENSE_IMPORTER_PASSWORD_FILE:-}
-if [ -z "$password_file" ] || [ ! -r "$password_file" ]; then
-    printf '%s\n' "schema migration failed: importer password file is unavailable" >&2
-    exit 1
-fi
-
-LICENSE_IMPORTER_PASSWORD=$(tr -d '\r\n' < "$password_file")
-if [ -z "$LICENSE_IMPORTER_PASSWORD" ]; then
-    printf '%s\n' "schema migration failed: importer password file is empty" >&2
-    exit 1
-fi
-export LICENSE_IMPORTER_PASSWORD
-
 : "${POSTGRES_USER:?schema migration failed: POSTGRES_USER is required}"
 : "${POSTGRES_PASSWORD:?schema migration failed: POSTGRES_PASSWORD is required}"
 : "${POSTGRES_DB:?schema migration failed: POSTGRES_DB is required}"
@@ -49,7 +36,6 @@ selfhosted/db_bootstrap.sql
 selfhosted/iptv_publish_lock.sql
 selfhosted/base_schema.sql
 selfhosted/license_importer_role.sql
-selfhosted/license_importer_smoke.psql
 selfhosted/rpc_grants_repair.sql
 selfhosted/migrations/license_restore_v1.sql
 selfhosted/migrations/vod_sources_replace_v1.sql
