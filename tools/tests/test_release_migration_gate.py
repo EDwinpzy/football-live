@@ -136,20 +136,45 @@ def test_missing_script_fails_before_running_anything(release_module, tmp_path, 
 
 
 def test_deploy_reloads_nginx_so_new_routes_take_effect(gate_only, monkeypatch):
-    """nginx.conf 以 bind mount 挂载，``up -d --build`` 不会让它重读配置。
-
-    新增的 location（比如 /admin/）会静默不生效：文件是对的、容器在跑、
-    线上却还是旧行为。发布流程必须在 up 之后显式 reload。
-    """
+    """Validate and remount nginx's bind-mounted file before reloading it."""
     runner = FakeRunner()
     run_release(gate_only, runner, deploy=True)
 
     rendered = [c for c, _cwd in runner.calls]
+    config_test_index = next(
+        (i for i, c in enumerate(rendered) if "run --rm --no-deps nginx nginx -t" in c), None)
+    recreate_index = next(
+        (i for i, c in enumerate(rendered)
+         if "up -d --force-recreate --no-deps nginx" in c), None)
     reload_index = next(
         (i for i, c in enumerate(rendered) if "nginx" in c and "reload" in c), None)
-    assert reload_index is not None, f"发布流程没有 reload nginx：{calls}"
+    assert config_test_index is not None, f"发布流程没有检查新 nginx 配置：{rendered}"
+    assert recreate_index is not None, f"发布流程没有重新挂载 nginx 配置：{rendered}"
+    assert reload_index is not None, f"发布流程没有 reload nginx：{rendered}"
     up_index = next(i for i, c in enumerate(rendered) if " up " in f" {c} ")
-    assert reload_index > up_index, "reload 必须发生在 up 之后，否则新容器还没起来"
+    assert up_index < config_test_index < recreate_index < reload_index, \
+        f"nginx 检查、重建和 reload 顺序错误：{rendered}"
+
+
+@pytest.mark.parametrize(
+    ("fail_on", "error_message", "later_command"),
+    [
+        ("nginx -t", "nginx 配置检查失败", "up -d --force-recreate"),
+        ("up -d --force-recreate --no-deps nginx", "nginx 容器重建失败", "nginx -s reload"),
+    ],
+)
+def test_nginx_preflight_or_recreate_failure_stops_switch(gate_only, fail_on,
+                                                           error_message, later_command):
+    runner = FakeRunner(fail_on=fail_on)
+    with pytest.raises(SystemExit, match=error_message):
+        run_release(gate_only, runner)
+    assert _first_index(runner.calls, later_command) is None, runner.calls
+
+
+def test_nginx_reload_failure_marks_release_failed(gate_only):
+    runner = FakeRunner(fail_on="nginx -s reload")
+    with pytest.raises(SystemExit, match="nginx reload 失败"):
+        run_release(gate_only, runner)
 
 
 if __name__ == "__main__":

@@ -71,6 +71,10 @@ def test_build_assets_is_stable_and_emits_a_cache_contract(tmp_path):
     assert manifest["cacheControl"][f"/{app_path}"] == "public, max-age=31536000, immutable"
     assert manifest["cacheControl"][f"/{css_path}"] == "public, max-age=31536000, immutable"
     assert manifest["defaultCacheControl"] == "public, max-age=300"
+    assert (dist / "app.js").read_bytes() == b"console.log('one');\n"
+    assert "app.js" in manifest["copiedFiles"]
+    app_alias = next(item for item in manifest["copiedAssetMeta"] if item["path"] == "app.js")
+    assert app_alias["sha256"] == hashlib.sha256(b"console.log('one');\n").hexdigest()
     assert (dist / "assets" / "logo.svg").is_file()
     assert (dist / "manifest.webmanifest").is_file()
 

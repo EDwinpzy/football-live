@@ -144,6 +144,13 @@ def build_assets(source_dir: str | Path, output_dir: str | Path) -> BuildResult:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source_bytes[source_name])
 
+    # Keep an unversioned alias for release source-digest checks. The page
+    # itself continues to load the content-hashed bundle above.
+    app_alias = output / "app.js"
+    app_alias.write_bytes(source_bytes["app.js"])
+    copied_files.append("app.js")
+    copied_metadata.append(_file_descriptor("app.js", app_alias))
+
     current_refs = set(referenced_files)
     current_copies = set(copied_files)
     for old_copy in previous_copies - current_copies - current_refs - previous_refs:

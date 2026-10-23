@@ -106,6 +106,29 @@ def selfhosted_nginx_reload_command(root=ROOT):
     ]
 
 
+def selfhosted_nginx_config_test_command(root=ROOT):
+    """Validate the host-mounted nginx file after app services are up."""
+    return selfhosted_compose_base(root) + [
+        "run",
+        "--rm",
+        "--no-deps",
+        "nginx",
+        "nginx",
+        "-t",
+    ]
+
+
+def selfhosted_nginx_recreate_command(root=ROOT):
+    """Reopen bind mounts that may still reference the previous file inode."""
+    return selfhosted_compose_base(root) + [
+        "up",
+        "-d",
+        "--force-recreate",
+        "--no-deps",
+        "nginx",
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build local deliverables; deploy with --deploy")
     parser.add_argument("--deploy", action="store_true",
@@ -133,15 +156,18 @@ def main():
             )
         if not run(selfhosted_deploy_command(ROOT), deploy_dir):
             raise SystemExit("self-hosted Docker Compose deployment failed")
-        # nginx.conf 以 bind mount 方式挂载：文件变了但进程不会自动重读，
-        # 新增的 location 路由会静默不生效。
+        # 先验证 host-mounted 配置，再重建容器，确保文件同步替换 inode 后
+        # nginx 不会继续使用旧配置。reload 失败必须让发布失败。
+        if not run(selfhosted_nginx_config_test_command(ROOT), deploy_dir):
+            raise SystemExit("nginx 配置检查失败，已阻止反向代理切换")
+        if not run(selfhosted_nginx_recreate_command(ROOT), deploy_dir):
+            raise SystemExit("nginx 容器重建失败，反向代理尚未切换")
         if not run(selfhosted_nginx_reload_command(ROOT), deploy_dir):
-            print("[WARN] nginx reload 失败，请手动执行："
-                  "docker compose exec nginx nginx -s reload", file=sys.stderr)
+            raise SystemExit("nginx reload 失败，发布未完成")
         print("\n[OK] 本地 Web 静态资源与 App 后端包已构建\n"
               "[OK] schema-migrations 已重跑并成功\n"
               "[OK] 已调用自建 Docker Compose 部署入口\n"
-              "[OK] nginx 已 reload")
+              "[OK] nginx 配置已验证、容器已重建并 reload")
     else:
         print("\n[OK] 本地 Web 静态资源与 App 后端包已构建\n"
               "[PAUSED] 未执行部署")
