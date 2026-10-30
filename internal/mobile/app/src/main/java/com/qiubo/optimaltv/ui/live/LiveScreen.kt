@@ -413,7 +413,7 @@ private fun MiddleText(text: String, color: Color, size: Int = 17) {
 }
 
 /** 状态徽标（SPEC v1「状态徽标」）：高 28dp 全弧胶囊、内 padding 12dp、label 字号；
- *  LIVE = live 底白字 + 左侧 6dp 呼吸圆点；未开赛/完赛 = textDisabled 弱化文字 */
+ *  LIVE = 红色底白字 + 左侧 6dp 白色呼吸圆点；未开赛/完赛 = textDisabled 弱化文字 */
 @Composable
 private fun StatusBadge(m: MatchItem) {
     when {
@@ -438,10 +438,10 @@ private fun StatusBadge(m: MatchItem) {
                     Modifier
                         .size(6.dp)
                         .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = dotAlpha)),
+                        .background(Color.White.copy(alpha = dotAlpha)),
                 )
                 Spacer(Modifier.width(6.dp))
-                Text("LIVE", color = Color.Black, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Text("LIVE", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
         }
         m.isFinished -> BadgeText("完赛")

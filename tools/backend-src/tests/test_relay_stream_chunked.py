@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """relay_stream 非 Range 媒体 chunked 下发行契约（2026-09-19）。
 
-背景：做直播「看一会就看不了、点重试/换源都没用」——个别链路（中间盒/代理/
+背景：球迹直播「看一会就看不了、点重试/换源都没用」——个别链路（中间盒/代理/
 CDN 边缘）会上游「声明 Content-Length=X、干净收尾却只交付 X-约10 字节」。
 旧版 relay_stream 透传该 CL，客户端（OkHttp/fetch）body 结束时判缺字节硬报
 unexpected end of stream → ERROR_CODE_IO_NETWORK_CONNECTION_FAILED，重试重抓

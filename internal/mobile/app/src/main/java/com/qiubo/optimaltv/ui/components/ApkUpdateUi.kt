@@ -66,7 +66,7 @@ fun ApkUpdateUi() {
                             ),
                         )
                     }
-                    ApkUpdateState.PermissionRequired -> Text("请允许 足球直播 安装未知应用，返回后会继续安装。")
+                    ApkUpdateState.PermissionRequired -> Text("请允许 球迹直播 安装未知应用，返回后会继续安装。")
                     ApkUpdateState.Installing -> Text("正在打开系统安装器…")
                     is ApkUpdateState.Error -> {
                         val error = state as ApkUpdateState.Error

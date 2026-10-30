@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "zuo-live"
+rootProject.name = "qiuji-live"
 include ':app'

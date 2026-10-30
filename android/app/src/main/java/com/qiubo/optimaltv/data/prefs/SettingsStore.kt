@@ -23,7 +23,7 @@ enum class AspectMode(val label: String, val ratio: Float?) {
 }
 
 data class AppSettings(
-    /** 做直播 API。 */
+    /** 球迹直播 API。 */
     val liveApiBaseUrl: String = "http://127.0.0.1:8090",
     val engineId: String = "media3",
     val aspectOrdinal: Int = 0,
@@ -54,7 +54,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setAspect(ord: Int) = context.dataStore.edit { it[K.ASPECT] = ord }
     suspend fun setSpeed(v: Float) = context.dataStore.edit { it[K.SPEED] = v }
 
-    // 做直播：保留用户上次手动选定的线路标识；历史旧源由 PlayerViewModel 回退到 A2。
+    // 球迹直播：保留用户上次手动选定的线路标识；历史旧源由 PlayerViewModel 回退到 A2。
     private val LIVE_LAST_SRC = stringPreferencesKey("live_last_src")
 
     suspend fun liveLastSrc(): String? = context.dataStore.data.first()[LIVE_LAST_SRC]

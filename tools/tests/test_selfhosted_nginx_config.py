@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "deploy" / "selfhosted"
 
 
-class ZuoLiveIngressConfigTests(unittest.TestCase):
+class QiuJiLiveIngressConfigTests(unittest.TestCase):
     def require(self, needle: str, content: str, label: str) -> None:
         self.assertIn(needle, content, f"missing ingress contract: {label}")
 

@@ -7,7 +7,7 @@ plugins {
 // 复验/联调可临时抬高版本号打一个升级包（-PapkVersionCode / -PapkVersionName），不必改死代码。
 def apkVersionCodeOverride = project.findProperty('apkVersionCode')
 def apkVersionNameOverride = project.findProperty('apkVersionName')
-// ---- 足球直播 Release 入口门槛（OTV-RELEASE-ORIGIN-GATE-BEGIN）----------------
+// ---- 球迹直播 Release 入口门槛（OTV-RELEASE-ORIGIN-GATE-BEGIN）----------------
 // TV 版与移动版必须使用逐字节相同的一段规则与同一套报错文案；对称性由
 // tools/tests/test_release_api_origin_contract.py 断言，改动必须同步两处。
 // 正式包：必须显式传入已验收的正式域名 -PapiBaseUrl=https://<正式域名>
@@ -82,14 +82,14 @@ def apiBaseUrl
 if (otvReleaseRequested) {
     def otvProblem = otvApiOriginProblem(otvConfiguredApiBaseUrl)
     if (otvProblem) {
-        throw new GradleException("足球直播 Release 入口门槛未通过：${otvProblem}")
+        throw new GradleException("球迹直播 Release 入口门槛未通过：${otvProblem}")
     }
     apiBaseUrl = otvConfiguredApiBaseUrl.replaceAll('/+$', '')
 } else {
     apiBaseUrl = (otvConfiguredApiBaseUrl ?: otvMigrationTestOrigin).replaceAll('/+$', '')
 }
 def apiBaseUrlConstant = '"' + apiBaseUrl + '"'
-// ---- 足球直播 Release 入口门槛（OTV-RELEASE-ORIGIN-GATE-END）------------------
+// ---- 球迹直播 Release 入口门槛（OTV-RELEASE-ORIGIN-GATE-END）------------------
 def releaseStorePassword = project.findProperty('OTV_RELEASE_STORE_PASSWORD') ?: System.getenv('OTV_RELEASE_STORE_PASSWORD') ?: ''
 def releaseKeyPassword = project.findProperty('OTV_RELEASE_KEY_PASSWORD') ?: System.getenv('OTV_RELEASE_KEY_PASSWORD') ?: ''
 
@@ -126,17 +126,17 @@ android {
     // 必须严格递增：客户端 ApkUpdatePolicy 只比较 versionCode（manifest.versionCode
     // <= 本机 versionCode 即视为无更新），系统安装也不允许降级覆盖。V1.0 取 100 而不是
     // 10，是为了同时高于重置前的 42，已装 1.4x 的设备仍能收到 V1.0 的更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 333)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "3.0.23")
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 334)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "3.0.24")
         // 方案 §5：双 ABI split 思路——真机 arm64/v7a + 模拟器 x86_64（开发验证用）
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
         // v1.19 版本重规划：内测/公测双 flavor 退役——只保留一条正式分发线（原公测版）。
         // 热更新用于内嵌后端的启动维护。
         // v1.18 热更新：云端下发内嵌后端 zip，启动时静默检查+预下载，下次冷启动生效
-        // TV 与移动客户端统一显示「足球直播」；归档文件名按设备类型区分。
+        // TV 与移动客户端统一显示「球迹直播」；归档文件名按设备类型区分。
         // 注意：两端 label 相同，故**同一台设备不要同时装 TV 版与移动版**（靠 applicationId
         // 可以共存，但桌面会出现两个同名图标），分发时按设备类型二选一。
-        resValue 'string', 'app_name', '足球直播'
+        resValue 'string', 'app_name', '球迹直播'
         // 足球比赛列表可直接访问，不设置内容准入门禁。
         buildConfigField 'String', 'API_BASE_URL', apiBaseUrlConstant
         buildConfigField 'boolean', 'HOTUPDATE_ENABLED', 'true'
@@ -216,13 +216,13 @@ chaquopy {
     }
 }
 
-// 统一产物到项目目录：apk/TV版/ 固定名 ZuoLive-TV.apk，
+// 统一产物到项目目录：apk/TV版/ 固定名 QiuJiLive-TV.apk，
 // 由 assembleRelease 复制（对外分发=签名+热更新正式链路）。
 // debug 测试包不进 apk/——直接用项目根 build 构建输出目录。
 tasks.register("copyTvApk", Copy) {
     from(layout.buildDirectory.file("outputs/apk/release/app-release.apk"))
     into(rootProject.file("../apk/TV版"))
-    rename { "ZuoLive-TV.apk" }
+    rename { "QiuJiLive-TV.apk" }
 }
 // AGP 的 assemble 任务在 android 插件注册后才出现，须在 afterEvaluate 挂接依赖
 afterEvaluate {

@@ -72,7 +72,7 @@ interface MediaEngine {
      * 长度（毫秒）后传入，0 = 未知（沿用旧行为）。须在 prepare 前调用。
      *
      * 背景：v1.23 把直播目标延迟统一设成「落后 15s」——对窗口 30s+ 的公网源是稳的，
-     * 但做直播走本地中继时上游清单只有 3×2s＝6s 窗口，15s 目标根本不可达：
+     * 但球迹直播走本地中继时上游清单只有 3×2s＝6s 窗口，15s 目标根本不可达：
      * ExoPlayer 的速度控制会一直按 0.97x 追赶一个够不到的偏移，播着播着就被滑动窗口
      * 甩到最老分片之外（实测 2–5 分钟一次可感知卡顿，最后整段冻住）。
      * 引擎据此选目标偏移与缓冲档：窗口小 → 目标 ≈ 窗口的 60%，把「延迟几秒」变成
@@ -133,7 +133,7 @@ class Media3Engine(context: Context) : MediaEngine {
     @Volatile private var liveWindowHintMs = 0L
     private var liveSegmentHintMs = 0L
 
-    /** 小窗口直播（做直播中继：3×2s＝6s）：必须换掉固定的 15s 目标延迟与 6s 恢复水位 */
+    /** 小窗口直播（球迹直播中继：3×2s＝6s）：必须换掉固定的 15s 目标延迟与 6s 恢复水位 */
     private fun smallWindowLive(): Boolean = LiveWindowPolicy.isSmall(liveWindowHintMs)
 
     override fun setLiveWindowHintMs(windowMs: Long, segmentMs: Long) {
@@ -397,7 +397,7 @@ class Media3Engine(context: Context) : MediaEngine {
             .setConnectTimeoutMs(10_000)
             // 直播源站或中继链路较慢时，读超时过短会触发中途断流重试。
             .setReadTimeoutMs(30_000)
-            .setUserAgent("Mozilla/5.0 (Linux; Android 11) ZuoLive/1.0")
+            .setUserAgent("Mozilla/5.0 (Linux; Android 11) QiuJiLive/1.0")
         val dataSourceFactory = DefaultDataSource.Factory(appCtx, httpFactory)
         // 直播缓冲参数按低配设备与慢源调整，降低网络抖动造成的反复缓冲；
         // v1.10（2026-08-31 低端机起播提速）：起播水位 2.5s→1s、二次缓冲 5s→2s——

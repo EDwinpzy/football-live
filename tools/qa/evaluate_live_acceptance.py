@@ -40,7 +40,7 @@ PLAYBACK_ERROR_PATTERNS = [
     r"vlc error:",
     r"vlc prepare failed",
     r"bootLive 无可用信号",
-    r"(?:做直播|足球直播)初始化失败",
+    r"(?:做直播|足球直播|球迹直播)初始化失败",
     r"直播线路刷新失败",
     r"直播 READY 后 .* 无首帧",
     r"缓冲 .* 无增长",

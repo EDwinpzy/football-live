@@ -69,7 +69,7 @@ object HotUpdateManager {
         val DEVICE = stringPreferencesKey("device_id")  // 本机随机指纹（仅日志关联用）
     }
 
-    /** 热更 zip 必备条目：做直播代理与线路处理模块 + 网页资源目录 */
+    /** 热更 zip 必备条目：球迹直播代理与线路处理模块 + 网页资源目录 */
     private val REQUIRED_ENTRIES = listOf(
         "proxy.py", "vlc_hls.py", "team_backdrop.py",
     )

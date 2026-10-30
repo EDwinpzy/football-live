@@ -25,8 +25,11 @@ fun rememberUiScale(): Float {
 
 fun Float.sx(scale: Float): Dp = (this * scale).dp
 
+private const val TV_TEXT_SCALE = 1.30f
+
+/** TV 文字在 1920 设计稿坐标上统一放大 30%；几何尺寸仍由 sx() 独立控制，避免整页等比放大。 */
 @Composable
-fun Float.sxs(scale: Float): TextUnit = with(LocalDensity.current) { (this@sxs * scale).dp.toSp() }
+fun Float.sxs(scale: Float): TextUnit = with(LocalDensity.current) { (this@sxs * scale * TV_TEXT_SCALE).dp.toSp() }
 
 /**
  * 全端统一设计 token（artifacts/2026-10-23-ui-redesign/SPEC.md「极简清爽」）。
@@ -39,7 +42,8 @@ object OtvColors {
     val SurfaceFocus = Color(0xFF1F1F1F)    // 焦点/按压态卡片背景
     val Brand = Color(0xFFFFFFFF)           // 焦点描边、选中态、强调
     val BrandDeep = Color(0xFFC9C9C9)       // 按压态、渐变端点
-    val Live = Color(0xFFFFFFFF)            // LIVE 徽标、直播中比分
+    val AccentGreen = Color(0xFF5BF29F)     // 球迹直播品牌绿：焦点、直播状态强调
+    val Live = Color(0xFFE53935)            // LIVE 徽标红色背景
     val TextPrimary = Color(0xFFF5F5F5)     // 主文字
     val TextSecondary = Color(0xFFA0A0A0)   // 联赛、时间等次级文字
     val TextDisabled = Color(0xFF666666)    // 未开赛弱化信息

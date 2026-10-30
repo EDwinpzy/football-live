@@ -30,7 +30,7 @@ import androidx.navigation.navArgument
 import kotlinx.coroutines.launch
 import com.qiubo.optimaltv.ui.live.LiveScreen
 import com.qiubo.optimaltv.ui.player.PlayerScreen
-import com.qiubo.optimaltv.ui.theme.ZuoLiveTheme
+import com.qiubo.optimaltv.ui.theme.QiuJiLiveTheme
 
 /** 调试直达播放页通道（v1.8 2026-08-30）：debug 构建 DebugNavReceiver 广播写入 pending，
  *  AppRoot 轮询消费——绕过模拟器丢键/焦点漂移，测试直播链路用。
@@ -41,13 +41,13 @@ object DebugNavBus {
     @Volatile var pendingEngine: String? = null
 }
 
-/** 足球直播启动屏：黑底、品牌图标与加载提示。 */
+/** 球迹直播启动屏：黑底、品牌图标与加载提示。 */
 @Composable
 private fun StartupSplash() {
     val status by AppStartup.status.collectAsStateWithLifecycle()
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("足球直播", color = Color.White, fontSize = 38.sp)
+            Text("球迹直播", color = Color.White, fontSize = 38.sp)
             Spacer(Modifier.height(40.dp))
             com.qiubo.optimaltv.ui.components.AppleLoading()
             // 全量预热可能十几秒到数十秒：给一行进度文案，避免看起来像卡死
@@ -90,7 +90,7 @@ class MainActivity : ComponentActivity() {
         com.qiubo.optimaltv.OtvLog.i("activity onCreate")
         consumeDebugNav(intent)
         syncViewportMetrics()
-        // TV 沉浸式：足球直播使用完整 16:9 画布，系统栏不隐藏会把内容挤出屏幕
+        // TV 沉浸式：球迹直播使用完整 16:9 画布，系统栏不隐藏会把内容挤出屏幕
         window.decorView.systemUiVisibility = (
             android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
@@ -100,7 +100,7 @@ class MainActivity : ComponentActivity() {
                 or android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
             )
         setContent {
-            ZuoLiveTheme {
+            QiuJiLiveTheme {
                 // 足球赛程页面就绪前渲染品牌启动屏。
                 val ready by AppStartup.ready.collectAsStateWithLifecycle()
                 // 热更新在后台静默处理；无论服务端 force 标记如何，都不阻断使用。

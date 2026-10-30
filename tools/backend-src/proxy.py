@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-做直播 数据代理服务器
+球迹直播 数据代理服务器
 - 足球比赛列表、线路发现与直播播放中继
 - 足球队徽、网页静态资源与 APK 更新清单
 - GET /api/matches : 抓取 88zhibo.tv → 解析为 JSON（缓存 60s）
@@ -162,7 +162,7 @@ def _web_static_root() -> Path:
     if override:
         return Path(override)
     return WWW_ROOT
-# 做直播列表源。88zhibo 首页同时混排篮球，parse_matches 会过滤非足球赛事。
+# 球迹直播列表源。88zhibo 首页同时混排篮球，parse_matches 会过滤非足球赛事。
 SOURCE_MIRRORS = [SOURCE_URL]
 _active_source = {"i": 0, "url": SOURCE_MIRRORS[0]}
 # APK 应用内更新清单由后台写入 CloudBase 公开桶；网页函数只负责以稳定的
@@ -1068,7 +1068,7 @@ def _matches_keepwarm():
 threading.Thread(target=_matches_keepwarm, daemon=True, name="matches-keepwarm").start()
 
 
-# ===== 做直播线路解析 =====
+# ===== 球迹直播线路解析 =====
 
 
 def fetch_url(url, referer=None, timeout=20):
@@ -1094,7 +1094,7 @@ STREAM_CACHE = {}
 STREAM_CACHE_MAX = 500
 _stream_lock = threading.Lock()
 
-# 直播「信号源清单」短缓存（2026-10-17 用户报障「做直播经常显示无法查找到可用信号源，
+# 直播「信号源清单」短缓存（2026-10-17 用户报障「球迹直播经常显示无法查找到可用信号源，
 # 彻底退出 app 再进又可以播放」）：
 # 一次打开播放器 = 源站清单 1 次 + 每条线路 3~4 次探测（大场次 10+ 线 = 40+ 次上游请求）。
 # 用户重试/反复进出播放器时这份探测风暴会被源站按 IP 限流/拦爬，之后**每次**解析都拿不到
@@ -1770,7 +1770,7 @@ def _trim_relay():
 # 中继在重写 m3u8 时记住各清单的分片顺序；每当一个分片被客户端请求，
 # 后台并发预取其后 PREFETCH_AHEAD 片入 RELAY_CACHE —— hls.js 下一片请求
 # 直接命中缓存，等效供给速度 = 并发连接数 × 单连接限速（4×70=280KB/s）。
-# v1.22（2026-09-05 需求⑥ 做直播卡顿）：6→8——直播分片供给波动的余量翻倍，
+# v1.22（2026-09-05 需求⑥ 球迹直播卡顿）：6→8——直播分片供给波动的余量翻倍，
 # 字节预算（48MB）不变仍兜底内存。
 PREFETCH_AHEAD = 8
 # 直播播放器从清单末端（直播边缘附近）起播；清单首次出现时只预热最老分片会
@@ -2706,7 +2706,7 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
         # （OkHttp/fetch）body 结束时判缺字节硬报 unexpected end of stream →
         # ERROR_CODE_IO_NETWORK_CONNECTION_FAILED；重试重抓同一上游必复发
         # （同线重试×3 → 错误态 30s 自动重试 → fresh 重解析仍同一 CDN 同一形态）
-        # = 做直播「看一会就看不了、点重试/换源都没用」根因（2026-09-19 实测）。
+        # = 球迹直播「看一会就看不了、点重试/换源都没用」根因（2026-09-19 实测）。
         # 改以 chunked 下发行：0-chunk 收尾即「完整」，到达多少算多少——TS 尾部
         # 残缺不足一个 188B 包，解复用器直接丢弃，无感知；上游真异常（连接重置/
         # 超时/读错误）仍由生成器上抛 → do_GET 不写终止块 → 客户端网络错误 →
@@ -4125,7 +4125,7 @@ def main(port=None, bind=None):
         bind = os.environ.get("OTV_BIND") or "127.0.0.1"
     # 多线程：直播分片/播放列表是并发请求，单线程服务器会互相阻塞。
     server = ThreadingHTTPServer((bind, port), Handler)
-    print("做直播 数据代理服务器 http://%s:%d  (数据源 %s)" % (bind, port, _active_source["url"]))
+    print("球迹直播 数据代理服务器 http://%s:%d  (数据源 %s)" % (bind, port, _active_source["url"]))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

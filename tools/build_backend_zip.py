@@ -74,7 +74,7 @@ def build_archive(source_dir: Path, output_zip: Path) -> tuple[str, ...]:
         if not (source_dir / name).is_file():
             raise FileNotFoundError(f"missing backend runtime: {source_dir / name}")
 
-    with tempfile.TemporaryDirectory(prefix="zuo-live-native-assets-") as build_temp:
+    with tempfile.TemporaryDirectory(prefix="qiuji-live-native-assets-") as build_temp:
         build_root = Path(build_temp)
         asset_root = build_root / "www"
         result = build_assets(source_dir / "www", asset_root)

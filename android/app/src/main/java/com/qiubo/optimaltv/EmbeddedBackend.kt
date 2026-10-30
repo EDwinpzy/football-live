@@ -12,7 +12,7 @@ import java.util.concurrent.TimeUnit
  * app 启动时把后端 zip 解压到应用可写目录，用 Chaquopy 在本机 127.0.0.1:8090 跑 proxy.py
  * —— app 的 baseUrl 默认指向这里。
  *
- * proxy.py 与做直播后端模块随包提供，运行时解压到应用私有目录；
+ * proxy.py 与球迹直播后端模块随包提供，运行时解压到应用私有目录；
  * www/ 与缓存目录(team_icon_cache/svg/transparent)运行前在解压目录内创建。
  *
  * v1.18 热更新（公测版）：优先解压 HotUpdateManager 暂存的云端包

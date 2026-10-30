@@ -17,7 +17,7 @@ val SurfaceDark = Color(0xFF141414)     // 卡片/条目背景
 val SurfaceFocus = Color(0xFF1F1F1F)    // 焦点/按压态卡片背景
 val Brand = Color(0xFFFFFFFF)           // 焦点描边、选中态、强调
 val BrandDeep = Color(0xFFC9C9C9)       // 按压态、渐变端点
-val LiveRed = Color(0xFFFFFFFF)         // LIVE 徽标、直播中比分
+val LiveRed = Color(0xFFE53935)         // LIVE 徽标红色背景
 val TextPrimary = Color(0xFFF5F5F5)     // 主文字
 val TextSecondary = Color(0xFFA0A0A0)   // 联赛、时间等次级文字
 val TextDisabled = Color(0xFF666666)    // 未开赛弱化信息
@@ -47,7 +47,7 @@ val AppTypography = androidx.compose.material3.Typography(
 )
 
 @Composable
-fun ZuoLiveTheme(content: @Composable () -> Unit) {
+fun QiuJiLiveTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = DarkScheme,
         typography = AppTypography,

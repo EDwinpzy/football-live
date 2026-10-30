@@ -32,7 +32,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.qiubo.optimaltv.ui.live.LiveScreen
 import com.qiubo.optimaltv.ui.player.PlayerScreen
-import com.qiubo.optimaltv.ui.theme.ZuoLiveTheme
+import com.qiubo.optimaltv.ui.theme.QiuJiLiveTheme
 import kotlinx.coroutines.launch
 
 /** 足球播放器调试入口（release 无写入方）。
@@ -43,7 +43,7 @@ object DebugNavBus {
     @Volatile var pendingEngine: String? = null
 }
 
-/** 足球直播启动屏：品牌图标、名称与加载提示。 */
+/** 球迹直播启动屏：品牌图标、名称与加载提示。 */
 @Composable
 private fun StartupSplash() {
     val status by AppStartup.status.collectAsStateWithLifecycle()
@@ -51,11 +51,11 @@ private fun StartupSplash() {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Image(
                 painter = painterResource(com.qiubo.optimaltv.R.drawable.my_tv_logo),
-                contentDescription = "足球直播",
+                contentDescription = "球迹直播",
                 modifier = Modifier.size(110.dp),
             )
             Text(
-                "足球直播",
+                "球迹直播",
                 color = Color.White,
                 fontSize = 26.sp,
                 fontWeight = FontWeight.Bold,
@@ -72,7 +72,7 @@ private fun StartupSplash() {
 
 /**
  * 移动版（手机/平板触屏）单 Activity：
- * - v1.18 前端样式/布局与 TV 版 1:1 同款（足球直播横屏布局，锁横屏 +
+ * - v1.18 前端样式/布局与 TV 版 1:1 同款（球迹直播横屏布局，锁横屏 +
  *   沉浸式全屏），顶部 Tab Bar 由各主 tab 屏自带（与 TV 版同构）；
  * - 无 D-pad 焦点引擎（TV 版 OtvNav 整套不参与），交互全部触控；
  * - 不显示状态栏/手势条（TV 沉浸式同款），保证 16:9 完整画布。
@@ -103,10 +103,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         com.qiubo.optimaltv.OtvLog.i("activity onCreate（mobile）")
         consumeDebugNav(intent)
-        // v1.18 沉浸式全屏（与 TV 版同款）：足球直播使用完整 16:9 画布，系统栏不隐藏会把内容挤出屏幕
+        // v1.18 沉浸式全屏（与 TV 版同款）：球迹直播使用完整 16:9 画布，系统栏不隐藏会把内容挤出屏幕
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
         setContent {
-            ZuoLiveTheme {
+            QiuJiLiveTheme {
                 // 足球比赛列表准备后显示直播首页。
                 val ready by AppStartup.ready.collectAsStateWithLifecycle()
                 // 热更只做后台静默下载；远端强更标记不会覆盖首页或阻断进入。

@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 「做直播找不到可用信号源」的设备侧排队回归（2026-10-17）。
+ * 「球迹直播找不到可用信号源」的设备侧排队回归（2026-10-17）。
  *
  * 现场形态：赛程/战报/集锦/新闻/信号源全部打到同一个 127.0.0.1:8090。生产请求走
  * [liveHttpResponse]（`call.enqueue`，**异步**），而 OkHttp 的 `maxRequestsPerHost`

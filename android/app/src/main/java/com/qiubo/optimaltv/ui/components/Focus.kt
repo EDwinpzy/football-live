@@ -232,6 +232,10 @@ fun Modifier.dpadFocusable(
     shape: Shape = RoundedCornerShape(12.dp),
     scaleFocused: Float = 1.06f,
     ringWidth: Dp = 2.dp,
+    /** 聚焦外环主色；默认沿用品牌白，调用方可指定语义色。 */
+    ringColor: Color = com.qiubo.optimaltv.ui.theme.OtvColors.Brand.copy(alpha = 0.85f),
+    /** 焦点环在浅色画面上的衬底；只在外侧轻量绘制，不再向内部堆粗边。 */
+    ringBackdropColor: Color = Color.Black.copy(alpha = 0.45f),
     /** 非空 = 聚焦时画背景胶囊（原版筛选 chip 焦点视觉），不画描边环 */
     focusedBg: Color? = null,
     /** focusedBg 胶囊圆角（默认 12dp；全圆角胶囊型按钮传高度一半） */
@@ -396,22 +400,23 @@ fun Modifier.dpadFocusable(
             }
             drawContent()
             if (focused && drawRing && !(focusedBg != null && focusedBg.luminance() > 0.5f)) {
-                // 规范焦点态：brand 2dp 描边（禁阴影发光堆叠）。
-                // 深色衬环：白海报/浅色封面上 brand 细环对比不足——先画一圈黑 55% 宽环
-                //（半内外），brand 环叠其上（同心圆角描边多圈叠加，无 radialGradient）
+                // 焦点环沿控件外缘绘制：品牌色细环 + 极窄暗色衬底，
+                // 避免旧版向内叠粗黑边后形成厚重灰框。
                 val strokeW = ringWidth.toPx()
+                val backdropW = strokeW + 2.dp.toPx()
+                val ringRadius = CornerRadius(12.dp.toPx())
                 drawRoundRect(
-                    color = Color.Black.copy(alpha = 0.55f),
-                    topLeft = Offset.Zero,
-                    size = Size(size.width, size.height),
-                    cornerRadius = CornerRadius(12.dp.toPx()),
-                    style = Stroke(width = strokeW + 4.dp.toPx()),
+                    color = ringBackdropColor,
+                    topLeft = Offset(-backdropW / 2f, -backdropW / 2f),
+                    size = Size(size.width + backdropW, size.height + backdropW),
+                    cornerRadius = CornerRadius(ringRadius.x + backdropW / 2f),
+                    style = Stroke(width = backdropW),
                 )
                 drawRoundRect(
-                    color = com.qiubo.optimaltv.ui.theme.OtvColors.Brand.copy(alpha = 0.85f),
-                    topLeft = Offset(strokeW, strokeW),
-                    size = Size(size.width - strokeW * 2, size.height - strokeW * 2),
-                    cornerRadius = CornerRadius(12.dp.toPx()),
+                    color = ringColor,
+                    topLeft = Offset(-strokeW / 2f, -strokeW / 2f),
+                    size = Size(size.width + strokeW, size.height + strokeW),
+                    cornerRadius = CornerRadius(ringRadius.x + strokeW / 2f),
                     style = Stroke(width = strokeW),
                 )
             }

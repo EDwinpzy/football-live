@@ -33,7 +33,7 @@ val AppTypography = androidx.compose.material3.Typography(
 )
 
 @Composable
-fun ZuoLiveTheme(content: @Composable () -> Unit) {
+fun QiuJiLiveTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = DarkScheme,
         typography = AppTypography,

@@ -438,18 +438,18 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                     groups.forEach { (date, ms) ->
                         val isFirstGroup = groupIdx++ == 0
                         item(key = "date-$date") {
-                            // 规范「日期分组头」：brand 6dp 圆点 + label 字号，上下留白充足
+                            // 规范「日期分组头」：放大 brand 圆点 + label 字号，上下留白充足
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(start = 90f.sx(s), top = 40f.sx(s), bottom = 20f.sx(s)),
+                                modifier = Modifier.padding(start = 70f.sx(s), top = 36f.sx(s), bottom = 24f.sx(s)),
                             ) {
                                 Box(
                                     Modifier
-                                        .size(6f.sx(s))
-                                        .background(OtvColors.Brand, CircleShape),
+                                        .size(8f.sx(s))
+                                        .background(OtvColors.AccentGreen, CircleShape),
                                 )
-                                Spacer(Modifier.width(12f.sx(s)))
-                                Text(dateLabel(date), color = OtvColors.TextSecondary, fontSize = 15f.sxs(s), fontWeight = FontWeight.Medium)
+                                Spacer(Modifier.width(16f.sx(s)))
+                                Text(dateLabel(date), color = OtvColors.TextPrimary, fontSize = 20f.sxs(s), fontWeight = FontWeight.SemiBold)
                             }
                         }
                         item(key = "row-$date-h") {
@@ -465,7 +465,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                         if (ms.isNotEmpty() && isFirstGroup) {
                             // 需求⑦：今日比赛横排展示；2026-09-05 需求④：卡片超一屏宽时
                             // 折两行（均分，行序保持时间顺序），未超出才单行——两行仍超宽
-                            // 时整体横向滚动。1920 设计宽下单行容量 = floor((1920-2×86+40)/360)=4。
+                            // 时整体横向滚动。放大卡片后仍保持一屏四列，并收紧左右安全边距。
                             // 每行独立 LazyRow+ProvideNavScrolls（行内滚动互不干扰，几何导航跨行照常）。
                             // 横向留白用 contentPadding（需求 足球#1）：选中环行首/行尾不裁剪。
                             item(key = "row-$date") {
@@ -473,12 +473,12 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                                 val pageState = rememberLazyListState()
                                 val pageScroll = remember(pageState) { lazyNavContainer(pageState) }
                                 ProvideNavScrolls(horizontal = pageScroll) {
-                                    LazyRow(state = pageState, contentPadding = PaddingValues(horizontal = 86f.sx(s)),
-                                        horizontalArrangement = Arrangement.spacedBy(40f.sx(s)), modifier = Modifier.padding(top = 24f.sx(s), bottom = 40f.sx(s))) {
+                                    LazyRow(state = pageState, contentPadding = PaddingValues(horizontal = 70f.sx(s)),
+                                        horizontalArrangement = Arrangement.spacedBy(24f.sx(s)), modifier = Modifier.padding(top = 24f.sx(s), bottom = 40f.sx(s))) {
                                         items(pages.size, key = { "today-page-$date-$it" }) { pi ->
-                                            Column(verticalArrangement = Arrangement.spacedBy(28f.sx(s))) {
+                                            Column(verticalArrangement = Arrangement.spacedBy(32f.sx(s))) {
                                                 pages[pi].rows.forEach { row ->
-                                                    Row(horizontalArrangement = Arrangement.spacedBy(40f.sx(s))) {
+                                                    Row(horizontalArrangement = Arrangement.spacedBy(24f.sx(s))) {
                                                         row.forEach { match ->
                                                             GameCard(match, s, ::playMatch, cardReg = cardReg)
                                                         }
@@ -490,17 +490,17 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                                 }
                             }
                         } else if (ms.isNotEmpty()) {
-                            // 明日及以后：按 400 设计像素卡宽计算列数；1920 宽下为 4 列。
+                            // 明日及以后：按 420 设计像素卡宽计算列数；1920 宽下保持 4 列。
                             // v1.10（2026-08-31）：逐行独立 item（原为单个巨 item 内非 lazy Column，
                             // 比赛多时整页一次性组合全部行，低端机切页/滚动卡顿）；间距 1:1 保留
                             // （首行 top24 / 行距 28 / 组间由下一组日期标题 top40 衔接）
                             ms.chunked(liveCols).forEachIndexed { ri, rowMs ->
                                 item(key = "row-$date-$ri") {
                                     Row(
-                                        horizontalArrangement = Arrangement.spacedBy(36f.sx(s)),
+                                        horizontalArrangement = Arrangement.spacedBy(24f.sx(s)),
                                         modifier = Modifier
                                             .padding(top = if (ri == 0) 24f.sx(s) else 28f.sx(s))
-                                            .padding(horizontal = 86f.sx(s)),
+                                            .padding(horizontal = 70f.sx(s)),
                                     ) {
                                         rowMs.forEach { m ->
                                             GameCard(m, s, ::playMatch, cardReg = cardReg)
@@ -566,7 +566,7 @@ private fun LiveHeroBand(
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Brush.horizontalGradient(listOf(Color(0x38000000), Color(0x14000000), Color.Transparent))),
+                .background(Brush.horizontalGradient(listOf(Color(0x66000000), Color(0x26000000), Color.Transparent))),
         )
         // 底部渐黑：与下方内容区（实底 Bg）自然衔接
         Box(
@@ -612,12 +612,12 @@ private fun LiveHeroBand(
                         } else {
                             Text(
                                 animatedHero.displayStatus,
-                                color = OtvColors.TextSecondary, fontSize = 20f.sxs(s), fontWeight = FontWeight.SemiBold,
+                                color = OtvColors.TextPrimary, fontSize = 20f.sxs(s), fontWeight = FontWeight.SemiBold,
                             )
                             Spacer(Modifier.width(14f.sx(s)))
                             Text(
                                 matchTimeLabel(animatedHero),
-                                color = OtvColors.TextSecondary, fontSize = 20f.sxs(s), fontWeight = FontWeight.SemiBold,
+                                color = OtvColors.TextPrimary, fontSize = 20f.sxs(s), fontWeight = FontWeight.SemiBold,
                             )
                         }
                     }
@@ -633,8 +633,11 @@ private fun LiveHeroBand(
                     Modifier
                         .focusRequester(heroBtnFocus)
                         .dpadFocusable(
-                            scaleFocused = 1.04f,
-                            // focusedBg 留空 → 聚焦画 brand 描边环（规范：brand=强调）
+                            scaleFocused = 1.025f,
+                            ringWidth = 3f.sx(s),
+                            ringColor = OtvColors.AccentGreen,
+                            ringBackdropColor = Color.Black.copy(alpha = 0.22f),
+                            // 焦点环使用球迹直播品牌绿，沿按钮外缘轻量绘制
                             // v1.13 方向语义声明：L/R=切换比赛（hero 海报固定不换，仅比分换）；
                             // DOWN=直达第一张可见比赛卡；
                             // UP=顶部无更多控件时由引擎原地封锁，不离开首屏主操作。
@@ -658,19 +661,19 @@ private fun LiveHeroBand(
                                 }
                             },
                         ) { onPlay(hero) }
-                        .background(OtvColors.Brand, RoundedCornerShape(12f.sx(s)))
-                        .width(268f.sx(s))
-                        .height(94f.sx(s)),
+                        .background(OtvColors.Brand, RoundedCornerShape(14f.sx(s)))
+                        .width(300f.sx(s))
+                        .height(104f.sx(s)),
                     contentAlignment = Alignment.Center,
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Canvas(Modifier.size(34f.sx(s))) {
+                        Canvas(Modifier.size(38f.sx(s))) {
                             val p = Path().apply {
                                 moveTo(0f, 0f); lineTo(size.width, size.height / 2f); lineTo(0f, size.height); close()
                             }
                             drawPath(p, OtvColors.Bg)
                         }
-                        Spacer(Modifier.width(14f.sx(s)))
+                        Spacer(Modifier.width(16f.sx(s)))
                         Text("立即观看", color = OtvColors.Bg, fontSize = 20f.sxs(s), fontWeight = FontWeight.Medium)
                     }
                 }
@@ -698,7 +701,7 @@ private fun LiveHeroBand(
     }
 }
 
-/** LIVE 徽标（规范：live 底白字胶囊 + 左侧 6dp 呼吸圆点；高 28、全弧圆角、label 字号） */
+/** LIVE 徽标（红色底白字胶囊 + 左侧 6dp 白色呼吸圆点；高 28、全弧圆角、label 字号） */
 @Composable
 private fun LiveBadge(s: Float) {
     val breath = rememberInfiniteTransition(label = "liveDot").animateFloat(
@@ -713,18 +716,18 @@ private fun LiveBadge(s: Float) {
     Box(
         Modifier
             .background(OtvColors.Live, RoundedCornerShape(50f.sx(s)))
-            .padding(horizontal = 12f.sx(s), vertical = 5f.sx(s)),
+            .padding(horizontal = 14f.sx(s), vertical = 6f.sx(s)),
         contentAlignment = Alignment.Center,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier
-                    .size(6f.sx(s))
-                    .background(OtvColors.Bg.copy(alpha = breath.value), CircleShape),
+                    .size(7f.sx(s))
+                    .background(OtvColors.PureWhite.copy(alpha = breath.value), CircleShape),
             )
-            Spacer(Modifier.width(6f.sx(s)))
+            Spacer(Modifier.width(7f.sx(s)))
             Text(
-                "LIVE", color = OtvColors.Bg, fontSize = 15f.sxs(s), fontWeight = FontWeight.Bold,
+                "LIVE", color = OtvColors.PureWhite, fontSize = 15f.sxs(s), fontWeight = FontWeight.Bold,
                 lineHeight = 18f.sxs(s),
             )
         }
@@ -736,10 +739,10 @@ private fun LiveBadge(s: Float) {
 private fun ScoreRow(team: String, pts: String, s: Float) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.height(96f.sx(s)),
+        modifier = Modifier.height(112f.sx(s)),
     ) {
         Box(
-            Modifier.size(84f.sx(s)),
+            Modifier.size(92f.sx(s)),
             contentAlignment = Alignment.Center,
         ) {
             // 2026-09-18 队标重叠修复：首字兜底只在图标未就绪时绘制。透明底队徽（尤文图斯
@@ -760,7 +763,7 @@ private fun ScoreRow(team: String, pts: String, s: Float) {
                     iconReady = w !in 1..2
                 },
                 onError = { iconReady = false },
-                modifier = Modifier.fillMaxSize().padding(6f.sx(s)),
+                modifier = Modifier.fillMaxSize().padding(8f.sx(s)),
             )
         }
         Spacer(Modifier.width(16f.sx(s)))
@@ -806,7 +809,7 @@ fun dateLabel(date: String): String {
     }
 }
 
-/** 比赛卡（400×146，给两侧队名和中部联赛信息留出宽度；
+/** 比赛卡（420×168，给两侧队名和中部联赛信息留出宽度；
  *  需求 #2：去掉中部「联赛 日期 时间」文案；
  *  需求 #3：直播 = LIVE 徽章(上下居中)/分钟/比分；未开赛 = VS；完场 = 比分。
  *  需求 #6：中部加入联赛名（意甲/意大利杯等）。
@@ -821,7 +824,7 @@ private fun GameCard(
 ) {
     // 规范焦点态：surfaceFocus 背景 + brand 描边（dpadFocusable 环）+ scale 1.02，无阴影发光堆叠
     var cardFocused by remember { mutableStateOf(false) }
-    Column(Modifier.width(400f.sx(s))) {
+    Column(Modifier.width(420f.sx(s))) {
         Box(
             Modifier
                 .dpadFocusable(
@@ -834,11 +837,11 @@ private fun GameCard(
                 ) { onPlay(m) }
                 .background(
                     if (cardFocused) OtvColors.SurfaceFocus else OtvColors.Surface,
-                    RoundedCornerShape(18f.sx(s)),
+                    RoundedCornerShape(20f.sx(s)),
                 )
                 .fillMaxWidth()
-                .height(146f.sx(s))
-                .padding(horizontal = 16f.sx(s)),
+                .height(168f.sx(s))
+                .padding(horizontal = 20f.sx(s)),
             contentAlignment = Alignment.Center,
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
@@ -846,9 +849,9 @@ private fun GameCard(
                 Column(
                     modifier = Modifier.weight(1f),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    // 需求 2026-09-11：联赛/VS/时间三行上下收紧——行距 5→2，各文本显式紧凑行高
+                    // 需求 2026-09-11：联赛/VS/时间三行上下收紧——行距 5→3，各文本显式紧凑行高
                     //（不设行高时中文联赛名按 CJK 字体度量撑高，三行整体偏松）
-                    verticalArrangement = Arrangement.spacedBy(2f.sx(s)),
+                    verticalArrangement = Arrangement.spacedBy(3f.sx(s)),
                 ) {
                     // 需求 足球#6：卡内中部显示联赛/杯赛名（意甲、意大利杯等）
                     if (m.league.isNotBlank()) {
@@ -961,7 +964,7 @@ private fun TeamBlock(team: String, s: Float, width: Float = 112f) {
                     iconReady = w !in 1..2
                 },
                 onError = { iconReady = false },
-                modifier = Modifier.fillMaxSize().padding(6f.sx(s)),
+                modifier = Modifier.fillMaxSize().padding(8f.sx(s)),
             )
         }
         Spacer(Modifier.height(4f.sx(s)))

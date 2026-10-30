@@ -90,7 +90,7 @@ internal object PlaybackRecoveryCoordinationPolicy {
  * 集数变少（源站抖动 / 部分线路解析失败）一律拒绝，免得把用户正在看的选集列表打回原形。
  */
 data class PlayerUiState(
-    val title: String = "足球直播",
+    val title: String = "球迹直播",
     val lines: List<LiveSourceLine> = emptyList(),
     val activeLine: Int = 0,
     val sourceResolving: Boolean = false,
@@ -109,7 +109,7 @@ data class PlayerUiState(
 )
 object PlayerStartupStatePolicy {
     fun initial(@Suppress("UNUSED_PARAMETER") matchId: String): PlayerUiState = PlayerUiState(
-        title = "足球直播",
+        title = "球迹直播",
         isLive = true,
         sourceResolving = true,
     )
@@ -275,7 +275,7 @@ private fun installEngine(newEngine: MediaEngine) {
         if (sources.isEmpty()) {
             OtvLog.w("bootLive 无可用信号 → fatalMsg")
             stopForFatal()
-            _ui.value = _ui.value.copy(fatalMsg = "直播信号暂不可用", title = "足球直播", isLive = true)
+            _ui.value = _ui.value.copy(fatalMsg = "直播信号暂不可用", title = "球迹直播", isLive = true)
             scheduleLiveAutoRetry()
             return
         }
@@ -290,7 +290,7 @@ private fun installEngine(newEngine: MediaEngine) {
         }
         installEngine(EngineRegistry.create(engineOverride ?: settings.current().engineId, Graph.appContext))
         _ui.value = _ui.value.copy(
-            title = "足球直播", lines = lines, isLive = true,
+            title = "球迹直播", lines = lines, isLive = true,
             engineId = engine.engineId, engineName = engine.displayName,
         )
         collectEngineState()
@@ -439,9 +439,9 @@ private suspend fun boot(fresh: Boolean = false) {
         throw cancelled
     } catch (failure: Exception) {
         currentCoroutineContext().ensureActive()
-        OtvLog.w("足球直播初始化失败: ${failure.message}")
+        OtvLog.w("球迹直播初始化失败: ${failure.message}")
         stopForFatal()
-        _ui.value = _ui.value.copy(sourceResolving = false, fatalMsg = "足球直播暂不可用，请重试")
+        _ui.value = _ui.value.copy(sourceResolving = false, fatalMsg = "球迹直播暂不可用，请重试")
         scheduleLiveAutoRetry()
     }
 }

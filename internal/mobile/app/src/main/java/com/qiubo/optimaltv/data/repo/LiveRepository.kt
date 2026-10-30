@@ -17,7 +17,7 @@ import org.json.JSONObject
 import java.net.URLEncoder
 
 /**
- * 做直播仓库（1:1 复刻原版 web 数据链路，同一后端）：
+ * 球迹直播仓库（1:1 复刻原版 web 数据链路，同一后端）：
  * - matches: /api/matches（90 场左右，含 live 比分）
  * - 直播信号: /api/stream/{matchId}?src=all&fresh=1 → 仅返回已解析并探活的 HLS 线路
  */
@@ -91,7 +91,7 @@ class LiveRepository(
     /**
      * 足球源在本地后端解析，但超时不应继承搜索抓取的 75 秒宽限。
      *
-     * 2026-10-17（用户报障「做直播经常找不到可用信号源，退出 app 重进又好了」）：
+     * 2026-10-17（用户报障「球迹直播经常找不到可用信号源，退出 app 重进又好了」）：
      * 旧版由 [okHttp] newBuilder 派生，**沿用同一个 Dispatcher**。生产请求走
      * `liveHttpResponse`（异步 enqueue），而 OkHttp 的 `maxRequestsPerHost`（默认 5）
      * 只约束异步调用；赛程与信号源请求打到同一个 127.0.0.1:8090，
@@ -120,7 +120,7 @@ class LiveRepository(
     private suspend fun getLiveSource(base: String, path: String): JSONObject = withContext(Dispatchers.IO) {
         val req = Request.Builder()
             .url(base.trimEnd('/') + path)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) ZuoLive/1.0")
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) QiuJiLive/1.0")
             .build()
         liveHttpResponse(liveSourceHttp, req).use { resp ->
             require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
@@ -132,7 +132,7 @@ class LiveRepository(
         val path = matchesRequestPath()
         val req = Request.Builder()
             .url(base.trimEnd('/') + path)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) ZuoLive/1.0")
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) QiuJiLive/1.0")
             .build()
         liveHttpResponse(matchesHttp, req).use { resp ->
             require(resp.isSuccessful) { "HTTP ${resp.code} $path" }

@@ -326,7 +326,7 @@ object ApkUpdateManager {
         }
         if (!opened) {
             _state.value = ApkUpdateState.Error(
-                "未能打开系统设置，请在系统设置中手动允许 足球直播 安装未知应用后重试",
+                "未能打开系统设置，请在系统设置中手动允许 球迹直播 安装未知应用后重试",
             )
         }
     }
