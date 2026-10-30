@@ -108,19 +108,17 @@ import com.qiubo.optimaltv.ui.components.NAV_DOWN
 import com.qiubo.optimaltv.ui.components.NAV_LEFT
 import com.qiubo.optimaltv.ui.components.NAV_RIGHT
 import com.qiubo.optimaltv.ui.components.NAV_UP
-import com.qiubo.optimaltv.ui.theme.AccentBlue
 import com.qiubo.optimaltv.ui.theme.OtvColors
 import com.qiubo.optimaltv.ui.theme.rememberUiScale
 import com.qiubo.optimaltv.ui.theme.sxs
 import com.qiubo.optimaltv.ui.theme.sx
-import com.qiubo.optimaltv.ui.theme.TextPrimary
 import java.net.URLDecoder
 import kotlinx.coroutines.launch
 
 /**
- * 足球直播播放页只提供比赛画面和信号源选择。
+ * 做直播播放页只提供比赛画面和信号源选择。
  * 左右键切换信号源，返回键退出；
- * - 足球直播（需求 足球#14）：无任何菜单、无比分板；唯一控件=信号源选择条
+ * - 做直播（需求 足球#14）：无任何菜单、无比分板；唯一控件=信号源选择条
  *   （OK/菜单键呼出，左右移动、OK 切换，BACK/5s 自动隐藏）；默认源=上次可用线路或服务端首条；
  *   两次返回退出（首次提示）
  * - KEEP_SCREEN_ON / 断点续播 / 看门狗换线（VM 承担）
@@ -180,9 +178,14 @@ fun PlayerScreen(nav: NavController, matchIdArg: String) {
         }
     }
     val rootFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { com.qiubo.optimaltv.ui.components.OtvNav.topFocus = null }
+    // 播放页没有顶部标签或菜单，进入页面后立即把焦点交给画面根宿，
+    // 让第一次上下左右/OK 就能被遥控器处理，不依赖用户先按第二次键触发自愈。
+    InitialFocusEffect(rootFocus, "player-root", enabled = !ui.srcPickerVisible)
+    LaunchedEffect(Unit) { com.qiubo.optimaltv.ui.components.OtvNav.topFocus = rootFocus }
     LaunchedEffect(ui.fatalMsg, ui.srcPickerVisible) {
-        if (ui.fatalMsg != null && !ui.srcPickerVisible) runCatching { rootFocus.requestFocus() }
+        if (ui.fatalMsg != null && !ui.srcPickerVisible) {
+            runCatching { rootFocus.requestFocus() }
+        }
     }
     Box(
         Modifier
@@ -218,7 +221,7 @@ fun PlayerScreen(nav: NavController, matchIdArg: String) {
             }
         }
         if (ui.sourceResolving && ui.lines.isEmpty()) {
-            Text("正在检测可用线路…", color = Color.White.copy(alpha = 0.7f), modifier = Modifier.align(Alignment.Center))
+            Text("正在检测可用线路…", color = OtvColors.TextSecondary, modifier = Modifier.align(Alignment.Center))
         }
         if (ui.playState == EnginePlayState.BUFFERING && ui.fatalMsg == null) {
             AppleLoading(modifier = Modifier.align(Alignment.Center), size = 56.dp)
@@ -278,30 +281,40 @@ private fun LiveSourcePicker(
     Column(
         modifier
             .padding(bottom = 56f.sx(ps))
-            .background(Color(0xB3111114), RoundedCornerShape(20f.sx(ps)))
+            .background(Color(0xF2151815), RoundedCornerShape(20f.sx(ps)))
             .padding(horizontal = 26f.sx(ps), vertical = 20f.sx(ps)),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
             "信号源",
-            color = Color(0x99FFFFFF), fontSize = 20f.sxs(ps),
+            color = OtvColors.TextSecondary, fontSize = 20f.sxs(ps),
             modifier = Modifier.padding(bottom = 12f.sx(ps)),
         )
         if (ui.lines.isEmpty()) {
             if (ui.sourceResolving) {
-                Text("正在检测可用线路…", color = Color.White, fontSize = 20f.sxs(ps))
+                Text("正在检测可用线路…", color = OtvColors.TextPrimary, fontSize = 20f.sxs(ps))
             } else {
+                var retryFocused by remember { mutableStateOf(false) }
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
                         .focusRequester(retryFocus)
-                        .dpadFocusable(scaleFocused = 1.05f, focusedBg = Color.White, drawRing = false) {
+                        .dpadFocusable(
+                            scaleFocused = 1.05f,
+                            // 播放器控件不画描边环，保证比赛画面干净；聚焦 = 白底深字
+                            drawRing = false,
+                            onFocusedChange = { retryFocused = it },
+                        ) {
                             vm.retry(); onTick()
                         }
-                        .background(Color(0x59FFFFFF), RoundedCornerShape(12f.sx(ps)))
+                        .background(if (retryFocused) Color.White else OtvColors.Brand, RoundedCornerShape(50f.sx(ps)))
                         .padding(horizontal = 24f.sx(ps), vertical = 12f.sx(ps)),
                 ) {
-                    Text("重新检测线路", color = Color.White, fontSize = 25f.sxs(ps), fontWeight = FontWeight.Bold)
+                    Text(
+                        "重新检测线路",
+                        color = if (retryFocused) OtvColors.Bg else OtvColors.Bg,
+                        fontSize = 15f.sxs(ps), fontWeight = FontWeight.Medium,
+                    )
                 }
             }
         } else {
@@ -315,8 +328,8 @@ private fun LiveSourcePicker(
                             .then(if (active) Modifier.focusRequester(chipFocus[idx]) else Modifier)
                             .dpadFocusable(
                                 scaleFocused = 1.05f,
-                                focusedBg = Color.White,
-                                // 播放器控件不画描边环，保证比赛画面干净。
+                                // 规范选源条：选中 = brand 底白字，未选 = surface 底次级字；
+                                // 播放器控件不画描边环，聚焦 = 白底深字（画面干净且光标醒目）
                                 drawRing = false,
                                 onFocusedChange = {
                                     chipFocused = it
@@ -324,16 +337,24 @@ private fun LiveSourcePicker(
                                 },
                             ) { vm.switchLine(idx); onTick() }
                             .background(
-                                if (active) Color(0x59FFFFFF) else Color(0x24FFFFFF),
-                                RoundedCornerShape(12f.sx(ps)),
+                                when {
+                                    chipFocused -> Color.White
+                                    active -> OtvColors.Brand
+                                    else -> OtvColors.Surface
+                                },
+                                RoundedCornerShape(50f.sx(ps)),
                             )
                             .padding(horizontal = 24f.sx(ps), vertical = 12f.sx(ps)),
                     ) {
                         Text(
                             line.label,
-                            color = if (active || chipFocused) OtvColors.Bg else Color.White,
-                            fontSize = 25f.sxs(ps),
-                            fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                            color = when {
+                                chipFocused -> OtvColors.Bg
+                                active -> OtvColors.Bg
+                                else -> OtvColors.TextSecondary
+                            },
+                            fontSize = 15f.sxs(ps),
+                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
                             maxLines = 1,
                         )
                     }
@@ -348,22 +369,22 @@ private fun LivePlaybackFailureHint(message: String, modifier: Modifier = Modifi
     Column(
         modifier
             .padding(top = 24.dp)
-            .background(Color(0xB3111114), RoundedCornerShape(12.dp))
+            .background(Color(0xF2151815), RoundedCornerShape(12.dp))
             .padding(horizontal = 18.dp, vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
-        Text("当前线路无法播放", color = Color.White, style = MaterialTheme.typography.titleSmall)
+        Text("当前线路无法播放", color = OtvColors.TextPrimary, style = MaterialTheme.typography.titleSmall)
         Text(
             message,
-            color = Color(0xCCFFFFFF),
+            color = OtvColors.TextSecondary,
             style = MaterialTheme.typography.bodySmall,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
         Text(
             "按 OK 或方向键打开线路列表重试",
-            color = Color(0xCCFFFFFF),
+            color = OtvColors.TextSecondary,
             style = MaterialTheme.typography.bodySmall,
         )
     }

@@ -146,6 +146,31 @@ class RelayPrefetchFlowTests(unittest.TestCase):
                 ]
                 self.assertEqual(prefetched[-2:], [child_url, child_url])
 
+    def test_manifest_prewarms_live_edge_segments_newest_first(self):
+        """Live players start at the newest edge, not the oldest playlist entry."""
+        manifest_url = "https://origin.example/live/child.m3u8"
+        raw_segments = [
+            "https://origin.example/live/seg-1.ts?token=old",
+            "https://origin.example/live/seg-2.ts?token=old",
+            "https://origin.example/live/seg-3.ts?token=old",
+            "https://origin.example/live/seg-4.ts?token=old",
+            "https://origin.example/live/seg-5.ts?token=new",
+            "https://origin.example/live/seg-6.ts?token=newest",
+        ]
+        calls = []
+
+        with mock.patch.object(
+            proxy,
+            "_prefetch_segments",
+            side_effect=lambda segments, ref: calls.append((list(segments), ref)),
+        ):
+            proxy._remember_manifest(manifest_url, raw_segments, manifest_url)
+
+        self.assertEqual(calls, [(
+            list(reversed(raw_segments[-4:])),
+            manifest_url,
+        )])
+
     def test_relay_url_releases_success_and_failed_strategy_responses(self):
         manifest = b"#EXTM3U\n#EXTINF:2,\nseg.ts\n"
         url = "https://source.example/live.m3u8"

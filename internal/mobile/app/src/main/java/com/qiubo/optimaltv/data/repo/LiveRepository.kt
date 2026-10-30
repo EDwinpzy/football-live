@@ -17,7 +17,7 @@ import org.json.JSONObject
 import java.net.URLEncoder
 
 /**
- * 足球直播仓库（1:1 复刻原版 web 数据链路，同一后端）：
+ * 做直播仓库（1:1 复刻原版 web 数据链路，同一后端）：
  * - matches: /api/matches（90 场左右，含 live 比分）
  * - 直播信号: /api/stream/{matchId}?src=all&fresh=1 → 仅返回已解析并探活的 HLS 线路
  */
@@ -56,7 +56,7 @@ class LiveRepository(
          * 仅保留五大联赛、欧战俱乐部赛事、国家队大赛、传统豪门杯赛与荷甲/葡超/中超。
          * 罗甲/沙特联/巴西杯/阿根廷杯/J联赛/墨联/各类男篮女篮等小众赛事全部剔除。
          */
-        private val NON_FOOTBALL_RE = Regex("男篮|女篮|篮球|排球|网球|琼斯杯|NBL|NBA|CBA|WNBA|冰球|棒球|橄榄球|乒乓|羽毛")
+        private val NON_FOOTBALL_RE = Regex("菲NCAA|男篮|女篮|篮球|排球|网球|琼斯杯|NBL|NBA|CBA|WNBA|冰球|棒球|橄榄球|乒乓|羽毛")
         private val EURO_CLUB_CUP_RE = Regex("欧冠|欧联|欧协|欧会|欧超|世俱|欧国联|欧罗巴")
         /** 亚洲俱乐部赛事（2026-09-15 补）：亚冠精英赛 / 亚冠联2——中超球队常年参赛，
          *  收紧白名单漏掉它之后，「今日比赛」在只有亚冠比赛的日子会整块空掉
@@ -91,7 +91,7 @@ class LiveRepository(
     /**
      * 足球源在本地后端解析，但超时不应继承搜索抓取的 75 秒宽限。
      *
-     * 2026-10-17（用户报障「足球直播经常找不到可用信号源，退出 app 重进又好了」）：
+     * 2026-10-17（用户报障「做直播经常找不到可用信号源，退出 app 重进又好了」）：
      * 旧版由 [okHttp] newBuilder 派生，**沿用同一个 Dispatcher**。生产请求走
      * `liveHttpResponse`（异步 enqueue），而 OkHttp 的 `maxRequestsPerHost`（默认 5）
      * 只约束异步调用；赛程与信号源请求打到同一个 127.0.0.1:8090，
@@ -120,7 +120,7 @@ class LiveRepository(
     private suspend fun getLiveSource(base: String, path: String): JSONObject = withContext(Dispatchers.IO) {
         val req = Request.Builder()
             .url(base.trimEnd('/') + path)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) FootballLive/1.0")
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) ZuoLive/1.0")
             .build()
         liveHttpResponse(liveSourceHttp, req).use { resp ->
             require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
@@ -132,7 +132,7 @@ class LiveRepository(
         val path = matchesRequestPath()
         val req = Request.Builder()
             .url(base.trimEnd('/') + path)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) FootballLive/1.0")
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11) ZuoLive/1.0")
             .build()
         liveHttpResponse(matchesHttp, req).use { resp ->
             require(resp.isSuccessful) { "HTTP ${resp.code} $path" }
@@ -268,14 +268,27 @@ class LiveRepository(
             it.matchId.isNotBlank() && it.home.isNotBlank() && it.away.isNotBlank()
         }
         // v1.16 防死页三级回退（用户报障「什么比赛都没了，光标也不动」）：
-        // ① 常规 = 主流赛事 × 今日/明日；② 空则回退「全部主流赛事不限日期」（国际比赛日/
-        //    赛程真空期页面不再死空）；③ 仍空（白名单全不命中）才回退全部足球比赛兜底。
+        // ① 常规 = 主流赛事 × 今日/明日；② 当前正在直播的足球比赛无论联赛级别都必须保留，
+        //    否则澳超/J联赛等真实直播会被主流白名单挡掉；③ 空则回退「全部主流赛事不限日期」；
+        //    ④ 仍空（白名单全不命中）才回退全部足球比赛兜底。
         val mainstream = list.filter { isMainstreamMatch(it) }
+        val liveFootballIds = list.asSequence()
+            .filter { it.isLive }
+            .filterNot {
+                NON_FOOTBALL_RE.containsMatchIn(it.league) ||
+                    NON_FOOTBALL_RE.containsMatchIn(it.home) ||
+                    NON_FOOTBALL_RE.containsMatchIn(it.away)
+            }
+            .map { it.matchId }
+            .toSet()
         fun matchDay(value: String): String = Regex("^(?:\\d{4}-)?(\\d{2}-\\d{2})$")
             .find(value.trim())?.groupValues?.get(1).orEmpty()
         val finalList = when {
             mainstream.any { matchDay(it.date) == today || matchDay(it.date) == tomorrow } ->
-                list.filter { isMainstreamMatch(it) && (matchDay(it.date) == today || matchDay(it.date) == tomorrow) }
+                list.filter {
+                    it.matchId in liveFootballIds ||
+                        (isMainstreamMatch(it) && (matchDay(it.date) == today || matchDay(it.date) == tomorrow))
+                }
             mainstream.isNotEmpty() -> {
                 OtvLog.w("matches 今日/明日无主流赛事 → 回退全量主流 ${mainstream.size} 场（不限日期）")
                 mainstream

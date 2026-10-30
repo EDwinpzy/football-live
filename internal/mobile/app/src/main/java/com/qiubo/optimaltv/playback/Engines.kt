@@ -72,13 +72,13 @@ interface MediaEngine {
      * 长度（毫秒）后传入，0 = 未知（沿用旧行为）。须在 prepare 前调用。
      *
      * 背景：v1.23 把直播目标延迟统一设成「落后 15s」——对窗口 30s+ 的公网源是稳的，
-     * 但足球直播走本地中继时上游清单只有 3×2s＝6s 窗口，15s 目标根本不可达：
+     * 但做直播走本地中继时上游清单只有 3×2s＝6s 窗口，15s 目标根本不可达：
      * ExoPlayer 的速度控制会一直按 0.97x 追赶一个够不到的偏移，播着播着就被滑动窗口
      * 甩到最老分片之外（实测 2–5 分钟一次可感知卡顿，最后整段冻住）。
      * 引擎据此选目标偏移与缓冲档：窗口小 → 目标 ≈ 窗口的 60%，把「延迟几秒」变成
      * 真正可用的缓冲垫。
      */
-    fun setLiveWindowHintMs(windowMs: Long) {}
+    fun setLiveWindowHintMs(windowMs: Long, segmentMs: Long = 0L) {}
     /** 当前音频轨道编解码（如 "mp4a.40.2"/"ac-3"）；未选中/未知返回 null。
      *  电视#8 无声源治理：Media3 软解不含 AC-3/EAC-3 时轨道静默失败不报错，
      *  由上层轮询本接口发现后切 libVLC（自带 ffmpeg 软解）。 */
@@ -124,16 +124,20 @@ class Media3Engine(context: Context) : MediaEngine {
     @Volatile private var droppedFramesTotal = 0
     /** 播放中 rebuffer 次数（v1.14 卡顿量化：READY→BUFFERING 且正在播放） */
     @Volatile private var rebufferCount = 0
+    /** 事件计数，避免短暂 ERROR→IDLE 被低频状态轮询漏掉。 */
+    @Volatile private var playbackErrorCount = 0
     /** 软解优先（直播硬解失败兜底）：true 时 MediaCodecSelector 只选软解（google/c2.android），
      *  无软解才回落硬解列表。切换时重建播放器（渲染面复用不闪黑）。 */
     @Volatile private var softwarePreferred = false
     /** 直播窗口长度提示（0 = 未知）：见 MediaEngine.setLiveWindowHintMs */
     @Volatile private var liveWindowHintMs = 0L
+    private var liveSegmentHintMs = 0L
 
-    /** 小窗口直播（足球直播中继：3×2s＝6s）：必须换掉固定的 15s 目标延迟与 6s 恢复水位 */
+    /** 小窗口直播（做直播中继：3×2s＝6s）：必须换掉固定的 15s 目标延迟与 6s 恢复水位 */
     private fun smallWindowLive(): Boolean = LiveWindowPolicy.isSmall(liveWindowHintMs)
 
-    override fun setLiveWindowHintMs(windowMs: Long) {
+    override fun setLiveWindowHintMs(windowMs: Long, segmentMs: Long) {
+        liveSegmentHintMs = segmentMs.coerceAtLeast(0L)
         val v = if (windowMs > 0) windowMs else 0L
         if (v == liveWindowHintMs) return
         val profileChanged = smallWindowLive() != LiveWindowPolicy.isSmall(v)
@@ -188,6 +192,9 @@ class Media3Engine(context: Context) : MediaEngine {
         }
     }.getOrNull()
 
+    /** 累计 Media3 播放错误事件数；供长测/诊断读取，不依赖瞬时 UI 状态。 */
+    fun playbackErrorCount(): Int = playbackErrorCount
+
     override val renderView: View by lazy {
         val inflationParent = android.widget.FrameLayout(appCtx)
         (LayoutInflater.from(appCtx).inflate(R.layout.view_player_texture, inflationParent, false) as PlayerView).apply {
@@ -204,9 +211,24 @@ class Media3Engine(context: Context) : MediaEngine {
     }
 
     private val listener = object : Player.Listener {
+        override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+            if (timeline.isEmpty || reason != Player.TIMELINE_CHANGE_REASON_SOURCE_UPDATE) return
+            val window = timeline.getWindow(0, androidx.media3.common.Timeline.Window())
+            if (window.isLive) {
+                com.qiubo.optimaltv.OtvLog.i(
+                    "live timeline source-update duration=${window.durationMs}ms " +
+                        "default=${window.defaultPositionMs}ms target=" +
+                        "${LiveWindowPolicy.targetOffsetMs(liveWindowHintMs, liveSegmentHintMs)}ms " +
+                        "segmentHint=${liveSegmentHintMs}ms",
+                )
+            }
+        }
+
         override fun onPlaybackStateChanged(playbackState: Int) {
             val mapped = when (playbackState) {
-                Player.STATE_IDLE -> EnginePlayState.IDLE
+                // Keep a fatal error observable until a new playback attempt changes state.
+                Player.STATE_IDLE -> if (_ui.value.state == EnginePlayState.ERROR)
+                    EnginePlayState.ERROR else EnginePlayState.IDLE
                 Player.STATE_BUFFERING -> EnginePlayState.BUFFERING
                 Player.STATE_READY -> EnginePlayState.READY
                 Player.STATE_ENDED -> EnginePlayState.ENDED
@@ -232,6 +254,7 @@ class Media3Engine(context: Context) : MediaEngine {
         }
 
         override fun onPlayerError(error: PlaybackException) {
+            playbackErrorCount++
             // v1.23（2026-09-06 直播卡顿根治）：BEHIND_LIVE_WINDOW 用官方推荐动作
             // （seekToDefaultPosition + re-prepare）就地自愈——~0.5s 跳边缘续播。
             // 旧版上抛走 VM 的 fresh 重解析阶梯（1-2s 频道页+播放器页+解密），
@@ -272,6 +295,40 @@ class Media3Engine(context: Context) : MediaEngine {
 
     /** 丢帧统计（AnalyticsListener 才有该回调）：解码/供给不足的量化证据 */
     private val analyticsListener = object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+        override fun onLoadStarted(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+            mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+        ) {
+            logLoadEvent("start", eventTime, loadEventInfo, mediaLoadData)
+        }
+
+        override fun onLoadCompleted(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+            mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+        ) {
+            logLoadEvent("complete", eventTime, loadEventInfo, mediaLoadData)
+        }
+
+        override fun onLoadCanceled(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+            mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+        ) {
+            logLoadEvent("cancel", eventTime, loadEventInfo, mediaLoadData)
+        }
+
+        override fun onLoadError(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+            mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+            error: java.io.IOException,
+            wasCanceled: Boolean,
+        ) {
+            logLoadEvent("error:${error.javaClass.simpleName}:canceled=$wasCanceled", eventTime, loadEventInfo, mediaLoadData)
+        }
+
         override fun onVideoDecoderInitialized(
             eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
             decoderName: String,
@@ -289,6 +346,31 @@ class Media3Engine(context: Context) : MediaEngine {
             droppedFramesTotal += droppedFrames
             com.qiubo.optimaltv.OtvLog.w("engine 丢帧 +$droppedFrames（${elapsedMs}ms，累计 $droppedFramesTotal）")
         }
+    }
+
+    /**
+     * Log HLS playlist/segment request timing without writing signed URLs or query parameters.
+     * This separates slow manifest refreshes, incomplete segment delivery and decoder stalls.
+     */
+    private fun logLoadEvent(
+        phase: String,
+        eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+        info: androidx.media3.exoplayer.source.LoadEventInfo,
+        data: androidx.media3.exoplayer.source.MediaLoadData,
+    ) {
+        val kind = when (data.dataType) {
+            C.DATA_TYPE_MANIFEST -> "manifest"
+            C.DATA_TYPE_MEDIA -> "media"
+            C.DATA_TYPE_DRM -> "drm"
+            else -> "type-${data.dataType}"
+        }
+        val mediaStart = data.mediaStartTimeMs.takeUnless { it == C.TIME_UNSET } ?: -1L
+        val mediaEnd = data.mediaEndTimeMs.takeUnless { it == C.TIME_UNSET } ?: -1L
+        com.qiubo.optimaltv.OtvLog.i(
+            "media3 load-$phase kind=$kind bytes=${info.bytesLoaded} duration=${info.loadDurationMs}ms " +
+                "pos=${eventTime.currentPlaybackPositionMs}ms buffered=${eventTime.totalBufferedDurationMs}ms " +
+                "media=${mediaStart}..${mediaEnd}ms",
+        )
     }
 
     private fun ensurePlayer(): ExoPlayer {
@@ -315,21 +397,15 @@ class Media3Engine(context: Context) : MediaEngine {
             .setConnectTimeoutMs(10_000)
             // 直播源站或中继链路较慢时，读超时过短会触发中途断流重试。
             .setReadTimeoutMs(30_000)
-            .setUserAgent("Mozilla/5.0 (Linux; Android 11) FootballLive/1.0")
+            .setUserAgent("Mozilla/5.0 (Linux; Android 11) ZuoLive/1.0")
         val dataSourceFactory = DefaultDataSource.Factory(appCtx, httpFactory)
         // 直播缓冲参数按低配设备与慢源调整，降低网络抖动造成的反复缓冲；
         // v1.10（2026-08-31 低端机起播提速）：起播水位 2.5s→1s、二次缓冲 5s→2s——
         // 缓冲水位只决定「多少缓冲开始出画」，min/max 不变，播放中稳定性不受影响。
         // v1.14（2026-09-01 卡顿根治）：max 90s→120s——直播续签改「旧地址死透才切」后，
         // 检测间隔 90s 必须被缓冲余量完整覆盖（120s > 90s 检测 + 30s 切换衔接安全垫）。
-        // Absorb football stream CDN stalls within the six second rebuffer reserve.
-        val (minBuf, maxBuf, startBuf, reBuf) =
-            when {
-                // 小窗口直播（中继足球源 6s）：恢复水位必须小于窗口，否则一次抖动就要
-                // 等满整个窗口才出画（实测「转圈 8s 后触发整会话重解析」的大卡顿）
-                smallWindowLive() -> intArrayOf(8_000, 16_000, 600, 1_500).toList()
-                else -> intArrayOf(30_000, 120_000, 1_000, 6_000).toList()
-            }
+        // A 1.5s resume threshold fits the <=5s live-offset budget.
+        val (minBuf, maxBuf, startBuf, reBuf) = loadControlDurations()
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(minBuf, maxBuf, startBuf, reBuf)
             .setPrioritizeTimeOverSizeThresholds(true)
@@ -404,10 +480,8 @@ class Media3Engine(context: Context) : MediaEngine {
      *  扩展名藏在编码后的查询参数里——ExoPlayer 按路径推断内容类型会判成普通媒体，
      *  解析 HLS 文本失败报 PARSING_CONTAINER_UNSUPPORTED，因此按 m3u8 地址显式声明 HLS MIME。
      *  URL 任意位置含 m3u8 即显式声明 HLS MIME。
-     *  v1.23（2026-09-06 半小时零卡顿）：直播显式 LiveConfiguration——默认目标偏移仅
-     *  约 3×分片时长（实测 4-8s），CDN 瞬时断供几秒就击穿成可感知 rebuffer；
-     *  目标 15s（播放器在 [8s,30s] 区间自适配：抖动时自动退离边缘吸收，稳定时追近）
-     *  观感=固定落后十来秒的稳定直播。 */
+     *  直播目标由 LiveWindowPolicy 根据清单窗口及最长分片设置。
+     *  这些值仅是播放器调度目标，实际额外延迟须与原始信号同期对照。 */
     private fun mediaItemFor(url: String): MediaItem {
         val b = MediaItem.Builder().setUri(url)
         if (url.contains("m3u8", ignoreCase = true)) {
@@ -418,24 +492,48 @@ class Media3Engine(context: Context) : MediaEngine {
     }
 
     /**
-     * 直播目标偏移（2026-09-16 长跑卡顿根治）：
-     * - 窗口未知 / 大窗口（上游 HLS 清单窗口通常 30s+）：沿用 v1.23 的「落后 15s」，
-     *   抖动时自动退离边缘吸收，稳定时追近；
-     * - 小窗口（中继足球源实测 6s）：目标偏移取窗口的 60%（6s → 3.6s），多留一段抗抖缓冲。
-     *   **可达**——不可达时 ExoPlayer 的速度控制会长期按 0.97x 追赶，最后被滑动窗口
-     *   甩出最老分片，表现为「看十几分钟后卡死，退出重进才好」。
+     * 直播目标偏移（2026-10-25 延迟门槛）：
+     * - 目标固定为 4s；HLS 只可从已完成分片/独立 part 起播，窗口位置会向前取整。
+     * - 最大允许偏移 5s，对应产品验收的“相对原信号额外延迟最多 5 秒”。
+     * - 小窗口按窗口深度收缩；未知窗口目标 3s。
+     *   这是播放器目标值，不是实测额外延迟；必须与原始信号同期对照。
      */
     private fun liveConfigurationFor(): MediaItem.LiveConfiguration {
-        val w = liveWindowHintMs
-        val cfg = MediaItem.LiveConfiguration.Builder()
-        return if (smallWindowLive()) {
-            cfg.setTargetOffsetMs(LiveWindowPolicy.targetOffsetMs(w))
-                .setMinOffsetMs(LiveWindowPolicy.minOffsetMs(w))
-                .setMaxOffsetMs(LiveWindowPolicy.maxOffsetMs(w))
-                .build()
-        } else {
-            cfg.setTargetOffsetMs(15_000).setMinOffsetMs(8_000).setMaxOffsetMs(30_000).build()
+        val target = LiveWindowPolicy.targetOffsetMs(liveWindowHintMs, liveSegmentHintMs)
+        // Keep the allowed band tight around the product target. The previous wide band
+        // (2.5s..5s) could settle near the edge and immediately exhaust the rolling window.
+        val min = (target - 500L).coerceAtLeast(500L)
+        val max = liveOffsetUpperBoundMs(target)
+        return MediaItem.LiveConfiguration.Builder()
+            .setTargetOffsetMs(target)
+            .setMinOffsetMs(min)
+            .setMaxOffsetMs(max)
+            .build()
+    }
+
+    private fun liveOffsetUpperBoundMs(
+        targetMs: Long = LiveWindowPolicy.targetOffsetMs(liveWindowHintMs, liveSegmentHintMs),
+    ): Long = (targetMs + 750L).coerceAtMost(LiveWindowPolicy.MAX_OFFSET_MS)
+
+    /**
+     * A rolling HLS window cannot be kept at a stable low offset with the old 30s/120s
+     * load-control profile: the requested 30s reserve is larger than the entire 32.4s
+     * window and the loader never reaches its stop condition. Keep a reachable reserve
+     * of one target plus one segment, while allowing the loader to fill the live window.
+     */
+    private fun loadControlDurations(): List<Int> {
+        if (smallWindowLive()) {
+            return listOf(8_000, 16_000, 600, 1_500)
         }
+        if (liveWindowHintMs in 13_000L..60_000L) {
+            val maxBuf = (liveWindowHintMs - 500L).coerceIn(8_000L, 60_000L).toInt()
+            val target = LiveWindowPolicy.targetOffsetMs(liveWindowHintMs, liveSegmentHintMs)
+            val segment = liveSegmentHintMs.takeIf { it > 0L } ?: 4_000L
+            val minBuf = (target + segment).coerceIn(6_000L, maxBuf.toLong()).toInt()
+            val startBuf = target.coerceIn(1_000L, 2_500L).toInt()
+            return listOf(minBuf, maxBuf, startBuf, 3_000)
+        }
+        return listOf(30_000, 120_000, 1_000, 2_500)
     }
 
     override fun prepare(request: PrepareRequest) {

@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "deploy" / "selfhosted"
 
 
-class FootballLiveIngressConfigTests(unittest.TestCase):
+class ZuoLiveIngressConfigTests(unittest.TestCase):
     def require(self, needle: str, content: str, label: str) -> None:
         self.assertIn(needle, content, f"missing ingress contract: {label}")
 
@@ -27,7 +27,7 @@ class FootballLiveIngressConfigTests(unittest.TestCase):
         ):
             self.require(value, nginx, label)
 
-    def test_only_live_web_health_and_update_routes_are_public(self):
+    def test_only_native_health_update_and_object_routes_are_public(self):
         nginx = (DEPLOY / "nginx.conf").read_text(encoding="utf-8")
         for value, label in (
             ("location = /health", "health endpoint"),
@@ -35,41 +35,36 @@ class FootballLiveIngressConfigTests(unittest.TestCase):
             ("proxy_pass http://business-api:8082/hotupdate;", "runtime update API"),
             ("location ^~ /hotupdate/", "runtime update reports"),
             ("location ^~ /v1/storages/object/", "update object storage"),
-            ("location = /web", "web root redirect"),
-            ("location ^~ /web/", "football live web app"),
+            ("location = /web/apk-update/tv.json", "TV update manifest compatibility URL"),
+            ("location = /web/apk-update/mobile.json", "mobile update manifest compatibility URL"),
+            (
+                "proxy_pass http://storage:8092/v1/storages/object/hotupdate/apk-update/tv.json;",
+                "TV manifest storage route",
+            ),
+            (
+                "proxy_pass http://storage:8092/v1/storages/object/hotupdate/apk-update/mobile.json;",
+                "mobile manifest storage route",
+            ),
             ("location / {\n        return 404;", "unknown routes rejected"),
         ):
             self.require(value, nginx, label)
+        self.assertNotIn("proxy_pass http://web-api", nginx)
+        self.assertNotIn("return 308 /web/", nginx)
+        self.assertNotIn("location = /web {", nginx)
         for removed_route in ("/activate", "/iptv/", "/metadata/", "/admin/"):
             self.assertNotIn(removed_route, nginx)
 
-    def test_runtime_services_contain_only_football_and_update_dependencies(self):
+    def test_runtime_services_contain_only_native_and_update_dependencies(self):
         compose = (DEPLOY / "compose.yaml").read_text(encoding="utf-8")
         config = yaml.safe_load(compose)
         services = config["services"]
         self.assertNotIn("admin", services)
+        self.assertNotIn("web-api", services)
         self.assertFalse(any(name.startswith("metadata-") for name in services))
-        web_env = services["web-api"]["environment"]
-        self.assertEqual(
-            web_env["OTV_APK_UPDATE_OBJECT_BASE"],
-            "http://storage:8092/v1/storages/object/hotupdate",
-        )
-        self.assertEqual(web_env["OTV_CLOUD_RELAY"], "0")
-        for key in web_env:
-            self.assertFalse(
-                any(part in key for part in ("VOD", "IPTV", "LICENSE", "METADATA")),
-                f"obsolete runtime setting remains: {key}",
-            )
-        dockerfile = (DEPLOY / "Dockerfile.web").read_text(encoding="utf-8")
-        for module in ("proxy.py", "vlc_hls.py", "team_backdrop.py"):
-            self.require(module, dockerfile, f"football runtime module {module}")
-        self.assertNotIn("quickjs", dockerfile.lower())
-        self.assertNotIn("decrypt_stream.js", dockerfile)
-        self.assertNotIn("vendor/", dockerfile)
-        self.require("RUN python /build/build_web_assets.py /build/www /build/web-dist",
-                     dockerfile, "content-addressed web assets built in-image")
-        self.require("COPY --from=web-assets /build/web-dist/ /app/www/",
-                     dockerfile, "generated assets copied into the runtime image")
+        self.assertNotIn("Dockerfile.web", compose)
+        self.assertNotIn("build_web_assets.py", compose)
+        self.assertNotIn("WEB_ASSET_ARCHIVE", compose)
+        self.assertFalse((DEPLOY / "Dockerfile.web").exists())
         proxy = (ROOT / "tools" / "backend-src" / "proxy.py").read_text(encoding="utf-8")
         for setting in ("OTV_IPTV_LATEST_URL", "OTV_LICENSE_ENDPOINT", "OTV_METADATA_API_URL"):
             self.assertNotIn(setting, proxy)

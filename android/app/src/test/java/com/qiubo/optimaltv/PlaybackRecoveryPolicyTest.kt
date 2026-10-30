@@ -8,6 +8,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlaybackRecoveryPolicyTest {
+    @Test fun `third available line is tried before rebuilding the failing second line`() {
+        assertEquals(RecoveryAction.REFRESH_CURRENT, PlaybackRecoveryPolicy.action(0, hasAlternate = true))
+        assertEquals(RecoveryAction.SWITCH_SOURCE, PlaybackRecoveryPolicy.action(1, hasAlternate = true))
+        assertEquals(RecoveryAction.SWITCH_SOURCE, PlaybackRecoveryPolicy.action(2, hasAlternate = true))
+        assertEquals(RecoveryAction.RECREATE_ENGINE, PlaybackRecoveryPolicy.action(2, hasAlternate = false))
+    }
+
     @Test fun `live recovery refreshes switches recreates and resets with a hard budget`() {
         val expected = listOf(
             RecoveryAction.REFRESH_CURRENT,

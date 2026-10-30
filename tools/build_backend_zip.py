@@ -1,19 +1,15 @@
-"""重建内置足球直播后端 zip，并同步 TV 与移动端 assets。
+"""Rebuild the embedded TV/mobile backend and its native-only assets.
 
-2026-09-07 需求⑤（热更含前后端）：REPL 从 5 个后端文件扩到全量——
-www/index.html、www/app.js、www/style.css、www/manifest.webmanifest、www/assets/*
-（logo 等前端静态资源）一并随包更新。内嵌后端托管 www（127.0.0.1:8090），
-此前 www 改动不进热更包 = 网页热更发不下去，只能发 APK。
+The archive contains the live Python runtime plus the football artwork and
+logo used by both native clients.  The retired standalone Web UI is never
+packaged: no HTML, application JavaScript, stylesheet, Web manifest or hashed
+Web bundle belongs in this archive.
 
-2026-08-29 需求 足球海报池更换：删除全部旧海报 www/assets/football/fb-*.webp，
-写入 D:/OneDrive/ZCode/football-posters 下的新海报（统一重命名 fb-01.jpg…，按原文件名排序），
-pool 大小由 LiveRepository.posterUrl 同步维护（POSTER_POOL = 36）。
-
-用法: python build_backend_zip.py
+Usage: python tools/build_backend_zip.py
 """
-import json
+from __future__ import annotations
+
 import os
-import re
 import shutil
 import tempfile
 import zipfile
@@ -24,196 +20,92 @@ try:
 except ImportError:  # direct `python tools/build_backend_zip.py` invocation
     from build_web_assets import build_assets
 
-ROOT = str(Path(__file__).resolve().parent.parent)
-SRC_ZIP = os.path.join(ROOT, "android", "app", "src", "main", "assets", "backend", "python-backend.zip")
-MOBILE_ZIP = os.path.join(ROOT, "internal", "mobile", "app", "src", "main", "assets", "backend", "python-backend.zip")
-TMP_ZIP = os.path.join(ROOT, "tools", "python-backend-new.zip")
-SRC_DIR = os.path.join(ROOT, "tools", "backend-src")
-POSTER_DIR = r"D:\OneDrive\ZCode\football-posters"
 
-# 嵌入式 Python runtime 只保留足球直播 API、HLS 中继及队徽资源。
-# 新增顶层同包依赖时同步更新这里；完整性由 tests/test_backend_zip_completeness.py 检查。
-REPL = ["proxy.py", "vlc_hls.py", "team_backdrop.py"]
-# 需求⑤：热更包纳入前端（www 根文件 + www/assets 下全部前端资源；football 海报池仍走整池替换）
-WWW_FILES = ["index.html", "app.js", "style.css", "manifest.webmanifest"]
-WWW_ASSETS_PREFIX = "www/assets/"
-FB_PREFIX = "www/assets/football/"
-# ZIP 条目时间统一固定，确保相同源码重复构建得到相同 SHA-256。
+ROOT = Path(__file__).resolve().parent.parent
+SRC_DIR = ROOT / "tools" / "backend-src"
+SRC_ZIP = ROOT / "android" / "app" / "src" / "main" / "assets" / "backend" / "python-backend.zip"
+MOBILE_ZIP = ROOT / "internal" / "mobile" / "app" / "src" / "main" / "assets" / "backend" / "python-backend.zip"
+TMP_ZIP = ROOT / "tools" / "python-backend-new.zip"
+
+# Embedded Python runtime: live API, HLS relay and team fallback artwork only.
+# Keep this list aligned with tests/test_backend_zip_completeness.py.
+REPL = ("proxy.py", "vlc_hls.py", "team_backdrop.py")
 FIXED_ZIP_TIME = (2026, 1, 1, 0, 0, 0)
-_HASHED_WEB_REFERENCE_RE = re.compile(
-    r"^assets/(?:app\.[0-9a-f]{16}\.js|style\.[0-9a-f]{16}\.css)$"
-)
+NATIVE_ASSET_PREFIX = "www/assets/"
+NATIVE_MANIFEST = "www/manifest.json"
 
 
-def write_entry(zout, filename, data, template=None):
+def write_entry(zout: zipfile.ZipFile, filename: str, data: bytes) -> None:
     info = zipfile.ZipInfo(filename, FIXED_ZIP_TIME)
     info.compress_type = zipfile.ZIP_DEFLATED
-    if template is not None:
-        info.create_system = template.create_system
-        info.external_attr = template.external_attr
-        info.internal_attr = template.internal_attr
-        info.comment = template.comment
-    else:
-        info.create_system = 3
-        info.external_attr = 0o644 << 16
+    info.create_system = 3
+    info.external_attr = 0o644 << 16
     zout.writestr(info, data)
 
 
-def atomic_copy_file(source, destination):
-    """Replace a generated archive without truncating the current package in place."""
-    destination = Path(destination)
-    staged = None
+def atomic_copy_file(source: Path, destination: Path) -> None:
+    """Replace a generated archive without truncating the current package."""
+    staged: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-                prefix=destination.name + ".", suffix=".tmp",
-                dir=str(destination.parent), delete=False) as output:
-            staged = output.name
-            with open(source, "rb") as input_file:
+                prefix=destination.name + ".",
+                suffix=".tmp",
+                dir=destination.parent,
+                delete=False) as output:
+            staged = Path(output.name)
+            with source.open("rb") as input_file:
                 shutil.copyfileobj(input_file, output)
             output.flush()
             os.fsync(output.fileno())
-        os.replace(staged, str(destination))
+        os.replace(staged, destination)
         staged = None
     finally:
-        if staged and os.path.exists(staged):
-            os.remove(staged)
+        if staged is not None and staged.exists():
+            staged.unlink()
 
 
-def copied_web_files(manifest_bytes):
-    try:
-        manifest = json.loads(manifest_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return set()
-    files = manifest.get("copiedFiles", []) if isinstance(manifest, dict) else []
-    if not isinstance(files, list):
-        return set()
-    return {"www/" + name for name in files if isinstance(name, str)}
+def build_archive(source_dir: Path, output_zip: Path) -> tuple[str, ...]:
+    """Build a deterministic archive and return its sorted entry names."""
+    source_dir = source_dir.resolve()
+    output_zip = output_zip.resolve()
+    output_zip.parent.mkdir(parents=True, exist_ok=True)
 
-
-def referenced_web_files(manifest_bytes):
-    try:
-        manifest = json.loads(manifest_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return set()
-    files = manifest.get("referencedFiles", []) if isinstance(manifest, dict) else []
-    if not isinstance(files, list):
-        return set()
-    return {
-        name for name in files
-        if isinstance(name, str) and _HASHED_WEB_REFERENCE_RE.fullmatch(name)
-    }
-
-
-def main():
     for name in REPL:
-        src = os.path.join(SRC_DIR, name)
-        if not os.path.isfile(src):
-            raise SystemExit("缺少 %s" % src)
-    for name in WWW_FILES:
-        src = os.path.join(SRC_DIR, "www", name)
-        if not os.path.isfile(src):
-            raise SystemExit("缺少 %s" % src)
-    with tempfile.TemporaryDirectory(prefix="football-live-web-assets-") as build_temp:
-        web_dist = Path(build_temp) / "www"
-        build_assets(Path(SRC_DIR) / "www", web_dist)
-        web_files = {}
-        for full in sorted(path for path in web_dist.rglob("*") if path.is_file()):
-            rel = ("www/" + full.relative_to(web_dist).as_posix())
-            if rel.startswith(FB_PREFIX) or rel.endswith(".log"):
-                continue
-            web_files[rel] = full.read_bytes()
-    # Unversioned source files remain available to tools and old local links;
-    # the generated index itself references only the content-hashed bundle.
-    web_files["www/app.js"] = Path(SRC_DIR, "www", "app.js").read_bytes()
-    web_files["www/style.css"] = Path(SRC_DIR, "www", "style.css").read_bytes()
-    asset_files = [name for name in web_files if name.startswith("www/assets/")]
-    posters = sorted(
-        (f for f in os.listdir(POSTER_DIR)
-         if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")) and not f.startswith(".")),
-    ) if os.path.isdir(POSTER_DIR) else []
-    replace_posters = bool(posters)
-    print("%s；www 前端文件 %d + assets %d" % (
-        ("新海报 %d 张" % len(posters)) if replace_posters else "未找到外部海报目录，保留包内现有海报",
-        len(WWW_FILES), len(asset_files)))
+        if not (source_dir / name).is_file():
+            raise FileNotFoundError(f"missing backend runtime: {source_dir / name}")
 
-    if os.path.exists(TMP_ZIP):
-        os.remove(TMP_ZIP)
-    zin = zipfile.ZipFile(SRC_ZIP, "r")
-    zout = zipfile.ZipFile(TMP_ZIP, "w", zipfile.ZIP_DEFLATED)
-    replaced, dropped, added = [], 0, 0
-    # 热更包内的 HTML 引用按内容哈希命名的 JS/CSS；其余静态资源仍按原路径复制。
-    previous_copies = set()
-    previous_refs = set()
-    existing_names = set(zin.namelist())
-    try:
-        previous_manifest_bytes = zin.read("www/manifest.json")
-        previous_copies = copied_web_files(previous_manifest_bytes)
-        previous_refs = referenced_web_files(previous_manifest_bytes)
-    except KeyError:
-        pass
-    current_manifest_bytes = web_files.get("www/manifest.json", b"{}")
-    current_copies = copied_web_files(current_manifest_bytes)
-    current_refs = referenced_web_files(current_manifest_bytes)
-    for relative in previous_refs - current_refs:
-        archive_path = "www/" + relative
-        if archive_path in existing_names:
-            web_files[archive_path] = zin.read(archive_path)
-    www_replace = set(web_files)
-    stale_copies = previous_copies - current_copies - {"www/" + path for path in previous_refs}
-    stale_web_assets = 0
-    for item in zin.infolist():
-        base = os.path.basename(item.filename)
-        if item.filename in REPL or (base in REPL and "/" not in item.filename):
-            data = open(os.path.join(SRC_DIR, base), "rb").read()
-            write_entry(zout, item.filename, data, item)
-            replaced.append(item.filename)
-        elif ("/" not in item.filename
-              and os.path.splitext(item.filename)[1].lower() in (".py", ".json", ".js")
-              and item.filename not in REPL):
-            # 删除旧客户端内嵌包中残留的 VOD、影视元数据和 IPTV 运行模块。
-            dropped += 1
-        elif replace_posters and item.filename.startswith(FB_PREFIX):
-            dropped += 1  # 旧海报池整池移除（需求：原来的海报都去掉）
-        elif (item.filename == "www/asset-manifest.json"
-              or (item.filename in stale_copies and not item.filename.startswith(FB_PREFIX))):
-            stale_web_assets += 1  # 移除旧清单记录的静态文件及旧版清单
-        elif (item.filename.startswith(WWW_ASSETS_PREFIX)
-              and not item.filename.startswith(FB_PREFIX)
-              and not item.filename.endswith(".log")
-              and item.filename not in www_replace):
-            stale_web_assets += 1  # 同步删除已从普通静态目录移除的文件
-        elif item.filename in www_replace:
-            data = web_files[item.filename]
-            write_entry(zout, item.filename, data, item)
-            replaced.append(item.filename)
-        else:
-            write_entry(zout, item.filename, zin.read(item.filename), item)
-    # www_replace 中 zip 里没有的（新文件）也写入
-    existing = existing_names
-    # 新增的后端模块/数据文件（例如好好看快照）在旧 zip 中没有同名条目，
-    # 必须显式写入；旧实现只会覆盖既有 REPL 文件。
-    for name in REPL:
-        if name not in existing:
-            write_entry(zout, name, open(os.path.join(SRC_DIR, name), "rb").read())
-            added += 1
-    for rel in sorted(www_replace):
-        if rel not in existing:
-            write_entry(zout, rel, web_files[rel])
-            added += 1
-    for i, f in enumerate(posters):
-        ext = ".jpg" if f.lower().endswith((".jpg", ".jpeg")) else os.path.splitext(f)[1].lower()
-        with open(os.path.join(POSTER_DIR, f), "rb") as fh:
-            write_entry(zout, "%sfb-%02d%s" % (FB_PREFIX, i + 1, ext), fh.read())
-        added += 1
-    zout.close()
-    zin.close()
+    with tempfile.TemporaryDirectory(prefix="zuo-live-native-assets-") as build_temp:
+        build_root = Path(build_temp)
+        asset_root = build_root / "www"
+        result = build_assets(source_dir / "www", asset_root)
+        static_paths = [asset_root.joinpath(*name.split("/")) for name in result.copied_files]
+        manifest_path = asset_root / "manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError("native asset manifest was not generated")
+
+        staged_zip = build_root / output_zip.name
+        with zipfile.ZipFile(staged_zip, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name in REPL:
+                write_entry(archive, name, (source_dir / name).read_bytes())
+            for name, path in zip(result.copied_files, static_paths):
+                write_entry(archive, NATIVE_ASSET_PREFIX + name.removeprefix("assets/"), path.read_bytes())
+            write_entry(archive, NATIVE_MANIFEST, manifest_path.read_bytes())
+
+        with zipfile.ZipFile(staged_zip, "r") as archive:
+            names = tuple(sorted(archive.namelist()))
+        atomic_copy_file(staged_zip, output_zip)
+    return names
+
+
+def main() -> None:
+    if TMP_ZIP.exists():
+        TMP_ZIP.unlink()
+    build_archive(SRC_DIR, TMP_ZIP)
     atomic_copy_file(TMP_ZIP, SRC_ZIP)
     atomic_copy_file(TMP_ZIP, MOBILE_ZIP)
-    os.remove(TMP_ZIP)
-    print("已替换:", replaced[:12], ("…共 %d 项" % len(replaced)) if len(replaced) > 12 else "")
-    print("新增 %d 项；旧海报删除 %d 个，过期 Web 哈希资源删除 %d 个，新海报写入 %d 个" % (
-        added, dropped, stale_web_assets, len(posters)))
-    print("zip 大小:", os.path.getsize(SRC_ZIP))
+    TMP_ZIP.unlink()
+    print(f"TV 后端包：{SRC_ZIP} ({SRC_ZIP.stat().st_size} bytes)")
+    print(f"移动版后端包：{MOBILE_ZIP} ({MOBILE_ZIP.stat().st_size} bytes)")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# AGENTS.md — 足球直播仓库约定
+# AGENTS.md — 做直播仓库约定
 
 ## 并行委派
 
@@ -13,14 +13,14 @@
 只有用户在当前请求中明确要求走发布流程时，才按以下发布步骤执行。
 
 > **仅在用户明确要求发布时检查并执行**：发布对共享工作区有影响；执行前用 `codex_app` 的 `list_threads` 看本仓库
-> （`D:\MyProjects\My TV`）还有没有其它 `status=active` 的对话：
+> （`D:\MyProjects\football-live`）还有没有其它 `status=active` 的对话：
 > - **没有** → 按下面 1~6 步执行用户要求的流水线；
 > - **还有** → 不构建 APK、不部署、不上传、不提交、不推送，先报告并等用户安排。
 >
 > 发布前 `git status` 要干净：别人未提交的改动不要打包进去。目的：避免热更版本号抢占、
 > 半成品上线、APK 内嵌 zip 与构建产物不一致。不要用定时任务触发发布；只在用户明确要求发布的当前对话中执行这些检查。
 
-1. 测试：后端改动跑 `tools/backend-src/tests` 足球直播测试；Kotlin 侧以 `assembleRelease` 编译通过兜底。
+1. 测试：后端改动跑 `tools/backend-src/tests` 做直播测试；Kotlin 侧以 `assembleRelease` 编译通过兜底。
 2. 部署网页版 + 重建产物：`python tools/release_all.py --deploy`。
 3. 构建 APK：`android` 与 `internal/mobile` 各跑一次 `.\gradlew.bat assembleRelease`（自动归档到 `apk/TV版/`、`apk/移动版/`）。
 4. 如需发布 Android 应用内更新包，使用 `python tools/publish_apk_update.py --channel <tv|mobile> --apk <APK路径> --version-code <版本号> --version-name <版本名> --cert <签名证书SHA-256>`；按工具提示补齐更新说明和发布参数。热更新管理后台及其上传脚本已删除。
@@ -30,10 +30,10 @@
 
 ### 顺序与口径
 
-- `tools/release_all.py` 构建网页与足球直播后端 zip；完成后再重打 APK，确保 APK 内嵌 zip 与构建产物一致。
+- `tools/release_all.py` 构建做直播后端 zip；完成后再重打 APK，确保 APK 内嵌 zip 与构建产物一致。
 - 并发期间只提交代码与文档是安全的；**应用更新版本号与 APK 产物以最后一次统一构建为准**，
   中途任务不要再单独上传更新包或另发 APK 版本。
-- 发布后自检：线上 `/web/app.js` 与 `tools/backend-src/www/app.js` 的 SHA-256 一致；线上热更包 sha256 与本地 zip 一致；
+- 发布后自检：线上热更包 sha256 与本地 zip 一致；
   两个 APK 内嵌 zip 的 `proxy.py`、`vlc_hls.py`、`team_backdrop.py`、`www/app.js` 与 `tools/backend-src` 逐一一致，并确认没有旧影视 runtime 模块。
 - 仍要先问的情况：不可恢复的破坏性操作（历史重写、删数据、下线在跑的东西），以及需要用户做产品取舍的改动。
 

@@ -3,7 +3,7 @@ package com.qiubo.optimaltv.data.model
 /** Resolved playable line for a live football match. */
 data class LiveSourceLine(val label: String, val url: String)
 
-// ---------- 足球直播（原版 /api/matches 等，1:1 复刻字段） ----------
+// ---------- 做直播（原版 /api/matches 等，1:1 复刻字段） ----------
 
 /** /api/matches 提供的信号元数据；可播放线路在进入播放器后由 /api/stream 解析并探活。 */
 data class MatchChannel(

@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 _PROJECT = Path(__file__).resolve().parents[1]
 ICONS = _PROJECT / "android" / "app" / "src" / "main" / "assets" / "team_icons.json"
 assert ICONS.is_relative_to(_PROJECT), "ICONS 必须位于工程目录内"
-UA = "Mozilla/5.0 (compatible; FootballLive/1.0)"
+UA = "Mozilla/5.0 (compatible; ZuoLive/1.0)"
 
 # SSRF 防护：仅允许这两个固定域名（TDB API + 其 CDN 队标）
 ALLOWED_HOSTS = {"www.thesportsdb.com", "r2.thesportsdb.com"}

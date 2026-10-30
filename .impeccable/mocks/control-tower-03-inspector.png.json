@@ -1,7 +1,0 @@
-{
-  "kind": "comp",
-  "title": "任务检视台",
-  "description": "以卡密管理等当前任务为中心，右侧检视抽屉提供单条记录上下文，顶部状态带压缩成运行摘要。",
-  "prompt": "Wide desktop operations control tower with a vertical command spine, compact top status ribbon, oversized central single-line license table and a subordinate right inspector drawer showing selected license details and safe actions; dark graphite, cyan current state, mint and amber statuses, Chinese admin content, visible horizontal-scroll affordance, no marketing hero.",
-  "approved": true
-}

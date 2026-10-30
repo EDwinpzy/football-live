@@ -49,7 +49,7 @@ import kotlinx.coroutines.launch
  *    注意：compose 的 performKeyInput 直注 Compose 层、绕过 Activity（实测引擎日志全无），
  *    测引擎必须用窗口级注入。
  *  - 断言语义（assertIsFocused），不断言颜色/缩放；
- *  - 场景几何取自真实页面（网格 3 列 / chips 40dp / 悬浮 tab 行 48dp）。
+ *  - 场景几何取自真实页面（网格 3 列 / chips 40dp / 悬浮筛选行 48dp）。
  * 覆盖：网格同列纪律、同行严格性（防斜跳）、悬浮层不作垂直候选、区域 override、
  * navGroup 封锁、scroll-reveal、UP 逃逸 topFocus、焦点销毁自愈、自愈排除 autoSelect。
  */
@@ -166,6 +166,22 @@ class OtvNavFocusHarnessTest {
     }
 
     @Test
+    fun `聚焦节点OK回调后保持焦点`() {
+        val fr = FocusRequester()
+        var clicks = 0
+        scene {
+            Box(Modifier.fillMaxSize()) {
+                Cell("stable", fr = fr, onClick = { clicks += 1 })
+            }
+        }
+        awaitFocused("stable")
+        key(KeyEvent.KEYCODE_DPAD_CENTER)
+        rule.waitForIdle()
+        assertFocused("stable")
+        check(clicks == 1) { "OK 应只触发一次点击，实际 $clicks" }
+    }
+
+    @Test
     fun `网格RIGHT行内右移_LEFT行首封锁`() {
         scene { Grid("cell_1-0", remember { FocusRequester() }) }
         awaitFocused("cell_1-0")
@@ -212,49 +228,49 @@ class OtvNavFocusHarnessTest {
         assertFocused("chipB")
     }
 
-    // ---------- 3) 悬浮层：参与水平行内导航，但绝不作为垂直候选 ----------
+    // ---------- 3) 悬浮筛选行：参与水平行内导航，但绝不作为垂直候选 ----------
 
     @Test
-    fun `悬浮行DOWN落内容_内容UP不得斜跳上悬浮行`() {
+    fun `悬浮筛选行DOWN落内容_内容UP不得斜跳上筛选行`() {
         scene {
             Box(Modifier.fillMaxSize()) {
-                Cell("tab0", 0, 0, 120, 48, floating = true, fr = remember { FocusRequester() })
-                Cell("tab1", 140, 0, 120, 48, floating = true)
+                Cell("chip0", 0, 0, 120, 48, floating = true, fr = remember { FocusRequester() })
+                Cell("chip1", 140, 0, 120, 48, floating = true)
                 Cell("g0", 0, 160)
                 Cell("g1", 200, 160)
                 Cell("g2", 0, 300)
                 Cell("g3", 200, 300)
             }
         }
-        awaitFocused("tab0")
+        awaitFocused("chip0")
         key(KeyEvent.KEYCODE_DPAD_RIGHT) // 悬浮行内水平导航仍可用
-        assertFocused("tab1")
+        assertFocused("chip1")
         key(KeyEvent.KEYCODE_DPAD_DOWN) // 悬浮节点下行 → 内容首行 x 就近
         assertFocused("g1")
-        key(KeyEvent.KEYCODE_DPAD_UP) // 内容 UP 不落悬浮 tab（被排除）→ 无 topFocus 原地封锁
+        key(KeyEvent.KEYCODE_DPAD_UP) // 内容 UP 不落悬浮筛选行（被排除）→ 无首焦点锚点时原地封锁
         assertFocused("g1")
     }
 
     @Test
-    fun `内容UP逃逸到topFocus_落tab行`() {
+    fun `内容UP逃逸到页面首焦点`() {
         scene {
             Box(Modifier.fillMaxSize()) {
-                val tabFr = remember { FocusRequester() }
-                SideEffect { OtvNav.topFocus = tabFr }
-                Cell("tab0", 0, 0, 120, 48, floating = true, fr = tabFr)
+                val firstFr = remember { FocusRequester() }
+                SideEffect { OtvNav.topFocus = firstFr }
+                Cell("chip0", 0, 0, 120, 48, floating = true, fr = firstFr)
                 Cell("g0", 0, 160)
                 Cell("g1", 200, 160)
             }
         }
-        awaitFocused("tab0")
+        awaitFocused("chip0")
         key(KeyEvent.KEYCODE_DPAD_DOWN)
-        // tab0 中心 x=105：g0 中心 157（距 52）< g1 中心 507 → 几何落 g0
+        // chip0 中心 x=105：g0 中心 157（距 52）< g1 中心 507 → 几何落 g0
         assertFocused("g0")
         key(KeyEvent.KEYCODE_DPAD_UP)
-        assertFocused("tab0")
+        assertFocused("chip0")
     }
 
-    // ---------- 4) 区域级 override（tab DOWN 定向进内容等语义） ----------
+    // ---------- 4) 区域级 override（首屏主操作 DOWN 定向进内容等语义） ----------
 
     @Test
     fun `区域override消费DOWN_定向落焦压过几何`() {

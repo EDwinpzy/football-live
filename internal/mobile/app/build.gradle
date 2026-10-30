@@ -1,7 +1,6 @@
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
-    id 'com.google.devtools.ksp'
     id 'com.chaquo.python'
 }
 
@@ -128,8 +127,8 @@ android {
     //   versionCode = 主版本×100 + 次版本×10 → V1.0=100、V1.1=110、V1.2=120、V2.0=200
     // 必须严格递增：客户端只比较 versionCode，系统安装也不允许降级覆盖。V1.0 取 100
     // 而非 10，是为了高于重置前的 42，已装 1.4x 的设备仍能收到 V1.0 的更新提示。
-    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 279)
-    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "2.7.9")
+    versionCode(apkVersionCodeOverride ? Integer.parseInt(apkVersionCodeOverride.toString()) : 280)
+    versionName(apkVersionNameOverride ? apkVersionNameOverride.toString() : "2.8.0")
         // 与 TV 版一致的三 ABI（Chaquopy/libVLC so 需要）；移动版无 cpp 拼音解码器
         ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
 
@@ -174,7 +173,7 @@ android {
 
     buildTypes {
         release {
-            minifyEnabled false   // Chaquopy + 反射（引擎/Room）保守不混淆
+            minifyEnabled false   // Chaquopy + 反射（引擎）保守不混淆
             signingConfig signingConfigs.release
         }
         debug {
@@ -214,13 +213,13 @@ chaquopy {
     }
 }
 
-// 统一产物到项目目录：apk/移动版/ 固定名 FootballLive-Mobile.apk，
+// 统一产物到项目目录：apk/移动版/ 固定名 ZuoLive-Mobile.apk，
 // 由 assembleRelease 复制（对外分发=签名+热更新正式链路）。
 // debug 测试包不进 apk/——直接用项目根 build 构建输出目录。
 tasks.register("copyMobileApk", Copy) {
     from(layout.buildDirectory.file("outputs/apk/release/app-release.apk"))
     into(rootProject.file("../../apk/移动版"))
-    rename { "FootballLive-Mobile.apk" }
+    rename { "ZuoLive-Mobile.apk" }
 }
 // AGP 的 assemble 任务在 android 插件注册后才出现，须在 afterEvaluate 挂接依赖
 afterEvaluate {
@@ -248,10 +247,7 @@ dependencies {
     implementation 'androidx.media3:media3-datasource:1.5.1'
     implementation 'org.videolan.android:libvlc-all:3.7.2'
 
-    // 数据层：Room 三表 + DataStore KV（与 TV 版一致）
-    implementation 'androidx.room:room-runtime:2.6.1'
-    implementation 'androidx.room:room-ktx:2.6.1'
-    ksp 'androidx.room:room-compiler:2.6.1'
+    // 数据层：DataStore KV。
     implementation 'androidx.datastore:datastore-preferences:1.1.1'
 
     // 图片：Coil 双缓存 + SVG 队标解码（与 TV 版一致）

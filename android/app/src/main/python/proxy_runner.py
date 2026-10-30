@@ -1,7 +1,7 @@
 """Chaquopy 入口：把解压后的后端目录加入 sys.path，再启动 proxy.main(port)。
 
 app 侧 EmbeddedBackend 解压 zip 后调用 start(dir, port)：
-- dir 是应用私有可写目录（含随包的足球直播后端脚本、www 与缓存目录）
+- dir 是应用私有可写目录（含随包的做直播后端脚本、www 与缓存目录）
 - 在此把 dir 插到 sys.path[0]，保证 import proxy 用的是解压出的那份
 """
 import sys

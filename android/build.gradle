@@ -1,16 +1,15 @@
-// 优化版根构建脚本：AGP 8.7.0 / Kotlin 1.9.24 / KSP（本机已验证组合）
+// 优化版根构建脚本：AGP 8.7.0 / Kotlin 1.9.24（本机已验证组合）
 plugins {
     id 'com.android.application' version '8.7.0' apply false
     id 'com.android.library' version '8.7.0' apply false
     id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
-    id 'com.google.devtools.ksp' version '1.9.24-1.0.20' apply false
     // 后端打包进 app：Chaquopy（Python 运行时，跑 proxy.py），版本与原版壳一致
     id 'com.chaquo.python' version '16.1.0' apply false
 }
 
 // 构建缓存移到项目根目录，源码与构建产物分开；TV 与移动版使用独立目录。
 // 目录必须跟随当前 checkout：固定到主工作树会让 worktree 构建共用同一份
-// KSP/CMake 中间产物（2026-09-02 与 2026-09-24 均实测到 KSP 缓存损坏）。
+// Kotlin/CMake 中间产物（2026-09-02 与 2026-09-24 均实测到缓存损坏）。
 allprojects {
-    buildDir = new File(rootDir, "build/football-live/${project.name}")
+    buildDir = new File(rootDir, "build/zuo-live/${project.name}")
 }

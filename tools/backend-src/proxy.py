@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-足球直播 数据代理服务器
+做直播 数据代理服务器
 - 足球比赛列表、线路发现与直播播放中继
 - 足球队徽、网页静态资源与 APK 更新清单
 - GET /api/matches : 抓取 88zhibo.tv → 解析为 JSON（缓存 60s）
@@ -22,6 +22,7 @@ import threading
 import contextvars
 import concurrent.futures
 import base64
+import http.client
 from urllib.parse import urljoin, quote, unquote, urlparse, urlsplit, parse_qs
 import urllib.request as urlreq
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -161,7 +162,7 @@ def _web_static_root() -> Path:
     if override:
         return Path(override)
     return WWW_ROOT
-# 足球直播列表源。88zhibo 首页同时混排篮球，parse_matches 会过滤非足球赛事。
+# 做直播列表源。88zhibo 首页同时混排篮球，parse_matches 会过滤非足球赛事。
 SOURCE_MIRRORS = [SOURCE_URL]
 _active_source = {"i": 0, "url": SOURCE_MIRRORS[0]}
 # APK 应用内更新清单由后台写入 CloudBase 公开桶；网页函数只负责以稳定的
@@ -351,7 +352,7 @@ _88Z_SOURCE_LABELS = {
     "c4": "线路C4",
 }
 _88Z_NON_FOOTBALL_RE = re.compile(
-    r"篮球|男篮|女篮|NBA|CBA|WNBA|NBL|排球|羽毛球|乒乓球|网球|"
+    r"篮球|男篮|女篮|NBA|CBA|WNBA|NBL|菲NCAA|排球|羽毛球|乒乓球|网球|"
     r"棒球|冰球|橄榄球|手球|拳击|搏击|综合格斗|斯诺克|台球|高尔夫|赛车|F1|电竞",
     re.I,
 )
@@ -490,6 +491,8 @@ def _parse_88zhibo_matches(page):
 
         sport_values = _88z_class_texts(row, "game-type")
         league = sport_values[0] if sport_values else ""
+        # 上游「法甲联赛 第8轮」与其他联赛（意甲/英超/西甲/中超）口径不一致，展示层统一为「法甲」。
+        league = league.replace("法甲联赛", "法甲") if league else league
         if not league or _88Z_NON_FOOTBALL_RE.search(league):
             continue
 
@@ -657,6 +660,9 @@ def parse_matches(html):
         # 2. 联赛名 + 颜色
         lm = re.search(r'<span class="league"[^>]*?background:([^">]+)["\']?[^>]*>([^<]+)</span>', rest)
         league = lm.group(2).strip() if lm else "其他"
+        # 上游写法不统一：法甲带「联赛」后缀（"法甲联赛 第8轮"），与其他联赛
+        # （意甲/英超/西甲/中超）口径不一致。展示层规范化：法甲联赛 -> 法甲。
+        league = re.sub(r"^法甲联赛\b", "法甲", league)
         color = lm.group(1).strip() if lm else "#5E5E5E"
         rest = re.sub(r'<span class="league"[^>]*>.*?</span>', '', rest)
         rest = re.sub(r'<[^>]+>', ' ', rest)
@@ -1062,7 +1068,7 @@ def _matches_keepwarm():
 threading.Thread(target=_matches_keepwarm, daemon=True, name="matches-keepwarm").start()
 
 
-# ===== 足球直播线路解析 =====
+# ===== 做直播线路解析 =====
 
 
 def fetch_url(url, referer=None, timeout=20):
@@ -1088,7 +1094,7 @@ STREAM_CACHE = {}
 STREAM_CACHE_MAX = 500
 _stream_lock = threading.Lock()
 
-# 直播「信号源清单」短缓存（2026-10-17 用户报障「足球直播经常显示无法查找到可用信号源，
+# 直播「信号源清单」短缓存（2026-10-17 用户报障「做直播经常显示无法查找到可用信号源，
 # 彻底退出 app 再进又可以播放」）：
 # 一次打开播放器 = 源站清单 1 次 + 每条线路 3~4 次探测（大场次 10+ 线 = 40+ 次上游请求）。
 # 用户重试/反复进出播放器时这份探测风暴会被源站按 IP 限流/拦爬，之后**每次**解析都拿不到
@@ -1658,7 +1664,15 @@ def resolve_88zhibo_streams(match_id, fresh=False):
             if hit and time.time() - hit["ts"] < STREAM_ALL_TTL:
                 return hit["data"], True
     lock = _stream_all_match_lock(key)
-    lock.acquire()
+    # acquire 必须带超时：上一轮请求即使已给客户端返回（3.5s 快窗口），
+    # 其后台残余线程仍在逐线路探活（read 最长 15s/线路，全场最坏约 45s）并持有本锁。
+    # 无限 acquire 会让用户的重试请求挂在 HTTP 线程上（真机表现=点播放永远转圈）。
+    # 45s 覆盖后台残余的最坏收尾时长；仍未拿到就如实报忙，客户端按 retryable 自愈。
+    if not lock.acquire(timeout=45.0):
+        return {
+            "url": None, "sources": [],
+            "error": "线路解析繁忙，请稍后重试", "retryable": True,
+        }, False
     try:
         with _stream_all_lock:
             hit = _stream_all_cache.get(key)
@@ -1756,9 +1770,13 @@ def _trim_relay():
 # 中继在重写 m3u8 时记住各清单的分片顺序；每当一个分片被客户端请求，
 # 后台并发预取其后 PREFETCH_AHEAD 片入 RELAY_CACHE —— hls.js 下一片请求
 # 直接命中缓存，等效供给速度 = 并发连接数 × 单连接限速（4×70=280KB/s）。
-# v1.22（2026-09-05 需求⑥ 足球直播卡顿）：6→8——直播分片供给波动的余量翻倍，
+# v1.22（2026-09-05 需求⑥ 做直播卡顿）：6→8——直播分片供给波动的余量翻倍，
 # 字节预算（48MB）不变仍兜底内存。
 PREFETCH_AHEAD = 8
+# 直播播放器从清单末端（直播边缘附近）起播；清单首次出现时只预热最老分片会
+# 让客户端首片仍要现场下载。最近 4 片按“最新→较旧”提交，优先命中起播窗口；
+# 后续清单刷新时已缓存/在途的分片会被去重，不会重复抓取。
+STARTUP_PREFETCH_SEGMENTS = 4
 MANIFEST_SEGS = {}          # 媒体 m3u8 url -> (原始分片 url 顺序表, ts)
 MANIFEST_SEGS_MAX = 60
 _MANIFEST_LOCK = threading.Lock()
@@ -1825,14 +1843,17 @@ def _prefetch_after(u, ref):
 
 
 def _remember_manifest(u, raw_segs, ref):
-    """记录媒体清单的分片顺序表，并预热头 2 片（加速首帧）。"""
+    """记录媒体清单的分片顺序，并预热直播边缘的最近分片以加速首帧。"""
     try:
         with _MANIFEST_LOCK:
             MANIFEST_SEGS[_relay_cache_key(u)] = (raw_segs, time.time())
             if len(MANIFEST_SEGS) > MANIFEST_SEGS_MAX:
                 oldest = min(MANIFEST_SEGS.items(), key=lambda kv: kv[1][1])[0]
                 MANIFEST_SEGS.pop(oldest, None)
-        _prefetch_segments(raw_segs[:2], ref)
+        # 播放器通常直接请求倒数第一/第二片；最新优先提交可先占满预取连接，
+        # 避免仍从清单头部开始下载而与客户端首片竞争。
+        _prefetch_segments(
+            list(reversed(raw_segs[-STARTUP_PREFETCH_SEGMENTS:])), ref)
     except Exception:
         pass
 
@@ -2381,6 +2402,65 @@ def _read_relay_chunk(resp, size):
     return getattr(resp, "read1", resp.read)(size)
 
 
+def _supports_byte_ranges(resp):
+    value = (resp.headers.get("Accept-Ranges") or "").strip()
+    return any(token.strip().lower() == "bytes" for token in value.split(","))
+
+
+def _strong_etag(resp):
+    value = (resp.headers.get("ETag") or "").strip()
+    if (len(value) >= 2 and value.startswith('"') and value.endswith('"')
+            and not value[:2].lower() == "w/" and '"' not in value[1:-1]):
+        return value
+    return ""
+
+
+def _identity_nonchunked(resp):
+    transfer_encoding = (resp.headers.get("Transfer-Encoding") or "").strip()
+    content_encoding = (resp.headers.get("Content-Encoding") or "").strip().lower()
+    return not transfer_encoding and content_encoding in ("", "identity")
+
+
+def _media_content_type(value):
+    media_type = (value or "").split(";", 1)[0].strip().lower()
+    return (
+        media_type.startswith(("video/", "audio/"))
+        or media_type in {
+            "application/octet-stream",
+            "application/mp2t",
+            "application/x-mpegts",
+        }
+    )
+
+
+def _content_range(value):
+    match = re.fullmatch(r"bytes\s+(\d+)-(\d+)/(\d+)", (value or "").strip(), re.I)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def _incomplete_read_partial(exc):
+    """Return bytes carried by IncompleteRead, including wrapped transport errors."""
+    pending = [exc]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, http.client.IncompleteRead):
+            return current.partial if isinstance(current.partial, bytes) else b""
+        cause = getattr(current, "__cause__", None)
+        context = getattr(current, "__context__", None)
+        if cause is not None:
+            pending.append(cause)
+        if context is not None:
+            pending.append(context)
+        pending.extend(arg for arg in getattr(current, "args", ()) if isinstance(arg, BaseException))
+    return b""
+
+
 def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
     """
     媒体流式中继（非 m3u8）：边收边发，避免整包缓冲（直播/大文件首字节更快，低端机播放更跟手）。
@@ -2419,6 +2499,7 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
                 last_err = "HTTP %d from %s" % (resp.status, u)
                 resp = None
                 continue   # 换下一 Referer 策略再试
+            state["request_headers"] = dict(headers)
             break
         except Exception as e:
             last_err = str(e)[:200]
@@ -2477,11 +2558,90 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
         return 502, "text/plain; charset=utf-8", {}, iter(
             [("relay rejected: tiny body (%dB)" % len(first)).encode("utf-8")]), False
     buf = bytearray() if (not rng and known_len >= 0 and known_len <= 8 * 1024 * 1024) else None
+    upstream_te = ""
+    try:
+        upstream_te = (state["resp"].headers.get("Transfer-Encoding") or "").strip().lower()
+    except Exception:
+        pass
+    resume_etag = _strong_etag(state["resp"])
+    resume_enabled = (
+        bool(first)
+        and not rng
+        and status == 200
+        and 0 < known_len <= 8 * 1024 * 1024
+        and not upstream_te
+        and _identity_nonchunked(state["resp"])
+        and _supports_byte_ranges(state["resp"])
+        and bool(resume_etag)
+        and _media_content_type(ctype)
+    )
+    resume_headers = dict(state.get("request_headers") or {})
+    strict_known_body = (
+        not rng and status == 200 and not upstream_te and known_len >= 0
+    )
 
     def gen():
         resp = state["resp"]
         first = state["first"]
         fully_read = False
+        sent = 0
+        resume_attempts = 0
+        last_read_error = None
+
+        def track(piece):
+            nonlocal sent
+            if not piece:
+                return piece
+            sent += len(piece)
+            if buf is not None and len(buf) < known_len:
+                buf.extend(piece[:known_len - len(buf)])
+            return piece
+
+        def open_resume(start):
+            headers = dict(resume_headers)
+            headers["Range"] = "bytes=%d-" % start
+            headers["If-Range"] = resume_etag
+            resumed, _final = _open_upstream(
+                u, headers, read_timeout=5, preload=False)
+            try:
+                if resumed.status != 206:
+                    raise RuntimeError(
+                        "relay resume expected 206, got %s" % resumed.status)
+                if not _identity_nonchunked(resumed):
+                    raise RuntimeError("relay resume was not identity/non-chunked")
+                if _strong_etag(resumed) != resume_etag:
+                    raise RuntimeError("relay resume ETag changed")
+                parsed = _content_range(resumed.headers.get("Content-Range"))
+                if parsed is None:
+                    raise RuntimeError("relay resume missing Content-Range")
+                resume_start, resume_end, total = parsed
+                if (resume_start != start or total != known_len
+                        or resume_end < resume_start or resume_end >= total):
+                    raise RuntimeError("relay resume Content-Range mismatch")
+                resume_len = (resumed.headers.get("Content-Length") or "").strip()
+                if (not resume_len.isdigit()
+                        or int(resume_len) != resume_end - resume_start + 1):
+                    raise RuntimeError("relay resume Content-Length mismatch")
+            except Exception:
+                _release_relay_response(resumed)
+                raise
+            return resumed
+
+        def resume_from(resp_after_error):
+            nonlocal resp, resume_attempts
+            if resume_attempts >= 2:
+                return None
+            resume_attempts += 1
+            resp = None
+            _release_relay_response(resp_after_error)
+            resp = open_resume(sent)
+            return resp
+
+        def raise_short():
+            if last_read_error is not None:
+                raise RuntimeError("relay stream incomplete after resume") from last_read_error
+            raise http.client.IncompleteRead(b"", max(0, known_len - sent))
+
         # 上游读失败必须向上抛（不得吞）：吞掉会导致响应 body 短于已发的
         # Content-Length 但连接干净收尾 → 客户端把截断分片当完整数据喂解码器
         # → hls.js worker 卡死（视频冻结、无报错、不再请求分片，实测复现）。
@@ -2491,17 +2651,37 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
             # a seek may disconnect even before response headers can be written.
             yield None
             if first:
-                if buf is not None:
-                    buf.extend(first)
-                yield first
+                yield track(first)
             while True:
-                b = _read_relay_chunk(resp, chunk)
+                try:
+                    b = _read_relay_chunk(resp, chunk)
+                except Exception as exc:
+                    last_read_error = exc
+                    partial = _incomplete_read_partial(exc)
+                    if partial:
+                        remaining = known_len - sent if known_len >= 0 else len(partial)
+                        if len(partial) > remaining:
+                            raise RuntimeError("relay stream exceeded Content-Length") from exc
+                        yield track(partial)
+                    if known_len >= 0 and sent >= known_len:
+                        fully_read = True
+                        break
+                    if resume_enabled and resume_from(resp) is not None:
+                        continue
+                    if strict_known_body:
+                        raise_short()
+                    raise
                 if not b:
+                    if known_len >= 0 and sent >= known_len:
+                        fully_read = True
+                        break
+                    if resume_enabled and resume_from(resp) is not None:
+                        continue
+                    if strict_known_body:
+                        raise_short()
                     fully_read = True
                     break
-                if buf is not None and len(buf) <= 8 * 1024 * 1024:
-                    buf.extend(b)
-                yield b
+                yield track(b)
         finally:
             try:
                 _release_relay_response(resp, fully_read=fully_read)
@@ -2515,11 +2695,6 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
                     _trim_relay()
 
     # extra（Content-Range/Accept-Ranges）已在打开上游连接时构建
-    upstream_te = ""
-    try:
-        upstream_te = (state["resp"].headers.get("Transfer-Encoding") or "").lower()
-    except Exception:
-        pass
     if rng:
         # Range/206：保留上游段长（seek 语义需要 Content-Range + Content-Length）
         if known_len >= 0:
@@ -2531,7 +2706,7 @@ def relay_stream(u, ref=None, rng=None, chunk=128 * 1024):
         # （OkHttp/fetch）body 结束时判缺字节硬报 unexpected end of stream →
         # ERROR_CODE_IO_NETWORK_CONNECTION_FAILED；重试重抓同一上游必复发
         # （同线重试×3 → 错误态 30s 自动重试 → fresh 重解析仍同一 CDN 同一形态）
-        # = 足球直播「看一会就看不了、点重试/换源都没用」根因（2026-09-19 实测）。
+        # = 做直播「看一会就看不了、点重试/换源都没用」根因（2026-09-19 实测）。
         # 改以 chunked 下发行：0-chunk 收尾即「完整」，到达多少算多少——TS 尾部
         # 残缺不足一个 188B 包，解复用器直接丢弃，无感知；上游真异常（连接重置/
         # 超时/读错误）仍由生成器上抛 → do_GET 不写终止块 → 客户端网络错误 →
@@ -3570,7 +3745,7 @@ class Handler(SimpleHTTPRequestHandler):
             path in {"/api/matches", "/api/relay", "/api/team-icon", "/api/team-icon-img", "/api/health"}
             or re.fullmatch(r"/api/(?:stream|relayts)/\d+", path)
         )
-        if path.startswith(("/vod/", "/hhkan/")) or (path.startswith("/api/") and not football_api):
+        if path.startswith("/api/") and not football_api:
             body = b'{"ok":false,"error":"not found"}'
             self.send_response(404)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -3838,12 +4013,6 @@ class Handler(SimpleHTTPRequestHandler):
             # compose healthcheck 与后台监控都无从发现「上一版本已丢失」。
             payload = {"ok": True, "time": time.strftime("%H:%M:%S"),
                        "assets": _web_asset_health()}
-            # 桌面版（EXE）会注入这两个变量，让网页端只在 Windows 客户端里
-            # 渲染版本号与「检查更新」；网页版不注入，行为与从前完全一致。
-            if os.environ.get("OTV_DESKTOP"):
-                payload["desktop"] = True
-                payload["hotVersion"] = int(
-                    os.environ.get("OTV_DESKTOP_HOT_VERSION") or 0)
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -3928,8 +4097,8 @@ class Handler(SimpleHTTPRequestHandler):
                 except Exception:
                     pass
             self.send_header("Cache-Control", cc)
-        # CORS：安卓 WebView 以 file:// 加载前端（origin 为 null），
-        # fetch 到 http://127.0.0.1:8090 属跨源，必须允许（桌面同源访问不受影响）
+        # CORS：原生客户端的本机资源请求可能来自 file://，
+        # fetch 到 http://127.0.0.1:8090 属跨源，必须允许。
         self.send_header("Access-Control-Allow-Origin", "*")
         super().end_headers()
 
@@ -3943,8 +4112,8 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main(port=None, bind=None):
     """启动代理服务器（阻塞）。安卓 Chaquopy 通过 main() 显式调用；
-    桌面 `python proxy.py [port]` 由 __main__ 块调用；
-    云端容器（网页版 CloudRun）不传参 —— 端口/绑定地址读环境变量
+    直接运行 `python proxy.py [port]` 由 __main__ 块调用；
+    云端容器不传参 —— 端口/绑定地址读环境变量
     PORT（容器平台注入）与 OTV_BIND（默认 127.0.0.1，容器设 0.0.0.0）。
     安卓侧 proxy_runner 传 bind="0.0.0.0"（投屏：电视需经局域网访问本机中继流）。"""
     if port is None:
@@ -3956,7 +4125,7 @@ def main(port=None, bind=None):
         bind = os.environ.get("OTV_BIND") or "127.0.0.1"
     # 多线程：直播分片/播放列表是并发请求，单线程服务器会互相阻塞。
     server = ThreadingHTTPServer((bind, port), Handler)
-    print("足球直播 数据代理服务器 http://%s:%d  (数据源 %s)" % (bind, port, _active_source["url"]))
+    print("做直播 数据代理服务器 http://%s:%d  (数据源 %s)" % (bind, port, _active_source["url"]))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

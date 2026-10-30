@@ -5,7 +5,6 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
-import com.qiubo.optimaltv.data.db.AppDb
 import com.qiubo.optimaltv.data.prefs.SettingsStore
 import com.qiubo.optimaltv.data.repo.LiveRepository
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,8 +12,6 @@ import kotlinx.coroutines.flow.asStateFlow
 /** 轻量服务定位器：单进程单实例（方案 §5 单 Activity 单进程） */
 object Graph {
     lateinit var appContext: Context
-        private set
-    lateinit var db: AppDb
         private set
     lateinit var settings: SettingsStore
         private set
@@ -24,7 +21,6 @@ object Graph {
     fun init(context: Context) {
         if (::appContext.isInitialized) return
         appContext = context.applicationContext
-        db = AppDb.get(appContext)
         settings = SettingsStore(appContext)
         val liveClient = okhttp3.OkHttpClient.Builder()
             .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)

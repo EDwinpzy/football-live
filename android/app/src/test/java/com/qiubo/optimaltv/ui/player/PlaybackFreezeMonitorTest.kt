@@ -170,7 +170,7 @@ class PlaybackFreezeMonitorTest {
         override fun swapSource(url: String, autoplay: Boolean) = Unit
         override fun seekToLiveEdge() = Unit
         override fun setSoftwareDecoderPreferred(on: Boolean) = Unit
-        override fun setLiveWindowHintMs(windowMs: Long) = Unit
+        override fun setLiveWindowHintMs(windowMs: Long, segmentMs: Long) = Unit
         override fun audioCodecs(): String? = null
         override fun decoderStats(): DecoderStats {
             decoderStatsReads++

@@ -23,7 +23,7 @@ def endpoint_config(*, storage_base, public_base, public_web_base):
         public_base_url=public_base,
         public_web_base_url=public_web_base,
         hotupdate_endpoint="http://business-api:8082/hotupdate",
-        environment_name="football-live-selfhosted",
+        environment_name="zuo-live-selfhosted",
         self_hosted=True,
     )
 

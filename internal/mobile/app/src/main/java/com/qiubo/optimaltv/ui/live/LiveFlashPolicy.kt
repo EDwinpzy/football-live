@@ -10,8 +10,6 @@ fun matchStatusKind(match: MatchItem): MatchStatusKind = when {
     else -> MatchStatusKind.UPCOMING
 }
 
-data class TodayMatchPage(val rows: List<List<MatchItem>>)
-object TodayMatchPager { fun pages(items: List<MatchItem>) = items.chunked(8).map { TodayMatchPage(listOf(it.take(4), it.drop(4))) } }
 object ImportantTeamPolicy {
     private val teams = listOf("曼联","曼彻斯特联","曼城","曼彻斯特城","利物浦","阿森纳","切尔西","热刺","皇家马德里","皇马","巴塞罗那","巴萨","马德里竞技","拜仁","多特蒙德","国际米兰","国米","AC米兰","尤文图斯","巴黎圣日耳曼","那不勒斯","罗马","勒沃库森")
     private val nations = Regex("世界杯|欧洲杯|美洲杯|亚洲杯|欧国联|世预赛|欧预赛|国家队")

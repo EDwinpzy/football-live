@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the local web/backend artifacts and optionally deploy the self-hosted stack."""
+"""Build the native TV/mobile backend artifact and optionally deploy the self-hosted stack."""
 
 import argparse
 import os
@@ -24,7 +24,6 @@ def script_path(root, *parts):
 def required_scripts(root=ROOT):
     """发布器会用到的仓库内脚本；缺任何一个都要在启动前说清楚。"""
     return [
-        script_path(root, "build_web_assets.py"),
         script_path(root, "build_backend_zip.py"),
     ]
 
@@ -139,9 +138,6 @@ def main():
     if args.deploy:
         require_files(required_deploy_files(ROOT), "自建部署入口")
 
-    # The Web task owns this static asset builder and its no-argument interface.
-    if not run([PY, os.path.join(ROOT, "tools", "build_web_assets.py")], ROOT):
-        raise SystemExit("build_web_assets 失败")
     if not run([PY, os.path.join(ROOT, "tools", "build_backend_zip.py")], ROOT):
         raise SystemExit("build_backend_zip 失败")
 
@@ -164,12 +160,12 @@ def main():
             raise SystemExit("nginx 容器重建失败，反向代理尚未切换")
         if not run(selfhosted_nginx_reload_command(ROOT), deploy_dir):
             raise SystemExit("nginx reload 失败，发布未完成")
-        print("\n[OK] 本地 Web 静态资源与 App 后端包已构建\n"
+        print("\n[OK] TV／移动版后端包与原生兼容资源已构建\n"
               "[OK] schema-migrations 已重跑并成功\n"
               "[OK] 已调用自建 Docker Compose 部署入口\n"
               "[OK] nginx 配置已验证、容器已重建并 reload")
     else:
-        print("\n[OK] 本地 Web 静态资源与 App 后端包已构建\n"
+        print("\n[OK] TV／移动版后端包与原生兼容资源已构建\n"
               "[PAUSED] 未执行部署")
 
 

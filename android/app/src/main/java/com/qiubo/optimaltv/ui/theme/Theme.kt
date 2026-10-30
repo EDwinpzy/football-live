@@ -1,6 +1,5 @@
 package com.qiubo.optimaltv.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
@@ -9,24 +8,18 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-// 10-foot UI（方案 §2.2）：暗光环境高对比、正文字号 ≥16sp
-val BgBlack = Color(0xFF050507)
-val SurfaceDark = Color(0xFF141419)
-val SurfaceCard = Color(0xFF1C1C22)
-val AccentBlue = Color(0xFF0A84FF)
-val TextPrimary = Color(0xFFF5F5F7)
-val TextSecondary = Color(0xFF9A9AA2)
-
+// 10-foot UI（方案 §2.2）：暗光环境高对比、正文字号 ≥16sp；
+// 色板 2026-10-23 起对齐全端「极简清爽」规范（SPEC.md tokens）。
 private val DarkScheme = darkColorScheme(
-    primary = AccentBlue,
-    onPrimary = Color.White,
-    background = BgBlack,
-    onBackground = TextPrimary,
-    surface = SurfaceDark,
-    onSurface = TextPrimary,
-    surfaceVariant = SurfaceCard,
-    onSurfaceVariant = TextSecondary,
-    secondary = Color(0xFF8E8E93),
+    primary = OtvColors.Brand,
+    onPrimary = OtvColors.PureWhite,
+    background = OtvColors.Bg,
+    onBackground = OtvColors.TextPrimary,
+    surface = OtvColors.Surface,
+    onSurface = OtvColors.TextPrimary,
+    surfaceVariant = OtvColors.SurfaceFocus,
+    onSurfaceVariant = OtvColors.TextSecondary,
+    secondary = OtvColors.BrandDeep,
 )
 
 val AppTypography = androidx.compose.material3.Typography(
@@ -40,7 +33,7 @@ val AppTypography = androidx.compose.material3.Typography(
 )
 
 @Composable
-fun FootballLiveTheme(content: @Composable () -> Unit) {
+fun ZuoLiveTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = DarkScheme,
         typography = AppTypography,

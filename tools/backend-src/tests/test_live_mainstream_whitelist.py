@@ -36,8 +36,13 @@ class LiveMainstreamWhitelistTest(unittest.TestCase):
         match = re.search(r'private val NON_FOOTBALL_RE = Regex\("([^"]+)"\)', self.src)
         self.assertIsNotNone(match)
         pat = re.compile(match.group(1))
-        for league in ("亚运男篮", "NBA", "CBA"):
+        for league in ("亚运男篮", "NBA", "CBA", "菲NCAA"):
             self.assertTrue(pat.search(league), f"{league} 应被剔除")
+
+    def test_current_live_football_is_not_hidden_by_league_whitelist(self):
+        self.assertIn("val liveFootballIds = list.asSequence()", self.src)
+        self.assertIn(".filter { it.isLive }", self.src)
+        self.assertIn("it.matchId in liveFootballIds", self.src)
 
     def test_mobile_tree_in_sync(self):
         mb = (ROOT / "internal/mobile/app/src/main/java/com/qiubo/optimaltv/data/repo/LiveRepository.kt").read_text(encoding="utf-8")

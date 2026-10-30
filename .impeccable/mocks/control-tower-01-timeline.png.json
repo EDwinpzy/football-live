@@ -1,7 +1,0 @@
-{
-  "kind": "comp",
-  "title": "事件时间线",
-  "description": "顶部事件时间线作为第一视觉锚点，中央运维表承接细节，右侧信号板保持常驻。",
-  "prompt": "Wide desktop operations control tower with a top horizontal operational timeline, large recent-operations table in the center, compact left work-domain rail and a right live-signal inspector; dark graphite blue-black, cyan focus, green success, amber pending, Chinese admin UI, single-line table rows, flat matte panels, no generic SaaS dashboard.",
-  "approved": false
-}

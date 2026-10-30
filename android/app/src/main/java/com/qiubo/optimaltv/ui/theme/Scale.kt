@@ -28,23 +28,38 @@ fun Float.sx(scale: Float): Dp = (this * scale).dp
 @Composable
 fun Float.sxs(scale: Float): TextUnit = with(LocalDensity.current) { (this@sxs * scale).dp.toSp() }
 
-/** 原版 web 色板（index.html :root 与组件 CSS） */
+/**
+ * 全端统一设计 token（artifacts/2026-10-23-ui-redesign/SPEC.md「极简清爽」）。
+ * 语义 token 供 UI 层引用；旧别名（White60 等）保留为兼容垫片，逐步迁移。
+ */
 object OtvColors {
-    val Bg = Color(0xFF0E0E0F)          // --bg
-    val Panel = Color(0xFF232323)       // --panel
-    val Live = Color(0xFFFF3A5F)        // --live（LIVE 徽章红）
-    val AccentBlue = Color(0xFF0A84FF)
-    val White = Color(0xFFFFFFFF)
-    val White60 = Color(0x99FFFFFF)     // --muted
-    val White75 = Color(0xBFFFFFFF)     // .75
-    val White70 = Color(0xB3FFFFFF)     // .7
-    val White55 = Color(0x8CFFFFFF)     // .55
-    val White50 = Color(0x80FFFFFF)     // .5
-    val White30 = Color(0x4DFFFFFF)     // --dim
-    val Line = Color(0x1AFFFFFF)        // --line
-    val ChipBg = Color(0x1FFFFFFF)      // rgba(255,255,255,.12)
-    val TabBarBg = Color(0x801E1E1E)    // rgba(30,30,30,.5)
-    val CardBlack80 = Color(0xCC000000) // gc-score rgba(0,0,0,.8)
-    val PanelBg = Color(0xF517171C)
-    val InputBg = Color(0xFF1C1C22)
+    // —— 规范 token ——
+    val Bg = Color(0xFF0A0A0A)              // 页面背景
+    val Surface = Color(0xFF141414)         // 卡片/条目背景
+    val SurfaceFocus = Color(0xFF1F1F1F)    // 焦点/按压态卡片背景
+    val Brand = Color(0xFFFFFFFF)           // 焦点描边、选中态、强调
+    val BrandDeep = Color(0xFFC9C9C9)       // 按压态、渐变端点
+    val Live = Color(0xFFFFFFFF)            // LIVE 徽标、直播中比分
+    val TextPrimary = Color(0xFFF5F5F5)     // 主文字
+    val TextSecondary = Color(0xFFA0A0A0)   // 联赛、时间等次级文字
+    val TextDisabled = Color(0xFF666666)    // 未开赛弱化信息
+    val Divider = Color(0x14FFFFFF)         // rgba(255,255,255,0.08)
+
+    // —— 兼容别名（旧调用点语义映射）——
+    val Panel = Surface
+    val White = TextPrimary                 // 文字场景的主文字
+    val PureWhite = Color(0xFFFFFFFF)       // 胶囊底/海报雾等真正需要纯白处
+    val White60 = TextSecondary
+    val White75 = Color(0xBFF4F6F4)
+    val White70 = Color(0xB3F4F6F4)
+    val White55 = Color(0x8CF4F6F4)
+    val White50 = TextDisabled
+    val White30 = Color(0x4D6B746B)
+    val Line = Divider
+    val ChipBg = Surface                    // 未选 chip 底
+    val Overlay = Color(0xCC151815)        // 海报上的点选浮层底
+    val CardBlack80 = Surface               // 比赛卡背景
+    val PanelBg = Color(0xF5151815)
+    val InputBg = SurfaceFocus
+    val AccentBlue = Color(0xFFFFFFFF)      // 旧强调色统一并入 brand
 }

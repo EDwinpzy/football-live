@@ -77,3 +77,14 @@ Thumbs.db
 # 临时工作目录（不入库）
 .tmp-test/
 tools/backend-src/.test-data/
+
+# Local assistant/tool session state and runtime caches (never publish)
+.workbuddy/
+**/.mimosa/
+tools/backend-src/team_icon_cache.json
+tools/backend-src/svg_icon_cache/
+tools/backend-src/transparent_icon_cache/
+
+# Release signing material must stay local and be injected by the operator.
+*.keystore
+*.jks

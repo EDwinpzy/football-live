@@ -1,5 +1,5 @@
 #!/bin/bash
-# 足球直播 10 分钟播放监控：采集心跳/错误/卡顿日志，供事后分析
+# 做直播 10 分钟播放监控：采集心跳/错误/卡顿日志，供事后分析
 # usage: monitor_live.sh <分钟数>
 ADB='/c/应用/MuMuPlayer/nx_main/adb.exe'
 SER=127.0.0.1:16416

@@ -47,7 +47,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
@@ -73,7 +72,7 @@ import kotlinx.coroutines.launch
  *  - 滚动找回：按挂靠的 Lazy 容器【瞬时】滚动一个行距（从 layoutInfo 推导，
  *    不再动画轮询），随后重试一次几何搜索；
  *  - 长按节流（65ms/步）+ 滚动进行中防重入——按住方向键即连续平滑移动；
- *  - 特殊语义（tab DOWN 进内容、hero 左右翻页、播放器 seek、浮窗组封锁）
+ *  - 特殊语义（hero/filter 进入内容、hero 左右翻页、播放器 seek、浮窗组封锁）
  *    全部改为节点级 navOverride 声明式回调，由引擎统一调用。
  * ===========================================================================
  */
@@ -205,7 +204,7 @@ fun scrollNavContainer(state: ScrollState): NavScrollContainer {
 val LocalNavVertical = androidx.compose.runtime.staticCompositionLocalOf<NavScrollContainer?> { null }
 val LocalNavHorizontal = androidx.compose.runtime.staticCompositionLocalOf<NavScrollContainer?> { null }
 
-/** 区域级方向语义覆盖（键盘行/候选行/tab 行等：区域内所有 dpadFocusable 共享） */
+    /** 区域级方向语义覆盖（键盘行/候选行/筛选行等：区域内所有 dpadFocusable 共享） */
 val LocalNavOverride = androidx.compose.runtime.staticCompositionLocalOf<((Int) -> Boolean)?> { null }
 
 @Composable
@@ -233,7 +232,7 @@ fun Modifier.dpadFocusable(
     shape: Shape = RoundedCornerShape(12.dp),
     scaleFocused: Float = 1.06f,
     ringWidth: Dp = 2.dp,
-    /** 非空 = 聚焦时画背景胶囊（原版 tab/chip 焦点视觉），不画描边环 */
+    /** 非空 = 聚焦时画背景胶囊（原版筛选 chip 焦点视觉），不画描边环 */
     focusedBg: Color? = null,
     /** focusedBg 胶囊圆角（默认 12dp；全圆角胶囊型按钮传高度一半） */
     focusedBgRadius: Dp = 12.dp,
@@ -245,7 +244,7 @@ fun Modifier.dpadFocusable(
     autoSelectDelayMs: Long = 80L,
     /** false = 不画描边环（播放器进度条等自带高亮表达的控件） */
     drawRing: Boolean = true,
-    /** true = 悬浮层元素（顶部 tab 栏/联赛筛选）：参与水平行内导航，但不作为垂直移动候选 */
+    /** true = 悬浮筛选元素：参与水平行内导航，但不作为垂直移动候选 */
     floating: Boolean = false,
     /** 外部落焦句柄（返回落焦）：与导航注册表共用同一节点 */
     externalFocusRequester: FocusRequester? = null,
@@ -294,7 +293,7 @@ fun Modifier.dpadFocusable(
         onDispose {
             OtvNav.unregisterCardIf(bandId, latestNode.value)
             // 曾持焦点的节点被销毁（重组/屏过渡）：若焦点无人接管则按锚点补焦，
-            // 消灭「切换标签后光标短暂隐形」与「数据加载把焦点甩给邻居」两类现象
+            // 消灭「页面状态切换后光标短暂隐形」与「数据加载把焦点甩给邻居」两类现象
             if (wasFocusedOnce.get()) OtvNav.healWhenFocusVanishes(latestNode.value.group)
         }
     }
@@ -373,8 +372,10 @@ fun Modifier.dpadFocusable(
             }
         }
         .focusRequester(bandNode.requester)
-        .focusable(enabled = enabled, interactionSource = interaction)
-        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+        // clickable already owns the single focus target. Adding focusable here creates
+        // a second target: DPAD_CENTER can move focus to it, leaving OtvNav's ring/state
+        // on the outer node and making the page appear frozen after a non-navigation click.
+        .clickable(enabled = enabled, interactionSource = interaction, indication = null, onClick = onClick)
         // Read each animation frame in the layer phase, avoiding recomposition and
         // navigation registration on every tick across all TV screens.
         .graphicsLayer {
@@ -395,10 +396,10 @@ fun Modifier.dpadFocusable(
             }
             drawContent()
             if (focused && drawRing && !(focusedBg != null && focusedBg.luminance() > 0.5f)) {
-                // 白底（亮色聚焦底）元素不画描边环；深色卡片描边环颜色 60% 白
+                // 规范焦点态：brand 2dp 描边（禁阴影发光堆叠）。
+                // 深色衬环：白海报/浅色封面上 brand 细环对比不足——先画一圈黑 55% 宽环
+                //（半内外），brand 环叠其上（同心圆角描边多圈叠加，无 radialGradient）
                 val strokeW = ringWidth.toPx()
-                // 深色衬环：白海报/浅色封面上白色细环不可见（同台标白剪影禁白底聚焦的教训，
-                // 2026-09-05 我的页白色海报实测隐形）——先画一圈黑 55% 宽环（半内外），白环叠其上
                 drawRoundRect(
                     color = Color.Black.copy(alpha = 0.55f),
                     topLeft = Offset.Zero,
@@ -407,7 +408,7 @@ fun Modifier.dpadFocusable(
                     style = Stroke(width = strokeW + 4.dp.toPx()),
                 )
                 drawRoundRect(
-                    color = Color.White.copy(alpha = 0.60f),
+                    color = com.qiubo.optimaltv.ui.theme.OtvColors.Brand.copy(alpha = 0.85f),
                     topLeft = Offset(strokeW, strokeW),
                     size = Size(size.width - strokeW * 2, size.height - strokeW * 2),
                     cornerRadius = CornerRadius(12.dp.toPx()),
@@ -451,11 +452,11 @@ object ReturnFocus {
     fun mark(screen: String, key: String) { last[screen] = key }
 
     /** 取回并消费（一次性）。仅「返回本屏」（BACK 从详情/播放回来）应恢复上次落焦；
-     *  消费防止旧记忆残留——否则 tab 切回本屏时会被旧 key 劫持：v1.13 实测只要在
+     *  消费防止旧记忆残留——否则页面切回本屏时会被旧 key 劫持：v1.13 实测只要在
      *  足球页聚焦过一次比赛卡，之后返回该页光标都会自动跳到该比赛。 */
     fun take(screen: String): String? = last.remove(screen)
 
-    /** tab 切换/搜索 chip 等前进入口调用：全部落焦记忆作废，目标屏一律落初始焦点 */
+    /** 页面切换/搜索 chip 等前进入口调用：全部落焦记忆作废，目标屏一律落初始焦点 */
     fun clearAll() { last.clear() }
 }
 
@@ -520,23 +521,8 @@ object OtvNav {
     private class Anchor(val bounds: Rect)
     private val lastAnchorByGroup = java.util.concurrent.ConcurrentHashMap<String, Anchor>()
 
-    /** 顶部 tab 栏焦点：内容到顶后 UP 的逃逸目标（group=null 的节点才逃逸；浮窗组封锁） */
+    /** 页面首个内容焦点：内容到顶后 UP 的逃逸目标（group=null 的节点才逃逸；浮窗组封锁） */
     @Volatile var topFocus: FocusRequester? = null
-
-    /**
-     * v1.16 顶部标签栏自动隐藏（用户需求：往下移动时隐藏顶部标签页，返回顶部才显示）：
-     * chromeHideThresholdPx > 0 时启用——聚焦节点顶边越过阈值 = 光标已进入内容区深处，
-     * 置 chromeHidden=true；光标回到阈值以上（tab 栏/顶部内容行）恢复 false。
-     * 阈值由 MainTabBar(autoHide=true) 进入页面时设置、离开时清除，全局单值。
-     */
-    @Volatile var chromeHideThresholdPx: Float = 0f
-    private val _chromeHidden = kotlinx.coroutines.flow.MutableStateFlow(false)
-    val chromeHidden: kotlinx.coroutines.flow.StateFlow<Boolean> = _chromeHidden.asStateFlow()
-
-    fun clearChrome() {
-        chromeHideThresholdPx = 0f
-        _chromeHidden.value = false
-    }
 
     /** 窗口可视高度（px，ROTATION 感知；MainActivity 从 WindowMetrics 注入，ensureVisible 用） */
     @Volatile var viewportHeightPx: Float = 0f
@@ -565,8 +551,6 @@ object OtvNav {
         focusEmpty = false
         lastAnchorByGroup.clear()
         topFocus = null
-        chromeHideThresholdPx = 0f
-        _chromeHidden.value = false
         viewportHeightPx = 0f
         lastMoveAt = 0L
         pendingRevealToken = 0L
@@ -574,6 +558,15 @@ object OtvNav {
     }
 
     fun registerCard(id: Int, node: Node) { cards[id] = node }
+
+    /** 弹窗接管焦点前保存当前真实控件；用于关闭弹窗时立即恢复，而非等下一次方向键自愈。 */
+    fun focusedRequesterSnapshot(): FocusRequester? = cards[focusedCardId]?.requester
+
+    /** 优先恢复弹窗前的控件；控件已销毁时退回页面顶层锚点。 */
+    fun restoreFocus(requester: FocusRequester?): Boolean {
+        if (requester != null && runCatching { requester.requestFocus() }.isSuccess) return true
+        return topFocus?.let { runCatching { it.requestFocus() }.isSuccess } ?: false
+    }
 
     /**
      * 同一次布局上报同时维护两条互不污染的状态：
@@ -660,14 +653,6 @@ object OtvNav {
         lastGroup = n.group
         val origin = currentNodeOrigin(n)
         if (origin != Rect.Zero) lastAnchorByGroup[n.group ?: ""] = Anchor(origin)
-        // v1.16 顶部标签栏自动隐藏联动（阈值 0 = 本屏未启用）
-        if (chromeHideThresholdPx > 0f && origin != Rect.Zero) {
-            val hide = origin.top > chromeHideThresholdPx
-            if (hide != _chromeHidden.value) {
-                Log.i(TAG, "chrome hide=$hide (top=${origin.top} > $chromeHideThresholdPx)")
-                _chromeHidden.value = hide
-            }
-        }
         return epoch
     }
 
@@ -729,7 +714,7 @@ object OtvNav {
             }
         }
 
-        // 1) 节点/区域级方向语义（tab DOWN 进内容、hero 翻页、播放器 seek、浮窗封锁…）
+        // 1) 节点/区域级方向语义（hero/filter 进内容、hero 翻页、播放器 seek、浮窗封锁…）
         cur.override?.let { ov ->
             if (ov(dir)) {
                 lastMoveAt = android.os.SystemClock.uptimeMillis()
@@ -759,7 +744,7 @@ object OtvNav {
             return true
         }
 
-        // 4) UP 到顶逃逸：仅全局节点回顶部 tab 栏；浮窗组/其余方向封锁（消费不放行）
+        // 4) UP 到顶逃逸：仅全局节点回页面首焦点；浮窗组/其余方向封锁（消费不放行）
         if (dir == NAV_UP && cur.group == null) {
             topFocus?.let { fr -> runCatching { fr.requestFocus() } }
         } else if (repeatCount == 0) {
@@ -837,7 +822,7 @@ object OtvNav {
 
     /**
      * 焦点漂移自愈：当前焦点节点无效（零尺寸/已销毁）时，以分组最近有效焦点的
-     * 坐标为锚做方向搜索；无锚则就近自愈；再不行回顶部 tab 栏。
+     * 坐标为锚做方向搜索；无锚则就近自愈；再不行回页面首焦点。
      * 返回恢复后的节点（供 dispatch 继续 override 检查），失败返回 null。
      */
     private fun healAndMove(dir: Int): Node? {

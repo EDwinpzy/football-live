@@ -36,6 +36,7 @@ import com.qiubo.optimaltv.ui.theme.OtvColors
 import com.qiubo.optimaltv.ui.theme.rememberUiScale
 import com.qiubo.optimaltv.ui.theme.sx
 import com.qiubo.optimaltv.ui.theme.sxs
+import kotlinx.coroutines.delay
 
 /** APK 更新确认、下载进度和“允许安装未知应用”提示（TV 遥控器可操作）。 */
 private const val APKUPDATE_DIALOG_GROUP = "apkupdate-dialog"
@@ -47,6 +48,26 @@ fun ApkUpdateUi() {
     val s = rememberUiScale()
     val requester = remember { FocusRequester() }
     val canDefer = state !is ApkUpdateState.Downloading && state != ApkUpdateState.Installing
+    var focusBeforeOverlay by remember { mutableStateOf<FocusRequester?>(null) }
+    var overlayWasVisible by remember { mutableStateOf(false) }
+
+    // 在弹窗子树拿焦点前保存底层控件；关闭时等退出动画释放焦点，再重试恢复。
+    // requestFocus() 在当前 Compose 版本以异常表示尚未 attach，必须继续重试，
+    // 否则关闭更新框后第一次方向键会被吞掉，表现成遥控器失灵。
+    LaunchedEffect(offer?.manifest?.versionCode) {
+        if (offer != null && !overlayWasVisible) {
+            focusBeforeOverlay = OtvNav.focusedRequesterSnapshot()
+            overlayWasVisible = true
+        } else if (offer == null && overlayWasVisible) {
+            val restore = focusBeforeOverlay
+            focusBeforeOverlay = null
+            overlayWasVisible = false
+            repeat(16) {
+                if (OtvNav.restoreFocus(restore)) return@LaunchedEffect
+                delay(50)
+            }
+        }
+    }
 
     AnimatedVisibility(visible = offer != null, enter = fadeIn(), exit = fadeOut()) {
         val current = offer ?: return@AnimatedVisibility
@@ -60,27 +81,27 @@ fun ApkUpdateUi() {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
-                    .background(Color(0xF217171C), RoundedCornerShape(28f.sx(s)))
+                    .background(Color(0xF5151815), RoundedCornerShape(28f.sx(s)))
                     .padding(horizontal = 64f.sx(s), vertical = 52f.sx(s))
                     .fillMaxWidth(),
             ) {
                 androidx.compose.material3.Text(
                     current.manifest.title,
-                    color = OtvColors.White,
+                    color = OtvColors.TextPrimary,
                     fontSize = 38f.sxs(s),
                     fontWeight = FontWeight.Bold,
                 )
                 Spacer(Modifier.height(12f.sx(s)))
                 androidx.compose.material3.Text(
                     "版本 ${current.manifest.versionName}",
-                    color = OtvColors.White60,
+                    color = OtvColors.TextSecondary,
                     fontSize = 24f.sxs(s),
                 )
                 Spacer(Modifier.height(14f.sx(s)))
                 current.manifest.changelog.take(6).forEach {
                     androidx.compose.material3.Text(
                         "• $it",
-                        color = OtvColors.White70,
+                        color = OtvColors.TextSecondary,
                         fontSize = 22f.sxs(s),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -129,6 +150,8 @@ private fun ApkUpdateStatus(state: ApkUpdateState?, s: Float) {
             androidx.compose.material3.LinearProgressIndicator(
                 progress = { state.progress.coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth().height(10f.sx(s)),
+                color = OtvColors.Brand,
+                trackColor = OtvColors.SurfaceFocus,
             )
             Spacer(Modifier.height(10f.sx(s)))
             androidx.compose.material3.Text(
@@ -138,13 +161,13 @@ private fun ApkUpdateStatus(state: ApkUpdateState?, s: Float) {
                     bytesPerSecond = state.bytesPerSecond,
                     attempt = state.attempt,
                 ),
-                color = OtvColors.White60,
+                color = OtvColors.TextSecondary,
                 fontSize = 20f.sxs(s),
             )
         }
         ApkUpdateState.PermissionRequired -> androidx.compose.material3.Text(
             "请在系统设置中允许 足球直播 安装未知应用，返回后会继续安装。",
-            color = OtvColors.White70,
+            color = OtvColors.TextSecondary,
             fontSize = 20f.sxs(s),
         )
         is ApkUpdateState.Error -> androidx.compose.material3.Text(
@@ -156,12 +179,12 @@ private fun ApkUpdateStatus(state: ApkUpdateState?, s: Float) {
         )
         ApkUpdateState.Installing -> androidx.compose.material3.Text(
             "正在打开系统安装器…",
-            color = OtvColors.White70,
+            color = OtvColors.TextSecondary,
             fontSize = 20f.sxs(s),
         )
         null -> androidx.compose.material3.Text(
             "APK 将下载完成后自动打开系统安装器。",
-            color = OtvColors.White60,
+            color = OtvColors.TextSecondary,
             fontSize = 20f.sxs(s),
         )
     }
@@ -186,21 +209,30 @@ private fun ApkUpdateKey(
                 enabled = enabled,
                 navGroup = navGroup,
                 scaleFocused = 1.04f,
-                focusedBg = if (primary) OtvColors.White else null,
-                focusedBgRadius = 30f.sx(s),
                 onFocusedChange = { focused = it },
                 onClick = onTap,
             )
             .background(
-                if (primary) Color(0x24FFFFFF) else Color(0x14FFFFFF),
-                RoundedCornerShape(30f.sx(s)),
+                when {
+                    // 主按钮 = brand 底（规范：brand=强调）；聚焦提亮为白底深字
+                    primary && focused -> OtvColors.PureWhite
+                    primary -> OtvColors.Brand
+                    focused -> OtvColors.SurfaceFocus
+                    else -> OtvColors.Surface
+                },
+                RoundedCornerShape(50f.sx(s)),
             )
             .padding(horizontal = 46f.sx(s), vertical = 21f.sx(s)),
     ) {
         androidx.compose.material3.Text(
             label,
-            color = if (focused && primary) OtvColors.Bg else OtvColors.White,
-            fontSize = 26f.sxs(s),
+            color = when {
+                primary && focused -> OtvColors.Bg
+                primary -> OtvColors.Bg
+                focused -> OtvColors.TextPrimary
+                else -> OtvColors.TextSecondary
+            },
+            fontSize = 20f.sxs(s),
             fontWeight = FontWeight.SemiBold,
         )
     }

@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.LocalTextStyle
@@ -82,19 +83,21 @@ import com.qiubo.optimaltv.ui.components.AppleLoading
 import com.qiubo.optimaltv.ui.components.MobileUiTags
 import com.qiubo.optimaltv.ui.components.OtvHint
 import com.qiubo.optimaltv.ui.components.tapCard
-import com.qiubo.optimaltv.ui.theme.AccentBlue
-import com.qiubo.optimaltv.ui.theme.OtvColors
+import com.qiubo.optimaltv.ui.theme.Bg
+import com.qiubo.optimaltv.ui.theme.Brand
 import com.qiubo.optimaltv.ui.theme.rememberUiScale
 import com.qiubo.optimaltv.ui.theme.sx
 import com.qiubo.optimaltv.ui.theme.sxs
+import com.qiubo.optimaltv.ui.theme.SurfaceDark
 import com.qiubo.optimaltv.ui.theme.TextPrimary
+import com.qiubo.optimaltv.ui.theme.TextSecondary
 import java.net.URLDecoder
 import kotlin.math.roundToInt
 
 /**
- * 移动端足球直播播放页只提供比赛画面和信号源选择。
+ * 移动端做直播播放页只提供比赛画面和信号源选择。
  * 左右滑动切换信号源，返回键退出；
- * - 足球直播（需求 足球#14）：无任何菜单、无比分板；唯一控件=信号源选择条
+ * - 做直播（需求 足球#14）：无任何菜单、无比分板；唯一控件=信号源选择条
  *   （单击画面呼出/收起，点 chip 即时换线，BACK/5s 自动隐藏）；两次返回退出
  * - 播放会话与 TV 版共用同一 PlayerViewModel（断点续播/看门狗换线/90s 续签/三段回退全保留）
  */
@@ -206,7 +209,7 @@ internal fun LiveSourcePicker(
         modifier
             .then(if (ui.fatalMsg != null) Modifier.fillMaxWidth(0.94f) else Modifier)
             .padding(bottom = 56f.sx(ps))
-            .background(Color(0xB3111114), RoundedCornerShape(20f.sx(ps)))
+            .background(Color(0xE6151815), RoundedCornerShape(20f.sx(ps)))
             .padding(horizontal = 26f.sx(ps), vertical = 20f.sx(ps)),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -219,14 +222,14 @@ internal fun LiveSourcePicker(
                 Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
                     Text(
                         "无法播放",
-                        color = Color.White,
+                        color = TextPrimary,
                         fontSize = 19f.sxs(ps),
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.testTag("live-playback-error-title"),
                     )
                     Text(
                         message,
-                        color = Color(0xFFB9C0CC),
+                        color = TextSecondary,
                         fontSize = 15f.sxs(ps),
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
@@ -238,42 +241,48 @@ internal fun LiveSourcePicker(
                     modifier = Modifier
                         .clip(RoundedCornerShape(10f.sx(ps)))
                         .tapCard { onRetry(); onTick() }
-                        .background(AccentBlue, RoundedCornerShape(10f.sx(ps)))
+                        .background(Brand, RoundedCornerShape(10f.sx(ps)))
                         .padding(horizontal = 16f.sx(ps), vertical = 10f.sx(ps))
                         .testTag("live-playback-retry"),
                 ) {
-                    Text("重新检测", color = Color.White, fontSize = 16f.sxs(ps))
+                    Text("重新检测", color = Color.Black, fontSize = 16f.sxs(ps))
                 }
             }
         }
         Text(
             "信号源",
-            color = Color(0x99FFFFFF), fontSize = 20f.sxs(ps),
+            color = TextSecondary, fontSize = 20f.sxs(ps),
             modifier = Modifier.padding(bottom = 12f.sx(ps)),
         )
         if (ui.sourceResolving && ui.lines.isEmpty()) {
-            Text("正在检测可用线路…", color = Color.White, fontSize = 20f.sxs(ps))
+            Text("正在检测可用线路…", color = TextSecondary, fontSize = 20f.sxs(ps))
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(14f.sx(ps))) {
+        // 线路数量会随后端变化，窄屏/竖屏时允许横向滑动，避免全屏钮或末条线路
+        // 被挤出可点击区域，保证触屏仍能选到每个可用源。
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(14f.sx(ps)),
+        ) {
             ui.lines.forEachIndexed { idx, line ->
                 val active = idx == ui.activeLine
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(12f.sx(ps)))
+                        .clip(RoundedCornerShape(50))
                         .tapCard { onSelectLine(idx); onTick() }
                         .background(
-                            if (active) Color(0x59FFFFFF) else Color(0x24FFFFFF),
-                            RoundedCornerShape(12f.sx(ps)),
+                            // SPEC v1「选源条」：选中 = brand 底白字；未选 = surface 底 textSecondary
+                            if (active) Brand else SurfaceDark,
+                            RoundedCornerShape(50),
                         )
                         .padding(horizontal = 24f.sx(ps), vertical = 12f.sx(ps))
                         .testTag("live-source-$idx"),
                 ) {
                     Text(
                         line.label,
-                        color = if (active) OtvColors.Bg else Color.White,
+                        color = if (active) Color.Black else TextSecondary,
                         fontSize = 25f.sxs(ps),
-                        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
                         maxLines = 1,
                     )
                 }
@@ -322,8 +331,8 @@ private fun CircleButton(
             .size(size)
             .clip(CircleShape)
             .tapCard(onClick)
-            .background(Color(0x66141414), CircleShape)
-            .border(1.dp, Color(0x1FFFFFFF), CircleShape),
+            .background(SurfaceDark, CircleShape)
+            .border(1.dp, com.qiubo.optimaltv.ui.theme.Divider, CircleShape),
     ) {
         content(Color.White)
     }

@@ -31,6 +31,17 @@ def _source_response(links):
 
 
 class ZhiBo88LiveTest(unittest.TestCase):
+    def test_philippine_ncaa_basketball_is_not_a_live_football_sample(self):
+        page = '''<li class="live-list-group-time">2026-10-26</li>
+        <li class="group-game-item" data-id="130212">
+          <span class="game-type">菲NCAA</span>
+          <span class="team-name">CSB开拓者</span>
+          <span class="team-name">玛布亚红雀</span>
+          <span class="category-game-time">15:00</span>
+          <a href="/live/130212/play">直播中</a>
+        </li>'''
+        self.assertEqual([], proxy.parse_matches(page))
+
     def test_legacy_football_vpn_query_does_not_select_a_proxy_route(self):
         handler = object.__new__(proxy.Handler)
         observed = []

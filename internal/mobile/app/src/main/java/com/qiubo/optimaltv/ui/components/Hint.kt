@@ -22,7 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * 主 tab 已到顶时按返回：**双击退出**（用户 2026-09-19 要求：按一下只提示、连按两下才退，
+ * 首页已到顶时按返回：**双击退出**（用户 2026-09-19 要求：按一下只提示、连按两下才退，
  * 防误触；与 TV 版同步）。窗口内第二次按才执行完整退出，第一次不改变任何生命周期状态。
  *
  * 历史口径（别搞反）：2026-09-16 曾把「2.5s 内连按两次才退出」改成「一次即退」，
@@ -54,7 +54,7 @@ fun rememberDoubleBackExit(onHint: (String) -> Unit): () -> Unit {
 /** 双击退出的时间窗（用户连按两次判定为「要退出」） */
 private const val DOUBLE_BACK_WINDOW_MS = 2500L
 
-/** 底部轻提示（需求 足球#5：只保留文字，背景半透明灰色；v1.18 尺寸与 TV 版 1:1 同款）。
+/** 底部轻提示（需求 足球#5：只保留文字，背景半透明 surfaceFocus 底；v2 配色按 SPEC tokens）。
  * 提示统一贴屏幕最下方（底边距 40）。
  */
 @Composable
@@ -65,11 +65,11 @@ fun BoxScope.OtvHint(text: String?, modifier: Modifier = Modifier) {
         modifier
             .align(Alignment.BottomCenter)
             .padding(bottom = 40f.sx(s))
-            .background(Color(0x8C808080), RoundedCornerShape(24f.sx(s)))
+            .background(Color(0xEE1D221D), RoundedCornerShape(24f.sx(s)))
             .padding(horizontal = 36f.sx(s), vertical = 16f.sx(s)),
     ) {
         Text(
-            text, color = Color.White, fontSize = 26f.sxs(s), fontWeight = FontWeight.Medium,
+            text, color = com.qiubo.optimaltv.ui.theme.TextPrimary, fontSize = 26f.sxs(s), fontWeight = FontWeight.Medium,
         )
     }
 }

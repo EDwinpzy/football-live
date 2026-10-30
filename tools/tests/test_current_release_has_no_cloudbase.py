@@ -74,7 +74,6 @@ def test_release_build_inventory_and_deploy_target_are_selfhosted(release_root, 
     ]
 
     assert any("build_backend_zip.py" in call for call in rendered)
-    assert any("build_web_assets.py" in call for call in rendered)
     assert not any("build_web_function.py" in call for call in rendered)
     assert not any("cloudfunctions/" in call for call in rendered)
     assert any("deploy/selfhosted/compose.yaml" in call and "compose" in call and "up" in call
@@ -115,8 +114,13 @@ def test_current_release_and_apk_runtime_config_has_no_cloudbase_paths():
             assert marker not in content, f"{path.relative_to(ROOT)} still contains {marker!r}"
 
     compose = (ROOT / "deploy/selfhosted/compose.yaml").read_text(encoding="utf-8")
-    assert "OTV_APK_UPDATE_OBJECT_BASE: http://storage:8092/v1/storages/object/hotupdate" in compose
-    assert 'OTV_CLOUD_RELAY: "0"' in compose
+    nginx = (ROOT / "deploy/selfhosted/nginx.conf").read_text(encoding="utf-8")
+    assert "web-api:" not in compose
+    assert "Dockerfile.web" not in compose
+    assert "location = /web/apk-update/tv.json" in nginx
+    assert "location = /web/apk-update/mobile.json" in nginx
+    assert "http://storage:8092/v1/storages/object/hotupdate/apk-update/tv.json" in nginx
+    assert "http://storage:8092/v1/storages/object/hotupdate/apk-update/mobile.json" in nginx
 
 
 def test_football_proxy_contains_no_cloudbase_fallbacks():

@@ -201,44 +201,6 @@ services:
     networks:
       - backend
 
-  web-api:
-    build:
-      context: ../..
-      dockerfile: deploy/selfhosted/Dockerfile.web
-    restart: unless-stopped
-    environment:
-      PORT: "8090"
-      OTV_BIND: 0.0.0.0
-      OTV_APK_UPDATE_OBJECT_BASE: http://storage:8092/v1/storages/object/hotupdate
-      OTV_WEB_ASSET_ARCHIVE: /var/lib/mytv/web-assets
-      # The live relay uses direct upstream requests; do not enable the retired cloud relay.
-      # CLOUD_RELAY_ENABLED in proxy.py defaults to "1" when the variable is absent,
-      # so this must be set explicitly rather than merely omitted.
-      OTV_CLOUD_RELAY: "0"
-    depends_on:
-      business-api:
-        condition: service_started
-      storage:
-        condition: service_started
-    volumes:
-      - ${WEB_ASSET_ARCHIVE_HOST_PATH:-./data/web-assets}:/var/lib/mytv/web-assets
-    expose:
-      - "8090"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/health', timeout=2)"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-      start_period: 30s
-    mem_limit: 768m
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
-    networks:
-      - backend
-
   apk-publisher:
     image: python:3.12-slim
     profiles: ["ops"]
@@ -291,8 +253,6 @@ services:
     depends_on:
       health:
         condition: service_started
-      web-api:
-        condition: service_healthy
       storage:
         condition: service_started
       business-api:

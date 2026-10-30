@@ -31,6 +31,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+private fun upstreamFingerprint(relayUrl: String): String {
+    val upstream = runCatching { android.net.Uri.parse(relayUrl).getQueryParameter("u") }.getOrNull()
+        ?.takeIf { it.startsWith("https://") || it.startsWith("http://") } ?: return "unknown"
+    return java.security.MessageDigest.getInstance("SHA-256").digest(upstream.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+}
+
 internal object PlaybackRecoveryCoordinationPolicy {
     fun canStartRecovery(
         startedThisSession: Boolean,
@@ -340,6 +347,7 @@ private fun installEngine(newEngine: MediaEngine) {
                 OtvLog.i("live renew: refreshed URL changed; hot-switch line=$idx source=$src")
                 writeBackLineUrl(idx, freshUrl)
                 expectedEngine.swapSource(freshUrl)
+                OtvLog.i("liveSourceRenewal upstreamFingerprint=${upstreamFingerprint(freshUrl)}")
                 livePlayingUrl = freshUrl
             }
         }
@@ -482,12 +490,16 @@ private suspend fun startSession(
     livePlayingUrl = playUrl
     sessionUrl = playUrl
     if (playUrl.contains("m3u8", ignoreCase = true)) {
-        val windowMs = probeLiveWindowMs(playUrl)
+        val (windowMs, segmentMs) = probeLiveWindowMs(playUrl)
         currentCoroutineContext().ensureActive()
         if (!isCurrentPlaybackRequest(generation, lineIdx, sessionEngine, sessionEngineEpoch)) return
-        sessionEngine.setLiveWindowHintMs(windowMs)
+        sessionEngine.setLiveWindowHintMs(windowMs, segmentMs)
     }
-    OtvLog.i("startSession line=$lineIdx engine=${sessionEngine.engineId} url=${playUrl.take(120)}")
+    val sourceFingerprint = source?.takeIf { it.isNotBlank() }?.let {
+        java.security.MessageDigest.getInstance("SHA-256").digest(it.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    } ?: "unknown"
+    OtvLog.i("startSession line=$lineIdx engine=${sessionEngine.engineId} sourceFingerprint=$sourceFingerprint upstreamFingerprint=${upstreamFingerprint(playUrl)}")
     telemetry.mark(
         PlaybackTelemetry.Stage.PLAYER_PREPARE,
         source = playUrl,
@@ -840,28 +852,30 @@ private fun startStallMonitor() {
      * 拿不到（主清单 #EXT-X-STREAM-INF / 请求失败 / 超时）返回 0 = 未知，引擎沿用旧档，
      * 行为与修复前一致——探测失败不会让直播更糟。
      */
-    private suspend fun probeLiveWindowMs(url: String): Long = withContext(Dispatchers.IO) {
+    private suspend fun probeLiveWindowMs(url: String): Pair<Long, Long> = withContext(Dispatchers.IO) {
         runCatching {
             val req = okhttp3.Request.Builder().url(url).build()
             windowProbeClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return@use 0L
+                if (!resp.isSuccessful) return@use 0L to 0L
                 readWindowMs(resp.body?.string().orEmpty())
             }
-        }.getOrDefault(0L)
+        }.getOrDefault(0L to 0L)
     }
 
     /** 纯函数：清单文本 → 窗口毫秒（无 EXTINF 视为未知 0）。 */
-    private fun readWindowMs(body: String): Long {
+    private fun readWindowMs(body: String): Pair<Long, Long> {
         var sum = 0.0
+        var longest = 0.0
         var n = 0
         for (line in body.lineSequence()) {
             val t = line.trim()
             if (!t.startsWith("#EXTINF", ignoreCase = true)) continue
             val v = t.substringAfter(":", "").substringBefore(",").trim().toDoubleOrNull() ?: continue
             sum += v
+            longest = maxOf(longest, v)
             n++
         }
-        return if (n > 0) (sum * 1000).toLong() else 0L
+        return if (n > 0) (sum * 1000).toLong() to (longest * 1000).toLong() else 0L to 0L
     }
 
     /** Bounded live recovery ladder shared with the mobile client. */
@@ -883,7 +897,8 @@ private fun startStallMonitor() {
         try {
             if (!isCurrentStallRecovery(requestToken, requestSessionGeneration, requestLine, requestEngine, requestEngineEpoch)) return@launch
             val attempt = recoveryAttempt++
-            val action = PlaybackRecoveryPolicy.action(attempt)
+            // Exhaust untried live lines before rebuilding a player on a failing CDN.
+            val action = PlaybackRecoveryPolicy.action(attempt, hasAlternate = nextUntriedSource() != null)
             val current = _ui.value.activeLine
             runCatching { PlaybackHealthLog.stall(healthSnapshot(reason)) }
             OtvLog.w("live recovery step=$attempt action=$action reason=$reason")

@@ -51,6 +51,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.togetherWith   // 需求⑦：hero 切换动画 transitionSpec 用
 import coil.compose.AsyncImage
 import com.qiubo.optimaltv.Graph
@@ -60,8 +65,6 @@ import com.qiubo.optimaltv.ui.components.InitialFocusEffect
 import com.qiubo.optimaltv.ui.components.NAV_DOWN
 import com.qiubo.optimaltv.ui.components.NAV_LEFT
 import com.qiubo.optimaltv.ui.components.NAV_RIGHT
-import com.qiubo.optimaltv.ui.components.NAV_UP
-import com.qiubo.optimaltv.ui.components.MainTabBar
 import com.qiubo.optimaltv.ui.components.OtvHint
 import com.qiubo.optimaltv.ui.components.ProvideNavScrolls
 import com.qiubo.optimaltv.ui.components.ReturnFocus
@@ -214,20 +217,70 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
     }
     // 从播放页返回时回到上次聚焦的比赛卡或 hero 按钮。
     val returnKey = remember { ReturnFocus.take("live") }
-    val tabFocus = remember { FocusRequester() }
     val cardReg = remember { FocusRegistry() }
-    InitialFocusEffect(tabFocus, "live-tab", enabled = returnKey == null)
     var restoredFocus by remember { mutableStateOf(false) }
+    var initialFocusDone by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+    val backScope = androidx.compose.runtime.rememberCoroutineScope()
+    var heroFocused by remember { mutableStateOf(false) }
+    val retryFocus = remember { FocusRequester() }
+    val visibleMatches = remember(ui.matches) { visibleLiveScheduleMatches(ui.matches) }
+    val groups = remember(visibleMatches) {
+        buildMap<String, List<MatchItem>> {
+            val zone = java.util.TimeZone.getTimeZone("Asia/Shanghai")
+            val fmt = SimpleDateFormat("MM-dd", Locale.CHINA).apply { timeZone = zone }
+            put(fmt.format(Date()), emptyList())
+            val cal = java.util.Calendar.getInstance(zone); cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
+            put(fmt.format(cal.time), emptyList())
+            visibleMatches.forEach { m ->
+                val date = m.date.ifBlank { "未知" }
+                put(date, (get(date) ?: emptyList()) + m)
+            }
+        }
+    }
+    val firstVisibleMatchId = groups.values.firstOrNull { it.isNotEmpty() }?.firstOrNull()?.matchId
+    val firstCardFocus = firstVisibleMatchId?.let { cardReg.fr(it) }
+    val firstCardRowItemIndex = remember(groups) {
+        var index = 1 // hero item
+        var found = false
+        for (matches in groups.values) {
+            index += 2 // date header + empty-row placeholder
+            if (matches.isNotEmpty()) {
+                found = true
+                break
+            }
+        }
+        if (found) index else null
+    }
 
     // hero 状态：仅手动左右键切换；按 matchId 记忆（列表刷新重排时海报不再自动换比赛，需求 #11）
     var heroId by rememberSaveable { mutableStateOf<String?>(null) }
     val heroes = remember(ui.matches) { vm.heroList(ui.matches) }
     val heroIdx = heroes.indexOfFirst { it.matchId == heroId }.takeIf { it >= 0 } ?: 0
     val heroBtnFocus = remember { FocusRequester() }
+    // 数据就绪后优先落到“立即观看”；没有 hero 时落到第一张可见比赛卡。
+    InitialFocusEffect(
+        heroBtnFocus,
+        "live-primary",
+        enabled = returnKey == null && heroes.isNotEmpty(),
+    )
 
-    val listState = rememberLazyListState()
-    val backScope = androidx.compose.runtime.rememberCoroutineScope()
-    var tabFocused by remember { mutableStateOf(false) }
+    suspend fun focusFirstVisibleCard(): Boolean {
+        val requester = firstCardFocus ?: return false
+        repeat(20) { attempt ->
+            if (runCatching { requester.requestFocus() }.isSuccess) return true
+            if (attempt == 0) firstCardRowItemIndex?.let { listState.scrollToItem(it) }
+            delay(50)
+        }
+        return false
+    }
+
+    LaunchedEffect(returnKey, heroes.isNotEmpty(), firstCardFocus, firstCardRowItemIndex) {
+        if (initialFocusDone || returnKey != null || heroes.isNotEmpty() ||
+            firstCardFocus == null || firstCardRowItemIndex == null
+        ) return@LaunchedEffect
+        initialFocusDone = focusFirstVisibleCard()
+    }
 
     // 底部轻提示（需求 足球#5：半透明灰底纯文字，替代系统 Toast）
     var hint by remember { mutableStateOf<String?>(null) }
@@ -247,7 +300,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
         }
     }
 
-    // 需求⑥：在顶部 tab 栏按返回——双击才彻底退出应用，首按轻提示
+    // 单页首页只在 hero 上双击退出，首按轻提示。
     val exitApp = com.qiubo.optimaltv.ui.components.rememberDoubleBackExit { hint = it }
 
     fun playMatch(m: MatchItem) {
@@ -272,67 +325,67 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
         nav.navigate("player/" + URLEncoder.encode(m.matchId, "UTF-8"))
     }
 
-    var leagueFilter by rememberSaveable { mutableStateOf("all") }
-    // 需求 足球#2：立即观看按钮 DOWN → 直达当前选中（上一次选中）的联赛筛选 chip
-    val filterChipFocus = remember { FocusRequester() }
-    // 筛选行聚焦状态（BACK 分层判定用）
-    var filterChipsFocused by remember { mutableStateOf(false) }
-    // 2026-09-05：筛选行为内容顶行、页面滚到顶时 UP 直达顶部。
-    // tab 栏——此前必经 hero「立即观看」中转；未到顶仍走引擎滚动找回（露出 hero）。
-    // 判顶用 offset 容差（ensureVisible 会微滚 ~16px 致 canScrollBackward 误判），
-    // 命中时顺手归零滚动。
-    val contentUpToTab: () -> Boolean = {
-        if (listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset <= 64) {
-            backScope.launch {
-                runCatching { listState.scrollToItem(0) }
-                repeat(10) {
-                    if (runCatching { tabFocus.requestFocus() }.isSuccess) return@launch
-                    delay(50)
-                }
-            }
-            true
-        } else false
-    }
-    // 需求 足球#5：首个比赛分组顶行卡 UP → 回「上次选中」的联赛 chip
-    val upToFilterChip: () -> Unit = {
-        backScope.launch {
-            repeat(10) {
-                if (runCatching { filterChipFocus.requestFocus() }.isSuccess) return@launch
-                delay(50)
-            }
+    InitialFocusEffect(
+        retryFocus,
+        "live-retry",
+        enabled = returnKey == null && !ui.loading && ui.error != null && ui.matches.isEmpty(),
+    )
+    // 顶栏删除后，OtvNav 的顶层自愈锚点直接指向首个真实内容控件。
+    androidx.compose.runtime.DisposableEffect(heroes.isNotEmpty(), ui.loading, ui.error) {
+        com.qiubo.optimaltv.ui.components.OtvNav.topFocus = when {
+            heroes.isNotEmpty() -> heroBtnFocus
+            firstCardFocus != null -> firstCardFocus
+            !ui.loading && ui.error != null -> retryFocus
+            else -> null
         }
+        onDispose { }
     }
 
     BackHandler {
         val atTop = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
         when {
-            // 需求 足球#5：内容区（比赛卡/hero）BACK → 滚回顶部并落「上次选中」的联赛 chip；
-            // 筛选行上 BACK → 当前页 tab；tab 上 BACK → 双击退出应用（需求⑥，首按提示）
-            !tabFocused && !filterChipsFocused -> backScope.launch {
+            // 卡片等深层内容 BACK → 返回 hero；hero BACK → 双击退出。
+            heroes.isNotEmpty() && (!atTop || !heroFocused) -> backScope.launch {
                 listState.scrollToItem(0)
                 repeat(10) {
-                    if (runCatching { filterChipFocus.requestFocus() }.isSuccess) return@launch
+                    if (runCatching { heroBtnFocus.requestFocus() }.isSuccess) return@launch
                     delay(50)
                 }
             }
-            atTop && tabFocused -> exitApp()
-            else -> {
-                backScope.launch { listState.scrollToItem(0) }
-                runCatching { tabFocus.requestFocus() }
+            heroes.isEmpty() && !atTop -> backScope.launch {
+                listState.scrollToItem(0)
+                focusFirstVisibleCard()
             }
+            else -> exitApp()
         }
     }
 
     Box(Modifier.fillMaxSize().background(OtvColors.Bg)) {
         when {
+            // 规范加载态：居中 brand 色 3 点呼吸 + caption
             ui.loading && ui.matches.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                com.qiubo.optimaltv.ui.components.AppleLoading()
+                com.qiubo.optimaltv.ui.components.BreathingDots(caption = "正在获取赛程")
             }
             ui.error != null && ui.matches.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("直播数据加载失败：${ui.error}", color = OtvColors.White60, fontSize = 26f.sxs(s))
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("直播数据加载失败：${ui.error}", color = OtvColors.TextSecondary, fontSize = 20f.sxs(s))
+                    Spacer(Modifier.height(24f.sx(s)))
+                    Box(
+                        Modifier
+                            .focusRequester(retryFocus)
+                            .dpadFocusable(
+                                scaleFocused = 1.04f,
+                                onClick = { vm.refresh() },
+                            )
+                            .background(OtvColors.Brand, RoundedCornerShape(12f.sx(s)))
+                            .padding(horizontal = 36f.sx(s), vertical = 18f.sx(s)),
+                    ) {
+                        Text("重新加载", color = OtvColors.Bg, fontSize = 20f.sxs(s), fontWeight = FontWeight.Medium)
+                    }
+                }
             }
             else -> {
-                // 数据就绪后找回上次聚焦的比赛卡；找不回则落到标签栏。
+                // 数据就绪后找回上次聚焦的比赛卡；找不回则落到首屏主操作。
                 LaunchedEffect(ui.matches) {
                     val key = returnKey ?: return@LaunchedEffect
                     if (restoredFocus || ui.matches.isEmpty()) return@LaunchedEffect
@@ -343,28 +396,16 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                         if (runCatching { target.requestFocus() }.isSuccess) return@LaunchedEffect
                         delay(100)
                     }
-                    runCatching { tabFocus.requestFocus() }
+                    if (heroes.isNotEmpty()) runCatching { heroBtnFocus.requestFocus() }
+                    else focusFirstVisibleCard()
                 }
-                // 整页一个 LazyColumn：hero 海报带 → 联赛筛选 → 按日期分组比赛
+                // 整页一个 LazyColumn：hero 海报带 → 按日期分组比赛
                 // v1.13：方向导航统一 OtvNav 引擎，容器仅声明滚动挂靠
                 val liveScroll = remember(listState) { lazyNavContainer(listState) }
                 // 比赛分组（今日/明日固定分区 + 按日期分组，原版 renderGameRow）
                 // 需求 足球#8：今日 = 双行横滑（LazyRow 每列上下两卡）；明日及以后每行 4 卡，
                 // 行数不限，避免固定 5 列把卡片挤窄。
-                // v1.19 流畅度：过滤+分组提级并 remember——旧版在 LazyColumn content
-                // lambda 里逐次重算，本页任何状态变化（hint/tab 焦点/hero/筛选）都全量
-                // 重跑过滤+建组+两次日期格式化；LazyListScope 非组合域不能 remember
-                val groups = remember(ui.matches, leagueFilter) {
-                    val filtered = visibleLiveScheduleMatches(ui.matches, leagueFilter)
-                    buildMap<String, List<MatchItem>> {
-            val zone = java.util.TimeZone.getTimeZone("Asia/Shanghai")
-            val fmt = SimpleDateFormat("MM-dd", Locale.CHINA).apply { timeZone = zone }
-                        put(fmt.format(Date()), emptyList<MatchItem>())
-            val cal = java.util.Calendar.getInstance(zone); cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
-                        put(fmt.format(cal.time), emptyList<MatchItem>())
-                        filtered.forEach { m -> put(m.date.ifBlank { "未知" }, (get(m.date.ifBlank { "未知" }) ?: emptyList()) + m) }
-                    }
-                }
+                // v1.19 流畅度：分组结果在 LazyColumn 外 remember，避免状态变化时反复建组。
                 ProvideNavScrolls(vertical = liveScroll) {
                 LazyColumn(
                     state = listState,
@@ -379,11 +420,10 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                             heroIdx = heroIdx,
                             s = s,
                             heroBtnFocus = heroBtnFocus,
-                            tabFocus = tabFocus,
                             backScope = backScope,
+                            onHeroFocused = { heroFocused = it },
                             listState = listState,
-                            filterChipFocus = filterChipFocus,
-                            cardReg = cardReg,
+                            onFocusFirstMatch = { backScope.launch { focusFirstVisibleCard() } },
                             onPlay = ::playMatch,
                             onPrev = {
                                 if (heroes.isNotEmpty()) heroId = heroes[(heroIdx - 1 + heroes.size) % heroes.size].matchId
@@ -393,34 +433,32 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                             },
                         )
                     }
-                    item(key = "filters") {
-                        LeagueFilterBar(
-                            selected = leagueFilter,
-                            onSelect = { leagueFilter = it },
-                            s = s,
-                            selectedFocus = filterChipFocus,
-                            onChipsFocused = { filterChipsFocused = it },
-                            upToTab = contentUpToTab,
-                        )
-                    }
                     // 比赛分组结果见 LazyColumn 外的 groups（v1.19 提级 remember）
                     var groupIdx = 0
                     groups.forEach { (date, ms) ->
                         val isFirstGroup = groupIdx++ == 0
                         item(key = "date-$date") {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 90f.sx(s), top = 40f.sx(s))) {
-                                Text(dateLabel(date), color = OtvColors.White, fontSize = 38f.sxs(s), fontWeight = FontWeight.Bold)
-                                if (ms.isNotEmpty()) {
-                                    Spacer(Modifier.width(18f.sx(s)))
-                                    Text("${ms.size} 场", color = OtvColors.White50, fontSize = 23f.sxs(s))
-                                }
+                            // 规范「日期分组头」：brand 6dp 圆点 + label 字号，上下留白充足
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(start = 90f.sx(s), top = 40f.sx(s), bottom = 20f.sx(s)),
+                            ) {
+                                Box(
+                                    Modifier
+                                        .size(6f.sx(s))
+                                        .background(OtvColors.Brand, CircleShape),
+                                )
+                                Spacer(Modifier.width(12f.sx(s)))
+                                Text(dateLabel(date), color = OtvColors.TextSecondary, fontSize = 15f.sxs(s), fontWeight = FontWeight.Medium)
                             }
                         }
                         item(key = "row-$date-h") {
                             if (ms.isEmpty()) {
+                                // 规范空分组：caption 居中
                                 Text(
-                                    "暂无比赛", color = OtvColors.White50, fontSize = 26f.sxs(s),
-                                    modifier = Modifier.padding(start = 90f.sx(s), top = 20f.sx(s), bottom = 20f.sx(s)),
+                                    "暂无比赛", color = OtvColors.TextDisabled, fontSize = 13f.sxs(s),
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth().padding(top = 20f.sx(s), bottom = 20f.sx(s)),
                                 )
                             }
                         }
@@ -439,12 +477,10 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                                         horizontalArrangement = Arrangement.spacedBy(40f.sx(s)), modifier = Modifier.padding(top = 24f.sx(s), bottom = 40f.sx(s))) {
                                         items(pages.size, key = { "today-page-$date-$it" }) { pi ->
                                             Column(verticalArrangement = Arrangement.spacedBy(28f.sx(s))) {
-                                                pages[pi].rows.forEachIndexed { ri, row ->
+                                                pages[pi].rows.forEach { row ->
                                                     Row(horizontalArrangement = Arrangement.spacedBy(40f.sx(s))) {
-                                                        row.forEachIndexed { ci, match ->
-                                                            GameCard(nav, match, s, ::playMatch,
-                                                                upToChip = if (pi == 0 && ri == 0 && ci == 0) upToFilterChip else null,
-                                                                cardReg = cardReg)
+                                                        row.forEach { match ->
+                                                            GameCard(match, s, ::playMatch, cardReg = cardReg)
                                                         }
                                                     }
                                                 }
@@ -467,7 +503,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                                             .padding(horizontal = 86f.sx(s)),
                                     ) {
                                         rowMs.forEach { m ->
-                                            GameCard(nav, m, s, ::playMatch, cardReg = cardReg)
+                                            GameCard(m, s, ::playMatch, cardReg = cardReg)
                                         }
                                     }
                                 }
@@ -479,76 +515,7 @@ fun LiveScreen(nav: NavController, vm: LiveViewModel = viewModel()) {
                 } // ProvideNavScrolls(liveScroll)
             }
         }
-        // TabBar 悬浮在最顶层
-        MainTabBar(
-            "live", { key -> com.qiubo.optimaltv.ui.components.navigateToTab(nav, key) },
-            tabFocus,
-            contentDownFocus = heroBtnFocus,
-            contentDownScrollTop = { listState.scrollToItem(0) },
-            onTabFocused = { tabFocused = it },
-            autoHide = true,   // v1.16：光标下移进内容区隐藏顶栏，回顶部显示
-        )
         OtvHint(hint)
-    }
-}
-
-/** 联赛筛选行（原版 league-filters chips；
- *  selectedFocus 绑定在当前选中 chip 上——立即观看按钮 DOWN 直达，需求 足球#2） */
-@Composable
-private fun LeagueFilterBar(
-    selected: String,
-    onSelect: (String) -> Unit,
-    s: Float,
-    selectedFocus: FocusRequester? = null,
-    onChipsFocused: ((Boolean) -> Unit)? = null,
-    upToTab: (() -> Boolean)? = null,
-) {
-    val rowState = rememberLazyListState()
-    val rowScroll = remember(rowState) { lazyNavContainer(rowState) }
-    ProvideNavScrolls(horizontal = rowScroll) {
-        LazyRow(
-            state = rowState,
-            horizontalArrangement = Arrangement.spacedBy(6f.sx(s)),
-            // 需求 足球#1：横向留白用 contentPadding——视口扩到全屏宽，
-            // 边缘 chip 聚焦 scale 外扩不再被视口裁剪
-            contentPadding = PaddingValues(start = 90f.sx(s), end = 50f.sx(s)),
-            modifier = Modifier.padding(top = 24f.sx(s)),
-        ) {
-        // 方案 §11.1：联赛筛选 chip 用稳定的联赛 key，不用 index。
-        // LEAGUE_FILTERS 是编译期常量，index 当 key 看似安全，但把「位置即身份」的
-        // 写法留在代码里，后续一旦改成动态列表就会静默退化成焦点漂移。
-        items(LEAGUE_FILTERS.size, key = { i -> "league-${LEAGUE_FILTERS[i].first}" }) { i ->
-            val (key, label) = LEAGUE_FILTERS[i]
-            val active = selected == key
-            var chipFocused by remember { mutableStateOf(false) }
-            Box(
-                Modifier
-                    .then(if (active && selectedFocus != null) Modifier.focusRequester(selectedFocus) else Modifier)
-                    .dpadFocusable(
-                        scaleFocused = 1.05f, focusedBg = OtvColors.White,
-                        // floating：筛选 chips 不参与垂直几何候选——比赛卡 UP/hero DOWN 到筛选行
-                        // 都由定向逻辑直达「选中 chip」（需求 足球#5），避免 x 最近误命中并 autoSelect 切筛选
-                        floating = true,
-                        onFocusedChange = {
-                            chipFocused = it
-                            onChipsFocused?.invoke(it)
-                        },
-                        // 2026-09-05：页面滚到顶时 UP 直达 tab 栏（不拦截时引擎会先命中
-                        // hero「立即观看」处理同一 gateway 问题。
-                        navOverride = { dir ->
-                            if (dir == NAV_UP) (upToTab?.invoke() ?: false) else false
-                        },
-                        autoSelect = true,
-                    ) {
-                        onSelect(key)
-                    }
-                    .background(if (active) OtvColors.White.copy(alpha = 0.5f) else OtvColors.ChipBg, RoundedCornerShape(32f.sx(s)))
-                    .padding(horizontal = 30f.sx(s), vertical = 14f.sx(s)),
-            ) {
-                Text(label, color = if (active || chipFocused) OtvColors.Bg else OtvColors.White60, fontSize = 29f.sxs(s))
-            }
-        }
-        }
     }
 }
 
@@ -563,11 +530,10 @@ private fun LiveHeroBand(
     heroIdx: Int,
     s: Float,
     heroBtnFocus: FocusRequester,
-    tabFocus: FocusRequester,
     backScope: kotlinx.coroutines.CoroutineScope,
     listState: androidx.compose.foundation.lazy.LazyListState,
-    filterChipFocus: FocusRequester,
-    cardReg: FocusRegistry,
+    onFocusFirstMatch: () -> Unit,
+    onHeroFocused: (Boolean) -> Unit,
     onPlay: (MatchItem) -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit,
@@ -641,17 +607,17 @@ private fun LiveHeroBand(
                                 listOf(animatedHero.league, if (animatedHero.minute.isNotBlank()) animatedHero.minute + "'" else animatedHero.time)
                                     .filter { it.isNotBlank() }
                                     .joinToString("  "),
-                                color = OtvColors.White, fontSize = 30f.sxs(s), fontWeight = FontWeight.SemiBold,
+                                color = OtvColors.TextPrimary, fontSize = 20f.sxs(s), fontWeight = FontWeight.SemiBold,
                             )
                         } else {
                             Text(
                                 animatedHero.displayStatus,
-                                color = OtvColors.White.copy(alpha = 0.85f), fontSize = 28f.sxs(s), fontWeight = FontWeight.SemiBold,
+                                color = OtvColors.TextSecondary, fontSize = 20f.sxs(s), fontWeight = FontWeight.SemiBold,
                             )
                             Spacer(Modifier.width(14f.sx(s)))
                             Text(
                                 matchTimeLabel(animatedHero),
-                                color = OtvColors.White, fontSize = 28f.sxs(s), fontWeight = FontWeight.SemiBold,
+                                color = OtvColors.TextSecondary, fontSize = 20f.sxs(s), fontWeight = FontWeight.SemiBold,
                             )
                         }
                     }
@@ -667,25 +633,17 @@ private fun LiveHeroBand(
                     Modifier
                         .focusRequester(heroBtnFocus)
                         .dpadFocusable(
-                            scaleFocused = 1.04f, focusedBg = OtvColors.White,
+                            scaleFocused = 1.04f,
+                            // focusedBg 留空 → 聚焦画 brand 描边环（规范：brand=强调）
                             // v1.13 方向语义声明：L/R=切换比赛（hero 海报固定不换，仅比分换）；
-                            // DOWN=直达当前选中联赛筛选 chip（几何会被比赛卡抢走，需求 足球#2）；
-                            // UP=引擎 topFocus 逃逸回当前页 tab（无需声明）
+                            // DOWN=直达第一张可见比赛卡；
+                            // UP=顶部无更多控件时由引擎原地封锁，不离开首屏主操作。
                             navOverride = { dir ->
                                 when (dir) {
                                     NAV_LEFT -> if (heroes.size > 1) { onPrev(); true } else false
                                     NAV_RIGHT -> if (heroes.size > 1) { onNext(); true } else false
                                     NAV_DOWN -> {
-                                        backScope.launch {
-                                            val ok = runCatching { filterChipFocus.requestFocus() }.isSuccess
-                                            if (!ok) {
-                                                listState.scrollToItem(1)
-                                                repeat(10) {
-                                                    if (runCatching { filterChipFocus.requestFocus() }.isSuccess) return@launch
-                                                    delay(50)
-                                                }
-                                            }
-                                        }
+                                        onFocusFirstMatch()
                                         true
                                     }
                                     else -> false
@@ -693,13 +651,14 @@ private fun LiveHeroBand(
                             },
                             // 需求 足球#7：光标移到立即观看按钮时页面滚动回最上方
                             onFocusedChange = {
+                                onHeroFocused(it)
                                 if (it) {
                                     ReturnFocus.mark("live", "hero")
                                     backScope.launch { listState.animateScrollToItem(0) }
                                 }
                             },
                         ) { onPlay(hero) }
-                        .background(OtvColors.White, RoundedCornerShape(12f.sx(s)))
+                        .background(OtvColors.Brand, RoundedCornerShape(12f.sx(s)))
                         .width(268f.sx(s))
                         .height(94f.sx(s)),
                     contentAlignment = Alignment.Center,
@@ -712,7 +671,7 @@ private fun LiveHeroBand(
                             drawPath(p, OtvColors.Bg)
                         }
                         Spacer(Modifier.width(14f.sx(s)))
-                        Text("立即观看", color = OtvColors.Bg, fontSize = 29f.sxs(s), fontWeight = FontWeight.Medium)
+                        Text("立即观看", color = OtvColors.Bg, fontSize = 20f.sxs(s), fontWeight = FontWeight.Medium)
                     }
                 }
             }
@@ -724,14 +683,14 @@ private fun LiveHeroBand(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 40f.sx(s), bottom = 30f.sx(s))
-                    .background(OtvColors.TabBarBg, RoundedCornerShape(26f.sx(s)))
+                    .background(OtvColors.Overlay, RoundedCornerShape(26f.sx(s)))
                     .padding(horizontal = 12f.sx(s), vertical = 8f.sx(s)),
             ) {
                 heroes.forEachIndexed { i, _ ->
                     Box(
                         Modifier
                             .size(10f.sx(s))
-                            .background(if (i == heroIdx) OtvColors.White else OtvColors.White30, CircleShape),
+                            .background(if (i == heroIdx) OtvColors.TextPrimary else OtvColors.TextDisabled, CircleShape),
                     )
                 }
             }
@@ -739,19 +698,36 @@ private fun LiveHeroBand(
     }
 }
 
-/** LIVE 徽章（需求 #3/#4：红底胶囊白字粗体，内边距撑起高度 → 文字天然上下居中） */
+/** LIVE 徽标（规范：live 底白字胶囊 + 左侧 6dp 呼吸圆点；高 28、全弧圆角、label 字号） */
 @Composable
 private fun LiveBadge(s: Float) {
+    val breath = rememberInfiniteTransition(label = "liveDot").animateFloat(
+        initialValue = 0.3f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "liveDotAlpha",
+    )
     Box(
         Modifier
-            .background(OtvColors.Live, RoundedCornerShape(17f.sx(s)))
-            .padding(horizontal = 14f.sx(s), vertical = 3f.sx(s)),
+            .background(OtvColors.Live, RoundedCornerShape(50f.sx(s)))
+            .padding(horizontal = 12f.sx(s), vertical = 5f.sx(s)),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            "LIVE", color = OtvColors.White, fontSize = 22f.sxs(s), fontWeight = FontWeight.Bold,
-            lineHeight = 26f.sxs(s),
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(6f.sx(s))
+                    .background(OtvColors.Bg.copy(alpha = breath.value), CircleShape),
+            )
+            Spacer(Modifier.width(6f.sx(s)))
+            Text(
+                "LIVE", color = OtvColors.Bg, fontSize = 15f.sxs(s), fontWeight = FontWeight.Bold,
+                lineHeight = 18f.sxs(s),
+            )
+        }
     }
 }
 
@@ -770,7 +746,7 @@ private fun ScoreRow(team: String, pts: String, s: Float) {
             // 等 SVG）会把压在下面的白字切成碎片，看上去就是"队标重叠"。
             var iconReady by remember(team) { mutableStateOf(false) }
             if (!iconReady) {
-                Text(team.take(1), color = OtvColors.White, fontSize = 40f.sxs(s), fontWeight = FontWeight.Bold)
+                Text(team.take(1), color = OtvColors.TextPrimary, fontSize = 40f.sxs(s), fontWeight = FontWeight.Bold)
             }
             coil.compose.AsyncImage(
                 model = Graph.live.teamIconUrl(team),
@@ -789,41 +765,17 @@ private fun ScoreRow(team: String, pts: String, s: Float) {
         }
         Spacer(Modifier.width(16f.sx(s)))
         val nameSize = (if (team.length > 10) 42 else if (team.length > 8) 50 else if (team.length > 6) 60 else 76).toFloat()
-        Text(team, color = OtvColors.White, fontSize = nameSize.sxs(s), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Text(team, color = OtvColors.TextPrimary, fontSize = nameSize.sxs(s), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         if (pts.isNotBlank()) {
             Spacer(Modifier.width(12f.sx(s)))
-            Text(pts, color = OtvColors.White, fontSize = 76f.sxs(s), fontWeight = FontWeight.Bold)
+            Text(pts, color = OtvColors.TextPrimary, fontSize = 76f.sxs(s), fontWeight = FontWeight.Bold)
         }
     }
 }
 
-/** 固定分类集（全部/重要/五大/中超/欧战/国家队）。v1.16：新增中超（用户需求） */
-val LEAGUE_FILTERS = listOf(
-    "all" to "全部", "important" to "重要",
-    "英超" to "英超", "西甲" to "西甲", "意甲" to "意甲", "德甲" to "德甲", "法甲" to "法甲",
-    "中超" to "中超",
-    "euro" to "欧战", "national" to "国家队",
-)
-
-private val TOP5_RE = Regex("^(英超|西甲|意甲|德甲|法甲|中超|足协杯)")
-private val EURO_RE = Regex("欧冠|欧联|欧协|欧罗巴|欧国联|欧会杯")
-private val NAT_RE = Regex("世预赛|欧预赛|欧洲杯|亚洲杯|美洲杯|世界杯|友谊赛|国家队|国联")
-
-/** 原版 filterLeagues 语义：important=五大+欧战国国赛；欧战/国家队为归并类，具体联赛精确匹配 */
-fun matchLeagueFilter(m: MatchItem, key: String): Boolean = when (key) {
-    "all" -> true
-    "important" -> ImportantTeamPolicy.isImportant(m)
-    "euro" -> EURO_RE.containsMatchIn(m.league)
-    "national" -> NAT_RE.containsMatchIn(m.league)
-    // v1.16：中超 chip = 中超+足协杯（都是中超球队的比赛，用户需求）；
-    // 其余具体联赛用 contains（兼容上游「中超联赛」等变体命名）
-    "中超" -> m.league.contains("中超") || m.league.contains("足协杯")
-    else -> m.league.contains(key)
-}
-
 /** 直播列表仅显示未开赛或正在进行的赛事。 */
-fun visibleLiveScheduleMatches(matches: List<MatchItem>, leagueFilter: String = "all"): List<MatchItem> =
-    matches.filter { !it.isFinished && matchLeagueFilter(it, leagueFilter) }
+fun visibleLiveScheduleMatches(matches: List<MatchItem>): List<MatchItem> =
+    matches.filter { !it.isFinished }
 
 private val MATCH_DATE_FULL_RE = Regex("^(\\d{4})-(\\d{2})-(\\d{2})$")
 private val MATCH_DATE_SHORT_RE = Regex("^(\\d{2})-(\\d{2})$")
@@ -848,8 +800,9 @@ fun dateLabel(date: String): String {
     val cal = java.util.Calendar.getInstance(zone); cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
     val tomorrow = fmt.format(cal.time)
     return when (matchDateMonthDay(date)) {
-        today -> "今日比赛"; tomorrow -> "明日比赛"
-        else -> matchDateDisplay(date).takeIf(String::isNotBlank)?.plus(" 比赛") ?: "比赛"
+        today -> "今日 · ${matchDateDisplay(date)}"
+        tomorrow -> "明日 · ${matchDateDisplay(date)}"
+        else -> matchDateDisplay(date).takeIf(String::isNotBlank) ?: "比赛"
     }
 }
 
@@ -858,29 +811,31 @@ fun dateLabel(date: String): String {
  *  需求 #3：直播 = LIVE 徽章(上下居中)/分钟/比分；未开赛 = VS；完场 = 比分。
  *  需求 #6：中部加入联赛名（意甲/意大利杯等）。
  *  需求 足球#3/#1：选中环内缩白色描边（贴卡内缘；行边缘不裁剪）。
- *  需求 足球#5：upToChip 非空（首个分组顶行卡）时 UP 定向回选中 chip——
- *  优先于引擎几何搜索（否则 UP 会被 hero 按钮截走）。 */
+ */
 @Composable
 private fun GameCard(
-    nav: NavController,
     m: MatchItem,
     s: Float,
     onPlay: (MatchItem) -> Unit = {},
-    upToChip: (() -> Unit)? = null,
     cardReg: FocusRegistry? = null,
 ) {
+    // 规范焦点态：surfaceFocus 背景 + brand 描边（dpadFocusable 环）+ scale 1.02，无阴影发光堆叠
+    var cardFocused by remember { mutableStateOf(false) }
     Column(Modifier.width(400f.sx(s))) {
         Box(
             Modifier
                 .dpadFocusable(
-                    scaleFocused = 1.05f,
-                    onFocusedChange = { if (it) ReturnFocus.mark("live", m.matchId) },
+                    scaleFocused = 1.02f,
+                    onFocusedChange = {
+                        cardFocused = it
+                        if (it) ReturnFocus.mark("live", m.matchId)
+                    },
                     externalFocusRequester = cardReg?.fr(m.matchId),
-                    navOverride = if (upToChip != null) {
-                        { dir -> if (dir == NAV_UP) { upToChip(); true } else false }
-                    } else null,
                 ) { onPlay(m) }
-                .background(OtvColors.CardBlack80, RoundedCornerShape(16f.sx(s)))
+                .background(
+                    if (cardFocused) OtvColors.SurfaceFocus else OtvColors.Surface,
+                    RoundedCornerShape(18f.sx(s)),
+                )
                 .fillMaxWidth()
                 .height(146f.sx(s))
                 .padding(horizontal = 16f.sx(s)),
@@ -898,43 +853,44 @@ private fun GameCard(
                     // 需求 足球#6：卡内中部显示联赛/杯赛名（意甲、意大利杯等）
                     if (m.league.isNotBlank()) {
                         Text(
-                            m.league, color = OtvColors.White60, fontSize = 20f.sxs(s), lineHeight = 22f.sxs(s),
+                            m.league, color = OtvColors.TextSecondary, fontSize = 20f.sxs(s), lineHeight = 22f.sxs(s),
                             maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
                     }
                     if (m.isLive) {
                         LiveBadge(s)
                         if (m.minute.isNotBlank()) {
-                            Text(m.minute + "'", color = OtvColors.White, fontSize = 26f.sxs(s), lineHeight = 28f.sxs(s), fontWeight = FontWeight.SemiBold)
+                            Text(m.minute + "'", color = OtvColors.TextPrimary, fontSize = 26f.sxs(s), lineHeight = 28f.sxs(s), fontWeight = FontWeight.SemiBold)
                         }
                         if (m.hasScore) {
                             Text(
                                 "${m.homeScore} - ${m.awayScore}",
-                                color = OtvColors.White, fontSize = 34f.sxs(s), lineHeight = 36f.sxs(s), fontWeight = FontWeight.Bold,
+                                color = OtvColors.TextPrimary, fontSize = 34f.sxs(s), lineHeight = 36f.sxs(s), fontWeight = FontWeight.Bold,
                             )
                         }
                     } else if (m.isFinished) {
+                        // 完赛：比分灰（规范——比分不做胜负语义色）
                         if (m.hasScore) {
                             Text(
                                 "${m.homeScore} - ${m.awayScore}",
-                                color = OtvColors.White, fontSize = 34f.sxs(s), lineHeight = 36f.sxs(s), fontWeight = FontWeight.Bold,
+                                color = OtvColors.TextSecondary, fontSize = 34f.sxs(s), lineHeight = 36f.sxs(s), fontWeight = FontWeight.Bold,
                             )
                         } else {
-                            Text("完场", color = OtvColors.White60, fontSize = 30f.sxs(s), lineHeight = 32f.sxs(s), fontWeight = FontWeight.Bold)
+                            Text("完场", color = OtvColors.TextDisabled, fontSize = 30f.sxs(s), lineHeight = 32f.sxs(s), fontWeight = FontWeight.Bold)
                         }
                     } else if (m.isClockHeld) {
-                        Text(m.displayStatus, color = OtvColors.White60, fontSize = 30f.sxs(s), lineHeight = 32f.sxs(s), fontWeight = FontWeight.Bold)
+                        Text(m.displayStatus, color = OtvColors.TextDisabled, fontSize = 30f.sxs(s), lineHeight = 32f.sxs(s), fontWeight = FontWeight.Bold)
                     } else if (m.hasScore) {
                         Text(
                             "${m.homeScore} - ${m.awayScore}",
-                            color = OtvColors.White, fontSize = 34f.sxs(s), lineHeight = 36f.sxs(s), fontWeight = FontWeight.Bold,
+                            color = OtvColors.TextPrimary, fontSize = 34f.sxs(s), lineHeight = 36f.sxs(s), fontWeight = FontWeight.Bold,
                         )
                     } else {
-                        Text("VS", color = OtvColors.White60, fontSize = 30f.sxs(s), lineHeight = 32f.sxs(s), fontWeight = FontWeight.Bold)
+                        Text("VS", color = OtvColors.TextDisabled, fontSize = 30f.sxs(s), lineHeight = 32f.sxs(s), fontWeight = FontWeight.Bold)
                     }
                     // 2026-09-05：未开赛/完场卡片显示开赛时间（直播中已有 LIVE 徽章/分钟数）
                     if (!m.isLive && m.time.isNotBlank()) {
-                        Text(m.time, color = OtvColors.White50, fontSize = 20f.sxs(s), lineHeight = 22f.sxs(s), fontWeight = FontWeight.Medium)
+                        Text(m.time, color = OtvColors.TextDisabled, fontSize = 20f.sxs(s), lineHeight = 22f.sxs(s), fontWeight = FontWeight.Medium)
                     }
                 }
                 TeamBlock(m.away, s, width = 112f)
@@ -991,7 +947,7 @@ private fun TeamBlock(team: String, s: Float, width: Float = 112f) {
             // 2026-09-18 队标重叠修复：同 TeamIcon 行，兜底首字只在未加载出队徽时显示
             var iconReady by remember(team) { mutableStateOf(false) }
             if (!iconReady) {
-                Text(team.take(1), color = OtvColors.White, fontSize = 34f.sxs(s), fontWeight = FontWeight.Bold)
+                Text(team.take(1), color = OtvColors.TextPrimary, fontSize = 34f.sxs(s), fontWeight = FontWeight.Bold)
             }
             coil.compose.AsyncImage(
                 model = Graph.live.teamIconUrl(team),
@@ -1013,7 +969,7 @@ private fun TeamBlock(team: String, s: Float, width: Float = 112f) {
         // 单行可容纳字号 ≈ 列宽/字数（留 4px 余量）；上限 18，保底 11（再长折行）
         val fitSize = (92f / team.length).coerceIn(11f, 18f)
         Text(
-            team, color = OtvColors.White, textAlign = TextAlign.Center,
+            team, color = OtvColors.TextPrimary, textAlign = TextAlign.Center,
             maxLines = if (wrap) 2 else 1,
             overflow = if (wrap) TextOverflow.Ellipsis else TextOverflow.Clip,
             lineHeight = (if (wrap) 17f else fitSize).sxs(s),

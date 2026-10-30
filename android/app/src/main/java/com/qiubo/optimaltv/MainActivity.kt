@@ -30,7 +30,7 @@ import androidx.navigation.navArgument
 import kotlinx.coroutines.launch
 import com.qiubo.optimaltv.ui.live.LiveScreen
 import com.qiubo.optimaltv.ui.player.PlayerScreen
-import com.qiubo.optimaltv.ui.theme.FootballLiveTheme
+import com.qiubo.optimaltv.ui.theme.ZuoLiveTheme
 
 /** 调试直达播放页通道（v1.8 2026-08-30）：debug 构建 DebugNavReceiver 广播写入 pending，
  *  AppRoot 轮询消费——绕过模拟器丢键/焦点漂移，测试直播链路用。
@@ -100,7 +100,7 @@ class MainActivity : ComponentActivity() {
                 or android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
             )
         setContent {
-            FootballLiveTheme {
+            ZuoLiveTheme {
                 // 足球赛程页面就绪前渲染品牌启动屏。
                 val ready by AppStartup.ready.collectAsStateWithLifecycle()
                 // 热更新在后台静默处理；无论服务端 force 标记如何，都不阻断使用。

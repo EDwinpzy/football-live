@@ -28,7 +28,7 @@ import org.videolan.libvlc.interfaces.IVLCVout
  *
  * 背景：MuMu/部分盒子的 MediaCodec 生态里「硬解」OMX.qcom.video.decoder.avc 内部
  * 实际包的是上古 SoftAVCDec 软件内核，遇到 AVC High 压段（8x8 变换 + CABAC，
- * bb 原版足球直播2 的 CDN 压片特征）直接 Fatal Error 0xffffffff；软解
+ * bb 原版做直播2 的 CDN 压片特征）直接 Fatal Error 0xffffffff；软解
  * OMX.google.h264.decoder 是同一内核同样必挂——MediaCodec 路线全线无解。
  * VLC 自带完整 ffmpeg 解码器，且按媒体关闭其 mediacodec 硬解（否则又会踩回
  * 同一批坏 codec），因此在本引擎里永远走自带 avcodec 软解，任何设备都能出画面。
@@ -54,6 +54,7 @@ class VlcEngine(context: Context) : MediaEngine {
     @Volatile private var player: MediaPlayer? = null
     @Volatile private var currentUrl: String? = null
     @Volatile private var ticker: Job? = null
+    @Volatile private var rebufferCount = 0
     /** vout 只允许 attach 一次（2026-08-30 实测教训：直播结束追边重开时重复 attachViews
      *  抛 IllegalStateException「Can't set view when already attached」→ 重开失败卡 BUFFERING） */
     private var voutAttached = false
@@ -165,6 +166,10 @@ class VlcEngine(context: Context) : MediaEngine {
                         _ui.value = _ui.value.copy(state = EnginePlayState.READY)
                     }
                 } else if (_ui.value.state != EnginePlayState.ERROR) {
+                    if (_ui.value.state == EnginePlayState.READY && _ui.value.isPlaying) {
+                        rebufferCount++
+                        OtvLog.w("engine rebuffer #$rebufferCount（vlc buffering=$pct%）")
+                    }
                     _ui.value = _ui.value.copy(state = EnginePlayState.BUFFERING)
                 }
             }

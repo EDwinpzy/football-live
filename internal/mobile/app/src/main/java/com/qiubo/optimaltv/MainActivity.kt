@@ -32,7 +32,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.qiubo.optimaltv.ui.live.LiveScreen
 import com.qiubo.optimaltv.ui.player.PlayerScreen
-import com.qiubo.optimaltv.ui.theme.FootballLiveTheme
+import com.qiubo.optimaltv.ui.theme.ZuoLiveTheme
 import kotlinx.coroutines.launch
 
 /** 足球播放器调试入口（release 无写入方）。
@@ -106,7 +106,7 @@ class MainActivity : ComponentActivity() {
         // v1.18 沉浸式全屏（与 TV 版同款）：足球直播使用完整 16:9 画布，系统栏不隐藏会把内容挤出屏幕
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
         setContent {
-            FootballLiveTheme {
+            ZuoLiveTheme {
                 // 足球比赛列表准备后显示直播首页。
                 val ready by AppStartup.ready.collectAsStateWithLifecycle()
                 // 热更只做后台静默下载；远端强更标记不会覆盖首页或阻断进入。

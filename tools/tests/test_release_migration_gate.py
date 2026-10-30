@@ -38,11 +38,7 @@ def release_module():
 
 @pytest.fixture
 def gate_only(release_module, monkeypatch):
-    """只测迁移顺序时跳过存在性检查。
-
-    `tools/build_web_assets.py` 由并行的网页 agent 分支落地，本分支尚未包含；
-    那是存在性检查该报的东西，由下面的存在性用例负责，不该污染顺序断言。
-    """
+    """只测迁移顺序时跳过存在性检查；原因由专门的存在性用例覆盖。"""
     monkeypatch.setattr(release_module, "required_scripts", lambda root: [])
     monkeypatch.setattr(release_module, "required_deploy_files", lambda root: [])
     return release_module
@@ -103,10 +99,10 @@ def test_release_check_covers_every_script_it_invokes(release_module):
     invoked = set(re.findall(r'script_path\(root,\s*"([^"]+)"\)', source))
     assert invoked, "发布器应通过 script_path 声明它调用的脚本"
     assert invoked <= required, f"这些脚本没进存在性检查：{invoked - required}"
-    # 关键脚本确实存在。
-    for name in ("build_backend_zip.py", "build_web_assets.py"):
-        assert name in required
-        assert (ROOT / "tools" / name).is_file(), f"{name} 必须存在"
+    # The native archive builder is the only build entry the release invokes.
+    assert "build_backend_zip.py" in required
+    assert (ROOT / "tools" / "build_backend_zip.py").is_file()
+    assert "build_web_assets.py" not in invoked
 
 
 def test_release_deploy_entry_files_exist(release_module):
@@ -131,7 +127,7 @@ def test_missing_script_fails_before_running_anything(release_module, tmp_path, 
             release_module.main()
     finally:
         release_module.ROOT = old_root
-    assert "build_web_assets.py" in str(excinfo.value)
+    assert "build_backend_zip.py" in str(excinfo.value)
     assert calls == [], f"存在性检查失败时不应执行任何命令：{calls}"
 
 

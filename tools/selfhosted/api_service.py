@@ -238,7 +238,7 @@ class BusinessApi:
 
 def create_server(api: BusinessApi, host: str = "0.0.0.0", port: int = 8082) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "FootballLiveBusinessApi/1.0"
+        server_version = "ZuoLiveBusinessApi/1.0"
 
         def _dispatch(self) -> None:
             try:

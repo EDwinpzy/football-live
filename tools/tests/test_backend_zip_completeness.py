@@ -1,4 +1,8 @@
 import ast
+import importlib.util
+import json
+import sys
+import tempfile
 import unittest
 import zipfile
 from pathlib import Path
@@ -6,30 +10,26 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "tools" / "backend-src"
+TOOLS = ROOT / "tools"
+if str(TOOLS) not in sys.path:
+    sys.path.insert(0, str(TOOLS))
+
+
+def _load_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _whitelisted_names():
-    """读出 build_backend_zip.py 里手工维护的 REPL 白名单。"""
-    import importlib.util
-    import sys
-    tools_dir = str(ROOT / "tools")
-    if tools_dir not in sys.path:
-        sys.path.insert(0, tools_dir)
-    spec = importlib.util.spec_from_file_location(
-        "bbz", ROOT / "tools" / "build_backend_zip.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return {name.split(".")[0] for name in module.REPL}
+    module = _load_module("bbz", TOOLS / "build_backend_zip.py")
+    return {name.removesuffix(".py") for name in module.REPL}
 
 
 def _local_imports(path: Path) -> set:
-    """模块**顶层**的同包 import 目标（只保留 SRC 下确实存在的 .py）。
-
-    只看顶层是刻意的：函数体内的 import 是延迟加载，通常带降级路径
-    （如 proxy.py 里 `import decrypt_python` 失败时退回 quickjs），
-    不打进 zip 不会让后端起不来。顶层 import 则是一旦缺失就直接
-    ModuleNotFoundError 崩在启动阶段。
-    """
+    """Return top-level same-package imports that must be in the runtime ZIP."""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     names = set()
     for node in tree.body:
@@ -41,17 +41,11 @@ def _local_imports(path: Path) -> set:
                 names.add(node.module.split(".")[0])
             for alias in node.names:
                 names.add(alias.name.split(".")[0])
-    return {n for n in names if (SRC / (n + ".py")).exists()}
-
-
-BACKEND_ZIPS = (
-    ROOT / "android/app/src/main/assets/backend/python-backend.zip",
-    ROOT / "internal/mobile/app/src/main/assets/backend/python-backend.zip",
-)
+    return {name for name in names if (SRC / (name + ".py")).exists()}
 
 
 class BackendZipCompletenessTests(unittest.TestCase):
-    """客户端后端 ZIP 只包含足球直播所需模块及其静态网页。"""
+    """The native archive contains only live runtime code and client assets."""
 
     def test_runtime_whitelist_contains_only_live_modules(self):
         self.assertEqual(_whitelisted_names(), {"proxy", "vlc_hls", "team_backdrop"})
@@ -67,20 +61,59 @@ class BackendZipCompletenessTests(unittest.TestCase):
                 if dependency not in whitelist:
                     missing.setdefault(name, []).append(dependency)
         self.assertEqual(
-            missing, {},
-            "这些同包依赖没进白名单，打出来的 zip 会在真机上 ImportError：%s" % missing)
+            missing,
+            {},
+            "these same-package imports are absent from the runtime ZIP: %s" % missing,
+        )
 
-    def test_embedded_backend_zips_contain_no_nonfootball_runtime_modules(self):
-        allowed = {name + ".py" for name in _whitelisted_names()}
-        for archive in BACKEND_ZIPS:
-            if not archive.exists():
-                continue
-            with zipfile.ZipFile(archive) as runtime:
-                root_modules = {
-                    name for name in runtime.namelist()
-                    if "/" not in name and name.lower().endswith((".py", ".json", ".js"))
-                }
-            self.assertEqual(root_modules, allowed, f"{archive} 含有非直播 runtime 文件")
+    def test_native_asset_builder_excludes_retired_web_ui(self):
+        build_assets = _load_module(
+            "native_assets", TOOLS / "build_web_assets.py"
+        ).build_assets
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "dist"
+            result = build_assets(SRC / "www", output)
+            self.assertEqual(37, len(result.copied_files))
+            self.assertEqual(
+                {f"assets/football/fb-{index:02d}.jpg" for index in range(1, 37)}
+                | {"assets/logo.png"},
+                set(result.copied_files),
+            )
+            for retired in (
+                "index.html",
+                "app.js",
+                "style.css",
+                "manifest.webmanifest",
+                "assets/app.77db0bc59c3ee053.js",
+                "assets/style.072301a4b36d4b31.css",
+            ):
+                self.assertFalse((output / retired).exists(), retired)
+            manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual("native-compatibility-assets", manifest["kind"])
+
+    def test_backend_archive_contains_only_live_runtime_and_native_assets(self):
+        builder = _load_module("bbz_build", TOOLS / "build_backend_zip.py")
+        with tempfile.TemporaryDirectory() as temp:
+            archive_path = Path(temp) / "python-backend.zip"
+            entries = builder.build_archive(SRC, archive_path)
+            allowed_runtime = set(builder.REPL)
+            allowed_static = {
+                name for name in entries
+                if name == "www/manifest.json" or name.startswith("www/assets/")
+            }
+            self.assertEqual(set(entries), allowed_runtime | allowed_static)
+            self.assertEqual(36, sum(
+                1 for name in entries if name.startswith("www/assets/football/fb-")
+            ))
+            self.assertIn("www/assets/logo.png", entries)
+            with zipfile.ZipFile(archive_path) as archive:
+                for retired in (
+                    "www/index.html",
+                    "www/app.js",
+                    "www/style.css",
+                    "www/manifest.webmanifest",
+                ):
+                    self.assertNotIn(retired, archive.namelist())
 
 
 if __name__ == "__main__":

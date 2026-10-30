@@ -1,4 +1,4 @@
-"""HTTP clients and URL policy for FootballLive update services."""
+"""HTTP clients and URL policy for ZuoLive update services."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class EndpointConfig:
     public_base_url: str
     public_web_base_url: str
     hotupdate_endpoint: str
-    environment_name: str = "football-live-selfhosted"
+    environment_name: str = "zuo-live-selfhosted"
     self_hosted: bool = True
 
     @property
@@ -31,14 +31,14 @@ class EndpointConfig:
     @staticmethod
     def _object_key(key: str) -> str:
         if not isinstance(key, str) or not key or "\\" in key or "\x00" in key:
-            raise ValueError("invalid FootballLive object key")
+            raise ValueError("invalid ZuoLive object key")
         if key.startswith("/") or any(part in ("", ".", "..") for part in key.split("/")):
-            raise ValueError("invalid FootballLive object key")
+            raise ValueError("invalid ZuoLive object key")
         return urllib.parse.quote(key, safe="/")
 
     def public_object_url(self, bucket: str, key: str) -> str:
         if bucket != "hotupdate" or not self.public_base_url:
-            raise ValueError("FootballLive public origin is not configured")
+            raise ValueError("ZuoLive public origin is not configured")
         return f"{self.public_base_url}/v1/storages/object/{bucket}/{self._object_key(key)}"
 
     def storage_object_url(self, key: str) -> str:
@@ -46,7 +46,7 @@ class EndpointConfig:
 
     def public_web_url(self, path: str) -> str:
         if not self.public_web_base_url:
-            raise ValueError("FootballLive public origin is not configured")
+            raise ValueError("ZuoLive public origin is not configured")
         return f"{self.public_web_base_url}/web/{self._object_key(path)}"
 
     def check_url(self, url: str) -> None:
